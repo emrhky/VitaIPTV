@@ -2,7 +2,7 @@
 #define PLAYER_H
 #include <vita2d.h>
 
-/* Starts playing a URL (http/https/rtmp-less: whatever sceAvPlayer accepts). 0 = ok. */
+/* Starts playing a URL or a file path (ux0:...). 0 = ok, otherwise a negative error code. */
 int  player_start(const char *url);
 void player_stop(void);
 
