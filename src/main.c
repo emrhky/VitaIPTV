@@ -388,6 +388,7 @@ int main(void)
     pgf = vita2d_load_default_pgf();
     channel_list_init(&chans);
     load_sources();
+    player_log_reset();
 
     for (;;) {
         unsigned p = read_pressed();
