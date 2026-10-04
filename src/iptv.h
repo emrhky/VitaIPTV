@@ -50,6 +50,20 @@ int  sources_parse(const char *text, Source *out, int max);
 /* Builds the list URL of an Xtream source. Returns 0 on success, -1 if it did not fit. */
 int  source_xtream_url(const Source *s, char *out, size_t outsz);
 
+/* ---- Xtream Codes JSON API (live channels only) ---- */
+#define XT_MAX_CATS 2048
+typedef struct { char id[24]; char name[IPTV_GROUP_MAX]; } XtCategory;
+
+/* "http://host:port" without trailing slash (adds http:// when missing). */
+int  source_xtream_base(const Source *s, char *out, size_t outsz);
+/* .../player_api.php?username=U&password=P&action=<action> */
+int  xtream_api_url(const Source *s, const char *action, char *out, size_t outsz);
+/* Parse get_live_categories JSON. Returns category count. */
+int  xtream_parse_categories(const char *json, size_t len, XtCategory *out, int max);
+/* Parse get_live_streams JSON into channels (group = category name). Returns channel count. */
+int  xtream_parse_live(const char *json, size_t len, const Source *s,
+                       const XtCategory *cats, int ncats, ChannelList *out);
+
 /* Percent-encodes src into dst. Returns 0 on success, -1 if it did not fit. */
 int  url_encode(char *dst, size_t dstsz, const char *src);
 
