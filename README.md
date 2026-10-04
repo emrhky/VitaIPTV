@@ -47,3 +47,7 @@ M3U ayrıştırıcı, Xtream adresi ve sources.txt okuyucusu `src/iptv.c` içind
 - Varsayılan yazı tipi Türkçe karakterlerin hepsini göstermeyebilir.
 - HTTPS, Vita'nın sistem sertifikalarını kullanır; eski yazılım sürümlerinde bazı HTTPS siteler açılmayabilir, mümkünse `http://` kullan.
 - Kullanıcı adı/şifre doğrulaması yalnızca Basic türünü destekler (Xtream için zaten gerekmez).
+
+## Sorun giderme
+
+Oynatıcı her adımı `ux0:data/VitaIPTV/log.txt` dosyasına yazar (kanal adresleri ve şifreler yazılmaz). Uygulama çökerse bu dosyanın son satırı çökmenin hangi adımda olduğunu gösterir. Dosya her açılışta sıfırlanır.
