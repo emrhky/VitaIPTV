@@ -63,6 +63,50 @@ int main(void)
     assert(ss[2].type == SRC_XTREAM && !strcmp(ss[2].pass, "veli"));
     assert(ss[3].type == SRC_STREAM && ss[4].type == SRC_M3U_FILE);
 
+    /* Xtream JSON API */
+    const char *cj =
+        "[{\"category_id\":\"1\",\"category_name\":\"T\\u00fcrkiye \\ud83d\\udcfa\",\"parent_id\":0},"
+        " {\"category_id\":\"2\",\"category_name\":\"News\\/World\",\"parent_id\":0}]";
+    XtCategory cats[8];
+    int nc = xtream_parse_categories(cj, strlen(cj), cats, 8);
+    assert(nc == 2);
+    assert(!strcmp(cats[0].id, "1"));
+    assert(!strcmp(cats[0].name, "T\xC3\xBCrkiye \xF0\x9F\x93\xBA"));
+    assert(!strcmp(cats[1].name, "News/World"));
+
+    const char *sj =
+        "\xEF\xBB\xBF[{\"num\":1,\"name\":\"TR: \\u015eov \\\"HD\\\"\",\"stream_type\":\"live\",\"stream_id\":101,"
+        "\"stream_icon\":\"http:\\/\\/x\\/i.png\",\"epg_channel_id\":null,\"category_id\":\"1\","
+        "\"extra\":{\"a\":[1,2,{\"b\":\"}\"}]},\"tv_archive\":0},"
+        "{\"name\":\"Haber\",\"stream_id\":\"202\",\"category_id\":2},"
+        "{\"name\":\"No id\"},"
+        "{\"name\":\"Bad/id\",\"stream_id\":\"../x\"}]";
+    Source xs; memset(&xs, 0, sizeof xs);
+    strcpy(xs.url, "host.example:8080/"); strcpy(xs.user, "ali"); strcpy(xs.pass, "p@ss");
+    ChannelList xl; channel_list_init(&xl);
+    int nx = xtream_parse_live(sj, strlen(sj), &xs, cats, nc, &xl);
+    assert(nx == 2 && xl.count == 2);
+    assert(!strcmp(xl.items[0].name, "TR: \xC5\x9Eov \"HD\""));
+    assert(!strcmp(xl.items[0].group, "T\xC3\xBCrkiye \xF0\x9F\x93\xBA"));
+    assert(!strcmp(xl.items[0].url, "http://host.example:8080/live/ali/p%40ss/101.ts"));
+    assert(!strcmp(xl.items[1].group, "News/World"));   /* numeric category_id matched too */
+    assert(!strcmp(xl.items[1].url, "http://host.example:8080/live/ali/p%40ss/202.ts"));
+    channel_list_free(&xl);
+
+    char api[IPTV_URL_MAX];
+    assert(xtream_api_url(&xs, "get_live_streams", api, sizeof api) == 0);
+    assert(!strcmp(api, "http://host.example:8080/player_api.php?username=ali&password=p%40ss&action=get_live_streams"));
+
+    /* garbage / error replies must not crash and yield nothing */
+    const char *e1 = "{\"user_info\":{\"auth\":0}}";
+    assert(xtream_parse_categories(e1, strlen(e1), cats, 8) == 0);
+    const char *e2 = "[{\"category_id\":\"1\",\"cat";
+    assert(xtream_parse_categories(e2, strlen(e2), cats, 8) == 0);
+    channel_list_init(&xl);
+    assert(xtream_parse_live("[]", 2, &xs, cats, nc, &xl) == 0);
+    assert(xtream_parse_live("", 0, &xs, cats, nc, &xl) == 0);
+    channel_list_free(&xl);
+
     puts("all host tests passed");
     return 0;
 }
