@@ -51,3 +51,13 @@ M3U ayrıştırıcı, Xtream adresi ve sources.txt okuyucusu `src/iptv.c` içind
 ## Sorun giderme
 
 Oynatıcı her adımı `ux0:data/VitaIPTV/log.txt` dosyasına yazar (kanal adresleri ve şifreler yazılmaz). Uygulama çökerse bu dosyanın son satırı çökmenin hangi adımda olduğunu gösterir. Dosya her açılışta sıfırlanır.
+
+## Yerel video testi
+
+`ux0:data/VitaIPTV/` klasörüne H.264 + AAC bir `.mp4` (ya da `.m4v`, `.mov`, `.ts`) dosyası koyarsan, uygulama açılışında kaynak listesinin sonunda `[Local] dosyaadı` olarak görünür. Seçince doğrudan oynatılır. Sonuç `log.txt` içinde `first video frame` / `first audio frame` satırlarıyla görülür. Oynatıcı kaynağı reddederse ekranda hata kodu gösterilir.
+
+## Ağ üzerinden oynatma (HTTP)
+
+SceAvPlayer'ın kendi okuyucusu `http://` adreslerini kabul etmez. Bu yüzden ağ kaynaklarında uygulama kendi okuyucusunu verir: HTTP Range istekleriyle dosyayı parça parça okur. Okumalar 256 KB'lık bloklarla önbelleğe alınır (oynatıcı MP4 başlıklarını 8 baytlık parçalarla okur). Sunucu Range isteğini desteklemiyorsa (ör. `python -m http.server`), küçük dosyalar (24 MB'a kadar) bir kez belleğe indirilip oradan okunur. Bu yöntem sabit dosyalar (MP4) için çalışır. Canlı yayınlar için ayrı bir çalışma gerekir.
+
+PC testi: `gcc -Wall -Isrc -Itests/mock tests/test_httpio.c src/httpio.c -o test_httpio && ./test_httpio`
