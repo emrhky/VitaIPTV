@@ -30,7 +30,7 @@ PlayStation Vita (HENkaku/Ensō) için IPTV oynatıcı. Kaynakları `ux0:data/Vi
     export VITASDK=/usr/local/vitasdk   # kendi yolun
     cmake -B build && cmake --build build   # build/VitaIPTV.vpk oluşur
 
-Gereken kütüphaneler: vita2d, libcurl (mbedtls ile), SceAvPlayer stub.
+Gereken kütüphane: vita2d. Ağ erişimi için libcurl yerine Vita'nın kendi `sceHttp` kütüphanesi kullanılır.
 
 ## PC'de test
 
@@ -45,4 +45,5 @@ M3U ayrıştırıcı, Xtream adresi ve sources.txt okuyucusu `src/iptv.c` içind
 - HLS (.m3u8) ve çeşitli codec'lerin SceAvPlayer'da çalışması yayına bağlıdır. Vita donanımı H.264 + AAC/MP3 çözer; HEVC çözmez.
 - Liste indirme sırasında arayüz donar (tek iş parçacığı). Çok büyük listeler (24 MB üstü) reddedilir.
 - Varsayılan yazı tipi Türkçe karakterlerin hepsini göstermeyebilir.
-- HTTPS sertifikası doğrulanmıyor (Vita'da CA paketi yok).
+- HTTPS, Vita'nın sistem sertifikalarını kullanır; eski yazılım sürümlerinde bazı HTTPS siteler açılmayabilir, mümkünse `http://` kullan.
+- Kullanıcı adı/şifre doğrulaması yalnızca Basic türünü destekler (Xtream için zaten gerekmez).
