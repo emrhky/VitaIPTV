@@ -1,0 +1,16 @@
+   name: Build VPK
+   on: [push, workflow_dispatch]
+   jobs:
+     build:
+       runs-on: ubuntu-latest
+       container: vitasdk/vitasdk:latest
+       steps:
+         - uses: actions/checkout@v4
+         - name: Build
+           run: |
+             cmake -B build
+             cmake --build build
+         - uses: actions/upload-artifact@v4
+           with:
+             name: VitaIPTV
+             path: build/VitaIPTV.vpk
