@@ -1,6 +1,14 @@
 #ifndef PLAYER_H
 #define PLAYER_H
+
 #include <vita2d.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* Resets internal player logs */
+void player_log_reset(void);
 
 /* Starts playing a URL (http/https/rtmp-less: whatever sceAvPlayer accepts). 0 = ok. */
 int  player_start(const char *url);
@@ -11,4 +19,9 @@ void player_stop(void);
 vita2d_texture *player_poll(void);
 
 void player_shutdown(void);
+
+#ifdef __cplusplus
+}
 #endif
+
+#endif /* PLAYER_H */
