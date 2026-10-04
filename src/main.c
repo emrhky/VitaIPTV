@@ -1,6 +1,7 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/ctrl.h>
 #include <psp2/io/stat.h>
+#include <psp2/io/dirent.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
@@ -9,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include "iptv.h"
 #include "player.h"
 
@@ -208,6 +210,30 @@ static void build_groups(void)
     rebuild_visible();
 }
 
+/* Every video file in DATA_DIR becomes a "[Local]" entry, so local playback can be
+ * tested without editing sources.txt. */
+static void add_local_files(void)
+{
+    SceUID d = sceIoDopen(DATA_DIR);
+    if (d < 0) return;
+    SceIoDirent e;
+    memset(&e, 0, sizeof e);
+    while (nsources < MAX_SOURCES && sceIoDread(d, &e) > 0) {
+        const char *dot = strrchr(e.d_name, '.');
+        if (!SCE_S_ISDIR(e.d_stat.st_mode) && dot &&
+            (!strcasecmp(dot, ".mp4") || !strcasecmp(dot, ".m4v") ||
+             !strcasecmp(dot, ".mov") || !strcasecmp(dot, ".ts"))) {
+            Source *s = &sources[nsources++];
+            memset(s, 0, sizeof *s);
+            s->type = SRC_STREAM;
+            snprintf(s->name, sizeof s->name, "[Local] %s", e.d_name);
+            snprintf(s->url, sizeof s->url, "%s/%s", DATA_DIR, e.d_name);
+        }
+        memset(&e, 0, sizeof e);
+    }
+    sceIoDclose(d);
+}
+
 static void load_sources(void)
 {
     sceIoMkdir(DATA_DIR, 0777);
@@ -225,10 +251,13 @@ static void load_sources(void)
         }
         set_status(0, "Edit %s on the memory card, then press Triangle.", SOURCES_FILE);
         nsources = 0;
+        add_local_files();
+        sel = scroll = 0;
         return;
     }
     nsources = sources_parse(m.buf, sources, MAX_SOURCES);
     free(m.buf);
+    add_local_files();
     if (nsources == 0) set_status(0, "No sources found in %s", SOURCES_FILE);
     else status[0] = 0;
     sel = scroll = 0;
@@ -317,6 +346,7 @@ static int load_channels(const Source *s)
 /* ---- playback ---------------------------------------------------------- */
 static unsigned play_started_us, osd_until_us;
 static int got_frame;
+static char play_err[128];
 
 static unsigned now_ms(void) { return (unsigned)(sceKernelGetProcessTimeWide() / 1000); }
 
@@ -326,8 +356,10 @@ static void play_channel(int vi)
     got_frame = 0;
     play_started_us = now_ms();
     osd_until_us = play_started_us + 5000;
-    if (player_start(chans.items[vis[vi]].url) != 0)
-        set_status(1, "Cannot start player", NULL);
+    play_err[0] = 0;
+    int rc = player_start(chans.items[vis[vi]].url);
+    if (rc != 0)
+        snprintf(play_err, sizeof play_err, "Player error 0x%08X (see ux0:data/VitaIPTV/log.txt)", (unsigned)rc);
 }
 
 /* ---- drawing ----------------------------------------------------------- */
@@ -460,7 +492,8 @@ int main(void)
                 const Channel *c = &chans.items[vis[play_vis]];
                 if (!got_frame) {
                     unsigned waited = now_ms() - play_started_us;
-                    if (waited > 20000) text(40, 270, COL_ERR, "Could not play this stream (no video after 20 s). O: back");
+                    if (play_err[0]) { text(40, 270, COL_ERR, play_err); text(40, 306, COL_DIM, "O: back"); }
+                    else if (waited > 20000) { text(40, 270, COL_ERR, "No video after 20 s (see log.txt)"); text(40, 306, COL_DIM, "O: back"); }
                     else text(40, 270, COL_TEXT, "Connecting...");
                 }
                 if (now_ms() < osd_until_us || !got_frame) {

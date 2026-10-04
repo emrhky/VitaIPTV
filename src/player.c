@@ -36,6 +36,7 @@ static int g_audio_port = -1;
 #define LOG_PATH "ux0:data/VitaIPTV/log.txt"
 static int g_module_loaded;
 static volatile int g_audio_logged, g_video_logged;
+static int g_last_active = -1;
 
 static void plog(const char *fmt, ...)
 {
@@ -125,6 +126,7 @@ int player_start(const char *url)
     player_stop();
     plog("player_start");
     g_audio_logged = g_video_logged = 0;
+    g_last_active = -1;
 
     if (!g_module_loaded) {
         int lr = sceSysmoduleLoadModule(SCE_SYSMODULE_AVPLAYER);
@@ -148,6 +150,12 @@ int player_start(const char *url)
     if (!g_player) return -1;
     int ar = sceAvPlayerAddSource(g_player, url);
     plog("sceAvPlayerAddSource -> 0x%08X", (unsigned)ar);
+    if (ar < 0) {                       /* source rejected: report the error code to the UI */
+        sceAvPlayerStop(g_player);
+        sceAvPlayerClose(g_player);
+        g_player = 0;
+        return ar;
+    }
     g_active = 1;
 
     g_audio_run = 1;
@@ -229,7 +237,9 @@ vita2d_texture *player_poll(void)
 {
     if (!g_active) return NULL;
     SceAvPlayerFrameInfo vi;
-    if (sceAvPlayerIsActive(g_player) && sceAvPlayerGetVideoData(g_player, &vi) && vi.pData) {
+    int act = sceAvPlayerIsActive(g_player);
+    if (act != g_last_active) { g_last_active = act; plog("IsActive -> %d", act); }
+    if (act && sceAvPlayerGetVideoData(g_player, &vi) && vi.pData) {
         if (!g_video_logged) {
             g_video_logged = 1;
             plog("first video frame %ux%u", (unsigned)vi.details.video.width, (unsigned)vi.details.video.height);
