@@ -15,6 +15,8 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdarg.h>
+#include <strings.h>
+#include <psp2/net/http.h>
 #include <psp2/sysmodule.h>
 
 /* ---- tunables ---------------------------------------------------------- */
@@ -121,6 +123,116 @@ static int audio_main(SceSize args, void *argp)
 }
 
 /* ---- control ----------------------------------------------------------- */
+/* ---- HTTP file reader ---------------------------------------------------
+ * SceAvPlayer's built-in reader rejects http:// URLs (AddSource -> 0x806A0002),
+ * so for network sources we hand it our own open/read/size/close callbacks.
+ * Reads use HTTP Range requests, which works for files (MP4). */
+typedef struct {
+    int tpl, conn;
+    char url[512];
+    uint64_t size;          /* 0 = unknown (live stream) */
+    SceUID lock;
+    int reads;
+} HttpFile;
+
+static HttpFile g_hf = { -1, -1, "", 0, 0, 0 };
+
+static void hf_free(HttpFile *f)
+{
+    if (f->conn >= 0) sceHttpDeleteConnection(f->conn);
+    if (f->tpl >= 0) sceHttpDeleteTemplate(f->tpl);
+    f->conn = f->tpl = -1;
+}
+
+static int hf_open(void *p, const char *filename)
+{
+    HttpFile *f = p;
+    int req, r, status = 0;
+    unsigned long long len = 0;
+
+    hf_free(f);
+    f->size = 0;
+    f->reads = 0;
+    snprintf(f->url, sizeof f->url, "%s", filename);
+    if (f->lock <= 0) f->lock = sceKernelCreateMutex("hf_lock", 0, 0, NULL);
+    plog("hf_open");
+
+    f->tpl = sceHttpCreateTemplate("VitaIPTV/1.0", SCE_HTTP_VERSION_1_1, 1);
+    if (f->tpl < 0) { r = f->tpl; f->tpl = -1; plog("hf_open: template 0x%08X", (unsigned)r); return r; }
+    sceHttpSetResolveTimeOut(f->tpl, 15 * 1000 * 1000);
+    sceHttpSetConnectTimeOut(f->tpl, 15 * 1000 * 1000);
+    sceHttpSetRecvTimeOut(f->tpl, 30 * 1000 * 1000);
+    sceHttpSetAutoRedirect(f->tpl, 1);
+
+    f->conn = sceHttpCreateConnectionWithURL(f->tpl, f->url, 1);
+    if (f->conn < 0) { r = f->conn; f->conn = -1; plog("hf_open: connection 0x%08X", (unsigned)r); hf_free(f); return r; }
+
+    req = sceHttpCreateRequestWithURL(f->conn, SCE_HTTP_METHOD_HEAD, f->url, 0);
+    if (req < 0) { plog("hf_open: request 0x%08X", (unsigned)req); hf_free(f); return req; }
+    r = sceHttpSendRequest(req, NULL, 0);
+    if (r < 0) { plog("hf_open: send 0x%08X", (unsigned)r); sceHttpDeleteRequest(req); hf_free(f); return r; }
+    sceHttpGetStatusCode(req, &status);
+    r = sceHttpGetResponseContentLength(req, &len);
+    if (r == 0) f->size = len;
+    sceHttpDeleteRequest(req);
+    plog("hf_open: status=%d size=%llu (length rc=0x%08X)", status, (unsigned long long)f->size, (unsigned)r);
+    if (status >= 400) { hf_free(f); return -1; }
+    return 0;
+}
+
+static int hf_close(void *p)
+{
+    plog("hf_close");
+    hf_free((HttpFile *)p);
+    return 0;
+}
+
+static uint64_t hf_size(void *p)
+{
+    return ((HttpFile *)p)->size;
+}
+
+static int hf_read(void *p, uint8_t *buffer, uint64_t position, uint32_t length)
+{
+    HttpFile *f = p;
+    uint32_t want = length;
+    int req = -1, status = 0, total = 0, r, n;
+    char range[64];
+
+    if (f->lock > 0) sceKernelLockMutex(f->lock, 1, NULL);
+
+    if (f->size) {
+        if (position >= f->size) goto done;                 /* end of file */
+        if (position + want > f->size) want = (uint32_t)(f->size - position);
+    }
+    snprintf(range, sizeof range, "bytes=%llu-%llu",
+             (unsigned long long)position, (unsigned long long)(position + want - 1));
+
+    req = sceHttpCreateRequestWithURL(f->conn, SCE_HTTP_METHOD_GET, f->url, 0);
+    if (req < 0) { total = req; goto done; }
+    sceHttpAddRequestHeader(req, "Range", range, SCE_HTTP_HEADER_OVERWRITE);
+    r = sceHttpSendRequest(req, NULL, 0);
+    if (r < 0) { total = r; goto done; }
+    sceHttpGetStatusCode(req, &status);
+    if (status != 206 && !(status == 200 && position == 0)) { total = -1; goto done; }
+
+    while ((uint32_t)total < want) {
+        n = sceHttpReadData(req, buffer + total, want - (uint32_t)total);
+        if (n < 0) { total = n; break; }
+        if (n == 0) break;
+        total += n;
+    }
+
+done:
+    if (req >= 0) sceHttpDeleteRequest(req);
+    if (f->reads < 30 || total < 0) {
+        f->reads++;
+        plog("hf_read pos=%llu len=%u status=%d -> %d", (unsigned long long)position, (unsigned)length, status, total);
+    }
+    if (f->lock > 0) sceKernelUnlockMutex(f->lock, 1);
+    return total;
+}
+
 int player_start(const char *url)
 {
     player_stop();
@@ -141,6 +253,15 @@ int player_start(const char *url)
     init.memoryReplacement.deallocate        = mem_free;
     init.memoryReplacement.allocateTexture   = tex_alloc;
     init.memoryReplacement.deallocateTexture = tex_free;
+    int remote = !strncasecmp(url, "http://", 7) || !strncasecmp(url, "https://", 8);
+    if (remote) {
+        init.fileReplacement.objectPointer = &g_hf;
+        init.fileReplacement.open          = hf_open;
+        init.fileReplacement.close         = hf_close;
+        init.fileReplacement.readOffset    = hf_read;
+        init.fileReplacement.size          = hf_size;
+    }
+    plog("source: %s", remote ? "network (custom reader)" : "local file");
     init.basePriority = 0xA0;
     init.numOutputVideoFrameBuffers = 5;
     init.autoStart = 1;
