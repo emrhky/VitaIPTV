@@ -5,7 +5,7 @@
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
 #include <vita2d.h>
-#include <curl/curl.h>
+#include <psp2/net/http.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -97,39 +97,72 @@ static size_t on_data(void *p, size_t sz, size_t nm, void *ud)
     return n;
 }
 
+static void b64(const unsigned char *in, size_t n, char *out)
+{
+    static const char t[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    size_t o = 0;
+    for (size_t i = 0; i < n; i += 3) {
+        unsigned v = in[i] << 16;
+        if (i + 1 < n) v |= in[i + 1] << 8;
+        if (i + 2 < n) v |= in[i + 2];
+        out[o++] = t[(v >> 18) & 63];
+        out[o++] = t[(v >> 12) & 63];
+        out[o++] = (i + 1 < n) ? t[(v >> 6) & 63] : '=';
+        out[o++] = (i + 2 < n) ? t[v & 63] : '=';
+    }
+    out[o] = 0;
+}
+
+/* HTTP(S) GET through the system sceHttp library. Optional Basic authentication. */
 static int http_get(const char *url, const char *user, const char *pass, Mem *m, char *err, size_t errsz)
 {
-    CURL *c = curl_easy_init();
-    if (!c) { snprintf(err, errsz, "curl init failed"); return -1; }
-    curl_easy_setopt(c, CURLOPT_URL, url);
-    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
-    curl_easy_setopt(c, CURLOPT_MAXREDIRS, 5L);
-    curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 15L);
-    curl_easy_setopt(c, CURLOPT_LOW_SPEED_LIMIT, 1024L);
-    curl_easy_setopt(c, CURLOPT_LOW_SPEED_TIME, 30L);
-    curl_easy_setopt(c, CURLOPT_SSL_VERIFYPEER, 0L);   /* no CA bundle on the Vita */
-    curl_easy_setopt(c, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "VitaIPTV/1.0");
+    int rc = -1, tpl = -1, conn = -1, req = -1;
+
+    tpl = sceHttpCreateTemplate("VitaIPTV/1.0", SCE_HTTP_VERSION_1_1, 1);
+    if (tpl < 0) { snprintf(err, errsz, "HTTP init failed (0x%08X)", (unsigned)tpl); goto done; }
+    sceHttpSetResolveTimeOut(tpl, 15 * 1000 * 1000);
+    sceHttpSetConnectTimeOut(tpl, 15 * 1000 * 1000);
+    sceHttpSetRecvTimeOut(tpl, 30 * 1000 * 1000);
+    sceHttpSetAutoRedirect(tpl, 1);
+
+    conn = sceHttpCreateConnectionWithURL(tpl, url, 1);
+    if (conn < 0) { snprintf(err, errsz, "Bad address (0x%08X)", (unsigned)conn); goto done; }
+    req = sceHttpCreateRequestWithURL(conn, SCE_HTTP_METHOD_GET, url, 0);
+    if (req < 0) { snprintf(err, errsz, "Request failed (0x%08X)", (unsigned)req); goto done; }
+
     if (user && *user) {
-        curl_easy_setopt(c, CURLOPT_HTTPAUTH, (long)CURLAUTH_ANY);
-        curl_easy_setopt(c, CURLOPT_USERNAME, user);
-        curl_easy_setopt(c, CURLOPT_PASSWORD, pass ? pass : "");
+        char cred[IPTV_CRED_MAX * 2 + 2], enc[IPTV_CRED_MAX * 3 + 16], hdr[IPTV_CRED_MAX * 3 + 32];
+        int cn = snprintf(cred, sizeof cred, "%s:%s", user, pass ? pass : "");
+        b64((const unsigned char *)cred, (size_t)cn, enc);
+        snprintf(hdr, sizeof hdr, "Basic %s", enc);
+        sceHttpAddRequestHeader(req, "Authorization", hdr, SCE_HTTP_HEADER_OVERWRITE);
     }
-    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, on_data);
-    curl_easy_setopt(c, CURLOPT_WRITEDATA, m);
 
-    CURLcode rc = curl_easy_perform(c);
-    long code = 0;
-    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &code);
-    curl_easy_cleanup(c);
+    int r = sceHttpSendRequest(req, NULL, 0);
+    if (r < 0) { snprintf(err, errsz, "Connection failed (0x%08X)", (unsigned)r); goto done; }
 
-    if (rc != CURLE_OK) {
-        snprintf(err, errsz, "%s", m->overflow ? "List is too large" : curl_easy_strerror(rc));
-        return -1;
+    int status = 0;
+    sceHttpGetStatusCode(req, &status);
+    if (status >= 400) { snprintf(err, errsz, "Server answered HTTP %d", status); goto done; }
+
+    unsigned char buf[16384];
+    for (;;) {
+        int n = sceHttpReadData(req, buf, sizeof buf);
+        if (n < 0) { snprintf(err, errsz, "Read error (0x%08X)", (unsigned)n); goto done; }
+        if (n == 0) break;
+        if (on_data(buf, 1, (size_t)n, m) != (size_t)n) {
+            snprintf(err, errsz, "%s", m->overflow ? "List is too large" : "Out of memory");
+            goto done;
+        }
     }
-    if (code >= 400) { snprintf(err, errsz, "Server answered HTTP %ld", code); return -1; }
-    if (!m->buf) { snprintf(err, errsz, "Empty answer"); return -1; }
-    return 0;
+    if (!m->buf) { snprintf(err, errsz, "Empty answer"); goto done; }
+    rc = 0;
+
+done:
+    if (req >= 0)  sceHttpDeleteRequest(req);
+    if (conn >= 0) sceHttpDeleteConnection(conn);
+    if (tpl >= 0)  sceHttpDeleteTemplate(tpl);
+    return rc;
 }
 
 static int read_file(const char *path, Mem *m)
@@ -306,10 +339,11 @@ static void move_sel(unsigned p, int count)
 int main(void)
 {
     sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
+    sceSysmoduleLoadModule(SCE_SYSMODULE_HTTPS);
     SceNetInitParam np = { malloc(1024 * 1024), 1024 * 1024, 0 };
     sceNetInit(&np);
     sceNetCtlInit();
-    curl_global_init(CURL_GLOBAL_DEFAULT);
+    sceHttpInit(1024 * 1024);
 
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
     vita2d_init();
@@ -407,7 +441,7 @@ int main(void)
     free(vis);
     vita2d_fini();
     vita2d_free_pgf(pgf);
-    curl_global_cleanup();
+    sceHttpTerm();
     sceNetCtlTerm();
     sceNetTerm();
     sceKernelExitProcess(0);
