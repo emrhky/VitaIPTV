@@ -25,7 +25,7 @@ add_executable(${PROJECT_NAME}.elf
 
 target_link_libraries(${PROJECT_NAME}.elf
   vita2d
-     curl ssl crypto z
+     curl ssl crypto z pthread
   freetype png jpeg m
   SceAvPlayer_stub SceAudio_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
