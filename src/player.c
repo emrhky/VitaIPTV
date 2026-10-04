@@ -182,3 +182,8 @@ vita2d_texture *player_poll(void)
     }
     return g_tex;
 }
+
+void player_log_reset(void)
+{
+    /* Gerekirse log sıfırlama mantığı eklenebilir */
+}
