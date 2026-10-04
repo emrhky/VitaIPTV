@@ -162,17 +162,292 @@ int url_encode(char *dst, size_t dstsz, const char *src)
     return 0;
 }
 
-int source_xtream_url(const Source *s, char *out, size_t outsz)
+int source_xtream_base(const Source *s, char *out, size_t outsz)
 {
-    char host[IPTV_URL_MAX], u[IPTV_CRED_MAX * 3 + 1], p[IPTV_CRED_MAX * 3 + 1];
+    char host[IPTV_URL_MAX];
     copy_trunc(host, sizeof host, s->url, strlen(s->url));
     size_t hl = strlen(host);
     while (hl > 0 && host[hl - 1] == '/') host[--hl] = 0;
-    if (url_encode(u, sizeof u, s->user) || url_encode(p, sizeof p, s->pass)) return -1;
     const char *scheme = strstr(host, "://") ? "" : "http://";
-    int n = snprintf(out, outsz, "%s%s/get.php?username=%s&password=%s&type=m3u_plus&output=ts",
-                     scheme, host, u, p);
+    int n = snprintf(out, outsz, "%s%s", scheme, host);
     return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
+int source_xtream_url(const Source *s, char *out, size_t outsz)
+{
+    char base[IPTV_URL_MAX + 16], u[IPTV_CRED_MAX * 3 + 1], p[IPTV_CRED_MAX * 3 + 1];
+    if (source_xtream_base(s, base, sizeof base)) return -1;
+    if (url_encode(u, sizeof u, s->user) || url_encode(p, sizeof p, s->pass)) return -1;
+    int n = snprintf(out, outsz, "%s/get.php?username=%s&password=%s&type=m3u_plus&output=ts", base, u, p);
+    return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
+int xtream_api_url(const Source *s, const char *action, char *out, size_t outsz)
+{
+    char base[IPTV_URL_MAX + 16], u[IPTV_CRED_MAX * 3 + 1], p[IPTV_CRED_MAX * 3 + 1];
+    if (source_xtream_base(s, base, sizeof base)) return -1;
+    if (url_encode(u, sizeof u, s->user) || url_encode(p, sizeof p, s->pass)) return -1;
+    int n = snprintf(out, outsz, "%s/player_api.php?username=%s&password=%s&action=%s", base, u, p, action);
+    return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
+/* ---- minimal tolerant JSON reader (only what the Xtream API needs) ---- */
+static const char *skip_ws(const char *p, const char *end)
+{
+    while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+    return p;
+}
+
+static void put_utf8(char *out, size_t outsz, size_t *o, unsigned cp)
+{
+    char t[4];
+    int n;
+    if (cp < 0x80)         { t[0] = (char)cp; n = 1; }
+    else if (cp < 0x800)   { t[0] = (char)(0xC0 | (cp >> 6)); t[1] = (char)(0x80 | (cp & 63)); n = 2; }
+    else if (cp < 0x10000) { t[0] = (char)(0xE0 | (cp >> 12)); t[1] = (char)(0x80 | ((cp >> 6) & 63)); t[2] = (char)(0x80 | (cp & 63)); n = 3; }
+    else                   { t[0] = (char)(0xF0 | (cp >> 18)); t[1] = (char)(0x80 | ((cp >> 12) & 63)); t[2] = (char)(0x80 | ((cp >> 6) & 63)); t[3] = (char)(0x80 | (cp & 63)); n = 4; }
+    if (*o + (size_t)n + 1 > outsz) return;
+    memcpy(out + *o, t, (size_t)n);
+    *o += (size_t)n;
+}
+
+static int hex4(const char *p, const char *end, unsigned *v)
+{
+    if (end - p < 4) return -1;
+    unsigned x = 0;
+    for (int i = 0; i < 4; i++) {
+        char ch = p[i];
+        x <<= 4;
+        if (ch >= '0' && ch <= '9') x |= (unsigned)(ch - '0');
+        else if (ch >= 'a' && ch <= 'f') x |= (unsigned)(ch - 'a' + 10);
+        else if (ch >= 'A' && ch <= 'F') x |= (unsigned)(ch - 'A' + 10);
+        else return -1;
+    }
+    *v = x;
+    return 0;
+}
+
+/* Removes an incomplete UTF-8 sequence at the end of s (n = strlen). */
+static void utf8_trim_tail(char *s, size_t n)
+{
+    size_t i = n;
+    int back = 0;
+    while (i > 0 && back < 3 && ((unsigned char)s[i - 1] & 0xC0) == 0x80) { i--; back++; }
+    if (i == 0) return;
+    unsigned char lead = (unsigned char)s[i - 1];
+    size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+    if (need > 1 && (size_t)back + 1 < need) s[i - 1] = 0;
+}
+
+/* p points at the opening quote. Writes the unescaped string (UTF-8) and
+ * returns the position after the closing quote, or NULL if unterminated. */
+static const char *json_string(const char *p, const char *end, char *out, size_t outsz)
+{
+    size_t o = 0;
+    if (outsz == 0) return NULL;
+    p++;
+    while (p < end && *p != '"') {
+        if (*p == '\\' && p + 1 < end) {
+            p++;
+            switch (*p) {
+            case 'n': case 'r': case 't': case 'b': case 'f':
+                put_utf8(out, outsz, &o, ' ');
+                p++;
+                break;
+            case 'u': {
+                unsigned cp;
+                if (hex4(p + 1, end, &cp) != 0) { p++; break; }
+                p += 5;
+                if (cp >= 0xD800 && cp < 0xDC00 && end - p >= 6 && p[0] == '\\' && p[1] == 'u') {
+                    unsigned lo;
+                    if (hex4(p + 2, end, &lo) == 0 && lo >= 0xDC00 && lo < 0xE000) {
+                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                        p += 6;
+                    }
+                }
+                if (cp >= 0xD800 && cp < 0xE000) cp = 0xFFFD;
+                put_utf8(out, outsz, &o, cp);
+                break;
+            }
+            default:
+                put_utf8(out, outsz, &o, (unsigned char)*p);
+                p++;
+                break;
+            }
+        } else {
+            if (o + 2 <= outsz) out[o++] = *p;
+            p++;
+        }
+    }
+    out[o] = 0;
+    utf8_trim_tail(out, o);
+    return p < end ? p + 1 : NULL;
+}
+
+static const char *json_skip_value(const char *p, const char *end)
+{
+    p = skip_ws(p, end);
+    if (p >= end) return NULL;
+    if (*p == '"') {
+        p++;
+        while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
+        return p < end ? p + 1 : NULL;
+    }
+    if (*p == '{' || *p == '[') {
+        int depth = 0;
+        while (p < end) {
+            if (*p == '"') {
+                p++;
+                while (p < end && *p != '"') { if (*p == '\\') p++; p++; }
+                if (p >= end) return NULL;
+            } else if (*p == '{' || *p == '[') {
+                depth++;
+            } else if (*p == '}' || *p == ']') {
+                if (--depth == 0) return p + 1;
+            }
+            p++;
+        }
+        return NULL;
+    }
+    while (p < end && *p != ',' && *p != '}' && *p != ']' && *p != ' ' && *p != '\n' && *p != '\r' && *p != '\t') p++;
+    return p;
+}
+
+typedef struct {
+    char name[IPTV_NAME_MAX];
+    char cname[IPTV_GROUP_MAX];
+    char id[24];
+    char cat[24];
+} XtObj;
+
+/* p points at '{'. Returns position after the matching '}', or NULL on malformed input. */
+static const char *xt_object(const char *p, const char *end, XtObj *o)
+{
+    memset(o, 0, sizeof *o);
+    p++;
+    for (;;) {
+        p = skip_ws(p, end);
+        if (p >= end) return NULL;
+        if (*p == '}') return p + 1;
+        if (*p == ',') { p++; continue; }
+        if (*p != '"') return NULL;
+
+        char key[24];
+        p = json_string(p, end, key, sizeof key);
+        if (!p) return NULL;
+        p = skip_ws(p, end);
+        if (p >= end || *p != ':') return NULL;
+        p = skip_ws(p + 1, end);
+        if (p >= end) return NULL;
+
+        char *dst = NULL;
+        size_t dsz = 0;
+        if (!strcmp(key, "name"))               { dst = o->name;  dsz = sizeof o->name; }
+        else if (!strcmp(key, "category_name")) { dst = o->cname; dsz = sizeof o->cname; }
+        else if (!strcmp(key, "stream_id"))     { dst = o->id;    dsz = sizeof o->id; }
+        else if (!strcmp(key, "category_id"))   { dst = o->cat;   dsz = sizeof o->cat; }
+
+        if (!dst) {
+            p = json_skip_value(p, end);
+            if (!p) return NULL;
+        } else if (*p == '"') {
+            p = json_string(p, end, dst, dsz);
+            if (!p) return NULL;
+        } else {
+            const char *q = json_skip_value(p, end);
+            if (!q) return NULL;
+            if (*p != '{' && *p != '[') copy_trunc(dst, dsz, p, (size_t)(q - p));
+            p = q;
+        }
+    }
+}
+
+/* Calls fn for every object of a top-level JSON array. */
+typedef int (*xt_cb)(const XtObj *o, void *ctx);
+static void xt_each(const char *json, size_t len, xt_cb fn, void *ctx)
+{
+    const char *p = json, *end = json + len;
+    XtObj o;
+    if (len >= 3 && memcmp(p, "\xEF\xBB\xBF", 3) == 0) p += 3;
+    p = skip_ws(p, end);
+    if (p >= end || *p != '[') return;
+    p++;
+    for (;;) {
+        p = skip_ws(p, end);
+        if (p >= end || *p == ']') return;
+        if (*p == ',') { p++; continue; }
+        if (*p == '{') {
+            p = xt_object(p, end, &o);
+            if (!p) return;
+            if (fn(&o, ctx) != 0) return;
+        } else {
+            p = json_skip_value(p, end);
+            if (!p) return;
+        }
+    }
+}
+
+typedef struct { XtCategory *out; int n, max; } CatCtx;
+static int cat_cb(const XtObj *o, void *vctx)
+{
+    CatCtx *c = vctx;
+    if (c->n >= c->max) return -1;
+    if (!o->id[0] && !o->cat[0]) return 0;
+    snprintf(c->out[c->n].id, sizeof c->out[c->n].id, "%s", o->cat);
+    snprintf(c->out[c->n].name, sizeof c->out[c->n].name, "%s", o->cname);
+    c->n++;
+    return 0;
+}
+
+int xtream_parse_categories(const char *json, size_t len, XtCategory *out, int max)
+{
+    CatCtx c = { out, 0, max };
+    xt_each(json, len, cat_cb, &c);
+    return c.n;
+}
+
+typedef struct {
+    ChannelList *out;
+    const XtCategory *cats;
+    int ncats, added;
+    char base[IPTV_URL_MAX + 16], eu[IPTV_CRED_MAX * 3 + 1], ep[IPTV_CRED_MAX * 3 + 1];
+} LiveCtx;
+
+static int live_cb(const XtObj *o, void *vctx)
+{
+    LiveCtx *c = vctx;
+    if (!o->id[0]) return 0;
+    for (const char *q = o->id; *q; q++)
+        if (!isalnum((unsigned char)*q) && *q != '_' && *q != '-') return 0;
+
+    Channel ch;
+    memset(&ch, 0, sizeof ch);
+    snprintf(ch.name, sizeof ch.name, "%s", o->name[0] ? o->name : o->id);
+    for (int i = 0; i < c->ncats; i++)
+        if (!strcmp(c->cats[i].id, o->cat)) {
+            snprintf(ch.group, sizeof ch.group, "%s", c->cats[i].name);
+            break;
+        }
+    int n = snprintf(ch.url, sizeof ch.url, "%s/live/%s/%s/%s.ts", c->base, c->eu, c->ep, o->id);
+    if (n < 0 || (size_t)n >= sizeof ch.url) return 0;
+    if (list_push(c->out, &ch) != 0) return -1;
+    c->added++;
+    return 0;
+}
+
+int xtream_parse_live(const char *json, size_t len, const Source *s,
+                      const XtCategory *cats, int ncats, ChannelList *out)
+{
+    LiveCtx *c = malloc(sizeof *c);
+    if (!c) return 0;
+    c->out = out; c->cats = cats; c->ncats = ncats; c->added = 0;
+    if (source_xtream_base(s, c->base, sizeof c->base) ||
+        url_encode(c->eu, sizeof c->eu, s->user) ||
+        url_encode(c->ep, sizeof c->ep, s->pass)) { free(c); return 0; }
+    xt_each(json, len, live_cb, c);
+    int n = c->added;
+    free(c);
+    return n;
 }
 
 /* sources.txt:  Name | type | arg1 | arg2 | arg3

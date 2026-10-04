@@ -151,7 +151,7 @@ static int http_get(const char *url, const char *user, const char *pass, Mem *m,
         if (n < 0) { snprintf(err, errsz, "Read error (0x%08X)", (unsigned)n); goto done; }
         if (n == 0) break;
         if (on_data(buf, 1, (size_t)n, m) != (size_t)n) {
-            snprintf(err, errsz, "%s", m->overflow ? "List is too large" : "Out of memory");
+            snprintf(err, errsz, "%s", m->overflow ? "List is too large (over 24 MB)" : "Out of memory");
             goto done;
         }
     }
@@ -234,18 +234,55 @@ static void load_sources(void)
     sel = scroll = 0;
 }
 
+/* Xtream: use the JSON API (live channels only) instead of the huge get.php list. */
+static int load_xtream(const Source *s, char *err, size_t errsz)
+{
+    char url[IPTV_URL_MAX + 160];
+    Mem mc = {0}, ms = {0};
+    XtCategory *cats = malloc(sizeof(XtCategory) * XT_MAX_CATS);
+    int ncats = 0;
+
+    if (cats && xtream_api_url(s, "get_live_categories", url, sizeof url) == 0 &&
+        http_get(url, NULL, NULL, &mc, err, errsz) == 0)
+        ncats = xtream_parse_categories(mc.buf, mc.len, cats, XT_MAX_CATS);
+    free(mc.buf);
+
+    err[0] = 0;
+    draw_message("Loading channels...");
+    if (xtream_api_url(s, "get_live_streams", url, sizeof url) != 0) {
+        snprintf(err, errsz, "URL too long");
+        free(cats);
+        return -1;
+    }
+    if (http_get(url, NULL, NULL, &ms, err, errsz) != 0) { free(ms.buf); free(cats); return -1; }
+
+    channel_list_free(&chans);
+    channel_list_init(&chans);
+    xtream_parse_live(ms.buf, ms.len, s, cats, ncats, &chans);
+    free(ms.buf);
+    free(cats);
+
+    if (chans.count == 0) {
+        snprintf(err, errsz, "No live channels returned (check host, username, password)");
+        return -1;
+    }
+    return 0;
+}
+
 static int load_channels(const Source *s)
 {
     draw_message("Loading list...");
     Mem m = {0};
-    char err[160] = "", url[IPTV_URL_MAX + 128];
+    char err[160] = "";
     int rc = -1;
 
     switch (s->type) {
     case SRC_XTREAM:
-        if (source_xtream_url(s, url, sizeof url) != 0) { snprintf(err, sizeof err, "URL too long"); break; }
-        rc = http_get(url, NULL, NULL, &m, err, sizeof err);
-        break;
+        rc = load_xtream(s, err, sizeof err);
+        if (rc != 0) { set_status(1, "Failed: %s", err); return -1; }
+        build_groups();
+        status[0] = 0;
+        return 0;
     case SRC_M3U_URL:
         rc = http_get(s->url, s->user, s->pass, &m, err, sizeof err);
         break;
