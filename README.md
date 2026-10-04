@@ -12,7 +12,7 @@ PlayStation Vita (HENkaku/Ensō) için IPTV oynatıcı. Kaynakları `ux0:data/Vi
     Yerel dosya  | file   | ux0:data/VitaIPTV/benim.m3u
 
 - `m3u`: M3U listesi. İsteğe bağlı kullanıcı/şifre HTTP Basic/Digest doğrulaması için kullanılır.
-- `xtream`: Xtream Codes tarzı (kullanıcı adı + şifre). Liste adresi otomatik oluşturulur; şifredeki özel karakterler kodlanır.
+- `xtream`: Xtream Codes tarzı (kullanıcı adı + şifre). Uygulama sağlayıcının JSON API'sini (`player_api.php`) kullanır ve yalnızca canlı kanalları ve kategorileri çeker; film/dizi listeleri çekilmez, bu yüzden büyük panellerde de hızlı ve bellek dostu çalışır. Kategoriler grup olarak görünür.
 - `stream`: Tek bir yayın linki, listeye gerek olmadan doğrudan oynatılır.
 - `file`: Hafıza kartındaki yerel M3U dosyası.
 - Doğrudan linkler (şifresiz) için `m3u` ya da `stream` yeterlidir. Kullanıcı adı/şifre zaten linkin içindeyse (`.../live/kullanici/sifre/1.ts`) ayrıca bir şey girmene gerek yok.
@@ -43,7 +43,7 @@ M3U ayrıştırıcı, Xtream adresi ve sources.txt okuyucusu `src/iptv.c` içind
 - `src/player.c` Vita üzerinde denenmedi. Görüntü bozuk ya da renkler yanlışsa `player.c` başındaki `FRAME_ALIGN`, `CHROMA_VU`, `DECIMATE` ayarlarına bak.
 - Video şimdilik yazılımla RGB'ye çevrilip yarı çözünürlükte çiziliyor (`DECIMATE 2`). GPU ile renk dönüşümü sonraki adım olabilir.
 - HLS (.m3u8) ve çeşitli codec'lerin SceAvPlayer'da çalışması yayına bağlıdır. Vita donanımı H.264 + AAC/MP3 çözer; HEVC çözmez.
-- Liste indirme sırasında arayüz donar (tek iş parçacığı). Çok büyük listeler (24 MB üstü) reddedilir.
+- Liste indirme sırasında arayüz donar (tek iş parçacığı). Düz `m3u` listeleri 24 MB üstündeyse reddedilir (Xtream için bu sınır geçerli değil).
 - Varsayılan yazı tipi Türkçe karakterlerin hepsini göstermeyebilir.
 - HTTPS, Vita'nın sistem sertifikalarını kullanır; eski yazılım sürümlerinde bazı HTTPS siteler açılmayabilir, mümkünse `http://` kullan.
 - Kullanıcı adı/şifre doğrulaması yalnızca Basic türünü destekler (Xtream için zaten gerekmez).
