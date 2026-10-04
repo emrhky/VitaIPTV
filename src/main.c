@@ -12,8 +12,6 @@
 #include "iptv.h"
 #include "player.h"
 
-extern void player_log_reset(void);
-
 int _newlib_heap_size_user = 96 * 1024 * 1024;
 
 #define DATA_DIR      "ux0:data/VitaIPTV"
