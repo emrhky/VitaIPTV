@@ -387,8 +387,9 @@ int main(void)
     vita2d_set_clear_color(COL_BG);
     pgf = vita2d_load_default_pgf();
     channel_list_init(&chans);
-    load_sources();
+    
     player_log_reset();
+    load_sources();
 
     for (;;) {
         unsigned p = read_pressed();
