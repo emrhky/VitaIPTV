@@ -13,6 +13,9 @@
 #include <malloc.h>
 #include <string.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdarg.h>
+#include <psp2/sysmodule.h>
 
 /* ---- tunables ---------------------------------------------------------- */
 #define FRAME_ALIGN      16   /* decoder pitch / height alignment (try 16, 32, 64) */
@@ -29,18 +32,53 @@ static volatile int g_audio_run;
 static SceUID g_audio_thread = -1;
 static int g_audio_port = -1;
 
+/* ---- log file: written and closed on every line, so it survives a crash ---- */
+#define LOG_PATH "ux0:data/VitaIPTV/log.txt"
+static int g_module_loaded;
+static volatile int g_audio_logged, g_video_logged;
+
+static void plog(const char *fmt, ...)
+{
+    FILE *f = fopen(LOG_PATH, "a");
+    if (!f) return;
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(f, fmt, ap);
+    va_end(ap);
+    fputc('\n', f);
+    fclose(f);
+}
+
+void player_log_reset(void)
+{
+    FILE *f = fopen(LOG_PATH, "w");
+    if (f) { fputs("Vita IPTV log\n", f); fclose(f); }
+}
+
 /* ---- allocators required by SceAvPlayer -------------------------------- */
-static void *mem_alloc(void *arg, uint32_t align, uint32_t size) { (void)arg; return memalign(align, size); }
+static void *mem_alloc(void *arg, uint32_t align, uint32_t size)
+{
+    (void)arg;
+    void *ptr = memalign(align, size);
+    if (!ptr) plog("mem_alloc FAILED size=%u align=%u", (unsigned)size, (unsigned)align);
+    return ptr;
+}
 static void  mem_free(void *arg, void *p) { (void)arg; free(p); }
 
 static void *tex_alloc(void *arg, uint32_t align, uint32_t size)
 {
     (void)arg; (void)align;
+    void *base = NULL;
     uint32_t sz = (size + 0xFFFFF) & ~0xFFFFFu;               /* 1 MiB multiples */
     SceUID uid = sceKernelAllocMemBlock("avp_frame", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW, sz, NULL);
-    if (uid < 0) return NULL;
-    void *base = NULL;
+    if (uid < 0) {
+        plog("tex_alloc PHYCONT failed 0x%08X size=%u, trying CDRAM", (unsigned)uid, (unsigned)sz);
+        sz = (size + 0x3FFFF) & ~0x3FFFFu;                    /* 256 KiB multiples */
+        uid = sceKernelAllocMemBlock("avp_frame", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, sz, NULL);
+        if (uid < 0) { plog("tex_alloc CDRAM failed 0x%08X", (unsigned)uid); return NULL; }
+    }
     sceKernelGetMemBlockBase(uid, &base);
+    plog("tex_alloc ok size=%u", (unsigned)sz);
     return base;
 }
 static void tex_free(void *arg, void *p)
@@ -62,7 +100,8 @@ static int audio_main(SceSize args, void *argp)
             int ch   = ai.details.audio.channelCount;
             int freq = (int)ai.details.audio.sampleRate;
             int mode = (ch == 1) ? SCE_AUDIO_OUT_MODE_MONO : SCE_AUDIO_OUT_MODE_STEREO;
-            int len  = (int)ai.details.audio.size / (ch * (int)sizeof(int16_t));
+            int len  = ch > 0 ? (int)ai.details.audio.size / (ch * (int)sizeof(int16_t)) : 0;
+            if (!g_audio_logged) { g_audio_logged = 1; plog("first audio frame ch=%d freq=%d bytes=%u", ch, freq, (unsigned)ai.details.audio.size); }
 
             if (len > 0 && freq > 0) {
                 if (g_audio_port < 0) {
@@ -84,6 +123,15 @@ static int audio_main(SceSize args, void *argp)
 int player_start(const char *url)
 {
     player_stop();
+    plog("player_start");
+    g_audio_logged = g_video_logged = 0;
+
+    if (!g_module_loaded) {
+        int lr = sceSysmoduleLoadModule(SCE_SYSMODULE_AVPLAYER);
+        plog("load AVPLAYER module -> 0x%08X", (unsigned)lr);
+        if (lr < 0) return -1;
+        g_module_loaded = 1;
+    }
 
     SceAvPlayerInitData init;
     memset(&init, 0, sizeof init);
@@ -96,19 +144,23 @@ int player_start(const char *url)
     init.autoStart = 1;
 
     g_player = sceAvPlayerInit(&init);
+    plog("sceAvPlayerInit -> 0x%08X", (unsigned)g_player);
     if (!g_player) return -1;
-    sceAvPlayerAddSource(g_player, url);
+    int ar = sceAvPlayerAddSource(g_player, url);
+    plog("sceAvPlayerAddSource -> 0x%08X", (unsigned)ar);
     g_active = 1;
 
     g_audio_run = 1;
     g_audio_thread = sceKernelCreateThread("iptv_audio", audio_main, 0x10000100, 0x10000, 0, 0, NULL);
     if (g_audio_thread >= 0) sceKernelStartThread(g_audio_thread, 0, NULL);
+    plog("audio thread -> 0x%08X, start done", (unsigned)g_audio_thread);
     return 0;
 }
 
 void player_stop(void)
 {
     if (!g_active) return;
+    plog("player_stop");
     g_audio_run = 0;
     if (g_audio_thread >= 0) {
         sceKernelWaitThreadEnd(g_audio_thread, NULL, NULL);
@@ -177,13 +229,12 @@ vita2d_texture *player_poll(void)
 {
     if (!g_active) return NULL;
     SceAvPlayerFrameInfo vi;
-    if (sceAvPlayerIsActive(g_player) && sceAvPlayerGetVideoData(g_player, &vi)) {
+    if (sceAvPlayerIsActive(g_player) && sceAvPlayerGetVideoData(g_player, &vi) && vi.pData) {
+        if (!g_video_logged) {
+            g_video_logged = 1;
+            plog("first video frame %ux%u", (unsigned)vi.details.video.width, (unsigned)vi.details.video.height);
+        }
         convert_frame((const uint8_t *)vi.pData, (int)vi.details.video.width, (int)vi.details.video.height);
     }
     return g_tex;
-}
-
-void player_log_reset(void)
-{
-    /* Gerekirse log sıfırlama mantığı eklenebilir */
 }
