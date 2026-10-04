@@ -23,13 +23,20 @@ add_executable(${PROJECT_NAME}.elf
   src/player.c
 )
 
+# Extra system stubs that vita2d needs (found automatically if present in the SDK)
+file(GLOB EXTRA_STUBS
+  "$ENV{VITASDK}/arm-vita-eabi/lib/libSceSharedFb*_stub.a"
+  "$ENV{VITASDK}/arm-vita-eabi/lib/libSceAppMgr_stub.a")
+message(STATUS "Extra stubs: ${EXTRA_STUBS}")
+
 target_link_libraries(${PROJECT_NAME}.elf
   vita2d
-     curl ssl crypto z pthread
-  freetype png jpeg m
+  freetype png jpeg z m
   SceAvPlayer_stub SceAudio_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
   SceCtrl_stub SceSysmodule_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub
+  ScePgf_stub ScePvf_stub
+  ${EXTRA_STUBS}
 )
 
 vita_create_self(${PROJECT_NAME}.self ${PROJECT_NAME}.elf)
