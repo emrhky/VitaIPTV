@@ -36,7 +36,7 @@ message(STATUS "Extra stubs: ${EXTRA_STUBS}")
 target_link_libraries(${PROJECT_NAME}.elf
   vita2d
   freetype png jpeg z m
-  SceAvPlayer_stub SceAudio_stub SceVideodec_stub
+  SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceAudiodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
   SceCtrl_stub SceSysmodule_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub
   ScePgf_stub ScePvf_stub
