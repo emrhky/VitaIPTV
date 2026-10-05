@@ -222,7 +222,8 @@ static void add_local_files(void)
         const char *dot = strrchr(e.d_name, '.');
         if (!SCE_S_ISDIR(e.d_stat.st_mode) && dot &&
             (!strcasecmp(dot, ".mp4") || !strcasecmp(dot, ".m4v") ||
-             !strcasecmp(dot, ".mov") || !strcasecmp(dot, ".ts"))) {
+             !strcasecmp(dot, ".mov") || !strcasecmp(dot, ".ts") ||
+             !strcasecmp(dot, ".m2ts") || !strcasecmp(dot, ".mts"))) {
             Source *s = &sources[nsources++];
             memset(s, 0, sizeof *s);
             s->type = SRC_STREAM;
