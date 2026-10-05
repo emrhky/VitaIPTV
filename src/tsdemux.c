@@ -208,10 +208,26 @@ static int sei_has_recovery_point(const uint8_t *b, size_t n)
     return 0;
 }
 
-/* Returns 1 if the access unit is a random access point. */
+/* nal points after the NAL header of a slice. */
+static int slice_is_intra(const uint8_t *p, size_t n)
+{
+    uint8_t rb[16];
+    size_t m = 0;
+    for (size_t i = 0; i < n && m < sizeof rb; i++) {
+        if (i >= 2 && p[i] == 3 && p[i - 1] == 0 && p[i - 2] == 0) continue;
+        rb[m++] = p[i];
+    }
+    Bits b = { rb, m * 8, 0, 0 };
+    uint32_t first_mb = bits_ue(&b), type = bits_ue(&b);
+    if (b.err || first_mb != 0) return 0;
+    type %= 5;
+    return type == 2 || type == 4;                      /* I or SI */
+}
+
+/* Returns TS_FLAG_KEYFRAME, TS_FLAG_INTRA or 0. */
 static int scan_h264(TsDemux *d, const uint8_t *b, size_t n)
 {
-    int key = 0;
+    int key = 0, intra = 0, seen_slice = 0;
     size_t s = find_start(b, 0, n);
     while (s < n) {
         size_t nal = s + 3, next = find_start(b, nal, n), end = next;
@@ -219,6 +235,7 @@ static int scan_h264(TsDemux *d, const uint8_t *b, size_t n)
         if (end > nal) {
             int type = b[nal] & 0x1F;
             if (type == 5) key = 1;
+            else if (type == 1 && !seen_slice) { seen_slice = 1; intra = slice_is_intra(b + nal + 1, end - nal - 1); }
             else if (type == 6) { if (sei_has_recovery_point(b + nal + 1, end - nal - 1)) key = 1; }
             else if (type == 7 && end - nal <= sizeof d->info.sps) {
                 if ((int)(end - nal) != d->info.sps_len || memcmp(d->info.sps, b + nal, end - nal)) {
@@ -236,7 +253,7 @@ static int scan_h264(TsDemux *d, const uint8_t *b, size_t n)
         }
         s = next;
     }
-    return key;
+    return key ? TS_FLAG_KEYFRAME : intra ? TS_FLAG_INTRA : 0;
 }
 
 /* ------------------------------------------------------------------- ADTS */
@@ -289,10 +306,11 @@ static void flush_video(TsDemux *d)
         const uint8_t *es = p->buf + off;
         size_t en = p->len - off;
         int flags = 0;
-        if (d->info.video_codec == TS_CODEC_H264 && scan_h264(d, es, en)) flags |= TS_FLAG_KEYFRAME;
+        if (d->info.video_codec == TS_CODEC_H264) flags |= scan_h264(d, es, en);
         if (p->damaged) { flags |= TS_FLAG_DAMAGED; d->info.damaged_aus++; }
         d->info.video_aus++;
         if (flags & TS_FLAG_KEYFRAME) d->info.keyframes++;
+        else if (flags & TS_FLAG_INTRA) d->info.intra_aus++;
         if (pts >= 0) {
             if (d->info.first_video_pts < 0) d->info.first_video_pts = pts;
             if (d->info.min_video_pts < 0 || pts < d->info.min_video_pts) d->info.min_video_pts = pts;

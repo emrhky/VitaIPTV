@@ -19,6 +19,9 @@
 #define CHUNK        16384
 #define ES_CAP       (2 * 1024 * 1024)  /* largest access unit we accept */
 #define LATE_US      1000000            /* more than this late: re-anchor the clock */
+#ifndef STALL_US
+#define STALL_US     10000000ULL        /* no picture after this long: report why */
+#endif
 #define TEX_FORMAT   SCE_GXM_TEXTURE_FORMAT_A8B8G8R8   /* if red/blue are swapped: SCE_GXM_TEXTURE_FORMAT_A8R8G8B8 */
 /* ------------------------------------------------------------------------ */
 
@@ -52,7 +55,7 @@ typedef struct {
     uint32_t out_seq;
     volatile int ready;                 /* slots usable by the UI thread */
     volatile uint32_t frame_us;         /* estimated picture duration */
-    uint64_t last_stats;
+    uint64_t last_stats, start_us;
     /* presentation (UI thread) */
     int shown, clock_on;
     uint64_t base_us;
@@ -114,9 +117,10 @@ static int decoder_open(Tsp *t, int w, int h, int refs)
 {
     int r;
     if (!g_module_loaded) {
+        /* On a real Vita this ID is rejected (0x805A1000) because the decoder lives in
+         * SceAvcodecUser, which is already loaded: a failure here is not fatal. */
         r = sceSysmoduleLoadModule(SCE_SYSMODULE_AVCDEC);
-        plog("tsp: load AVCDEC module -> 0x%08X", (unsigned)r);
-        if (r < 0) return r;
+        plog("tsp: load AVCDEC module -> 0x%08X%s", (unsigned)r, r < 0 ? " (ignored, continuing)" : "");
         g_module_loaded = 1;
     }
     t->dw = ALIGN(w, 16);
@@ -260,14 +264,16 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
     double fps = ts_video_fps(i);
     if (fps > 5.0 && fps < 121.0) t->frame_us = (uint32_t)(1000000.0 / fps);
 
+    int start_ok = flags & (TS_FLAG_KEYFRAME | TS_FLAG_INTRA);   /* IDR, recovery point or plain I picture */
     if (!t->dec_open) {
-        if (!(flags & TS_FLAG_KEYFRAME) || i->width == 0 || i->sps_len == 0 || i->pps_len == 0) {
+        if (!start_ok || i->width == 0 || i->sps_len == 0 || i->pps_len == 0) {
             t->st.state = TSP_WAIT_KEY;
             t->st.dropped++;
             return;
         }
         if (i->bit_depth != 8 || i->chroma_format != 1) { set_error(t, "H.264 %d-bit / chroma %d: not supported", i->bit_depth, i->chroma_format); return; }
-        plog("tsp: first keyframe after %u skipped pictures, %dx%d", t->st.dropped, i->width, i->height);
+        plog("tsp: first %s after %u skipped pictures, %dx%d", (flags & TS_FLAG_KEYFRAME) ? "keyframe" : "I-picture",
+             t->st.dropped, i->width, i->height);
         int r = decoder_open(t, i->width, i->height, i->ref_frames);
         if (r < 0) { set_error(t, "Decoder init failed (0x%08X), see log.txt", (unsigned)r); return; }
         t->need_key = 0;
@@ -281,7 +287,7 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
      * keyframe, which is often the damaged one); only decoder errors force a resync. */
     if (flags & TS_FLAG_DAMAGED) t->st.damaged++;
     if (t->need_key) {
-        if (!(flags & TS_FLAG_KEYFRAME)) { t->st.dropped++; return; }
+        if (!start_ok) { t->st.dropped++; return; }
         t->need_key = 0;
     }
 
@@ -324,6 +330,25 @@ static void stats_tick(Tsp *t)
          t->st.errors, (unsigned)t->frame_us);
 }
 
+/* No picture: say why. */
+static void explain_no_picture(Tsp *t)
+{
+    const TsInfo *i = ts_info(t->dmx);
+    if (i->program < 0) set_error(t, "No MPEG-TS data (not a TS stream?)");
+    else if (i->video_pid < 0) set_error(t, "No video stream (radio channel?)");
+    else if (i->scrambled_packets && !i->video_aus) set_error(t, "Channel is encrypted (scrambled)");
+    else if (!i->video_aus) set_error(t, "No video data received");
+    else if (!t->dec_open) set_error(t, "No usable keyframe in %u pictures", i->video_aus);
+    else set_error(t, "Decoder produced no picture (%u errors)", t->st.errors);
+}
+
+/* Nothing decoded for a long time: report instead of waiting forever. */
+static void check_stall(Tsp *t)
+{
+    if (t->st.decoded || t->st.state == TSP_ERROR || now_us() - t->start_us < STALL_US) return;
+    explain_no_picture(t);
+}
+
 static int stopping(Tsp *t) { return t->cancel || t->st.state == TSP_ERROR; }
 
 static void read_http(Tsp *t, uint8_t *buf)
@@ -351,6 +376,7 @@ static void read_http(Tsp *t, uint8_t *buf)
         t->st.bytes += (uint32_t)n;
         ts_feed(t->dmx, buf, (size_t)n);
         stats_tick(t);
+        check_stall(t);
     }
 done:
     if (req >= 0) sceHttpDeleteRequest(req);
@@ -367,6 +393,7 @@ static void read_local(Tsp *t, uint8_t *buf)
         t->st.bytes += (uint32_t)n;
         ts_feed(t->dmx, buf, n);
         stats_tick(t);
+        check_stall(t);
     }
     fclose(f);
 }
@@ -377,17 +404,14 @@ static int worker(SceSize args, void *argp)
     Tsp *t = *(Tsp **)argp;
     uint8_t *buf = malloc(CHUNK);
     plog("tsp: start");
-    t->last_stats = now_us();
+    t->last_stats = t->start_us = now_us();
     if (!buf) set_error(t, "Out of memory");
     else if (!strncasecmp(t->url, "http://", 7) || !strncasecmp(t->url, "https://", 8)) read_http(t, buf);
     else read_local(t, buf);
     free(buf);
     if (!t->cancel && t->st.state != TSP_ERROR) {
         if (t->st.decoded == 0) {
-            const TsInfo *i = ts_info(t->dmx);
-            if (i->program < 0) set_error(t, "No MPEG-TS data (not a TS stream?)");
-            else if (i->video_pid < 0) set_error(t, "No video in this stream");
-            else set_error(t, "Stream ended before a picture was decoded");
+            explain_no_picture(t);
         } else {
             t->st.state = TSP_ENDED;
         }

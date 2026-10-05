@@ -82,7 +82,7 @@ static void summarize(ProbeResult *r, const TsInfo *i, int http_status, unsigned
             add_line(r, "Video: H.264 %s L%d.%d  %dx%d%s  %.2f fps  %d-bit",
                      profile_name(i->profile), i->level / 10, i->level % 10, i->width, i->height,
                      i->frame_mbs_only ? "" : " interlaced", ts_video_fps(i), i->bit_depth);
-            add_line(r, "Keyframes: %u of %u pictures, reference frames: %d", i->keyframes, i->video_aus, i->ref_frames);
+            add_line(r, "Keyframes: %u (+%u other I-pictures) of %u pictures, reference frames: %d", i->keyframes, i->intra_aus, i->video_aus, i->ref_frames);
             if (i->bit_depth != 8 || i->chroma_format != 1) verdict = "NO: Vita cannot decode this H.264 variant";
             else if (i->width > 1280 || i->height > 720) verdict = "MAYBE: above 720p, hardware limit unknown";
             else verdict = "YES: H.264 8-bit up to 720p";
