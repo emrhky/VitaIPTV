@@ -14,6 +14,7 @@
 #include "iptv.h"
 #include "player.h"
 #include "probe.h"
+#include "tsplayer.h"
 
 int _newlib_heap_size_user = 96 * 1024 * 1024;
 
@@ -349,7 +350,7 @@ static int load_channels(const Source *s)
 static unsigned play_started_us, osd_until_us;
 static int got_frame;
 static char play_err[128];
-static int play_mode;               /* 0 = SceAvPlayer (MP4), 1 = stream analysis (TS) */
+static int play_mode;               /* 0 = SceAvPlayer (MP4), 1 = stream analysis, 2 = live TS player */
 
 static unsigned now_ms(void) { return (unsigned)(sceKernelGetProcessTimeWide() / 1000); }
 
@@ -371,21 +372,33 @@ static void play_channel(int vi)
     const char *url = chans.items[vis[vi]].url;
     player_stop();
     probe_cancel();
+    tsp_stop();
     if (is_mp4_url(url)) {
         play_mode = 0;
         int rc = player_start(url);
         if (rc != 0)
             snprintf(play_err, sizeof play_err, "Player error 0x%08X (see ux0:data/VitaIPTV/log.txt)", (unsigned)rc);
     } else {
-        play_mode = 1;
-        if (probe_start(url) != 0) snprintf(play_err, sizeof play_err, "Cannot start analysis");
+        play_mode = 2;
+        if (tsp_start(url) != 0) snprintf(play_err, sizeof play_err, "Cannot start the TS player");
     }
+}
+
+static void start_probe(void)
+{
+    player_stop();
+    tsp_stop();
+    probe_cancel();
+    play_err[0] = 0;
+    got_frame = 0;
+    play_mode = 1;
+    if (probe_start(chans.items[vis[play_vis]].url) != 0) snprintf(play_err, sizeof play_err, "Cannot start analysis");
 }
 
 static void draw_probe(void)
 {
     const ProbeResult *r = probe_result();
-    text(40, 76, COL_DIM, "Stream analysis (step 1: video playback is not implemented yet)");
+    text(40, 76, COL_DIM, "Stream analysis");
     if (!r) { if (play_err[0]) text(40, 120, COL_ERR, play_err); return; }
     int y = 120;
     if (r->state == PROBE_RUNNING) {
@@ -397,7 +410,43 @@ static void draw_probe(void)
     }
     if (r->state == PROBE_FAILED) { text(40, y, COL_ERR, r->error); y += 36; }
     for (int i = 0; i < r->nlines; i++) { text(40, y, COL_TEXT, r->lines[i]); y += 30; }
-    text(40, 520, COL_DIM, "X: analyze again   Up/Down: other channel   O: back   (details in log.txt)");
+    text(40, 520, COL_DIM, "X: analyze again   Triangle: play   Up/Down: other channel   O: back");
+}
+
+static void draw_tsp(int osd)
+{
+    int vw = 0, vh = 0;
+    vita2d_texture *tx = tsp_frame(&vw, &vh);
+    const TspStatus *st = tsp_status();
+    if (tx && vw > 0 && vh > 0) {
+        float sx = 960.0f / vw, sy = 544.0f / vh, s = sx < sy ? sx : sy;
+        vita2d_draw_texture_part_scale(tx, (960.0f - vw * s) / 2, (544.0f - vh * s) / 2, 0, 0, vw, vh, s, s);
+        got_frame = 1;
+    }
+    if (!st) {
+        if (play_err[0]) { text(40, 270, COL_ERR, play_err); text(40, 306, COL_DIM, "O: back"); }
+        return;
+    }
+    const char *msg = NULL;
+    unsigned col = COL_TEXT;
+    switch (st->state) {
+    case TSP_CONNECTING: msg = "Connecting..."; break;
+    case TSP_WAIT_KEY:   msg = "Waiting for a keyframe..."; break;
+    case TSP_ENDED:      msg = "Stream ended"; break;
+    case TSP_ERROR:      msg = st->msg; col = COL_ERR; break;
+    default: break;
+    }
+    if (msg && (!tx || st->state >= TSP_ENDED)) {
+        text(40, 270, col, msg);
+        if (st->state >= TSP_ENDED) text(40, 306, COL_DIM, "O: back   Triangle: analyze stream");
+    }
+    if (osd) {
+        char b[160];
+        snprintf(b, sizeof b, "%dx%d  shown %u  dropped %u  late %u  damaged %u  errors %u  %u KB",
+                 st->width, st->height, st->shown, st->dropped, st->late, st->damaged, st->errors, (unsigned)(st->bytes / 1024));
+        vita2d_draw_rectangle(0, 504, 960, 40, RGBA8(0, 0, 0, 170));
+        text(16, 530, COL_DIM, b);
+    }
 }
 
 /* ---- drawing ----------------------------------------------------------- */
@@ -513,12 +562,14 @@ int main(void)
             if (p & SCE_CTRL_CIRCLE) {
                 player_stop();
                 probe_cancel();
+                tsp_stop();
                 state = return_state;
                 if (state == ST_CHANNELS) sel = play_vis;
             } else {
                 if ((p & SCE_CTRL_DOWN) && nvis > 1 && return_state == ST_CHANNELS) play_channel((play_vis + 1) % nvis);
                 if ((p & SCE_CTRL_UP) && nvis > 1 && return_state == ST_CHANNELS)   play_channel((play_vis + nvis - 1) % nvis);
-                if (p & SCE_CTRL_CROSS) { if (play_mode == 1) play_channel(play_vis); else osd_until_us = now_ms() + 5000; }
+                if (p & SCE_CTRL_CROSS) { if (play_mode == 1) start_probe(); else osd_until_us = now_ms() + 5000; }
+                if (p & SCE_CTRL_TRIANGLE) { if (play_mode == 1) play_channel(play_vis); else start_probe(); }
 
                 vita2d_texture *t = play_mode == 0 ? player_poll() : NULL;
                 if (t) {
@@ -536,6 +587,7 @@ int main(void)
                     else text(40, 270, COL_TEXT, "Connecting...");
                 }
                 if (play_mode == 1) draw_probe();
+                if (play_mode == 2) draw_tsp(now_ms() < osd_until_us);
                 if (now_ms() < osd_until_us || !got_frame) {
                     vita2d_draw_rectangle(0, 0, 960, 40, RGBA8(0, 0, 0, 170));
                     text_fit(16, 28, COL_TEXT, c->name, 920);
@@ -548,6 +600,7 @@ int main(void)
     }
 
     probe_cancel();
+    tsp_stop();
     player_shutdown();
     channel_list_free(&chans);
     free(vis);
