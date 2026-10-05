@@ -13,6 +13,7 @@
 #include <strings.h>
 #include "iptv.h"
 #include "player.h"
+#include "probe.h"
 
 int _newlib_heap_size_user = 96 * 1024 * 1024;
 
@@ -348,8 +349,17 @@ static int load_channels(const Source *s)
 static unsigned play_started_us, osd_until_us;
 static int got_frame;
 static char play_err[128];
+static int play_mode;               /* 0 = SceAvPlayer (MP4), 1 = stream analysis (TS) */
 
 static unsigned now_ms(void) { return (unsigned)(sceKernelGetProcessTimeWide() / 1000); }
+
+static int is_mp4_url(const char *u)
+{
+    const char *q = strpbrk(u, "?#");
+    size_t n = q ? (size_t)(q - u) : strlen(u);
+    if (n < 4) return 0;
+    return !strncasecmp(u + n - 4, ".mp4", 4) || !strncasecmp(u + n - 4, ".m4v", 4) || !strncasecmp(u + n - 4, ".mov", 4);
+}
 
 static void play_channel(int vi)
 {
@@ -358,9 +368,36 @@ static void play_channel(int vi)
     play_started_us = now_ms();
     osd_until_us = play_started_us + 5000;
     play_err[0] = 0;
-    int rc = player_start(chans.items[vis[vi]].url);
-    if (rc != 0)
-        snprintf(play_err, sizeof play_err, "Player error 0x%08X (see ux0:data/VitaIPTV/log.txt)", (unsigned)rc);
+    const char *url = chans.items[vis[vi]].url;
+    player_stop();
+    probe_cancel();
+    if (is_mp4_url(url)) {
+        play_mode = 0;
+        int rc = player_start(url);
+        if (rc != 0)
+            snprintf(play_err, sizeof play_err, "Player error 0x%08X (see ux0:data/VitaIPTV/log.txt)", (unsigned)rc);
+    } else {
+        play_mode = 1;
+        if (probe_start(url) != 0) snprintf(play_err, sizeof play_err, "Cannot start analysis");
+    }
+}
+
+static void draw_probe(void)
+{
+    const ProbeResult *r = probe_result();
+    text(40, 76, COL_DIM, "Stream analysis (step 1: video playback is not implemented yet)");
+    if (!r) { if (play_err[0]) text(40, 120, COL_ERR, play_err); return; }
+    int y = 120;
+    if (r->state == PROBE_RUNNING) {
+        char b[96];
+        snprintf(b, sizeof b, "Analyzing stream... %u KB", (unsigned)(r->bytes / 1024));
+        text(40, y, COL_TEXT, b);
+        text(40, 520, COL_DIM, "O: back");
+        return;
+    }
+    if (r->state == PROBE_FAILED) { text(40, y, COL_ERR, r->error); y += 36; }
+    for (int i = 0; i < r->nlines; i++) { text(40, y, COL_TEXT, r->lines[i]); y += 30; }
+    text(40, 520, COL_DIM, "X: analyze again   Up/Down: other channel   O: back   (details in log.txt)");
 }
 
 /* ---- drawing ----------------------------------------------------------- */
@@ -475,14 +512,15 @@ int main(void)
         else { /* ST_PLAYING */
             if (p & SCE_CTRL_CIRCLE) {
                 player_stop();
+                probe_cancel();
                 state = return_state;
                 if (state == ST_CHANNELS) sel = play_vis;
             } else {
                 if ((p & SCE_CTRL_DOWN) && nvis > 1 && return_state == ST_CHANNELS) play_channel((play_vis + 1) % nvis);
                 if ((p & SCE_CTRL_UP) && nvis > 1 && return_state == ST_CHANNELS)   play_channel((play_vis + nvis - 1) % nvis);
-                if (p & SCE_CTRL_CROSS) osd_until_us = now_ms() + 5000;
+                if (p & SCE_CTRL_CROSS) { if (play_mode == 1) play_channel(play_vis); else osd_until_us = now_ms() + 5000; }
 
-                vita2d_texture *t = player_poll();
+                vita2d_texture *t = play_mode == 0 ? player_poll() : NULL;
                 if (t) {
                     got_frame = 1;
                     float sx = 960.0f / vita2d_texture_get_width(t), sy = 544.0f / vita2d_texture_get_height(t);
@@ -491,12 +529,13 @@ int main(void)
                     vita2d_draw_texture_scale(t, dx, dy, s, s);
                 }
                 const Channel *c = &chans.items[vis[play_vis]];
-                if (!got_frame) {
+                if (play_mode == 0 && !got_frame) {
                     unsigned waited = now_ms() - play_started_us;
                     if (play_err[0]) { text(40, 270, COL_ERR, play_err); text(40, 306, COL_DIM, "O: back"); }
                     else if (waited > 20000) { text(40, 270, COL_ERR, "No video after 20 s (see log.txt)"); text(40, 306, COL_DIM, "O: back"); }
                     else text(40, 270, COL_TEXT, "Connecting...");
                 }
+                if (play_mode == 1) draw_probe();
                 if (now_ms() < osd_until_us || !got_frame) {
                     vita2d_draw_rectangle(0, 0, 960, 40, RGBA8(0, 0, 0, 170));
                     text_fit(16, 28, COL_TEXT, c->name, 920);
@@ -508,6 +547,7 @@ int main(void)
         vita2d_swap_buffers();
     }
 
+    probe_cancel();
     player_shutdown();
     channel_list_free(&chans);
     free(vis);
