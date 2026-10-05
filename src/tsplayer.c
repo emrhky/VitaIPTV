@@ -48,6 +48,7 @@ typedef struct {
     int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done;
     SceAvcdecCtrl ctrl;
     SceUID fb_uid, es_uid;
+    int plan, fb_kind;
     uint8_t *es;
     int dw, dh, vw, vh;
     Slot slots[NSLOTS];
@@ -80,12 +81,27 @@ static void set_error(Tsp *t, const char *fmt, ...)
     plog("tsp: ERROR: %s", t->st.msg);
 }
 
-/* Physically contiguous video memory; mapped for the GPU when it holds a texture. */
-static void *cdram_alloc(uint32_t size, SceUID *uid, int gpu)
+/* Memory kinds tried for the decoder. Which ones the hardware accepts for which buffer
+ * is not documented, so the player tries them in order and logs what worked. */
+typedef enum { MEM_PHYCONT = 0, MEM_CDRAM, MEM_MAIN_NC, MEM_KINDS } MemKind;
+static const char *mem_name(int k) { return k == MEM_PHYCONT ? "PHYCONT" : k == MEM_CDRAM ? "CDRAM" : "MAIN_NC"; }
+
+static void *mem_alloc(int kind, uint32_t size, SceUID *uid, int gpu)
 {
-    size = ALIGN(size, 256 * 1024);
-    *uid = sceKernelAllocMemBlock("tsp_mem", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, size, NULL);
-    if (*uid < 0) { plog("tsp: CDRAM alloc %u failed 0x%08X", (unsigned)size, (unsigned)*uid); *uid = -1; return NULL; }
+    int type;
+    uint32_t align;
+    switch (kind) {
+    case MEM_PHYCONT: type = SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW; align = 1024 * 1024; break;
+    case MEM_CDRAM:   type = SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW;           align = 256 * 1024; break;
+    default:          type = SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE;         align = 4096; break;
+    }
+    size = ALIGN(size, align);
+    *uid = sceKernelAllocMemBlock("tsp_mem", type, size, NULL);
+    if (*uid < 0) {
+        plog("tsp: %s alloc %u failed 0x%08X", mem_name(kind), (unsigned)size, (unsigned)*uid);
+        *uid = -1;
+        return NULL;
+    }
     void *mem = NULL;
     sceKernelGetMemBlockBase(*uid, &mem);
     if (gpu && sceGxmMapMemory(mem, size, SCE_GXM_MEMORY_ATTRIB_READ | SCE_GXM_MEMORY_ATTRIB_WRITE) < 0) {
@@ -97,12 +113,25 @@ static void *cdram_alloc(uint32_t size, SceUID *uid, int gpu)
     return mem;
 }
 
-static void cdram_free(void *mem, SceUID uid, int gpu)
+static void mem_free(void *mem, SceUID uid, int gpu)
 {
     if (uid < 0) return;
     if (gpu && mem) sceGxmUnmapMemory(mem);
     sceKernelFreeMemBlock(uid);
 }
+
+static int is_mem_error(int r)
+{
+    unsigned u = (unsigned)r;
+    return u == 0x80620009u || u == 0x80620007u || u == 0x80620809u || u == 0x80620807u;
+}
+
+/* Where the compressed data (ES) and the decoded pictures live. */
+static const struct { int es, pic; } PLANS[] = {
+    { MEM_PHYCONT, MEM_CDRAM }, { MEM_CDRAM, MEM_CDRAM }, { MEM_MAIN_NC, MEM_CDRAM },
+    { MEM_PHYCONT, MEM_PHYCONT }, { MEM_CDRAM, MEM_PHYCONT }, { MEM_MAIN_NC, MEM_PHYCONT },
+};
+#define NPLANS ((int)(sizeof PLANS / sizeof PLANS[0]))
 
 static int au_has_sps(const uint8_t *b, size_t n)
 {
@@ -112,6 +141,49 @@ static int au_has_sps(const uint8_t *b, size_t n)
 }
 
 /* ---------------------------------------------------------------- decoder */
+
+static void free_plan(Tsp *t)
+{
+    sceKernelLockMutex(t->lock, 1, NULL);
+    for (int i = 0; i < NSLOTS; i++) {
+        mem_free(t->slots[i].data, t->slots[i].uid, 1);
+        t->slots[i].data = NULL;
+        t->slots[i].uid = -1;
+        t->slots[i].state = SLOT_FREE;
+    }
+    t->shown = -1;
+    t->nslots = 0;
+    sceKernelUnlockMutex(t->lock, 1);
+    mem_free(t->es, t->es_uid, 0);
+    t->es = NULL;
+    t->es_uid = -1;
+}
+
+/* Allocates the ES buffer and picture buffers in the memory kinds of plan p. */
+static int set_plan(Tsp *t, int p)
+{
+    free_plan(t);
+    t->plan = p;
+    int pk = PLANS[p].pic;
+    t->es = mem_alloc(PLANS[p].es, ES_CAP, &t->es_uid, 0);
+    if (!t->es) return -1;
+    int n = (t->dw * t->dh > 1280 * 736 || pk == MEM_PHYCONT) ? 3 : NSLOTS;
+    for (int i = 0; i < n; i++) {
+        Slot *s = &t->slots[i];
+        s->data = mem_alloc(pk, (uint32_t)(t->dw * t->dh * 4), &s->uid, 1);
+        if (!s->data) { free_plan(t); return -1; }
+        memset(&s->tex, 0, sizeof s->tex);
+        int r = sceGxmTextureInitLinear(&s->tex.gxm_tex, s->data, TEX_FORMAT, (unsigned)t->dw, (unsigned)t->dh, 0);
+        if (r < 0) { plog("tsp: texture init 0x%08X", (unsigned)r); free_plan(t); return r; }
+        vita2d_texture_set_filters(&s->tex, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
+        s->state = SLOT_FREE;
+    }
+    sceKernelLockMutex(t->lock, 1, NULL);
+    t->nslots = n;
+    sceKernelUnlockMutex(t->lock, 1);
+    plog("tsp: memory plan %d: ES in %s, %d pictures in %s", p, mem_name(PLANS[p].es), n, mem_name(pk));
+    return 0;
+}
 
 static int decoder_open(Tsp *t, int w, int h, int refs)
 {
@@ -152,38 +224,31 @@ static int decoder_open(Tsp *t, int w, int h, int refs)
     plog("tsp: decoder memory %u bytes -> 0x%08X", (unsigned)di.frameMemSize, (unsigned)r);
     if (r < 0) return r;
 
-    uint32_t fsz = ALIGN(di.frameMemSize, 1024 * 1024);
-    void *fb = cdram_alloc(fsz, &t->fb_uid, 0);
-    if (!fb) return -1;
-    memset(&t->ctrl, 0, sizeof t->ctrl);
-    t->ctrl.frameBuf.pBuf = fb;
-    t->ctrl.frameBuf.size = fsz;
-    r = sceAvcdecCreateDecoder(SCE_VIDEODEC_TYPE_HW_AVCDEC, &t->ctrl, &q);
-    plog("tsp: sceAvcdecCreateDecoder -> 0x%08X", (unsigned)r);
+    r = -1;
+    for (int k = 0; k < MEM_KINDS; k++) {
+        void *fb = mem_alloc(k, di.frameMemSize, &t->fb_uid, 0);
+        if (!fb) continue;
+        memset(&t->ctrl, 0, sizeof t->ctrl);
+        t->ctrl.frameBuf.pBuf = fb;
+        t->ctrl.frameBuf.size = ALIGN(di.frameMemSize, k == MEM_PHYCONT ? 1024 * 1024 : k == MEM_CDRAM ? 256 * 1024 : 4096);
+        r = sceAvcdecCreateDecoder(SCE_VIDEODEC_TYPE_HW_AVCDEC, &t->ctrl, &q);
+        plog("tsp: sceAvcdecCreateDecoder (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
+        if (r >= 0) { t->fb_kind = k; break; }
+        mem_free(fb, t->fb_uid, 0);
+        t->fb_uid = -1;
+        t->ctrl.frameBuf.pBuf = NULL;
+    }
     if (r < 0) return r;
     t->dec_open = 1;
-
-    t->es = cdram_alloc(ES_CAP, &t->es_uid, 0);
-    if (!t->es) return -1;
-
-    t->nslots = (t->dw * t->dh > 1280 * 736) ? 3 : NSLOTS;
-    for (int i = 0; i < t->nslots; i++) {
-        Slot *s = &t->slots[i];
-        s->data = cdram_alloc((uint32_t)(t->dw * t->dh * 4), &s->uid, 1);
-        if (!s->data) return -1;
-        memset(&s->tex, 0, sizeof s->tex);
-        r = sceGxmTextureInitLinear(&s->tex.gxm_tex, s->data, TEX_FORMAT, (unsigned)t->dw, (unsigned)t->dh, 0);
-        if (r < 0) { plog("tsp: texture init 0x%08X", (unsigned)r); return r; }
-        vita2d_texture_set_filters(&s->tex, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
-        s->state = SLOT_FREE;
-    }
+    int p = 0;
+    while (p < NPLANS && set_plan(t, p) < 0) p++;           /* skip plans whose memory is not available */
+    if (p >= NPLANS) return -1;
     t->vw = w;
     t->vh = h;
     t->st.width = w;
     t->st.height = h;
     __sync_synchronize();
     t->ready = 1;
-    plog("tsp: decoder ready, %d picture buffers", t->nslots);
     return 0;
 }
 
@@ -237,6 +302,9 @@ static int decode_au(Tsp *t, Slot *sl, size_t n, int64_t pts)
         if (!(pic.info.pts.upper == NO_TS && pic.info.pts.lower == NO_TS))
             opts = (int64_t)(((uint64_t)pic.info.pts.upper << 32) | pic.info.pts.lower);
         if (t->st.decoded == 0)
+            plog("tsp: decoding works with frame memory %s, ES %s, pictures %s",
+                 mem_name(t->fb_kind), mem_name(PLANS[t->plan].es), mem_name(PLANS[t->plan].pic));
+        if (t->st.decoded == 0)
             plog("tsp: first picture %ux%u (crop L%u R%u T%u B%u), pts %lld",
                  (unsigned)pic.frame.horizontalSize, (unsigned)pic.frame.verticalSize,
                  (unsigned)pic.frame.frameCropLeftOffset, (unsigned)pic.frame.frameCropRightOffset,
@@ -250,6 +318,22 @@ static int decode_au(Tsp *t, Slot *sl, size_t n, int64_t pts)
         t->st.state = TSP_PLAYING;
     }
     return 0;
+}
+
+/* Copies the access unit (optionally behind SPS/PPS) into the ES buffer. Returns its size, 0 if too big. */
+static size_t build_es(Tsp *t, const TsInfo *i, const uint8_t *data, size_t len, int with_params)
+{
+    static const uint8_t sc[4] = { 0, 0, 0, 1 };
+    size_t n = 0;
+    if (with_params) {
+        memcpy(t->es + n, sc, 4); n += 4;
+        memcpy(t->es + n, i->sps, (size_t)i->sps_len); n += (size_t)i->sps_len;
+        memcpy(t->es + n, sc, 4); n += 4;
+        memcpy(t->es + n, i->pps, (size_t)i->pps_len); n += (size_t)i->pps_len;
+    }
+    if (n + len > ES_CAP) return 0;
+    memcpy(t->es + n, data, len);
+    return n + len;
 }
 
 /* Demuxer callback: one H.264 access unit. Runs on the worker thread. */
@@ -291,25 +375,32 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
         t->need_key = 0;
     }
 
-    size_t n = 0;
-    if (t->need_params && !au_has_sps(data, len)) {      /* first picture: make sure SPS/PPS go first */
-        static const uint8_t sc[4] = { 0, 0, 0, 1 };
-        memcpy(t->es + n, sc, 4); n += 4;
-        memcpy(t->es + n, i->sps, (size_t)i->sps_len); n += (size_t)i->sps_len;
-        memcpy(t->es + n, sc, 4); n += 4;
-        memcpy(t->es + n, i->pps, (size_t)i->pps_len); n += (size_t)i->pps_len;
-    }
+    int with_params = t->need_params && !au_has_sps(data, len);   /* first picture: SPS/PPS first */
     t->need_params = 0;
-    if (n + len > ES_CAP) { t->st.dropped++; t->need_key = 1; return; }
-    memcpy(t->es + n, data, len);
-    n += len;
+    size_t n = build_es(t, i, data, len, with_params);
+    if (!n) { t->st.dropped++; t->need_key = 1; return; }
 
     int s;
     while ((s = take_free_slot(t)) < 0) {                /* wait for the UI to show a picture */
         if (t->cancel) return;
         sceKernelDelayThread(2000);
     }
-    int r = decode_au(t, &t->slots[s], n, pts);
+    int r;
+    for (;;) {
+        r = decode_au(t, &t->slots[s], n, pts);
+        if (r >= 0 || t->st.decoded > 0 || !is_mem_error(r) || t->plan + 1 >= NPLANS) break;
+        plog("tsp: decode 0x%08X with memory plan %d, trying the next one", (unsigned)r, t->plan);
+        int np = t->plan + 1;
+        while (np < NPLANS && set_plan(t, np) < 0) np++;
+        if (np >= NPLANS) { set_error(t, "No memory layout accepted by the decoder (0x%08X)", (unsigned)r); return; }
+        n = build_es(t, i, data, len, with_params);
+        s = 0;
+    }
+
+    if (r < 0 && t->st.decoded == 0 && is_mem_error(r) && t->plan + 1 >= NPLANS) {
+        set_error(t, "No memory layout accepted by the decoder (0x%08X)", (unsigned)r);
+        return;
+    }
     if (r < 0) {
         t->st.errors++;
         if (t->st.errors <= 10) plog("tsp: decode error 0x%08X (AU %u bytes, flags %d)", (unsigned)r, (unsigned)n, flags);
@@ -535,10 +626,9 @@ void tsp_stop(void)
     }
     sceKernelDeleteThread(t->thread);
     vita2d_wait_rendering_done();      /* the GPU may still be drawing one of our textures */
-    for (int i = 0; i < NSLOTS; i++) cdram_free(t->slots[i].data, t->slots[i].uid, 1);
+    free_plan(t);
     if (t->dec_open) sceAvcdecDeleteDecoder(&t->ctrl);
-    cdram_free(t->ctrl.frameBuf.pBuf, t->fb_uid, 0);
-    cdram_free(t->es, t->es_uid, 0);
+    mem_free(t->ctrl.frameBuf.pBuf, t->fb_uid, 0);
     if (t->lib_open) sceVideodecTermLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC);
     ts_destroy(t->dmx);
     sceKernelDeleteMutex(t->lock);
