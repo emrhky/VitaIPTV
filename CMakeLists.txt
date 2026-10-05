@@ -22,6 +22,8 @@ add_executable(${PROJECT_NAME}.elf
   src/iptv.c
   src/player.c
   src/httpio.c
+  src/tsdemux.c
+  src/probe.c
 )
 
 # Extra system stubs that vita2d needs (found automatically if present in the SDK)

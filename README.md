@@ -61,3 +61,12 @@ Oynatıcı her adımı `ux0:data/VitaIPTV/log.txt` dosyasına yazar (kanal adres
 SceAvPlayer'ın kendi okuyucusu `http://` adreslerini kabul etmez. Bu yüzden ağ kaynaklarında uygulama kendi okuyucusunu verir: HTTP Range istekleriyle dosyayı parça parça okur. Okumalar 256 KB'lık bloklarla önbelleğe alınır (oynatıcı MP4 başlıklarını 8 baytlık parçalarla okur). Sunucu Range isteğini desteklemiyorsa (ör. `python -m http.server`), küçük dosyalar (24 MB'a kadar) bir kez belleğe indirilip oradan okunur. Bu yöntem sabit dosyalar (MP4) için çalışır. Canlı yayınlar için ayrı bir çalışma gerekir.
 
 PC testi: `gcc -Wall -Isrc -Itests/mock tests/test_httpio.c src/httpio.c -o test_httpio && ./test_httpio`
+
+## MPEG-TS (canlı IPTV) - 1. adım: akış analizi
+
+SceAvPlayer MPEG-TS, M2TS ve parçalı MP4'ü oynatamıyor (denendi). Canlı kanallar için kendi ayrıştırıcımız var (`src/tsdemux.c`). Şu an bir kanal seçildiğinde (MP4 olmayan her adres ya da `.ts` dosyası) uygulama akışı birkaç saniye okuyup içeriğini ekrana ve `log.txt` dosyasına yazar: kodek, çözünürlük, profil, kare hızı, ses biçimi, kayıp paket sayısı, şifreli mi, Vita donanımıyla oynatılabilir mi. Henüz görüntü oynatmaz.
+
+Ayrıştırıcı testleri (ffmpeg ve ffprobe gerekir):
+
+    python3 tests/run_ts_tests.py
+    gcc -Wall -Isrc -Itests/mock tests/test_probe.c src/probe.c src/tsdemux.c -o test_probe
