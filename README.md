@@ -70,3 +70,13 @@ Ayrıştırıcı testleri (ffmpeg ve ffprobe gerekir):
 
     python3 tests/run_ts_tests.py
     gcc -Wall -Isrc -Itests/mock tests/test_probe.c src/probe.c src/tsdemux.c -o test_probe
+
+## MPEG-TS (canlı IPTV) - 2. adım: donanım H.264 ile görüntü
+
+MP4 olmayan her kanal artık `src/tsplayer.c` ile oynatılır: akış okunur, `tsdemux` ile ayrıştırılır, H.264 kareler Vita'nın donanım çözücüsüne (`sceAvcdec`) verilir ve RGBA olarak doğrudan GPU dokusuna yazılır. Kareler zaman damgalarına göre gösterilir. Henüz ses yok (3. adım).
+
+Oynatma ekranında: X istatistikleri gösterir, Üçgen akış analizine geçer (analiz ekranında Üçgen tekrar oynatır), Yukarı/Aşağı kanal değiştirir, O geri döner.
+
+Bilinen sınırlar: HEVC ve 10-bit H.264 oynamaz; yayın sırasında çözünürlük değişirse oynatma durur; renkler ters (kırmızı/mavi yer değiştirmiş) görünürse `src/tsplayer.c` başındaki `TEX_FORMAT` değiştirilir.
+
+Test (PC, ffmpeg gerekir): `python3 tests/run_player_tests.py` - gerçek iş parçacıkları ve sahte bir donanım çözücüyle oynatıcıyı sınar.

@@ -24,6 +24,7 @@ add_executable(${PROJECT_NAME}.elf
   src/httpio.c
   src/tsdemux.c
   src/probe.c
+  src/tsplayer.c
 )
 
 # Extra system stubs that vita2d needs (found automatically if present in the SDK)
@@ -35,7 +36,7 @@ message(STATUS "Extra stubs: ${EXTRA_STUBS}")
 target_link_libraries(${PROJECT_NAME}.elf
   vita2d
   freetype png jpeg z m
-  SceAvPlayer_stub SceAudio_stub
+  SceAvPlayer_stub SceAudio_stub SceVideodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
   SceCtrl_stub SceSysmodule_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub
   ScePgf_stub ScePvf_stub
