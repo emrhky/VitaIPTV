@@ -21,6 +21,7 @@ typedef enum {
 
 #define TS_FLAG_KEYFRAME 1      /* IDR picture or recovery-point SEI */
 #define TS_FLAG_DAMAGED  2      /* packets were lost while this unit was received */
+#define TS_FLAG_INTRA    4      /* non-IDR picture whose first slice is an I slice (no recovery SEI) */
 #define TS_MAX_STREAMS   16
 
 typedef struct { int pid, stream_type; TsCodec codec; } TsStream;
@@ -42,7 +43,7 @@ typedef struct {
     /* statistics */
     uint64_t packets, bytes;
     uint32_t sync_losses, cc_errors, tei_errors, scrambled_packets, pes_overflows;
-    uint32_t video_aus, keyframes, damaged_aus, audio_frames;
+    uint32_t video_aus, keyframes, intra_aus, damaged_aus, audio_frames;
     int64_t first_video_pts, min_video_pts, max_video_pts, first_audio_pts;
 } TsInfo;
 
