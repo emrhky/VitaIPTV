@@ -88,3 +88,18 @@ Ses (AAC) Vita'nın ses çözücüsüyle (`sceAudiodec`) çözülür ve `BGM` po
 - Desteklenen ses: AAC (ADTS), 1-2 kanal, 8-48 kHz. AC-3/E-AC-3, MP2 ve çok kanallı AAC'de görüntü oynar, ses kapalı kalır ve nedeni ekranda yazar.
 - Görüntüsü olmayan kanallar (radyo) yalnızca ses olarak çalar.
 - X ile açılan bilgi satırında ses biçimi ve görüntü-ses farkı (A/V) gösterilir.
+
+## Arayüz ve kontroller (sürüm 4)
+
+| Ekran | Tuşlar |
+|---|---|
+| Kaynaklar | X aç, Üçgen sources.txt'yi yeniden oku, Start çık |
+| Kanallar | X oynat, Kare ara (ekran klavyesi), L/R grup, Sol/Sağ sayfa, O geri |
+| Arama sonuçları | X oynat, Kare yeni arama, Select aramayı temizle, O aramadan çık |
+| Oynatma | Yukarı/Aşağı kanal, X ayrıntılı bilgi, Üçgen akış analizi, O geri |
+| Radyo | Yukarı/Aşağı istasyon, Üçgen analiz, O geri |
+
+- Arama büyük/küçük harf ve Türkçe harf farkını yok sayar ("cocuk" -> "TRT Çocuk"); birden çok kelime yazılabilir, hepsi geçmeli. Arama tüm gruplarda yapılır.
+- Ekran kapanması: görüntü oynarken ekran açık kalır; listelerde ve hata ekranlarında sistem ayarına göre kapanabilir. Radyoda ekran kapanabilir ama cihaz uykuya geçmez ve ses devam eder. Güç düğmesiyle uykuya alınırsa çalma durur.
+- Radyo kanalları program tablosundan hemen tanınır ve ses seviyesine tepki veren bir gösterge ile oynatılır.
+- PC önizleme: `tests/preview/` (FreeType ile arayüzü PNG olarak çizer).
