@@ -25,12 +25,15 @@ add_executable(${PROJECT_NAME}.elf
   src/tsdemux.c
   src/probe.c
   src/tsplayer.c
+  src/ui.c
+  src/screens.c
 )
 
 # Extra system stubs that vita2d needs (found automatically if present in the SDK)
 file(GLOB EXTRA_STUBS
   "$ENV{VITASDK}/arm-vita-eabi/lib/libSceSharedFb*_stub.a"
-  "$ENV{VITASDK}/arm-vita-eabi/lib/libSceAppMgr_stub.a")
+  "$ENV{VITASDK}/arm-vita-eabi/lib/libSceAppMgr_stub.a"
+  "$ENV{VITASDK}/arm-vita-eabi/lib/libSceIme_stub.a")
 message(STATUS "Extra stubs: ${EXTRA_STUBS}")
 
 target_link_libraries(${PROJECT_NAME}.elf
