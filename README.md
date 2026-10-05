@@ -80,3 +80,11 @@ Oynatma ekranında: X istatistikleri gösterir, Üçgen akış analizine geçer 
 Bilinen sınırlar: HEVC ve 10-bit H.264 oynamaz; yayın sırasında çözünürlük değişirse oynatma durur; renkler ters (kırmızı/mavi yer değiştirmiş) görünürse `src/tsplayer.c` başındaki `TEX_FORMAT` değiştirilir.
 
 Test (PC, ffmpeg gerekir): `python3 tests/run_player_tests.py` - gerçek iş parçacıkları ve sahte bir donanım çözücüyle oynatıcıyı sınar.
+
+## MPEG-TS - 3. adım: ses
+
+Ses (AAC) Vita'nın ses çözücüsüyle (`sceAudiodec`) çözülür ve `BGM` portundan çalınır (`MAIN` portu yalnızca 48 kHz kabul eder). Ses ana saattir: görüntü kareleri sesin o an çalan zamanına göre gösterilir. Ses kesilirse görüntü kendi saatine döner. Okuma, görüntü çözme ve ses ayrı iş parçacıklarındadır; aralarında sıkıştırılmış veri kuyrukları vardır.
+
+- Desteklenen ses: AAC (ADTS), 1-2 kanal, 8-48 kHz. AC-3/E-AC-3, MP2 ve çok kanallı AAC'de görüntü oynar, ses kapalı kalır ve nedeni ekranda yazar.
+- Görüntüsü olmayan kanallar (radyo) yalnızca ses olarak çalar.
+- X ile açılan bilgi satırında ses biçimi ve görüntü-ses farkı (A/V) gösterilir.
