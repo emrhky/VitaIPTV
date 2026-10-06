@@ -201,3 +201,12 @@ START > Ayarlar > "1080p çözücü (deneysel)" ile kapatılabilir. `log.txt` i�
 - İlk bağlantı zaman aşımına uğrarsa iki kez daha denenir; kanaldan çıkarken iptal edilen istek hata olarak gösterilmez.
 - START/SELECT düğme resimleri daha okunaklı.
 - LiveArea başlatma resmi yalnızca simgedir. Altındaki "Başlat" düğmesi sistemin kendi düğmesidir, kaldırılamaz.
+
+## Sürüm 11: dahili çözücü, ikinci deneme
+
+Sürüm 10'da fonksiyonlar bulundu ama ilk çağrıda (`SetConfigInternal`) uygulama kapandı. Artık:
+- Fonksiyonlar kanca (taiHEN hook) yerine doğrudan, SceAvcodecUser'ın dışa aktarım tablosundan alınan adreslerle çağrılır.
+- Dört yol sırayla denenir: 0) hazırlıksız, 1) yalnız SetDecodeMode, 2) ReAvPlayer'daki gibi SetConfigInternal + SetDecodeMode, 3) hazırlıksız açıp normal çözme fonksiyonuyla çözme.
+- Her yoldan önce `ux0:data/VitaIPTV/vdi_state.txt` dosyasına "trying N" yazılır, ilk resimden sonra "ok N". Uygulama kapanırsa bir sonraki açılışta o yol atlanır. Yani bir kanal uygulamayı kapatırsa, uygulamayı yeniden açıp aynı kanalı tekrar deneyin; her denemede bir sonraki yol kullanılır.
+- Bütün yollar kapanmaya yol açarsa dahili çözücü kendiliğinden kapanır. Ayarlar'dan "1080p çözücü" kapatılıp tekrar açılınca kayıt silinir ve her şey baştan denenir.
+- Test: `gcc -std=gnu99 -DVDI_TESTING -DSTATE_FILE='"/tmp/vdi_state.txt"' -Isrc -Itests/mock_tai -Itests/mock_rt tests/test_vdi.c src/vdec_internal.c -o test_vdi && ./test_vdi`
