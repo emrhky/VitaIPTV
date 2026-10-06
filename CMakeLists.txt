@@ -23,6 +23,7 @@ add_executable(${PROJECT_NAME}.elf
   src/player.c
   src/httpio.c
   src/tsdemux.c
+  src/mkvdemux.c
   src/probe.c
   src/tsplayer.c
   src/ui.c

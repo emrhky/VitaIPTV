@@ -156,3 +156,17 @@ taiHEN `config.txt` içindeki `*main` bölümü ana menüye (LiveArea) yükler, 
     ur0:tai/reAvPlayer.suprx
 
 `*main` altındaki satırı kaldırın. Uygulamanın kendisi yüklemeyi denediğinde `0x8002D003` hatası alınıyordu. Modül yüklense bile çözücünün 720p sınırını kaldırıp kaldırmayacağı doğrulanmadı; olmazsa 1080p için dönüştürme sunucusu kullanılır.
+
+## Sürüm 8
+
+### MKV (Matroska / WebM) kanallar
+Uygulamanın içinde yazılmış bir MKV ayrıştırıcısı var (`src/mkvdemux.c`): canlı yayınlardaki boyutu bilinmeyen bölümler, paketlenmiş (laced) ses blokları desteklenir. MKV içindeki H.264 + AAC doğrudan donanımda oynar; MKV içinde HEVC, MP3 vb. varsa dönüştürme sunucusu gerekir. `.mkv` / `.webm` dosyaları da yerel dosya olarak listelenir. Test: `python3 tests/run_mkv_tests.py`.
+
+### Radyo
+Radyo çalarken ekran video gibi açık kalır. START ekranı bilerek kapatır; herhangi bir tuş geri açar.
+
+### Çözücü belleği
+H.264 seviye sınırı + 2 resim (en fazla 10) ile açılır; ilk "bellek yetmedi" hatasında bir sonraki anahtar karede iki katına çıkar. Kanaldan çıkarken bekleyen HTTP isteği iptal edilir (önceden bazen oynatıcı kapanamıyordu).
+
+### ğ harfi
+Sistem yazı tipinde ğ/Ğ yok; uygulama bu harfleri g/G üzerine kısa işareti çizerek gösterir.
