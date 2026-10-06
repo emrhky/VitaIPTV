@@ -170,3 +170,17 @@ H.264 seviye sınırı + 2 resim (en fazla 10) ile açılır; ilk "bellek yetmed
 
 ### ğ harfi
 Sistem yazı tipinde ğ/Ğ yok; uygulama bu harfleri g/G üzerine kısa işareti çizerek gösterir.
+
+## Sürüm 9
+
+### 720p kanallar yeniden açılıyor
+Sürüm 8'de çözücü 7 referans karesiyle açılmak istendi; Vita'nın kütüphanesi bunu reddetti (`0x80620802`) ve hiçbir video açılmadı. Artık reddedilen sayı birer birer düşürülür, kabul edilen en büyük değer çalışırken büyütmenin de üst sınırı olur. Büyütme mümkün değilse "bellek yetmedi" hatası yalnızca o kareyi atlatır, görüntü donmaz.
+
+### 1080p eklentisi kaldırıldı
+reAvPlayer taiHEN ile uygulamaya yüklendiğinde de çözücü 1080p'yi reddetti; bu eklenti bu çözücüye yardım etmiyor. Uygulama artık onu yüklemeye çalışmaz. `config.txt` içindeki `*VIPTV0001` / `ur0:tai/reAvPlayer.suprx` satırlarını silebilirsiniz. 1080p kanallar için dönüştürme sunucusu kullanılır.
+
+### Türkçe harfler
+Ekranda ğ, ı, ş, ç, ü, ö (ve büyükleri) g, i, s, c, u, o olarak gösterilir.
+
+### Yetişkin kanallarını gizle
+START > Ayarlar > "Yetişkin kanallarını gizle". Açıkken: Xtream sunucusunun yetişkin olarak işaretlediği kanallar (`is_adult`) ve kategori ya da adında "adult", "xxx", "18+", "yetişkin", "erotik" vb. geçen kanallar listelere hiç girmez (aramada da çıkmaz). Bir listeyi açarken uygulanır. Varsayılan: kapalı.
