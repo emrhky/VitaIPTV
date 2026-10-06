@@ -137,3 +137,22 @@ Radyo çalarken uygulama bekleme modunu kilitler; ekran kendiliğinden kararsa d
 
 ### 1080p modülü
 `reAvPlayer.suprx` dosyasını `ux0:data/VitaIPTV/` klasörüne koyun (taiHEN `config.txt` içine eklemek gerekmez; uygulama kendisi yükler). Şu yerlere de bakılır: `ux0:data/VitaIPTV/modules/`, `ux0:tai/`, `ur0:tai/`, `ux0:data/`, `ux0:`. Durum START > Ayarlar > "1080p modülü" satırında ve `log.txt` içindeki `module ...` satırında görünür. Modül çözücünün 720p sınırını kaldırmazsa 1080p kanallar dönüştürme sunucusuyla oynatılır.
+
+## Sürüm 7
+
+### Kanal ekranı iki panelli
+Solda kategoriler (kanal sayılarıyla), sağda seçili kategorinin kanalları. Solda Yukarı/Aşağı kategori seçer, Sağ veya X kanallara geçer; sağda X oynatır, L/R sayfa atlar, Sol veya O kategorilere döner. Kare ile arama tüm kategorilerde yapılır.
+
+### Titreme ve ses kayması düzeltildi
+Çözücü artık H.264 seviyesinin gerektirdiği kadar resim belleğiyle açılır (ör. 720p Level 3.2 için 5 kare). Yine yetmezse bir sonraki anahtar karede belleği ikiye katlayarak yeniden açılır. Bellek hataları artık zaman damgalarını kapatmaz (ses-görüntü senkronunu bozan hata buydu).
+
+### Türkçe karakterler
+Arayüz artık Vita'nın kendi sistem yazı tipini (PVF) kullanır; ş, ğ, ı, İ gibi harfler görünür. Yazı tipi açılamazsa eski yazı tipine döner.
+
+### 1080p modülü için kurulum
+taiHEN `config.txt` içindeki `*main` bölümü ana menüye (LiveArea) yükler, bu uygulamaya değil. Eklentiyi yalnızca bu uygulamaya yüklemek için:
+
+    *VIPTV0001
+    ur0:tai/reAvPlayer.suprx
+
+`*main` altındaki satırı kaldırın. Uygulamanın kendisi yüklemeyi denediğinde `0x8002D003` hatası alınıyordu. Modül yüklense bile çözücünün 720p sınırını kaldırıp kaldırmayacağı doğrulanmadı; olmazsa 1080p için dönüştürme sunucusu kullanılır.
