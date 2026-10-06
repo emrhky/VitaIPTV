@@ -24,6 +24,7 @@ add_executable(${PROJECT_NAME}.elf
   src/httpio.c
   src/tsdemux.c
   src/mkvdemux.c
+  src/vdec_internal.c
   src/probe.c
   src/tsplayer.c
   src/ui.c
@@ -45,7 +46,7 @@ target_link_libraries(${PROJECT_NAME}.elf
   SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceAudiodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
   SceCtrl_stub SceSysmodule_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub
-  ScePgf_stub ScePvf_stub SceAppUtil_stub ScePower_stub
+  ScePgf_stub ScePvf_stub SceAppUtil_stub ScePower_stub taihen_stub
   ${EXTRA_STUBS}
 )
 
