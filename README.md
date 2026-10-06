@@ -103,3 +103,26 @@ Ses (AAC) Vita'nın ses çözücüsüyle (`sceAudiodec`) çözülür ve `BGM` po
 - Ekran kapanması: görüntü oynarken ekran açık kalır; listelerde ve hata ekranlarında sistem ayarına göre kapanabilir. Radyoda ekran kapanabilir ama cihaz uykuya geçmez ve ses devam eder. Güç düğmesiyle uykuya alınırsa çalma durur.
 - Radyo kanalları program tablosundan hemen tanınır ve ses seviyesine tepki veren bir gösterge ile oynatılır.
 - PC önizleme: `tests/preview/` (FreeType ile arayüzü PNG olarak çizer).
+
+## Sürüm 5: listeler uygulamada, dönüştürme sunucusu, logo
+
+### Listeleri uygulamadan ekleme
+- Liste ekranında Kare = ekle, Üçgen = düzenle, Select = sil, START = menü (Ayarlar, Yeniden yükle, Hakkında, Çıkış).
+- Türler: Xtream (sunucu + kullanıcı + şifre), M3U bağlantısı, tek yayın bağlantısı. Bir Xtream `get.php?username=...&password=...` bağlantısı yapıştırılırsa sunucu/kullanıcı/şifre otomatik ayrılır ve liste Xtream olarak kaydedilir (yalnız canlı kanallar, hızlı).
+- Toplu ekleme hâlâ mümkün: `sources.txt` dosyasını düzenleyin ya da `.m3u` dosyalarını `ux0:data/VitaIPTV/` klasörüne kopyalayın; otomatik listelenir.
+
+### Dönüştürme sunucusu (1080p, HEVC, MKV, MP2/AC-3 ses)
+Vita'nın donanımı yalnız H.264 (720p'ye kadar) ve AAC çözebiliyor. Diğer kanallar için evdeki bir bilgisayarda:
+
+    python3 tools/vita_iptv_proxy.py
+
+(Python 3 ve ffmpeg gerekir; Windows'ta `python tools\vita_iptv_proxy.py`.) Program, Vita'ya yazılacak adresi ekrana basar. Vita'da START > Settings > Transcoding server alanına yazın, "Test server" ile deneyin. "Use automatically" açıksa oynatılamayan kanallar (ve sesi desteklenmeyenler) kendiliğinden sunucu üzerinden açılır; oynatırken Kare ile elle de geçilebilir. Sunucu çıktısı: H.264 en fazla 720p ve 30 fps, AAC stereo. 50 fps kanallar da sunucudan akıcı gelir.
+
+### 1080p doğrudan (deneysel)
+`reAvPlayer.suprx` (github.com/SonicMastr/ReAvPlayer) `ux0:data/VitaIPTV/` klasörüne konursa uygulama açılışta yükler. Vita'nın çözücüsündeki 720p sınırını kaldırabilir; denenmedi. Sonuç `log.txt` içinde `module ...` ve `sceVideodecInitLibrary 1920x1088` satırlarında görünür.
+
+### Radyo
+Yavaş akışlar için okuma 4 KB parçalarla, 15 sn zaman aşımıyla yapılır; bağlantı koparsa otomatik yeniden bağlanılır.
+
+### Logo ve açılış ekranı
+`tools/make_assets.py` logo, simge (icon0), LiveArea görselleri ve açılış ekranını üretir (Pillow gerekir). Üretilen dosyalar projede hazırdır.
