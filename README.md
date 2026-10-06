@@ -210,3 +210,11 @@ Sürüm 10'da fonksiyonlar bulundu ama ilk çağrıda (`SetConfigInternal`) uygu
 - Her yoldan önce `ux0:data/VitaIPTV/vdi_state.txt` dosyasına "trying N" yazılır, ilk resimden sonra "ok N". Uygulama kapanırsa bir sonraki açılışta o yol atlanır. Yani bir kanal uygulamayı kapatırsa, uygulamayı yeniden açıp aynı kanalı tekrar deneyin; her denemede bir sonraki yol kullanılır.
 - Bütün yollar kapanmaya yol açarsa dahili çözücü kendiliğinden kapanır. Ayarlar'dan "1080p çözücü" kapatılıp tekrar açılınca kayıt silinir ve her şey baştan denenir.
 - Test: `gcc -std=gnu99 -DVDI_TESTING -DSTATE_FILE='"/tmp/vdi_state.txt"' -Isrc -Itests/mock_tai -Itests/mock_rt tests/test_vdi.c src/vdec_internal.c -o test_vdi && ./test_vdi`
+
+## Sürüm 12
+
+### 720p donmaları: referanssız resimleri atlama
+Bazı 720p kanallar (çoğu 50 fps) Vita'nın normal çözücüsünün izin verdiğinden (5 resim) fazla resim belleği istiyor. Bu kanallarda bellek hatası sınırda tekrarlanırsa ve dahili çözücü kullanılamıyorsa oynatıcı, başka resimlerin referans almadığı B-resimleri (nal_ref_idc 0) atlar. Çözücüde yeniden sıralanmak için bekleyen ve belleği dolduran resimler bunlardır. Kare hızı kanala göre yarıya kadar düşebilir ama görüntü donmaz. Log'daki `stats` satırında `skipped` sayısı görünür.
+
+### Dahili çözücü: tanı ve yedek yol
+Sürüm 11'de dışa aktarım tablosunda fonksiyonlar bulunamadı (sürüm 10'da taiHEN aynı kimlikleri bulmuştu). Artık tablonun içeriği log'a yazılır (`vdi: library ...` satırları) ve tabloda bulunamayan fonksiyonlar taiHEN kancasıyla alınır; denemeler en güvenli yoldan başlar. Dahili çözücü açılamazsa oynatma durmaz: normal çözücüye dönülür ve resim atlama devreye girer.
