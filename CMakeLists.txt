@@ -27,6 +27,7 @@ add_executable(${PROJECT_NAME}.elf
   src/tsplayer.c
   src/ui.c
   src/screens.c
+  src/lang.c
 )
 
 # Extra system stubs that vita2d needs (found automatically if present in the SDK)
@@ -43,7 +44,7 @@ target_link_libraries(${PROJECT_NAME}.elf
   SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceAudiodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
   SceCtrl_stub SceSysmodule_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub
-  ScePgf_stub ScePvf_stub
+  ScePgf_stub ScePvf_stub SceAppUtil_stub ScePower_stub
   ${EXTRA_STUBS}
 )
 
