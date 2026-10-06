@@ -126,3 +126,14 @@ Yavaş akışlar için okuma 4 KB parçalarla, 15 sn zaman aşımıyla yapılır
 
 ### Logo ve açılış ekranı
 `tools/make_assets.py` logo, simge (icon0), LiveArea görselleri ve açılış ekranını üretir (Pillow gerekir). Üretilen dosyalar projede hazırdır.
+
+## Sürüm 6: Türkçe, radyo ekranı kapalıyken, 1080p modülü
+
+### Dil
+Konsolun dili Türkçe ise uygulama Türkçe, diğer dillerde İngilizce açılır. START > Ayarlar > Dil ile değiştirilebilir (Otomatik / English / Türkçe). Metinler `src/lang.c` içindedir.
+
+### Radyo ekran kapalıyken
+Radyo çalarken uygulama bekleme modunu kilitler; ekran kendiliğinden kararsa da ses devam eder. Radyo ekranında START ekranı hemen kapatır, herhangi bir tuş geri açar. **Güç düğmesine basmayın**: Vita'yı bekleme moduna alır ve homebrew uygulamalar orada durdurulur (bunu yalnızca sistem eklentileri aşabilir).
+
+### 1080p modülü
+`reAvPlayer.suprx` dosyasını `ux0:data/VitaIPTV/` klasörüne koyun (taiHEN `config.txt` içine eklemek gerekmez; uygulama kendisi yükler). Şu yerlere de bakılır: `ux0:data/VitaIPTV/modules/`, `ux0:tai/`, `ur0:tai/`, `ux0:data/`, `ux0:`. Durum START > Ayarlar > "1080p modülü" satırında ve `log.txt` içindeki `module ...` satırında görünür. Modül çözücünün 720p sınırını kaldırmazsa 1080p kanallar dönüştürme sunucusuyla oynatılır.
