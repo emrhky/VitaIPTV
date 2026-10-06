@@ -184,3 +184,20 @@ Ekranda ğ, ı, ş, ç, ü, ö (ve büyükleri) g, i, s, c, u, o olarak gösteri
 
 ### Yetişkin kanallarını gizle
 START > Ayarlar > "Yetişkin kanallarını gizle". Açıkken: Xtream sunucusunun yetişkin olarak işaretlediği kanallar (`is_adult`) ve kategori ya da adında "adult", "xxx", "18+", "yetişkin", "erotik" vb. geçen kanallar listelere hiç girmez (aramada da çıkmaz). Bir listeyi açarken uygulanır. Varsayılan: kapalı.
+
+## Sürüm 10: dahili çözücü (1080p, deneysel)
+
+### Neden 1080p ve bazı 720p kanallar açılmıyordu
+Log'lar gösterdi ki uygulamalara açık çözücü H.264 Level 3.1 ile sınırlı: resim en fazla 3600 makroblok (720p) ve referans resim belleği en fazla 18000 makroblok (720p'de 5 resim, 960x544'te 8). Level 3.2/4.0 olarak kodlanmış 720p kanallar daha fazla referans resmi istediği için "bellek yetmedi" (0x80620003) hatası alıyor, 1080p hiç başlatılamıyordu.
+
+### Dahili çözücü
+ReAvPlayer eklentisinin (github.com/SonicMastr/ReAvPlayer, MIT) kaynağı, 1080p'yi sistemin "Internal" çözücü fonksiyonlarına yönlendirerek açtığını gösteriyor. Uygulama artık bu fonksiyonları eklentisiz, doğrudan kullanmayı deniyor (`src/vdec_internal.c`, taiHEN geçiş kancalarıyla):
+- 720p'den büyük yayınlarda doğrudan,
+- 720p'de normal çözücünün izin verdiği en fazla resimle bile bellek yetmezse bir sonraki anahtar karede.
+START > Ayarlar > "1080p çözücü (deneysel)" ile kapatılabilir. `log.txt` içinde `vdi:` ile başlayan satırlar her adımı gösterir; bir sorun olursa bu satırlar gereklidir. Eklentiyi `config.txt`'ye eklemek gerekmez.
+
+### Diğer
+- Çözücü bir hatadan sonra resim vermezse (donma) bir sonraki anahtar karede yeniden açılır.
+- İlk bağlantı zaman aşımına uğrarsa iki kez daha denenir; kanaldan çıkarken iptal edilen istek hata olarak gösterilmez.
+- START/SELECT düğme resimleri daha okunaklı.
+- LiveArea başlatma resmi yalnızca simgedir. Altındaki "Başlat" düğmesi sistemin kendi düğmesidir, kaldırılamaz.
