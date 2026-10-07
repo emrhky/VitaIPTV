@@ -139,7 +139,7 @@ def save_palette(img, path):
     img.convert("RGB").quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG).save(path, optimize=True)
 
 
-def main(version="v1.0"):
+def main(version="v0.1"):
     icon = Image.new("RGBA", (128, 128), NAVY + (255,))
     lg = logo(120)
     icon.alpha_composite(lg, (4, 4))
