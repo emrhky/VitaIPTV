@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """tsplayer over real HTTPS (libcurl + OpenSSL) against a local server: a plain stream and HLS.
-   Needs gcc, ffmpeg, openssl and a libcurl build (CURL_DIR, default /home/claude/ext/curl)."""
+   Needs gcc, ffmpeg, openssl (the TLS itself is third_party/mbedtls)."""
 import os, ssl, subprocess, sys, tempfile, threading
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from functools import partial
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CURL = os.environ.get("CURL_DIR", "/home/claude/ext/curl")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mbedtls_pc
+MCF, MLIB = mbedtls_pc.build()
 T = tempfile.mkdtemp(prefix="tsps_")
 def sh(c):
     r = subprocess.run(c, shell=True, capture_output=True, text=True)
@@ -24,9 +26,9 @@ ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(f"{T}/c.pem",
 srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 M = f"{ROOT}/tests/mock_rt"
-sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DHAVE_CURL -DSTALL_US=1500000ULL -I{ROOT}/src -I{M} -I{CURL}/include "
+sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread {MCF} -DSTALL_US=1500000ULL -I{ROOT}/src -I{M} "
    f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/hls.c "
-   f"{ROOT}/src/curlio.c {M}/mock_rt.c {CURL}/build/lib/libcurl.a -lssl -lcrypto -lm -o {T}/test_https")
+   f"{ROOT}/src/curlio.c {M}/mock_rt.c {MLIB} -lm -o {T}/test_https")
 env = dict(os.environ, HTTPS_BASE=f"https://127.0.0.1:{srv.server_address[1]}")
 r = subprocess.run([f"{T}/test_https"], capture_output=True, text=True, env=env, timeout=300)
 print(r.stdout); print(r.stderr[-3000:])

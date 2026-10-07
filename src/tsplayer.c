@@ -494,16 +494,6 @@ static int take_free_slot(Tsp *t)
     return s;
 }
 
-/* a free slot other than `not` (-1 if none) */
-static int take_free_slot2(Tsp *t, int not)
-{
-    int s = -1;
-    sceKernelLockMutex(t->lock, 1, NULL);
-    for (int i = 0; i < t->nslots; i++) if (i != not && t->slots[i].state == SLOT_FREE) { s = i; break; }
-    sceKernelUnlockMutex(t->lock, 1);
-    return s;
-}
-
 /* Decodes one unit into slot s0, and s1 too when the decoder hands out two pictures at once
  * (it can, e.g. when it empties its buffer at a keyframe; with room for only one picture it
  * answered "out of memory" and then stopped giving pictures). */

@@ -34,25 +34,17 @@ add_executable(${PROJECT_NAME}.elf
   src/curlio.c
 )
 
-# https:// through libcurl + OpenSSL (vdpm packages curl, openssl, zlib, zstd; "vdpm install-all" has them).
-# The Vita's own TLS fails on most sites today. Turn off with -DVITAIPTV_HTTPS=OFF if the link fails.
-option(VITAIPTV_HTTPS "https:// through libcurl + OpenSSL" ON)
-set(HTTPS_LIBS "")
+# https:// with the app's own TLS: mbedTLS 3.6 (third_party/mbedtls, Apache-2.0) and a small HTTP client
+# (src/curlio.c). The Vita's own TLS fails on most sites today; the SDK's libcurl does not link with its
+# OpenSSL. -DVITAIPTV_HTTPS=OFF builds without it (https:// then uses the Vita's own TLS only).
+option(VITAIPTV_HTTPS "https:// with the built-in mbedTLS" ON)
 if(VITAIPTV_HTTPS)
-  find_library(CURL_LIB curl)
-  find_library(SSL_LIB ssl)
-  find_library(CRYPTO_LIB crypto)
-  find_library(ZSTD_LIB zstd)
-  if(CURL_LIB AND SSL_LIB AND CRYPTO_LIB)
-    target_compile_definitions(${PROJECT_NAME}.elf PRIVATE HAVE_CURL)
-    set(HTTPS_LIBS ${CURL_LIB} ${SSL_LIB} ${CRYPTO_LIB})
-    if(ZSTD_LIB)
-      list(APPEND HTTPS_LIBS ${ZSTD_LIB})
-    endif()
-    message(STATUS "HTTPS: libcurl + OpenSSL (${CURL_LIB})")
-  else()
-    message(WARNING "curl / OpenSSL not found in the SDK (vdpm install curl openssl): https:// uses the Vita's own TLS only")
-  endif()
+  file(GLOB MBEDTLS_SRC ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/library/*.c)
+  target_sources(${PROJECT_NAME}.elf PRIVATE ${MBEDTLS_SRC})
+  target_include_directories(${PROJECT_NAME}.elf PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mbedtls/include ${CMAKE_CURRENT_SOURCE_DIR}/third_party)
+  target_compile_definitions(${PROJECT_NAME}.elf PRIVATE HAVE_TLS "MBEDTLS_USER_CONFIG_FILE=\"mbedtls_user_config.h\"")
+  message(STATUS "HTTPS: built-in mbedTLS")
 endif()
 
 # Extra system stubs that vita2d needs (found automatically if present in the SDK)
@@ -65,7 +57,6 @@ message(STATUS "Extra stubs: ${EXTRA_STUBS}")
 
 target_link_libraries(${PROJECT_NAME}.elf
   vita2d
-  ${HTTPS_LIBS}
   freetype png jpeg z m pthread
   SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceAudiodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
