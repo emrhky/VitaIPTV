@@ -218,3 +218,16 @@ Bazı 720p kanallar (çoğu 50 fps) Vita'nın normal çözücüsünün izin verd
 
 ### Dahili çözücü: tanı ve yedek yol
 Sürüm 11'de dışa aktarım tablosunda fonksiyonlar bulunamadı (sürüm 10'da taiHEN aynı kimlikleri bulmuştu). Artık tablonun içeriği log'a yazılır (`vdi: library ...` satırları) ve tabloda bulunamayan fonksiyonlar taiHEN kancasıyla alınır; denemeler en güvenli yoldan başlar. Dahili çözücü açılamazsa oynatma durmaz: normal çözücüye dönülür ve resim atlama devreye girer.
+
+## Sürüm 13: dahili çözücü kaldırıldı, joystick
+
+### Dahili çözücü geri alındı
+Sürüm 10-12'de denenen "dahili çözücü" (sistemin Internal fonksiyonları) yalnızca başarısız olmuyor, cihazda kalıcı zarar veriyordu: bir kez çağrıldıktan sonra normal (720p) kanallar da `0x80620002` hatası verip görüntü üretmez oluyordu (ekranda ses var, görüntü yok). Bu fonksiyonlar bu uygulama türünde güvenle kullanılamıyor. İlgili tüm kod, ayar ve dosyalar kaldırıldı. 1080p ve HEVC için tek güvenilir yol dönüştürme sunucusudur.
+
+Hafıza kartında kalan `ux0:data/VitaIPTV/vdi_state.txt` dosyası artık kullanılmıyor, silebilirsiniz. Eski `settings.txt` içindeki `internal_dec` satırı da yok sayılır.
+
+### 720p donmaları
+Normal çözücünün izin verdiğinden (genelde 5 resim) fazla resim belleği isteyen kanallarda (çoğu 50 fps), oynatıcı referanssız B-resimlerini atlayarak devam eder; görüntü donmaz, kare hızı düşebilir. Bu, dahili çözücüden bağımsız çalışır ve korundu.
+
+### Joystick
+Kanal ekranında sol analog çubuk kategorilerde, sağ analog çubuk kanallarda yukarı/aşağı gezinir. D-pad eskisi gibi çalışmaya devam eder.
