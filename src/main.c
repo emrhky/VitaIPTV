@@ -35,7 +35,7 @@ int _newlib_heap_size_user = 96 * 1024 * 1024;
 #define DATA_DIR      "ux0:data/VitaIPTV"
 #define SOURCES_FILE  DATA_DIR "/sources.txt"
 #define SETTINGS_FILE DATA_DIR "/settings.txt"
-#define APP_VERSION   "v1.0"
+#define APP_VERSION   "v0.1"
 #define MAX_SOURCES   64
 #define MAX_GROUPS    256
 #define MAX_DOWNLOAD  (24 * 1024 * 1024)
