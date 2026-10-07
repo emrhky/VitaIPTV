@@ -99,6 +99,7 @@ typedef struct {
     /* decoder (worker thread) */
     int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder, no_two;
     int connect_fails, multi_out, oom_fixed, status_retries;
+    int no_out, reopen_pending, reopens;  /* decoder that takes units but gives no pictures: restart it */
     int win_calls, win_oom, skip_left;  /* out-of-memory rate decides whether non-reference pictures are dropped */
     int64_t last_out_pts;
     uint32_t out_of_order;              /* pictures that came out of the decoder before an earlier one */
@@ -635,6 +636,16 @@ static void video_packet(Tsp *t, Pkt *p)
         t->skipped++;
         return;
     }
+    if (t->reopen_pending && start_ok) {                    /* stuck decoder: start it again at a keyframe */
+        t->reopen_pending = 0;
+        t->reopens++;
+        t->no_out = 0;
+        decoder_core_close(t);
+        t->need_params = 1;
+        int rr = decoder_core_open(t, t->nref, t->nref);
+        if (rr < 0) { set_error(t, "Decoder init failed (0x%08X), see log.txt", (unsigned)rr); return; }
+        plog("tsp: decoder restarted (%d)", t->reopens);
+    }
     if (t->grow_pending && start_ok) {                      /* reopen with more picture memory at a keyframe */
         t->grow_pending = 0;
         if (decoder_grow(t) < 0) return;
@@ -651,6 +662,7 @@ static void video_packet(Tsp *t, Pkt *p)
         sceKernelDelayThread(2000);
     }
     int r;
+    uint32_t out_before = t->st.decoded;
     for (;;) {
         /* One output picture per call: the real decoder answers 0x80620002 to every call that offers two. */
         r = decode_au(t, s, -1, n, pts, 1);
@@ -666,6 +678,14 @@ static void video_packet(Tsp *t, Pkt *p)
     if (r < 0 && t->st.decoded == 0 && is_mem_error(r) && t->plan + 1 >= NPLANS) {
         set_error(t, "No memory layout accepted by the decoder (0x%08X)", (unsigned)r);
         return;
+    }
+    /* After an out-of-memory error some streams leave the decoder taking units without giving any
+     * picture back (the screen freezes until the channel is changed). Notice it and restart it. */
+    if (t->st.decoded != out_before) t->no_out = 0;
+    else if (t->st.decoded > 0 && ++t->no_out >= 40 && !t->reopen_pending && t->reopens < 5) {
+        plog("tsp: no picture from the decoder for %d units; restarting it at the next keyframe", t->no_out);
+        t->reopen_pending = 1;
+        if (!t->skip_nonref) { t->skip_nonref = 1; t->skip_left = 750; }   /* the pictures that did not fit */
     }
     if ((unsigned)r == 0x80620003u) {                        /* OUT_OF_MEMORY */
         if (t->nref < 16 && (!t->nref_cap || t->nref < t->nref_cap)) t->grow_pending = 1;   /* more pictures at the next keyframe */
@@ -1041,9 +1061,9 @@ static void check_stall(Tsp *t)
 static int http_refused(Tsp *t, int status)
 {
     int busy = status == 407 || status == 429 || status == 503 || status == 509;
-    if (busy && t->st.bytes == 0 && t->status_retries++ < 2) {
-        plog("tsp: server answered %d, asking again in 2 s", status);
-        for (int k = 0; k < 100 && !stopping(t); k++) sceKernelDelayThread(20000);
+    if (busy && t->st.bytes == 0 && t->status_retries++ < 1) {
+        plog("tsp: server answered %d, asking once more in 1.5 s", status);
+        for (int k = 0; k < 75 && !stopping(t); k++) sceKernelDelayThread(20000);
         return 1;
     }
     if (status == 407)
@@ -1053,7 +1073,7 @@ static int http_refused(Tsp *t, int status)
     return 0;
 }
 
-/* https:// through libcurl + OpenSSL (the Vita's own TLS fails on most sites) */
+/* https:// with the built-in TLS (src/curlio.c; the Vita's own TLS fails on most sites) */
 typedef struct { Tsp *t; uint32_t got; } HsCtx;
 
 static int hs_data(void *ctx, const uint8_t *d, size_t n)
@@ -1292,17 +1312,19 @@ static void hls_wait(Tsp *t, int ms)
     for (int k = 0; k < ms / 20 && !stopping(t); k++) sceKernelDelayThread(20000);
 }
 
-static int hls_fetch_text(Tsp *t, const char *url, char *text, const char *what)
+static int hls_fetch_text(Tsp *t, const char *url, char *text, const char *what, int quiet)
 {
     int status = 0, n = -1;
     for (int attempt = 0; attempt < 3 && !stopping(t); attempt++) {
         n = hls_get(t, url, text, HLS_TEXT_MAX, NULL, &status);
         if (n > 0 && status < 400) return n;
-        plog("tsp: HLS %s: %s (status %d)", what, n < 0 ? "connection failed" : "no answer", status);
-        if (status == 404 || status == 403 || status == 401) break;
+        if (stopping(t)) return -1;
+        if (status >= 400) plog("tsp: HLS %s: HTTP %d", what, status);
+        else plog("tsp: HLS %s: %s (0x%08X)", what, n < 0 ? "connection failed" : "empty answer", (unsigned)n);
+        if (status == 404 || status == 403 || status == 401 || status == 410) break;
         hls_wait(t, 1000);
     }
-    if (stopping(t)) return -1;
+    if (stopping(t) || quiet) return -1;
     if (status >= 400) set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d", status);
     else if (n < 0 && !strncasecmp(url, "https:", 6) && !cio_available())
         set_error_kind(t, TSP_ERRK_NET, "HTTPS failed (0x%08X): this site needs newer TLS than the Vita has", (unsigned)n);
@@ -1326,7 +1348,7 @@ static void read_hls(Tsp *t, uint8_t *buf)
     if (!text) { set_error(t, "Out of memory"); return; }
     snprintf(url, sizeof url, "%s", t->url);
     plog("tsp: HLS stream");
-    if (hls_fetch_text(t, url, text, "playlist") < 0) goto out;
+    if (hls_fetch_text(t, url, text, "playlist", 0) < 0) goto out;
     if (!hls_is_playlist(text, strlen(text))) { set_error_kind(t, TSP_ERRK_NET, "The server sent a web page instead of video"); goto out; }
     if (hls_is_master(text)) {
         HlsVariant *v = malloc(sizeof *v * 32);
@@ -1337,9 +1359,22 @@ static void read_hls(Tsp *t, uint8_t *buf)
             plog("tsp: HLS variant %d: %dx%d, %ld kbit/s%s%s%s", i, v[i].width, v[i].height, v[i].bandwidth / 1000,
                  v[i].hevc ? ", HEVC" : "", v[i].audio_only ? ", audio only" : "", i == k ? "  <- chosen" : "");
         if (k < 0) { free(v); set_error_kind(t, TSP_ERRK_FORMAT, "HLS playlist without a usable stream"); goto out; }
-        snprintf(url, sizeof url, "%s", v[k].uri);
+        /* a variant that does not answer: try the next best one (up to three) */
+        int got = -1;
+        for (int tries = 0; tries < 3 && k >= 0 && !stopping(t); tries++) {
+            snprintf(url, sizeof url, "%s", v[k].uri);
+            got = hls_fetch_text(t, url, text, "variant playlist", tries < 2);
+            if (got >= 0) break;
+            v[k].hevc = 1;                                  /* not usable: pick another */
+            k = hls_pick_variant(v, n);
+            if (k >= 0 && v[k].hevc) k = -1;
+            if (k >= 0) plog("tsp: HLS trying variant %d instead", k);
+        }
         free(v);
-        if (hls_fetch_text(t, url, text, "variant playlist") < 0) goto out;
+        if (got < 0) {
+            if (!stopping(t) && t->st.state != TSP_ERROR) set_error_kind(t, TSP_ERRK_NET, "No HLS variant answers");
+            goto out;
+        }
         if (hls_is_master(text)) { set_error_kind(t, TSP_ERRK_FORMAT, "HLS playlist inside a playlist: not supported"); goto out; }
     }
     int64_t next = -1;
@@ -1355,7 +1390,8 @@ static void read_hls(Tsp *t, uint8_t *buf)
             goto out;
         }
         if (next < 0) {
-            next = m.endlist || m.nseg <= 3 ? m.first_seq : m.seg[m.nseg - 3].seq;
+            int back = m.target_ms >= 8000 ? 2 : 3;           /* long segments: start closer to live */
+            next = m.endlist || m.nseg <= back ? m.first_seq : m.seg[m.nseg - back].seq;
             plog("tsp: HLS %s, %d segments of %d ms, starting at #%lld", m.endlist ? "video" : "live", m.nseg, m.target_ms, (long long)next);
         }
         if (m.nseg && next < m.seg[0].seq) {                /* the playlist moved past us */
@@ -1403,7 +1439,7 @@ static void read_hls(Tsp *t, uint8_t *buf)
         if (wait > 5000) wait = 5000;
         hls_wait(t, wait);
         if (stopping(t)) goto out;
-        if (hls_fetch_text(t, url, text, "playlist update") < 0) goto out;
+        if (hls_fetch_text(t, url, text, "playlist update", 0) < 0) goto out;
     }
 out:
     free(text);
@@ -1558,6 +1594,11 @@ vita2d_texture *tsp_frame(int *w, int *h)
         }
         uint64_t due = due_time(t, &t->slots[n], now);
         if (due > now) break;
+        if (t->out_of_order >= 3 && now < due + 120000) {   /* the decoder gives pictures out of order: an */
+            int ready = 0;                                  /* earlier one may still come, wait for a second */
+            for (int k = 0; k < t->nslots; k++) if (t->slots[k].state == SLOT_READY) ready++;
+            if (ready < 2) break;
+        }
         int n2 = next_ready(t, 1, t->slots[n].seq);
         if (n2 >= 0 && due_time(t, &t->slots[n2], now) <= now) {   /* behind: skip this one */
             t->slots[n].state = SLOT_FREE;
