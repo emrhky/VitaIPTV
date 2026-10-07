@@ -75,6 +75,8 @@ sh(f"ffmpeg -loglevel error -y -i {T}/s720g30.ts -c copy -f hls -hls_time 1 -hls
    f"-hls_segment_filename {T}/hls/seg%03d.ts {T}/hls/index.m3u8")
 open(f"{T}/hls/master.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080\nhd/big.m3u8\n"
     "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS=\"avc1.640020,mp4a.40.2\"\nindex.m3u8?token=1\n")
+open(f"{T}/hls/master2.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nmissing720.m3u8\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=854x480\nindex.m3u8\n")
 live = open(f"{T}/hls/index.m3u8").read().replace("#EXT-X-ENDLIST", "").replace("#EXT-X-PLAYLIST-TYPE:VOD\n", "")
 open(f"{T}/hls/live.m3u8", "w").write(live)
 M = f"{ROOT}/tests/mock_rt"
