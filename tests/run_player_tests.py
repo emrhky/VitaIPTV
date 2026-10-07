@@ -65,11 +65,23 @@ sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavf
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5 "
    f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a ac3 -f mpegts {T}/ac3.ts")
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1280x720', r=30)} -c:v libx264 -profile:v high -bf 3 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -f matroska {T}/bframes.mkv")
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5 "
+   f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a mp2 -b:a 192k -f mpegts {T}/mp2.ts")
+# HLS: the 720p test stream cut into 1 s segments, a master playlist with a 1080p and a 720p variant,
+# and a "live" copy of the media playlist (no #EXT-X-ENDLIST)
+os.makedirs(f"{T}/hls", exist_ok=True)
+sh(f"ffmpeg -loglevel error -y {SRC.format(s='1280x720', r=30)} -c:v libx264 -profile:v high -bf 3 -g 30 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/s720g30.ts")
+sh(f"ffmpeg -loglevel error -y -i {T}/s720g30.ts -c copy -f hls -hls_time 1 -hls_list_size 0 -hls_playlist_type vod "
+   f"-hls_segment_filename {T}/hls/seg%03d.ts {T}/hls/index.m3u8")
+open(f"{T}/hls/master.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080\nhd/big.m3u8\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS=\"avc1.640020,mp4a.40.2\"\nindex.m3u8?token=1\n")
+live = open(f"{T}/hls/index.m3u8").read().replace("#EXT-X-ENDLIST", "").replace("#EXT-X-PLAYLIST-TYPE:VOD\n", "")
+open(f"{T}/hls/live.m3u8", "w").write(live)
 M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {M}/mock_rt.c -lm -o {T}/test_tsplayer")
+   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {M}/mock_rt.c -lm -o {T}/test_tsplayer")
 r = subprocess.run(f"{T}/test_tsplayer {T}/s720.ts {T}/s1080.ts {T}/hevc.ts {T}/midgop.ts {T}/dropped.ts "
-                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts",
+                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls",
                    shell=True, capture_output=True, text=True)
 print(r.stdout); print(r.stderr[-4000:])
 sys.exit(r.returncode)

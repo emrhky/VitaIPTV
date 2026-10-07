@@ -70,12 +70,67 @@ def splash(w, h, version):
 
 
 def startup(w, h):
-    """Only the icon, on a transparent background, above the system's Start button
-    (which the Vita draws over the bottom of this picture)."""
-    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    lg = logo(int(h * 0.62))
-    img.alpha_composite(lg, ((w - lg.width) // 2, int(h * 0.04)))
-    return img
+    """The gate picture above the system's Start button. Opaque (a transparent palette PNG lost the
+    soft edges of the logo and looked cut on the Vita), with the logo small enough to stay clear of
+    the frame's rounded corners and of the Start label the system draws at the bottom."""
+    img = Image.new("RGB", (w, h), NAVY)
+    glow = Image.new("RGB", (w, h), NAVY)
+    ImageDraw.Draw(glow).ellipse([w * 0.18, -h * 0.35, w * 0.82, h * 0.95], fill=(40, 54, 112))
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=h // 5))
+    img = Image.blend(img, glow, 0.95).convert("RGBA")
+    size = int(h * 0.56)
+    lg = logo(size)
+    shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ImageDraw.Draw(shadow).rounded_rectangle([(w - size) // 2 + 2, int(h * 0.12) + 5, (w + size) // 2 + 2, int(h * 0.12) + size + 5],
+                                             radius=int(size * 0.22), fill=(0, 0, 0, 110))
+    img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(radius=5)))
+    img.alpha_composite(lg, ((w - size) // 2, int(h * 0.12)))
+    return img.convert("RGB")
+
+
+def livearea_bg(w, h):
+    """LiveArea page: the system puts the Start gate in the middle, so the middle stays calm
+    (glow and scan lines only) and the name sits in the top-left corner."""
+    img = Image.new("RGB", (w, h), (10, 12, 20))
+    glow = Image.new("RGB", (w, h), (10, 12, 20))
+    gd = ImageDraw.Draw(glow)
+    gd.ellipse([w * 0.10, h * 0.10, w * 0.90, h * 1.20], fill=(32, 42, 92))
+    gd.ellipse([w * 0.62, -h * 0.30, w * 1.20, h * 0.40], fill=(70, 50, 140))
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=w // 8))
+    img = Image.blend(img, glow, 0.92).convert("RGBA")
+    lines = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    ld = ImageDraw.Draw(lines)
+    for y in range(0, h, 4):
+        ld.line([(0, y), (w, y)], fill=(255, 255, 255, 7))
+    img.alpha_composite(lines)
+    lg = logo(64)
+    img.alpha_composite(lg, (34, 30))
+    d = ImageDraw.Draw(img)
+    d.text((112, 32), "Vita IPTV", font=ImageFont.truetype(BOLD, 34), fill=(240, 242, 250))
+    d.text((113, 74), "Live TV and radio", font=ImageFont.truetype(REG, 17), fill=(150, 160, 192))
+    return img.convert("RGB")
+
+
+def waiting(w, h):
+    """Background behind the loading screens: a soft glow, the logo above the message box and the name below."""
+    img = Image.new("RGB", (w, h), (10, 12, 20))
+    glow = Image.new("RGB", (w, h), (10, 12, 20))
+    gd = ImageDraw.Draw(glow)
+    gd.ellipse([w * 0.12, h * 0.02, w * 0.88, h * 0.98], fill=(30, 40, 86))
+    gd.ellipse([w * 0.30, h * 0.10, w * 0.70, h * 0.60], fill=(44, 58, 124))
+    glow = glow.filter(ImageFilter.GaussianBlur(radius=w // 9))
+    img = Image.blend(img, glow, 0.9).convert("RGBA")
+    lines = Image.new("RGBA", (w, h), (0, 0, 0, 0))     # faint TV scan lines
+    ld = ImageDraw.Draw(lines)
+    for y in range(0, h, 4):
+        ld.line([(0, y), (w, y)], fill=(255, 255, 255, 6))
+    img.alpha_composite(lines)
+    size = 96
+    lg = logo(size)
+    img.alpha_composite(lg, ((w - size) // 2, 72))
+    d = ImageDraw.Draw(img)
+    centered(d, w, 372, "Live TV and radio", ImageFont.truetype(REG, 19), (120, 130, 168))
+    return img.convert("RGB")
 
 
 def save_palette(img, path):
@@ -89,10 +144,8 @@ def main(version="v1.0"):
     lg = logo(120)
     icon.alpha_composite(lg, (4, 4))
     save_palette(icon, os.path.join(ROOT, "sce_sys", "icon0.png"))
-    save_palette(splash(840, 500, None), os.path.join(ROOT, "sce_sys", "livearea", "contents", "bg.png"))
-    st = startup(280, 158)                                   # palette PNG that keeps the transparency
-    path = os.path.join(ROOT, "sce_sys", "livearea", "contents", "startup.png")
-    st.quantize(colors=255, method=Image.Quantize.FASTOCTREE).save(path, optimize=True)
+    save_palette(livearea_bg(840, 500), os.path.join(ROOT, "sce_sys", "livearea", "contents", "bg.png"))
+    save_palette(startup(280, 158), os.path.join(ROOT, "sce_sys", "livearea", "contents", "startup.png"))
     with open(os.path.join(ROOT, "sce_sys", "livearea", "contents", "template.xml"), "w") as f:
         f.write('<?xml version="1.0" encoding="utf-8"?>\n'
                 '<livearea style="a1" format-ver="01.00" content-rev="1">\n'
@@ -101,6 +154,7 @@ def main(version="v1.0"):
                 '</livearea>\n')
     os.makedirs(os.path.join(ROOT, "resources"), exist_ok=True)
     splash(960, 544, version).save(os.path.join(ROOT, "resources", "splash.png"), optimize=True)
+    waiting(960, 544).save(os.path.join(ROOT, "resources", "waiting.png"), optimize=True)
     os.makedirs(os.path.join(ROOT, "docs"), exist_ok=True)
     logo(512).save(os.path.join(ROOT, "docs", "logo.png"))
     print("assets written")

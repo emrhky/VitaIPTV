@@ -1,6 +1,7 @@
 /* Integration test of tsplayer.c with a fake hardware decoder and real threads.
  * Built and run by tests/run_player_tests.py */
 #include "tsplayer.h"
+#include "curlio.h"
 #include <psp2/videodec.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/audiodec.h>
@@ -19,10 +20,16 @@ extern int mock_mapped;
 extern const char *mock_http_file;
 extern long mock_http_fail_after;
 extern int mock_http_sessions;
+extern long mock_http_rate;
+extern int mock_http_status;
+extern const char *mock_http_map[64][2];
+extern int mock_http_requests;
+extern void mock_http_reset(void);
+static int64_t pts_shift;                                   /* the decoder labels pictures this much earlier */
 void mock_http_reset(void);
 
 /* ---- fake hardware decoder: needs SPS/PPS first, reorders pictures by 2 like B-frames ---- */
-static int refuse_refs, reject_two;
+static int refuse_refs, reject_two, oom_every = 5;
 static int lib_open, dec_open, sps_seen, reject_pts, npend, need_refs, created_refs, decode_calls, creates, lib_max_refs;
 static int lib_l31, wedge_mode, wedged, need_two, two_calls, gave_two;
 static int64_t refused_pts = -2;
@@ -78,7 +85,7 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
     if (need_refs && created_refs < need_refs) {             /* the same pictures fail every time they are tried */
         int has = !(au->pts.upper == 0xFFFFFFFFu && au->pts.lower == 0xFFFFFFFFu);
         int64_t t = has ? (int64_t)(((uint64_t)au->pts.upper << 32) | au->pts.lower) : ++decode_calls * 3000;
-        if (au_nonref(b, n) && (t / 3000) % 5 == 0) {      /* reordered (non-reference) pictures fill the memory */
+        if (au_nonref(b, n) && (t / 3000) % oom_every == 0) {   /* reordered (non-reference) pictures fill the memory */
             if (wedge_mode) wedged = 1;
             return (int)0x80620003;
         }
@@ -116,6 +123,7 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
         uint8_t *pix = p->frame.pPicture[0];
         memcpy(pix, &o, 8);                                 /* the test reads the time back from the picture */
         pix[(size_t)p->frame.framePitch * p->frame.frameHeight * 4 - 1] = 0x5A;   /* touches the last byte */
+        if (o >= 0 && pts_shift) { o -= pts_shift; memcpy(pix, &o, 8); }
         p->info.pts.upper = o < 0 ? 0xFFFFFFFFu : (uint32_t)((uint64_t)o >> 32);
         p->info.pts.lower = o < 0 ? 0xFFFFFFFFu : (uint32_t)o;
         p->frame.horizontalSize = lib_w; p->frame.verticalSize = lib_h;
@@ -216,10 +224,29 @@ int main(int argc, char **argv)
 {
     setvbuf(stdout, NULL, _IONBF, 0);
     if (getenv("ONE")) { Run one = play(getenv("ONE"), 10); show("one", &one); return 0; }   /* debug a single file */
+    if (getenv("HTTPS_BASE")) {                              /* tests/run_https_tests.py: real TLS through libcurl */
+        char u[512];
+        const char *b = getenv("HTTPS_BASE");
+        cio_init();
+        snprintf(u, sizeof u, "%s/s720.ts", b);
+        Run h = play(u, 10);
+        show("https stream", &h);
+        assert(h.changes >= 120 && h.st.audio_frames > 200 && h.synced);   /* (the server sends the file again after the end: a jump back) */
+        snprintf(u, sizeof u, "%s/hls/master.m3u8", b);
+        h = play(u, 12);
+        show("https hls", &h);
+        assert(h.st.state == TSP_ENDED && h.changes >= 130 && h.synced && h.w == 1280);
+        snprintf(u, sizeof u, "%s/missing.ts", b);
+        h = play(u, 8);
+        show("https 404", &h);
+        assert(h.st.state == TSP_ERROR && strstr(h.st.msg, "404"));
+        puts("all https tests passed");
+        return 0;
+    }
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 15);
+    assert(argc == 17);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r = play(argv[1], 10);
@@ -283,6 +310,10 @@ int main(int argc, char **argv)
     r = play(argv[12], 10);                                 /* AC-3 audio: picture plays, audio says why not */
     show("ac3 audio", &r);
     assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames == 0 && strstr(r.st.audio_msg, "ac3"));
+    r = play(argv[15], 10);                                 /* MP2 audio (TV channels): decoded in software, in sync */
+    show("mp2 audio", &r);
+    assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames > 150 && r.st.audio_mpeg == 2 && !r.st.audio_msg[0]);
+    assert(r.st.audio_rate == 48000 && r.synced && r.avn > 100 && r.av_bad * 10 <= r.avn);
 
     /* memory layouts the hardware might demand; the player must find a working one */
     struct { int fb, es, out; const char *name; int ok; } mem[] = {
@@ -347,12 +378,14 @@ int main(int argc, char **argv)
     r = play(argv[1], 10);
     show("lib cap, no grow", &r);
     printf("               decoder created with %d refs, %d time(s)\n", created_refs, creates);
-    assert(created_refs == 5 && creates == 1 && r.st.errors <= 2 && r.st.decoded >= 60 && r.synced);  /* drops B pictures, no freeze */
-    need_refs = 9; creates = 0; decode_calls = 0;             /* the stream wants more than the library allows */
+    /* now and then a picture does not fit: only that one is lost */
+    assert(created_refs == 5 && creates == 1 && r.st.errors <= 20 && r.st.decoded >= 120 && r.synced && r.nonmono == 0);
+    need_refs = 9; creates = 0; decode_calls = 0; oom_every = 2;   /* very often: drop non-reference pictures for a while */
     r = play(argv[1], 10);
     show("lib cap, drop B", &r);
     printf("               decoder created with %d refs, %d time(s)\n", created_refs, creates);
-    assert(created_refs == 5 && creates == 1 && r.st.errors <= 2 && r.st.decoded >= 60 && r.synced);  /* drops B pictures, no freeze */
+    assert(created_refs == 5 && creates == 1 && r.st.errors <= 30 && r.st.decoded >= 60 && r.synced && r.nonmono == 0);
+    oom_every = 5;
     lib_max_refs = 0;
 
     /* a decoder that refuses two output pictures per call: playback must not depend on it */
@@ -377,19 +410,74 @@ int main(int argc, char **argv)
     assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "above"));
     lib_l31 = 0;
 
-    /* the decoder sometimes gives two pictures at once; with one slot it would say "out of memory" and stall */
-    need_two = 1; wedge_mode = 1; two_calls = 0; gave_two = 0; creates = 0;
+    /* the decoder sometimes wants to give two pictures at once and says "out of memory" with one slot;
+     * the real Vita refuses two slots, so only that picture may be lost - no freeze, no B-picture dropping */
+    need_two = 1; reject_two = 1; two_calls = 0; gave_two = 0; creates = 0;
     r = play(argv[1], 10);
-    show("two at once", &r);
-    printf("               decoder gave two pictures %d time(s), decoders created %d\n", gave_two, creates);
-    assert(gave_two >= 3 && r.st.errors == 0 && creates == 1 && r.st.state == TSP_ENDED && r.st.decoded >= 140);
-    assert(r.synced && r.av_bad * 10 <= r.avn && r.nonmono == 0);
-    need_two = 0; wedge_mode = 0;
+    show("needs two", &r);
+    printf("               decoder wanted two pictures %d time(s), skipped %s\n", two_calls, "-");
+    assert(r.st.state == TSP_ENDED && r.st.errors <= 10 && creates == 1 && r.st.decoded >= 120);
+    assert(r.synced && r.nonmono == 0);
+    need_two = 0; reject_two = 0;
+
+    /* a live stream (paced input) whose pictures come out late against the sound: the sound pauses once */
+    {
+        FILE *f = fopen(argv[1], "rb"); fseek(f, 0, SEEK_END); long sz = ftell(f); fclose(f);
+        mock_http_file = argv[1];
+        mock_http_rate = sz / 5;                            /* real time: the file is 5 s long */
+        pts_shift = 90000 * 4 / 10;                         /* 400 ms late */
+        r = play("http://example.invalid/live.ts", 10);
+        show("late video", &r);
+        printf("               late at the end %d ms\n", r.st.av_late_ms);
+        assert(r.changes >= 100 && r.st.av_late_ms < 60 && r.nonmono == 0 && r.av_bad * 3 <= r.avn);
+        pts_shift = 0;
+        mock_http_reset();
+        /* the server says 407: a clear error */
+        mock_http_status = 407;
+        r = play("http://example.invalid/live.ts", 8);
+        show("http 407", &r);
+        assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "407"));
+        mock_http_status = 200;
+        mock_http_rate = 0;
+        mock_http_reset();
+        mock_http_file = NULL;
+    }
+
+    /* HLS: master playlist -> the 720p variant -> 1 s MPEG-TS segments */
+    {
+        static char names[64][32], paths[64][512];
+        int k = 0;
+        const char *pl[] = { "master.m3u8", "index.m3u8", "live.m3u8" };
+        for (int i = 0; i < 3; i++) { snprintf(names[k], 32, "%s", pl[i]); snprintf(paths[k], 512, "%s/%s", argv[16], pl[i]); k++; }
+        for (int i = 0; i < 20 && k < 63; i++) {
+            snprintf(names[k], 32, "seg%03d.ts", i); snprintf(paths[k], 512, "%s/seg%03d.ts", argv[16], i);
+            FILE *f = fopen(paths[k], "rb"); if (!f) break; fclose(f); k++;
+        }
+        mock_http_reset();
+        for (int i = 0; i < k; i++) { mock_http_map[i][0] = names[i]; mock_http_map[i][1] = paths[i]; }
+        mock_http_requests = 0;
+        r = play("http://example.invalid/tv/master.m3u8?app=web", 12);
+        show("hls video", &r);
+        printf("               %d HTTP requests\n", mock_http_requests);
+        assert(r.st.state == TSP_ENDED && r.changes >= 130 && r.st.audio_frames > 200 && r.synced && r.nonmono == 0 && r.w == 1280);
+        /* live: starts three segments from the end and keeps asking for new ones */
+        mock_http_requests = 0;
+        r = play("http://example.invalid/tv/live.m3u8", 6);
+        show("hls live", &r);
+        printf("               %d HTTP requests\n", mock_http_requests);
+        assert(r.changes >= 40 && r.changes <= 110 && r.st.state != TSP_ERROR && mock_http_requests >= 5);
+        /* a playlist whose segments are missing: a clear error, not a hang */
+        for (int i = 3; i < k; i++) mock_http_map[i][0] = "none.ts";
+        r = play("http://example.invalid/tv/index.m3u8", 8);
+        show("hls 404", &r);
+        assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "404"));
+        mock_http_reset();
+    }
     need_refs = 12; creates = 0; decode_calls = 0;
     r = play(argv[1], 10);
     show("dpb above the 720p limit", &r);
     printf("               decoder created with %d refs, %d time(s)\n", created_refs, creates);
-    assert(created_refs == 5 && creates == 1 && r.st.errors <= 2 && r.changes >= 60);  /* never grows past what 720p allows */
+    assert(created_refs == 5 && creates == 1 && r.st.errors <= 20 && r.changes >= 120);  /* never grows past 720p; a lost picture now and then */
     assert(r.synced && r.av_bad * 5 <= r.avn);               /* out-of-memory errors no longer turn timestamps off */
     need_refs = 0;
 

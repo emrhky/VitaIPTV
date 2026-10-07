@@ -21,10 +21,12 @@ typedef struct {
     volatile uint32_t bytes, decoded, shown, dropped, errors, late, damaged;
     /* audio */
     int audio_rate, audio_ch;
+    volatile int audio_mpeg;            /* MPEG audio layer (1-3) when not AAC, else 0 */
     volatile int audio_only;            /* stream has no video (radio) */
     volatile uint32_t audio_frames, audio_errors;
     char audio_msg[64];                 /* why audio is off, if it is */
     volatile int av_sync;               /* video is following the audio clock */
+    volatile int av_late_ms;            /* how late pictures are shown against the audio, on average */
     volatile int audio_level;           /* loudness of the last audio frame, 0..1000 */
 } TspStatus;
 

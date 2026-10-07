@@ -39,6 +39,8 @@ void ui_header(const char *title, const char *subtitle, const char *right);
 void ui_footer(const UiHint *hints, int n, const char *status, int status_err);
 int  ui_button(int x, int cy, int btn);           /* draws a glyph starting at x, returns its width */
 int  ui_badge(int x, int y, const char *txt, unsigned col);   /* y = top; returns width */
+void ui_round_rect(int x, int y, int w, int h, int r, unsigned col);
+int  ui_tag(int x, int y, int w, int h, const char *txt, unsigned col);   /* big centred label, returns w */
 void ui_scrollbar(int x, int y, int h, int first, int visible, int total);
 void ui_spinner(int cx, int cy, unsigned t_ms);
 void ui_meter(int x, int y, int w, int h, int level, unsigned t_ms);   /* level 0..1000 */

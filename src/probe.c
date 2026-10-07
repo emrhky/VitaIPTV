@@ -127,7 +127,7 @@ static int read_http(ProbeCtx *c, Demux *d, uint8_t *buf, int *status_out, unsig
     int tpl = -1, conn = -1, req = -1, rc = -1, status = 0, n, first = 1;
     uint32_t total = 0;
 
-    tpl = sceHttpCreateTemplate("VitaIPTV/1.0", SCE_HTTP_VERSION_1_1, 1);
+    tpl = sceHttpCreateTemplate(NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { fail(r, "HTTP init failed"); goto done; }
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);

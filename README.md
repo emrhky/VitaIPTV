@@ -246,3 +246,30 @@ Kanal ekranında sol analog çubuk kategorilerde, sağ analog çubuk kanallarda 
 
 ### Sürüm 14d: 720p görüntü yok sorununun asıl nedeni
 Eski sürümle (VitaIPTV12.zip) karşılaştırınca bulundu: yeni oynatıcı her kare için çözücüden **iki** çıktı resmi istiyordu (`numOfElm = 2`); gerçek Vita bunu `0x80620002` (geçersiz parametre) ile reddediyor, eski sürüm hep tek resim istiyordu. Artık her çağrıda tek resim istenir; ikinci resim yalnızca `0x80620003` (bellek yetmedi) durumunda bir kez denenir ve cihaz bunu da reddederse bir daha denenmez. Test düzeneği "iki resmi reddeden çözücü" durumunu da kapsar. Önceki ek önlemler (referans sayısı sınırı, 2/3/4 ile yeniden açma) yedek olarak durur.
+
+## Sürüm 15: HLS, HTTPS (curl), MP2 ses, kare atlamaları, arayüz
+
+### Kare atlamaları
+- Çözücüye iki resim isteyen ikinci deneme, zaman damgalarını kalıcı olarak kapatıyordu (log: `decode with timestamps failed ... retrying without`): kaldırıldı, her çağrı tek resim.
+- Bellek yetmeyen (`0x80620003`) tek tük resimler artık yalnızca atlanır. Önceden ilk hatada tüm B (referans olmayan) resimler kalıcı olarak atılıyordu, kare hızı yarıya iniyordu. Şimdi bu yalnızca 100 resimde 10'dan fazla hata olursa ve 30 sn için yapılır.
+- Görüntü sese göre sürekli geç kalıyorsa (canlı yayınlarda ses akışta önde gelir; patlamalı gelen resimlerin yarısı atılıyordu) ses bir kez kısa süre durdurulur ve ikisi hizalanır. Log: `video is N ms late; pausing the sound for N ms`.
+- Hazır resimler zaman damgasına göre sırayla gösterilir, ekrandakinden eski olan gösterilmez.
+- İstatistik satırında yeni bilgiler: `video ±N ms vs audio`, `out of order N`, `screen N fps`.
+- Geçmeli (interlaced, 576i TV yayını) H.264 için açık hata mesajı (Vita çözücüsü `0x80620010` ile reddediyor).
+
+### Ses: MP2 / MP3
+TV kanallarındaki MPEG-1 Layer II (MP2) ve MP3 ses artık yazılımla çözülür (`src/mpadec.c`, minimp3 - CC0, `src/minimp3.h`). Test: `tests/test_mpadec.c` (ffmpeg'in çözdüğü PCM ile karşılaştırır, MP2'de birebir aynı).
+
+### HLS (.m3u8)
+`src/hls.c` (ayrıştırma) + `tsplayer.c` (indirme): ana liste -> en iyi 720p H.264 varyantı -> MPEG-TS parçaları sırayla demuxer'a. Canlı listeler sondan 3 parça geriden başlar ve oynarken yenilenir. Şifreli (AES) ve fMP4 parçalı HLS desteklenmez (açık hata). Testler: `tests/test_hls.c`, `tests/run_player_tests.py` (HLS video, canlı, 404).
+
+### HTTPS: libcurl + OpenSSL
+Vita'nın kendi TLS'i (`0x80431075`) bugünkü sitelerin çoğuyla el sıkışamıyor. `https://` adresleri (liste indirme, yayın, HLS) artık vdpm'deki libcurl + OpenSSL ile açılır (`src/curlio.c`). CMake bunları bulamazsa uyarı verir ve eskisi gibi sistem TLS'i kullanılır; bağlama (link) hatası olursa `cmake -B build -DVITAIPTV_HTTPS=OFF` ile kapatılabilir. Test: `python3 tests/run_curlio_test.py` ve `python3 tests/run_https_tests.py` (yerel HTTPS sunucusuna karşı; libcurl kaynak derlemesi gerekir, `CURL_DIR`).
+
+### HTTP 407
+407 IPTV sağlayıcısının cevabıdır (Vita'dan değil): genelde hesap başka yerde açık (az önce kapatılan kanal sunucuda henüz kapanmamış) ya da kanal pakette yok. Artık 2 sn arayla iki kez daha denenir; olmazsa açık bir mesaj gösterilir. Bazı sunucular bilinmeyen oynatıcıları reddettiği için uygulama kendini VLC olarak tanıtır (`src/netua.h`).
+
+### Arayüz
+- Sağ analog her zaman kanal listesini, sol analog kategorileri kaydırır; mavi vurgu kullanılan çubuğun listesine geçer.
+- Oynatma listeleri ekranı: büyük renkli tür etiketleri (XTREAM, M3U, FILE, STREAM, LOCAL), daha büyük adlar ve altında sunucu / dosya adı.
+- LiveArea: Başlat kapısındaki logo artık kırpılmıyor (opak, kenar boşluklu); LiveArea arka planı sade, ad sol üstte. Kanal yüklenirken ve listeler yüklenirken markalı bekleme arka planı (`resources/waiting.png`).

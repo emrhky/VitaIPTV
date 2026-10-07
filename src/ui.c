@@ -210,6 +210,33 @@ int ui_badge(int x, int y, const char *txt, unsigned col)
     return w;
 }
 
+void ui_round_rect(int x, int y, int w, int h, int r, unsigned col)
+{
+    if (r * 2 > h) r = h / 2;
+    if (r * 2 > w) r = w / 2;
+    vita2d_draw_rectangle(x + r, y, w - 2 * r, h, col);
+    vita2d_draw_rectangle(x, y + r, r, h - 2 * r, col);
+    vita2d_draw_rectangle(x + w - r, y + r, r, h - 2 * r, col);
+    vita2d_draw_fill_circle(x + r, y + r, r, col);
+    vita2d_draw_fill_circle(x + w - r - 1, y + r, r, col);
+    vita2d_draw_fill_circle(x + r, y + h - r - 1, r, col);
+    vita2d_draw_fill_circle(x + w - r - 1, y + h - r - 1, r, col);
+}
+
+/* A big, readable source-type tag: fixed width so the names line up, bold white letters. */
+int ui_tag(int x, int y, int w, int h, const char *txt, unsigned col)
+{
+    ui_round_rect(x, y, w, h, 8, col);
+    vita2d_draw_rectangle(x + 8, y + 1, w - 16, 2, RGBA8(255, 255, 255, 40));   /* a little light on top */
+    float sc = 1.05f;
+    while (sc > 0.7f && ui_text_w(sc, txt) > w - 14) sc -= 0.05f;
+    int tw = ui_text_w(sc, txt);
+    int ty = y + h / 2 + (int)(8 * sc);
+    ui_text(x + (w - tw) / 2, ty, RGBA8(255, 255, 255, 255), sc, txt);
+    ui_text(x + (w - tw) / 2 + 1, ty, RGBA8(255, 255, 255, 255), sc, txt);   /* bold */
+    return w;
+}
+
 void ui_scrollbar(int x, int y, int h, int first, int visible, int total)
 {
     if (total <= visible || total <= 0) return;
