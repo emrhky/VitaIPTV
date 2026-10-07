@@ -145,7 +145,13 @@ static int http_get(const char *url, const char *user, const char *pass, Mem *m,
     }
 
     int r = sceHttpSendRequest(req, NULL, 0);
-    if (r < 0) { snprintf(err, errsz, "Connection failed (0x%08X)", (unsigned)r); goto done; }
+    if (r < 0) {
+        if (!strncmp(url, "https:", 6) && ((unsigned)r >> 16) == 0x8043u)
+            snprintf(err, errsz, "HTTPS failed (0x%08X): this site needs newer TLS than the Vita has. Copy the .m3u file to ux0:data/VitaIPTV/ instead", (unsigned)r);
+        else
+            snprintf(err, errsz, "Connection failed (0x%08X)", (unsigned)r);
+        goto done;
+    }
 
     int status = 0;
     sceHttpGetStatusCode(req, &status);
@@ -165,6 +171,12 @@ static int http_get(const char *url, const char *user, const char *pass, Mem *m,
     rc = 0;
 
 done:
+    if (rc != 0) {                                        /* host only: the log may be shared */
+        char host[96]; const char *h = strstr(url, "://"); h = h ? h + 3 : url;
+        size_t k = strcspn(h, "/?#"); if (k >= sizeof host) k = sizeof host - 1;
+        memcpy(host, h, k); host[k] = 0;
+        plog("http: GET %.5s//%s failed: %s", url, host, err);
+    }
     if (req >= 0)  sceHttpDeleteRequest(req);
     if (conn >= 0) sceHttpDeleteConnection(conn);
     if (tpl >= 0)  sceHttpDeleteTemplate(tpl);

@@ -22,6 +22,7 @@ extern int mock_http_sessions;
 void mock_http_reset(void);
 
 /* ---- fake hardware decoder: needs SPS/PPS first, reorders pictures by 2 like B-frames ---- */
+static int refuse_refs;
 static int lib_open, dec_open, sps_seen, reject_pts, npend, need_refs, created_refs, decode_calls, creates, lib_max_refs;
 static int lib_l31, wedge_mode, wedged, need_two, two_calls, gave_two;
 static int64_t refused_pts = -2;
@@ -84,6 +85,7 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
     }
     if (!(kind_bit(au->es.pBuf) & es_ok) || !(kind_bit(arr->pPicture[0]->frame.pPicture[0]) & out_ok)) return (int)0x80620009;
     int has_ts = !(au->pts.upper == 0xFFFFFFFFu && au->pts.lower == 0xFFFFFFFFu);
+    if (refuse_refs && created_refs == refuse_refs) return (int)0x80620002;   /* a decoder that dislikes this reference count */
     if (reject_pts && has_ts) return (int)0x80620002;
     if (arr->numOfElm < 1 || arr->numOfElm > 2) return (int)0x80620002;
     for (unsigned e = 0; e < arr->numOfElm; e++) {
@@ -351,6 +353,14 @@ int main(int argc, char **argv)
     printf("               decoder created with %d refs, %d time(s)\n", created_refs, creates);
     assert(created_refs == 5 && creates == 1 && r.st.errors <= 2 && r.st.decoded >= 60 && r.synced);  /* drops B pictures, no freeze */
     lib_max_refs = 0;
+
+    /* the decoder opens with 5 refs but refuses every picture: reopened with fewer */
+    refuse_refs = 5; need_refs = 0; creates = 0;
+    r = play(argv[1], 10);
+    show("refuses 5 refs", &r);
+    printf("               decoder created with %d refs, %d time(s)\n", created_refs, creates);
+    assert(created_refs < 5 && creates >= 2 && r.st.decoded >= 20 && r.synced);
+    refuse_refs = 0;
 
     /* 1080p cannot be decoded: a clear error, no crash */
     lib_l31 = 1; need_refs = 0;
