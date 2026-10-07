@@ -29,7 +29,7 @@ static int64_t pts_shift;                                   /* the decoder label
 void mock_http_reset(void);
 
 /* ---- fake hardware decoder: needs SPS/PPS first, reorders pictures by 2 like B-frames ---- */
-static int refuse_refs, reject_two, oom_every = 5;
+static int refuse_refs, reject_two, oom_every = 5, decode_order;
 static int lib_open, dec_open, sps_seen, reject_pts, npend, need_refs, created_refs, decode_calls, creates, lib_max_refs;
 static int lib_l31, wedge_mode, wedged, need_two, two_calls, gave_two;
 static int64_t refused_pts = -2;
@@ -113,11 +113,12 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
     if (flush && arr->numOfElm < 2) { refused_pts = upts; return (int)0x80620003; }   /* no room: "out of memory" */
     pend[npend++] = has_ts ? (int64_t)(((uint64_t)au->pts.upper << 32) | au->pts.lower) : -1;
     arr->numOfOutput = 0;
-    int want = flush ? 2 : (npend > 2 ? 1 : 0);
+    int want = flush ? 2 : (decode_order ? 1 : (npend > 2 ? 1 : 0));
     for (int e = 0; e < want && npend > 0; e++) {
         SceAvcdecPicture *p = arr->pPicture[e];
         int k = 0;
         for (int i = 1; i < npend; i++) if (pend[i] < pend[k]) k = i;
+        if (decode_order) k = npend - 1;                   /* a decoder that does not reorder */
         int64_t o = pend[k];
         pend[k] = pend[--npend];
         uint8_t *pix = p->frame.pPicture[0];
@@ -403,6 +404,21 @@ int main(int argc, char **argv)
     assert(created_refs < 5 && creates >= 2 && r.st.decoded >= 20 && r.synced);
     refuse_refs = 0;
 
+    /* after an out-of-memory error the decoder takes units but gives nothing back: restarted at a keyframe */
+    lib_max_refs = 5; need_refs = 9; oom_every = 5; wedge_mode = 1; creates = 0; decode_calls = 0;
+    r = play(argv[1], 10);
+    show("stuck decoder", &r);
+    printf("               decoders created %d\n", creates);
+    assert(creates >= 2 && r.changes >= 30 && r.nonmono == 0);   /* pictures again after the restart */
+    wedge_mode = 0; need_refs = 0; lib_max_refs = 0;
+
+    /* pictures come out in decode order (B-frames before their reference): shown in time order */
+    decode_order = 1; creates = 0;
+    r = play(argv[1], 10);
+    show("decode order", &r);
+    assert(r.changes >= 110 && r.nonmono == 0 && r.synced);
+    decode_order = 0;
+
     /* 1080p cannot be decoded: a clear error, no crash */
     lib_l31 = 1; need_refs = 0;
     r = play(argv[14], 8);
@@ -447,8 +463,8 @@ int main(int argc, char **argv)
     {
         static char names[64][32], paths[64][512];
         int k = 0;
-        const char *pl[] = { "master.m3u8", "index.m3u8", "live.m3u8" };
-        for (int i = 0; i < 3; i++) { snprintf(names[k], 32, "%s", pl[i]); snprintf(paths[k], 512, "%s/%s", argv[16], pl[i]); k++; }
+        const char *pl[] = { "master.m3u8", "index.m3u8", "live.m3u8", "master2.m3u8" };
+        for (int i = 0; i < 4; i++) { snprintf(names[k], 32, "%s", pl[i]); snprintf(paths[k], 512, "%s/%s", argv[16], pl[i]); k++; }
         for (int i = 0; i < 20 && k < 63; i++) {
             snprintf(names[k], 32, "seg%03d.ts", i); snprintf(paths[k], 512, "%s/seg%03d.ts", argv[16], i);
             FILE *f = fopen(paths[k], "rb"); if (!f) break; fclose(f); k++;
@@ -460,6 +476,10 @@ int main(int argc, char **argv)
         show("hls video", &r);
         printf("               %d HTTP requests\n", mock_http_requests);
         assert(r.st.state == TSP_ENDED && r.changes >= 130 && r.st.audio_frames > 200 && r.synced && r.nonmono == 0 && r.w == 1280);
+        /* the chosen variant is gone (404): the next one plays */
+        r = play("http://example.invalid/tv/master2.m3u8", 12);
+        show("hls fallback", &r);
+        assert(r.st.state == TSP_ENDED && r.changes >= 130);
         /* live: starts three segments from the end and keeps asking for new ones */
         mock_http_requests = 0;
         r = play("http://example.invalid/tv/live.m3u8", 6);
@@ -467,7 +487,7 @@ int main(int argc, char **argv)
         printf("               %d HTTP requests\n", mock_http_requests);
         assert(r.changes >= 40 && r.changes <= 110 && r.st.state != TSP_ERROR && mock_http_requests >= 5);
         /* a playlist whose segments are missing: a clear error, not a hang */
-        for (int i = 3; i < k; i++) mock_http_map[i][0] = "none.ts";
+        for (int i = 4; i < k; i++) mock_http_map[i][0] = "none.ts";
         r = play("http://example.invalid/tv/index.m3u8", 8);
         show("hls 404", &r);
         assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "404"));
