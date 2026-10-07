@@ -5,7 +5,11 @@
 A native IPTV player for the PlayStation Vita and PS TV (HENkaku / Ensō). Watch live TV and listen to radio
 from your own M3U playlists or Xtream accounts, decoded by the Vita's hardware H.264 decoder.
 
-**Version 0.1** - first public release. Expect rough edges; logs and feedback are very welcome.
+<p align="center"><img src="https://github.com/user-attachments/assets/010c908b-58ff-4be5-982d-5e6c4701ef0c" width="640" alt="Vita IPTV screenshot"></p>
+
+**Version 0.1** - first public release. It is a hobby project, provided as is, without support or a roadmap.
+
+This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
 > Vita IPTV is only a player. It does not include, sell or point to any channels or playlists.
 > Use it with playlists and services you are allowed to watch.
@@ -82,7 +86,6 @@ One channel      | stream | http://example.com/live/1.ts
 | | Encrypted (AES) HLS, HLS with fMP4 segments |
 
 If a channel does not open, the screen tells you why, and `ux0:data/VitaIPTV/log.txt` has the details.
-Please attach that file when you report a problem.
 
 **HTTP 407 / 403** comes from the IPTV provider, not from the Vita: usually the account is already in use
 elsewhere or the channel is not in your package.
@@ -105,5 +108,3 @@ e.g. `python3 tests/run_player_tests.py`.
 - [mbedTLS](https://github.com/Mbed-TLS/mbedtls) (Apache-2.0) - TLS, in `third_party/mbedtls`
 - [minimp3](https://github.com/lieff/minimp3) (CC0) - MP2 / MP3 decoding
 - The VitaSDK and HENkaku teams
-
-Development notes (Turkish) are in [`docs/DEVLOG_TR.md`](docs/DEVLOG_TR.md).
