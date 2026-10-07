@@ -94,7 +94,7 @@ typedef struct {
     MkvDemux *mkv;                      /* used instead of dmx when the stream is Matroska */
     volatile int cur_req;               /* HTTP request in progress, aborted on stop */
     /* decoder (worker thread) */
-    int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending;
+    int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder;
     int connect_fails, multi_out, oom_fixed;
     int skip_nonref;                    /* decoder too small for this stream: drop pictures nothing refers to */
     uint32_t skipped;
@@ -677,6 +677,21 @@ static void video_packet(Tsp *t, Pkt *p)
          * freezing until the next keyframe, which on some channels is 10 s away. */
         int capped = (unsigned)r == 0x80620003u && !t->grow_pending && t->st.decoded > 0;
         if (!capped) t->need_key = 1;
+        /* The decoder takes the stream but refuses every picture (invalid parameter): it may dislike this
+         * reference count. Reopen it with other counts (2, 3, 4) before giving up. */
+        if ((unsigned)r == 0x80620002u && t->st.decoded == 0 && t->st.errors >= 2 && t->ladder < 3) {
+            static const int TRY[3] = { 2, 3, 4 };
+            int n = TRY[t->ladder++];
+            if (n == t->nref) n = TRY[t->ladder < 3 ? t->ladder++ : 2];
+            plog("tsp: decoder refuses every picture with %d refs, reopening with %d", t->nref, n);
+            decoder_core_close(t);
+            t->need_params = 1;
+            t->need_key = 1;
+            t->pts_retry_done = 0;
+            t->use_pts = 1;
+            int rr = decoder_core_open(t, n, n);
+            if (rr < 0) { set_error(t, "Decoder init failed (0x%08X), see log.txt", (unsigned)rr); return; }
+        }
         if (t->st.decoded == 0 && t->st.errors >= 30) set_error_kind(t, TSP_ERRK_FORMAT, "Decoder rejects this stream (0x%08X)", (unsigned)r);
     }
 }
@@ -921,7 +936,7 @@ static void explain_no_picture(Tsp *t)
     else if (i->scrambled_packets && !i->video_aus) set_error(t, "Channel is encrypted (scrambled)");
     else if (!i->video_aus) set_error(t, "No video data received");
     else if (!t->dec_open) set_error_kind(t, TSP_ERRK_FORMAT, "No usable keyframe in %u pictures", i->video_aus);
-    else set_error(t, "Decoder produced no picture (%u errors). Remove video plugins (reAvPlayer) from ur0:tai/config.txt and restart the Vita", t->st.errors);
+    else set_error(t, "Decoder produced no picture (%u errors). Switch the Vita fully off and on again, then try a 720p channel", t->st.errors);
 }
 
 /* Nothing decoded for a long time: report instead of waiting forever. */
