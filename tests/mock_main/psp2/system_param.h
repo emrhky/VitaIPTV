@@ -1,3 +1,0 @@
-#pragma once
-typedef enum { SCE_SYSTEM_PARAM_ID_LANG = 1 } SceSystemParamId;
-typedef enum { SCE_SYSTEM_PARAM_LANG_JAPANESE, SCE_SYSTEM_PARAM_LANG_ENGLISH_US, SCE_SYSTEM_PARAM_LANG_TURKISH = 19 } SceSystemParamLang;
