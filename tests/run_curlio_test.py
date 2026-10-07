@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""curlio.c against a local HTTPS server (needs gcc, openssl, and libcurl built with OpenSSL:
-   set CURL_DIR to a curl source tree with build/lib/libcurl.a)."""
+"""curlio.c (own HTTP client + mbedTLS from third_party) against a local HTTPS server (needs gcc, openssl)."""
 import os, ssl, subprocess, sys, tempfile, threading, time, base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-CURL = os.environ.get("CURL_DIR", "/home/claude/ext/curl")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import mbedtls_pc
+MCF, MLIB = mbedtls_pc.build()
 T = tempfile.mkdtemp()
 subprocess.run(f"openssl req -x509 -newkey rsa:2048 -nodes -keyout {T}/k.pem -out {T}/c.pem -days 2 -subj /CN=localhost",
                shell=True, check=True, capture_output=True)
@@ -37,9 +38,15 @@ ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx.load_cert_chain(f"{T}/c.pem",
 srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
 threading.Thread(target=srv.serve_forever, daemon=True).start()
 port = srv.server_address[1]
-subprocess.run(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -DHAVE_CURL -I{ROOT}/src -I{CURL}/include "
-               f"{ROOT}/tests/test_curlio.c {ROOT}/src/curlio.c {CURL}/build/lib/libcurl.a -lssl -lcrypto -lpthread -o {T}/test_curlio",
+# a second server that speaks only TLS 1.2 (many CDNs still do)
+srv12 = ThreadingHTTPServer(("127.0.0.1", 0), H)
+ctx12 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx12.load_cert_chain(f"{T}/c.pem", f"{T}/k.pem")
+ctx12.maximum_version = ssl.TLSVersion.TLSv1_2
+srv12.socket = ctx12.wrap_socket(srv12.socket, server_side=True)
+threading.Thread(target=srv12.serve_forever, daemon=True).start()
+subprocess.run(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra {MCF} -I{ROOT}/src "
+               f"{ROOT}/tests/test_curlio.c {ROOT}/src/curlio.c {ROOT}/src/hls.c {MLIB} -o {T}/test_curlio",
                shell=True, check=True)
-r = subprocess.run([f"{T}/test_curlio", str(port), f"{T}/file.ts"], capture_output=True, text=True, timeout=120)
+r = subprocess.run([f"{T}/test_curlio", str(port), f"{T}/file.ts", str(srv12.server_address[1])], capture_output=True, text=True, timeout=120)
 print(r.stdout); print(r.stderr[-3000:])
 sys.exit(r.returncode)

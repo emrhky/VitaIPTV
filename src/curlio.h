@@ -1,8 +1,8 @@
 #ifndef CURLIO_H
 #define CURLIO_H
-/* HTTPS through libcurl + OpenSSL (from vdpm). The Vita's own TLS (sceHttp/sceSsl) is too old for most
- * sites today (handshake error 0x80431075), so https:// addresses go through here. Built only when the
- * SDK has curl and OpenSSL (HAVE_CURL); otherwise cio_available() is 0 and the app stays on sceHttp. */
+/* HTTPS with the app's own TLS (mbedTLS in third_party/, built in with HAVE_TLS). The Vita's own TLS
+ * (sceHttp/sceSsl) fails on most sites today (handshake error 0x80431075), so https:// addresses go
+ * through here. Without HAVE_TLS cio_available() is 0 and the app stays on sceHttp. */
 #include <stddef.h>
 #include <stdint.h>
 

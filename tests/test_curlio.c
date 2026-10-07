@@ -17,7 +17,7 @@ static int stop_now(void *ctx) { Acc *a = ctx; return ++a->polls > 3 && a->stop_
 
 int main(int argc, char **argv)
 {
-    assert(argc == 3);
+    assert(argc == 4);
     int port = atoi(argv[1]);
     FILE *f = fopen(argv[2], "rb"); assert(f);
     Acc want = { 0 }; int ch; while ((ch = fgetc(f)) != EOF) { uint8_t b = (uint8_t)ch; on_data(&want, &b, 1); } fclose(f);
@@ -67,6 +67,11 @@ int main(int argc, char **argv)
     r = cio_get(&rq, &status, err, sizeof err);
     printf("refused: r=%d err='%s'\n", r, err);
     assert(r < -1000 && err[0]);
+    memset(&a, 0, sizeof a);                                     /* TLS 1.2 only server */
+    snprintf(url, sizeof url, "https://127.0.0.1:%d/file.ts", atoi(argv[3]));
+    r = cio_get(&rq, &status, err, sizeof err);
+    printf("tls 1.2: r=%d status=%d bytes=%zu err='%s'\n", r, status, a.n, err);
+    assert(r == 0 && status == 200 && a.n == want.n && a.sum == want.sum);
     puts("all curlio tests passed");
     return 0;
 }
