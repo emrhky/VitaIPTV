@@ -18,9 +18,10 @@ static void shot(const char *name)
 
 /* sources */
 static const char *src_names[] = { "Ev internet - Xtream", "Spor paketi", "Belgesel listesi", "TRT 1 (tek link)", "[Local] test_ts_h264_aac.ts" };
-static const char *src_badge[] = { "XTREAM", "XTREAM", "M3U", "STREAM", "LOCAL" };
-static const unsigned src_col[] = { RGBA8(130, 80, 220, 255), RGBA8(130, 80, 220, 255), RGBA8(40, 110, 220, 255), RGBA8(30, 150, 100, 255), RGBA8(110, 110, 130, 255) };
-static void src_row(int i, ScrRow *r, void *c) { (void)c; r->name = src_names[i]; r->badge = src_badge[i]; r->badge_col = src_col[i]; }
+static const char *src_badge[] = { "XTREAM", "XTREAM", "M3U", "STREAM", "FILE" };
+static const char *src_sub[] = { "tv.example.net:8080", "spor.example.com", "raw.example.org", "trt.example.tr", "Turkiye_IP_TV.m3u" };
+static const unsigned src_col[] = { RGBA8(124, 77, 230, 255), RGBA8(124, 77, 230, 255), RGBA8(33, 120, 235, 255), RGBA8(22, 160, 105, 255), RGBA8(222, 128, 30, 255) };
+static void src_row(int i, ScrRow *r, void *c) { (void)c; r->name = src_names[i]; r->badge = src_badge[i]; r->badge_col = src_col[i]; r->sub = src_sub[i]; }
 
 /* channels */
 static const char *ch_names[] = { "TRT 1 HD", "Kanal D HD", "Show TV HD", "Star TV HD", "ATV HD", "TV8 HD", "FOX HD", "TRT Haber HD",
@@ -39,8 +40,25 @@ static void grp_row_pv(int i, ScrRow *r, void *c)
     (void)c; r->name = i == 0 ? T("All") : gr[i]; r->right = cnt[i];
 }
 
+static vita2d_texture wait_tex;
+static void load_backdrop(void)                              /* raw RGBA written by the test script from resources/waiting.png */
+{
+    FILE *f = fopen("/tmp/preview/waiting.rgba", "rb");
+    if (!f) return;
+    wait_tex.w = 960; wait_tex.h = 544; wait_tex.px = malloc(960 * 544 * 4);
+    if (fread(wait_tex.px, 4, 960 * 544, f) == 960 * 544) {
+        for (int i = 0; i < 960 * 544; i++) {               /* file is R,G,B,A bytes; the raster wants RGBA8() order */
+            uint8_t *b = (uint8_t *)&wait_tex.px[i];
+            wait_tex.px[i] = RGBA8(b[0], b[1], b[2], b[3]);
+        }
+        scr_set_backdrop(&wait_tex);
+    }
+    fclose(f);
+}
+
 int main(int argc, char **argv)
 {
+    load_backdrop();
     (void)argv;
     preview_init();
     if (argc > 1) lang_set(LANG_TR);
@@ -72,7 +90,7 @@ int main(int argc, char **argv)
                      "Audio AAC 48000 Hz 2 ch   A/V +12 ms", NULL, NULL, 0, 0, 0 };
     preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pl); shot("5_player_osd");
 
-    ScrPlayer pc = { "Kanal D HD", "Ulusal", NULL, 1, hp, 4, NULL, NULL, "Connecting...", "Waiting for the stream", UI_TEXT, 1, 300 };
+    ScrPlayer pc = { "Kanal D HD", "Ulusal", NULL, 1, hp, 4, NULL, NULL, "Connecting...", "Waiting for the stream", UI_TEXT, 1, 300, 1 };
     preview_clear(0); scr_player(&pc); shot("6_connecting");
 
     ScrPlayer pe = { "beIN Sports 1 HD (FHD)", "Spor", NULL, 1, hp, 4, NULL, NULL,

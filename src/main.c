@@ -13,6 +13,7 @@
 #include <string.h>
 #include <strings.h>
 #include "nettls.h"
+#include "curlio.h"
 #include "iptv.h"
 #include "player.h"
 #include "probe.h"
@@ -118,12 +119,30 @@ static void b64(const unsigned char *in, size_t n, char *out)
     out[o] = 0;
 }
 
+/* https:// through libcurl + OpenSSL: the Vita's own TLS cannot talk to most sites today */
+static int mem_data(void *ctx, const uint8_t *d, size_t n) { return on_data((void *)d, 1, n, ctx) != n; }
+
+static int http_get_curl(const char *url, const char *user, const char *pass, Mem *m, char *err, size_t errsz)
+{
+    CioRequest rq = { url, user, pass, 15, 30, mem_data, NULL, m };
+    int status = 0;
+    char e[96];
+    int r = cio_get(&rq, &status, e, sizeof e);
+    plog("http: GET %.5s (curl) -> status %d%s%s", url, status, r < 0 ? ", " : "", r < 0 ? e : "");
+    if (status >= 400) { snprintf(err, errsz, "Server answered HTTP %d", status); return -1; }
+    if (m->overflow) { snprintf(err, errsz, "List is too large (over 24 MB)"); return -1; }
+    if (r < 0) { snprintf(err, errsz, "Connection failed (%s)", e); return -1; }
+    if (!m->buf) { snprintf(err, errsz, "Empty answer"); return -1; }
+    return 0;
+}
+
 /* HTTP(S) GET through the system sceHttp library. Optional Basic authentication. */
 static int http_get(const char *url, const char *user, const char *pass, Mem *m, char *err, size_t errsz)
 {
     int rc = -1, tpl = -1, conn = -1, req = -1;
+    if (cio_available() && !strncasecmp(url, "https:", 6)) return http_get_curl(url, user, pass, m, err, errsz);
 
-    tpl = sceHttpCreateTemplate("VitaIPTV/1.0", SCE_HTTP_VERSION_1_1, 1);
+    tpl = sceHttpCreateTemplate(NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { snprintf(err, errsz, "HTTP init failed (0x%08X)", (unsigned)tpl); goto done; }
     sceHttpSetResolveTimeOut(tpl, 15 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 15 * 1000 * 1000);
@@ -145,6 +164,12 @@ static int http_get(const char *url, const char *user, const char *pass, Mem *m,
     }
 
     int r = sceHttpSendRequest(req, NULL, 0);
+    if (r < 0 && ((unsigned)r >> 16) == 0x8043u && cio_available()) {   /* e.g. redirected to https: try curl */
+        sceHttpDeleteRequest(req); req = -1;
+        sceHttpDeleteConnection(conn); conn = -1;
+        sceHttpDeleteTemplate(tpl); tpl = -1;
+        return http_get_curl(url, user, pass, m, err, errsz);
+    }
     if (r < 0) {
         if (!strncmp(url, "https:", 6) && ((unsigned)r >> 16) == 0x8043u)
             snprintf(err, errsz, "HTTPS failed (0x%08X): this site needs newer TLS than the Vita has. Copy the .m3u file to ux0:data/VitaIPTV/ instead", (unsigned)r);
@@ -535,6 +560,7 @@ static void draw_tsp_screen(int osd)
     ScrPlayer sp;
     char info[48] = "", s1[200] = "", s2[200] = "";
     memset(&sp, 0, sizeof sp);
+    sp.backdrop = !tx;
     sp.name = c->name;
     sp.group = c->group;
     sp.hints = settings.proxy[0] ? HINTS_VIDEO_SRV : HINTS_VIDEO;
@@ -596,6 +622,7 @@ static void draw_mp4_screen(int osd)
     if (t) { got_frame = 1; draw_video_texture(t, vita2d_texture_get_width(t), vita2d_texture_get_height(t)); }
     ScrPlayer sp;
     memset(&sp, 0, sizeof sp);
+    sp.backdrop = !got_frame;
     sp.name = c->name;
     sp.group = c->group;
     sp.hints = HINTS_VIDEO;
@@ -612,18 +639,40 @@ static void draw_mp4_screen(int osd)
 }
 
 /* ---- lists -------------------------------------------------------------- */
+/* The host of an address, or the file name of a path: shown under the playlist name (never the user or password). */
+static const char *src_where(const Source *s, char *buf, size_t cap)
+{
+    const char *u = s->url;
+    const char *h = strstr(u, "://");
+    if (h) {
+        h += 3;
+        const char *at = strchr(h, '@'), *end = h + strcspn(h, "/?#");
+        if (at && at < end) h = at + 1;                    /* drop user:password@ */
+        size_t n = (size_t)(end - h);
+        if (n >= cap) n = cap - 1;
+        memcpy(buf, h, n);
+        buf[n] = 0;
+        return buf;
+    }
+    const char *slash = strrchr(u, '/');
+    snprintf(buf, cap, "%s", slash ? slash + 1 : u);
+    return buf;
+}
+
 static void src_row(int i, ScrRow *r, void *ctx)
 {
     (void)ctx;
+    static char where[96];
     const Source *s = &sources[i];
     r->name = s->name;
+    r->sub = src_where(s, where, sizeof where);
     switch (s->type) {
-    case SRC_XTREAM:   r->badge = "XTREAM"; r->badge_col = RGBA8(130, 80, 220, 255); break;
-    case SRC_M3U_URL:  r->badge = "M3U";    r->badge_col = RGBA8(40, 110, 220, 255); break;
-    case SRC_M3U_FILE: r->badge = "FILE";   r->badge_col = RGBA8(200, 120, 40, 255); break;
+    case SRC_XTREAM:   r->badge = "XTREAM"; r->badge_col = RGBA8(124, 77, 230, 255); break;
+    case SRC_M3U_URL:  r->badge = "M3U";    r->badge_col = RGBA8(33, 120, 235, 255); break;
+    case SRC_M3U_FILE: r->badge = "FILE";   r->badge_col = RGBA8(222, 128, 30, 255); break;
     default:
-        if (!strncmp(s->name, "[Local] ", 8)) { r->badge = "LOCAL"; r->badge_col = RGBA8(110, 110, 130, 255); r->name = s->name + 8; }
-        else { r->badge = "STREAM"; r->badge_col = RGBA8(30, 150, 100, 255); }
+        if (!strncmp(s->name, "[Local] ", 8)) { r->badge = "LOCAL"; r->badge_col = RGBA8(96, 104, 132, 255); r->name = s->name + 8; }
+        else { r->badge = "STREAM"; r->badge_col = RGBA8(22, 160, 105, 255); }
         break;
     }
 }
@@ -1054,8 +1103,8 @@ static void move_sel(unsigned p, int count)
     if (!count) return;
     if (p & SCE_CTRL_DOWN)  sel = (sel + 1) % count;
     if (p & SCE_CTRL_UP)    sel = (sel + count - 1) % count;
-    if (p & SCE_CTRL_RIGHT) { sel += SCR_ROWS; if (sel >= count) sel = count - 1; }
-    if (p & SCE_CTRL_LEFT)  { sel -= SCR_ROWS; if (sel < 0) sel = 0; }
+    if (p & SCE_CTRL_RIGHT) { sel += SCR_SRC_ROWS; if (sel >= count) sel = count - 1; }
+    if (p & SCE_CTRL_LEFT)  { sel -= SCR_SRC_ROWS; if (sel < 0) sel = 0; }
 }
 
 static void stop_all(void)
@@ -1066,7 +1115,7 @@ static void stop_all(void)
 }
 
 /* ---- start-up -------------------------------------------------------------- */
-static vita2d_texture *splash_img;
+static vita2d_texture *splash_img, *wait_img;
 
 static void splash_frame(const char *status_line)
 {
@@ -1097,6 +1146,8 @@ int main(void)
     pgf = vita2d_load_default_pgf();
     ui_init(pgf);
     splash_img = vita2d_load_PNG_file("app0:resources/splash.png");
+    wait_img = vita2d_load_PNG_file("app0:resources/waiting.png");   /* behind loading screens */
+    scr_set_backdrop(wait_img);
     unsigned t0 = now_ms();
     splash_frame(T("Starting..."));
 
@@ -1107,6 +1158,7 @@ int main(void)
     sceNetCtlInit();
     sceSslInit(300 * 1024);
     sceHttpInit(1024 * 1024);
+    cio_init();
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
     splash_frame(T("Loading playlists..."));
@@ -1121,6 +1173,7 @@ int main(void)
         }
     }
     plog("settings: server %s", settings.proxy[0] ? settings.proxy : "none");
+    plog("https: %s", cio_available() ? "libcurl + OpenSSL" : "system only (built without curl)");
     channel_list_init(&chans);
     load_sources();
     while (now_ms() - t0 < 1500) splash_frame(T("Loading playlists..."));   /* let the logo be seen */
@@ -1240,11 +1293,15 @@ int main(void)
         }
         else if (state == ST_CHANNELS) {
             int searching = search_fold[0] != 0;
-            /* the right stick always moves channels; the left stick always moves categories */
+            /* the right stick always moves the channel list and the left stick the categories, wherever the
+             * blue highlight is; the highlight follows the stick that was used (so X acts on that list) */
             unsigned chan_p = p, cat_p = p;
-            if (rstick_ud > 0) chan_p |= SCE_CTRL_DOWN;
-            if (rstick_ud < 0) chan_p |= SCE_CTRL_UP;
+            if (rstick_ud && nvis) {
+                focus = 1;
+                sel = rstick_ud > 0 ? (sel + 1) % nvis : (sel + nvis - 1) % nvis;
+            }
             if (!searching && ngroups > 1 && lstick_ud) {
+                focus = 0;
                 if (lstick_ud > 0) { cur_group = (cur_group + 1) % ngroups; rebuild_visible(); }
                 else { cur_group = (cur_group + ngroups - 1) % ngroups; rebuild_visible(); }
             }

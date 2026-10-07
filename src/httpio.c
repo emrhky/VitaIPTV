@@ -61,7 +61,7 @@ int httpio_open(void *p, const char *filename)
     if (f->lock <= 0) f->lock = sceKernelCreateMutex("hf_lock", 0, 0, NULL);
     plog("hf_open");
 
-    f->tpl = sceHttpCreateTemplate("VitaIPTV/1.0", SCE_HTTP_VERSION_1_1, 1);
+    f->tpl = sceHttpCreateTemplate(NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (f->tpl < 0) { r = f->tpl; f->tpl = -1; plog("hf_open: template 0x%08X", (unsigned)r); return r; }
     sceHttpSetResolveTimeOut(f->tpl, 15 * 1000 * 1000);
     sceHttpSetConnectTimeOut(f->tpl, 15 * 1000 * 1000);

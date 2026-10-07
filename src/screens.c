@@ -6,55 +6,71 @@
 #define LIST_Y   70
 #define ROW_H    33
 
+/* Playlist cards: a big coloured type tag, the name and a dim second line. */
+#define CARD_H 56
+
 void scr_list(const ScrList *l)
 {
     ui_header(l->title, l->subtitle, l->right);
     int sel = l->sel, *scroll = l->scroll;
     if (sel < *scroll) *scroll = sel;
-    if (sel >= *scroll + SCR_ROWS) *scroll = sel - SCR_ROWS + 1;
+    if (sel >= *scroll + SCR_SRC_ROWS) *scroll = sel - SCR_SRC_ROWS + 1;
     if (*scroll < 0) *scroll = 0;
 
     if (l->count == 0 && l->empty) ui_message(l->empty, NULL, UI_DIM, 0, 0);
 
-    for (int r = 0; r < SCR_ROWS && *scroll + r < l->count; r++) {
-        int i = *scroll + r, y = LIST_Y + r * ROW_H;
+    for (int r = 0; r < SCR_SRC_ROWS && *scroll + r < l->count; r++) {
+        int i = *scroll + r, y = LIST_Y + r * CARD_H;
+        int on = i == sel;
         ScrRow row;
         memset(&row, 0, sizeof row);
         l->row(i, &row, l->ctx);
-        if (i == sel) {
-            vita2d_draw_rectangle(10, y + 1, 928, ROW_H - 2, UI_SEL);
-            vita2d_draw_rectangle(10, y + 1, 4, ROW_H - 2, UI_ACCENT);
-        } else if (r % 2) {
-            vita2d_draw_rectangle(10, y + 1, 928, ROW_H - 2, RGBA8(20, 23, 34, 255));
-        }
-        int x = 26;
-        if (row.number > 0) {
-            char nb[16];
-            snprintf(nb, sizeof nb, "%d", row.number);
-            ui_text(72 - ui_text_w(0.9f, nb), y + 23, i == sel ? UI_TEXT : UI_DIM, 0.9f, nb);
-            x = 86;
-        }
-        if (row.badge) x += ui_badge(x, y + 8, row.badge, row.badge_col) + 10;
+        ui_round_rect(12, y + 3, 922, CARD_H - 6, 10, on ? UI_SEL : RGBA8(24, 28, 41, 255));
+        if (on) vita2d_draw_rectangle(12, y + 13, 4, CARD_H - 26, UI_ACCENT);
+        int x = 28;
+        if (row.badge) x += ui_tag(x, y + 11, 112, CARD_H - 22, row.badge, row.badge_col) + 18;
         int rw = 0;
         if (row.right && row.right[0]) {
-            rw = ui_text_w(0.9f, row.right);
+            rw = ui_text_w(1.0f, row.right);
             if (rw > 230) rw = 230;
-            ui_text_fit(926 - rw, y + 23, i == sel ? RGBA8(200, 210, 240, 255) : UI_DIM, 0.9f, row.right, 230);
+            ui_text_fit(918 - rw, y + 34, on ? RGBA8(200, 210, 240, 255) : UI_DIM, 1.0f, row.right, 230);
         }
-        ui_text_fit(x, y + 23, UI_TEXT, 1.0f, row.name, 926 - rw - 16 - x);
+        int maxw = 918 - rw - 16 - x;
+        if (row.sub && row.sub[0]) {
+            ui_text_fit(x, y + 27, UI_TEXT, 1.2f, row.name, maxw);
+            if (on) ui_text_fit(x + 1, y + 27, UI_TEXT, 1.2f, row.name, maxw);
+            ui_text_fit(x, y + 47, on ? RGBA8(190, 200, 230, 255) : UI_DIM, 0.9f, row.sub, maxw);
+        } else {
+            ui_text_fit(x, y + 36, UI_TEXT, 1.2f, row.name, maxw);
+            if (on) ui_text_fit(x + 1, y + 36, UI_TEXT, 1.2f, row.name, maxw);
+        }
     }
-    ui_scrollbar(946, LIST_Y + 2, SCR_ROWS * ROW_H - 4, *scroll, SCR_ROWS, l->count);
+    ui_scrollbar(946, LIST_Y + 4, SCR_SRC_ROWS * CARD_H - 8, *scroll, SCR_SRC_ROWS, l->count);
     ui_footer(l->hints, l->nhints, l->status, l->status_err);
+}
+
+static void splash_background(void);
+static const vita2d_texture *g_backdrop;
+
+void scr_set_backdrop(const vita2d_texture *img) { g_backdrop = img; }
+
+void scr_backdrop(void)
+{
+    if (g_backdrop) { vita2d_draw_texture(g_backdrop, 0, 0); return; }
+    splash_background();
+    ui_logo(480, 250, 150);
 }
 
 void scr_loading(const char *title, const char *line, unsigned t_ms)
 {
+    scr_backdrop();
     ui_header("Vita IPTV", NULL, NULL);
     ui_message(title, line, UI_TEXT, 1, t_ms);
 }
 
 void scr_player(const ScrPlayer *p)
 {
+    if (p->backdrop) scr_backdrop();
     if (p->center_title) ui_message(p->center_title, p->center_line, p->center_col, p->spinner, p->t_ms);
     if (!p->osd) return;
     vita2d_draw_rectangle(0, 0, 960, 62, UI_SHADE);

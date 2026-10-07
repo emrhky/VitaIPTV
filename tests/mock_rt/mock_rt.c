@@ -70,9 +70,15 @@ int sceSysmoduleLoadModule(int id) { (void)id; return (int)0x805A1000; }   /* wh
 #include <stdio.h>
 const char *mock_http_file;
 long mock_http_fail_after;
+long mock_http_rate;                  /* bytes per second, 0 = as fast as possible (a live stream is paced) */
+int mock_http_status = 200;
 int mock_http_sessions;
 static FILE *http_f;
 static long http_pos, http_sess_bytes;
+static double http_t0;
+#include <time.h>
+#include <unistd.h>
+static double mock_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 int sceHttpCreateTemplate(const char *u, int v, int k) { (void)u;(void)v;(void)k; return 1; }
 int sceHttpDeleteTemplate(int i) { (void)i; return 0; }
 int sceHttpSetResolveTimeOut(int i, unsigned u) { (void)i;(void)u; return 0; }
@@ -81,25 +87,49 @@ int sceHttpSetRecvTimeOut(int i, unsigned u) { (void)i;(void)u; return 0; }
 int sceHttpSetAutoRedirect(int i, int e) { (void)i;(void)e; return 0; }
 int sceHttpsDisableOption(unsigned int f) { (void)f; return 0; }
 int sceSslInit(unsigned int p) { (void)p; return 0; }
-int sceHttpCreateConnectionWithURL(int t, const char *u, int k) { (void)t;(void)u;(void)k; return mock_http_file ? 2 : -1; }
+
 int sceHttpDeleteConnection(int i) { (void)i; return 0; }
+/* addresses ending in a key (before '?') are served from their own file, from the start each time */
+const char *mock_http_map[64][2];
+int mock_http_requests;
+static int http_mapped;
+static const char *map_lookup(const char *u)
+{
+    size_t n = strcspn(u, "?#");
+    for (int i = 0; i < 64 && mock_http_map[i][0]; i++) {
+        size_t k = strlen(mock_http_map[i][0]);
+        if (n >= k && !strncmp(u + n - k, mock_http_map[i][0], k) && (n == k || u[n - k - 1] == '/')) return mock_http_map[i][1];
+    }
+    return NULL;
+}
+int sceHttpCreateConnectionWithURL(int t, const char *u, int k) { (void)t;(void)u;(void)k; return mock_http_file || mock_http_map[0][0] ? 2 : -1; }
 int sceHttpCreateRequestWithURL(int c, int m, const char *u, unsigned long long cl)
-{ (void)c;(void)m;(void)u;(void)cl;
-  if (!http_f) { http_f = fopen(mock_http_file, "rb"); http_pos = 0; }
-  http_sess_bytes = 0; mock_http_sessions++; return 3; }
+{ (void)c;(void)m;(void)cl;
+  mock_http_requests++;
+  const char *mf = map_lookup(u);
+  if (mf) { if (http_f) fclose(http_f); http_f = fopen(mf, "rb"); http_pos = 0; http_mapped = 1; }
+  else if (mock_http_map[0][0]) { if (http_f) fclose(http_f); http_f = NULL; http_mapped = 1; }   /* unknown address: 404 */
+  else if (!http_f) { http_f = fopen(mock_http_file, "rb"); http_pos = 0; }
+  http_sess_bytes = 0; http_t0 = mock_now(); mock_http_sessions++; return 3; }
 int sceHttpDeleteRequest(int i) { (void)i; return 0; }
 int sceHttpAbortRequest(int i) { (void)i; return 0; }
 int sceHttpAddRequestHeader(int i, const char *n, const char *v, unsigned m) { (void)i;(void)n;(void)v;(void)m; return 0; }
-int sceHttpSendRequest(int r, const void *p, unsigned s) { (void)r;(void)p;(void)s; return http_f ? 0 : -1; }
-int sceHttpGetStatusCode(int r, int *s) { (void)r; *s = 200; return 0; }
+int sceHttpSendRequest(int r, const void *p, unsigned s) { (void)r;(void)p;(void)s; return http_f || http_mapped ? 0 : -1; }
+int sceHttpGetStatusCode(int r, int *s) { (void)r; *s = (http_mapped && !http_f) ? 404 : mock_http_status; return 0; }
 int sceHttpGetResponseContentLength(int r, unsigned long long *l) { (void)r; *l = 0; return -1; }
 int sceHttpReadData(int r, void *d, unsigned n)
 {
     (void)r;
+    if (!http_f) return 0;
     if (mock_http_fail_after && http_sess_bytes >= mock_http_fail_after) return (int)0x80431068;   /* "connection lost" */
+    if (mock_http_rate > 0) {
+        double due = http_t0 + (double)http_sess_bytes / (double)mock_http_rate;
+        double now = mock_now();
+        if (due > now) usleep((useconds_t)((due - now) * 1e6));
+    }
     fseek(http_f, http_pos, SEEK_SET);
     size_t k = fread(d, 1, n, http_f);
     http_pos += (long)k; http_sess_bytes += (long)k;
     return (int)k;
 }
-void mock_http_reset(void) { if (http_f) fclose(http_f); http_f = NULL; mock_http_sessions = 0; }
+void mock_http_reset(void) { if (http_f) fclose(http_f); http_f = NULL; mock_http_sessions = 0; http_mapped = 0; memset(mock_http_map, 0, sizeof mock_http_map); }

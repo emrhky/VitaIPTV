@@ -4,12 +4,14 @@
 #include "ui.h"
 
 #define SCR_ROWS 12                     /* list rows per page */
+#define SCR_SRC_ROWS 7                  /* playlist cards per page */
 
 typedef struct {
     const char *name;
     const char *badge;                  /* small coloured label before the name (may be NULL) */
     unsigned badge_col;
     const char *right;                  /* dim text on the right (may be NULL) */
+    const char *sub;                    /* second, dim line under the name (playlist cards, may be NULL) */
     int number;                         /* shown before the name if > 0 */
 } ScrRow;
 typedef void (*ScrRowFn)(int i, ScrRow *row, void *ctx);
@@ -46,6 +48,9 @@ typedef struct {
 } ScrDual;
 void scr_dual(const ScrDual *d);
 void scr_loading(const char *title, const char *line, unsigned t_ms);
+/* the waiting background (a picture from the VPK, or drawn) behind loading screens */
+void scr_set_backdrop(const vita2d_texture *img);
+void scr_backdrop(void);
 
 typedef struct {
     const char *name, *group, *info;    /* channel name, group, top-right info (resolution...) */
@@ -57,6 +62,7 @@ typedef struct {
     unsigned center_col;
     int spinner;
     unsigned t_ms;
+    int backdrop;                       /* no picture yet: draw the waiting background */
 } ScrPlayer;
 void scr_player(const ScrPlayer *p);
 

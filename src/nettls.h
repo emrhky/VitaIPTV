@@ -7,6 +7,8 @@
  * checks are switched off for every HTTP template. */
 extern int sceSslInit(unsigned int poolSize);
 
+#include "netua.h"
+
 #define NETTLS_ALL_FLAGS 0x3Fu   /* server verify, client verify, CN, not-after, not-before, known CA */
 
 static inline void net_tls_relax(int tpl)

@@ -29,7 +29,31 @@ add_executable(${PROJECT_NAME}.elf
   src/ui.c
   src/screens.c
   src/lang.c
+  src/mpadec.c
+  src/hls.c
+  src/curlio.c
 )
+
+# https:// through libcurl + OpenSSL (vdpm packages curl, openssl, zlib, zstd; "vdpm install-all" has them).
+# The Vita's own TLS fails on most sites today. Turn off with -DVITAIPTV_HTTPS=OFF if the link fails.
+option(VITAIPTV_HTTPS "https:// through libcurl + OpenSSL" ON)
+set(HTTPS_LIBS "")
+if(VITAIPTV_HTTPS)
+  find_library(CURL_LIB curl)
+  find_library(SSL_LIB ssl)
+  find_library(CRYPTO_LIB crypto)
+  find_library(ZSTD_LIB zstd)
+  if(CURL_LIB AND SSL_LIB AND CRYPTO_LIB)
+    target_compile_definitions(${PROJECT_NAME}.elf PRIVATE HAVE_CURL)
+    set(HTTPS_LIBS ${CURL_LIB} ${SSL_LIB} ${CRYPTO_LIB})
+    if(ZSTD_LIB)
+      list(APPEND HTTPS_LIBS ${ZSTD_LIB})
+    endif()
+    message(STATUS "HTTPS: libcurl + OpenSSL (${CURL_LIB})")
+  else()
+    message(WARNING "curl / OpenSSL not found in the SDK (vdpm install curl openssl): https:// uses the Vita's own TLS only")
+  endif()
+endif()
 
 # Extra system stubs that vita2d needs (found automatically if present in the SDK)
 file(GLOB EXTRA_STUBS
@@ -41,7 +65,8 @@ message(STATUS "Extra stubs: ${EXTRA_STUBS}")
 
 target_link_libraries(${PROJECT_NAME}.elf
   vita2d
-  freetype png jpeg z m
+  ${HTTPS_LIBS}
+  freetype png jpeg z m pthread
   SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceAudiodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
   SceCtrl_stub SceSysmodule_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub
@@ -58,4 +83,5 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE sce_sys/livearea/contents/startup.png sce_sys/livearea/contents/startup.png
   FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
   FILE resources/splash.png resources/splash.png
+  FILE resources/waiting.png resources/waiting.png
 )
