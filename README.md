@@ -231,3 +231,10 @@ Normal çözücünün izin verdiğinden (genelde 5 resim) fazla resim belleği i
 
 ### Joystick
 Kanal ekranında sol analog çubuk kategorilerde, sağ analog çubuk kanallarda yukarı/aşağı gezinir. D-pad eskisi gibi çalışmaya devam eder.
+
+## Sürüm 14: HTTPS, büyük arayüz, 1080p gizleme
+
+- **HTTPS bağlantıları**: `0x80435001` hatası Vita'nın eski sertifika deposundan geliyordu (tinyurl, GitHub, CDN gibi yeni sertifikalar reddediliyordu). Uygulama artık `sceSslInit` çağırıyor ve tüm HTTP istemcilerinde (liste, oynatıcı, analiz, dosya okuyucu) sertifika denetimini kapatıyor (`src/nettls.h`). Kısaltılmış (tinyurl) adresler yönlendirmeyle takip edilir. Not: sertifika denetimi kapalı olduğu için https, şifrelemeyi korur ama sunucunun kimliğini doğrulamaz; herkese açık yayın listeleri için bu kabul edilebilir.
+- **Büyük üst/alt çubuk**: üst çubuk 60 px, alt çubuk 48 px; yazılar bir kademe büyük, düğme simgeleri (X, O, kare, üçgen) 26 px, START/SELECT hapları daha büyük ve belirgin; üst çubukta uygulama logosu.
+- **Ayarlar > 1080p kanalları gizle**: adında/grubunda 1080p, 1080i, FHD, UHD, 4K, 2160p, Full HD geçen kanallar listede görünmez (varsayılan kapalı). `settings.txt` anahtarı: `hide_1080p`.
+- **HD kanalda ses var, görüntü yok (`0x80620002`)**: aynı akışlar önceki sürümlerde sorunsuz açılıyordu; hata çözücünün ilk karede parametre reddetmesi. En olası neden cihazda kalan `reAvPlayer`/dahili çözücü denemesi. Başlangıçta `ur0:tai/config.txt` taranır ve log'a yazılır (`tai config: ...`); hata ekranı eklentiyi kaldırıp Vita'yı yeniden başlatmayı önerir.
