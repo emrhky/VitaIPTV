@@ -119,7 +119,7 @@ static void b64(const unsigned char *in, size_t n, char *out)
     out[o] = 0;
 }
 
-/* https:// through libcurl + OpenSSL: the Vita's own TLS cannot talk to most sites today */
+/* https:// with the built-in TLS (src/curlio.c): the Vita's own TLS cannot talk to most sites today */
 static int mem_data(void *ctx, const uint8_t *d, size_t n) { return on_data((void *)d, 1, n, ctx) != n; }
 
 static int http_get_curl(const char *url, const char *user, const char *pass, Mem *m, char *err, size_t errsz)
@@ -128,7 +128,7 @@ static int http_get_curl(const char *url, const char *user, const char *pass, Me
     int status = 0;
     char e[96];
     int r = cio_get(&rq, &status, e, sizeof e);
-    plog("http: GET %.5s (curl) -> status %d%s%s", url, status, r < 0 ? ", " : "", r < 0 ? e : "");
+    plog("http: GET %.5s (built-in TLS) -> status %d%s%s", url, status, r < 0 ? ", " : "", r < 0 ? e : "");
     if (status >= 400) { snprintf(err, errsz, "Server answered HTTP %d", status); return -1; }
     if (m->overflow) { snprintf(err, errsz, "List is too large (over 24 MB)"); return -1; }
     if (r < 0) { snprintf(err, errsz, "Connection failed (%s)", e); return -1; }
@@ -1116,6 +1116,7 @@ static void stop_all(void)
 
 /* ---- start-up -------------------------------------------------------------- */
 static vita2d_texture *splash_img, *wait_img;
+static int clocks_rc[4];
 
 static void splash_frame(const char *status_line)
 {
@@ -1151,6 +1152,11 @@ int main(void)
     unsigned t0 = now_ms();
     splash_frame(T("Starting..."));
 
+    /* full speed: the software parts (TLS, MP2 audio, demuxing, the screen) get 444 MHz instead of 333 */
+    clocks_rc[0] = scePowerSetArmClockFrequency(444);
+    clocks_rc[1] = scePowerSetBusClockFrequency(222);
+    clocks_rc[2] = scePowerSetGpuClockFrequency(222);
+    clocks_rc[3] = scePowerSetGpuXbarClockFrequency(166);
     sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
     sceSysmoduleLoadModule(SCE_SYSMODULE_HTTPS);
     SceNetInitParam np = { malloc(1024 * 1024), 1024 * 1024, 0 };
@@ -1173,7 +1179,9 @@ int main(void)
         }
     }
     plog("settings: server %s", settings.proxy[0] ? settings.proxy : "none");
-    plog("https: %s", cio_available() ? "libcurl + OpenSSL" : "system only (built without curl)");
+    plog("clocks: cpu 444 -> 0x%08X, bus 222 -> 0x%08X, gpu 222 -> 0x%08X, xbar 166 -> 0x%08X",
+         (unsigned)clocks_rc[0], (unsigned)clocks_rc[1], (unsigned)clocks_rc[2], (unsigned)clocks_rc[3]);
+    plog("https: %s", cio_available() ? "built-in TLS (mbedTLS)" : "system only (built without TLS)");
     channel_list_init(&chans);
     load_sources();
     while (now_ms() - t0 < 1500) splash_frame(T("Loading playlists..."));   /* let the logo be seen */

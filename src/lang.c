@@ -125,6 +125,7 @@ static const Pair PATTERNS[] = {
       "Sunucu HTTP 407 dedi (sağlayıcı reddediyor: hesap başka yerde açık ya da kanal pakette yok)" },
     { "HTTPS failed (0x%08X): this site needs newer TLS than the Vita has",
       "HTTPS başarısız (0x%s): bu site Vita'dakinden yeni TLS istiyor" },
+    { "No HLS variant answers", "HLS yayınının hiçbir kalitesi yanıt vermiyor" },
     { "Stream stopped (the HLS playlist is not updated)", "Yayın durdu (HLS listesi güncellenmiyor)" },
     { "Encrypted HLS stream (AES): not supported", "Şifreli HLS yayını (AES): desteklenmiyor" },
     { "HLS with MP4 segments: not supported (MPEG-TS only)", "MP4 parçalı HLS: desteklenmiyor (yalnız MPEG-TS)" },
