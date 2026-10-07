@@ -273,3 +273,13 @@ Vita'nın kendi TLS'i (`0x80431075`) bugünkü sitelerin çoğuyla el sıkışam
 - Sağ analog her zaman kanal listesini, sol analog kategorileri kaydırır; mavi vurgu kullanılan çubuğun listesine geçer.
 - Oynatma listeleri ekranı: büyük renkli tür etiketleri (XTREAM, M3U, FILE, STREAM, LOCAL), daha büyük adlar ve altında sunucu / dosya adı.
 - LiveArea: Başlat kapısındaki logo artık kırpılmıyor (opak, kenar boşluklu); LiveArea arka planı sade, ad sol üstte. Kanal yüklenirken ve listeler yüklenirken markalı bekleme arka planı (`resources/waiting.png`).
+
+## Sürüm 16: log bulguları ve hız
+
+- **Donan görüntü:** bazı kanallarda `0x80620003` hatasından sonra çözücü veri almaya devam edip hiç resim vermiyordu (log: 15 sn'de 9 resim). Artık 40 birim boyunca resim gelmezse çözücü bir sonraki anahtar karede yeniden başlatılır ve sığmayan (referans olmayan) resimler 30 sn atlanır. Log: `no picture from the decoder ...; restarting it`, `decoder restarted`.
+- **Sırasız gelen resimler:** bazı HLS kanallarında çözücü resimleri sırasız veriyor (log: `out of order 46`). Bu kanallarda gösterim bir resim daha bekler, böylece önce gelmesi gereken resim atılmaz.
+- **HLS kalite yedeği:** seçilen kalite (ör. 720p) 404 verirse sıradaki uygun kalite denenir (en fazla üç). Log metinleri düzeltildi (`HTTP 404` / `connection failed`).
+- **Uzun parçalı canlı HLS** (8 sn ve üstü) canlıya daha yakın başlar (sondan 2 parça).
+- **407:** yalnız bir kez, 1,5 sn sonra yeniden denenir (sürekli 407 veren kanallarda bekleme kısaldı).
+- **Hız:** açılışta işlemci 444 MHz, veri yolu 222, GPU 222, xbar 166 MHz'e çıkarılır (homebrew varsayılanı 333 MHz). TLS, MP2 ses, demux ve ekran çizimi hızlanır. Log: `clocks: ...`.
+- Log'da `https: built-in TLS (mbedTLS)` yazar.
