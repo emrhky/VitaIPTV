@@ -94,7 +94,7 @@ typedef struct {
     MkvDemux *mkv;                      /* used instead of dmx when the stream is Matroska */
     volatile int cur_req;               /* HTTP request in progress, aborted on stop */
     /* decoder (worker thread) */
-    int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder;
+    int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder, no_two;
     int connect_fails, multi_out, oom_fixed;
     int skip_nonref;                    /* decoder too small for this stream: drop pictures nothing refers to */
     uint32_t skipped;
@@ -639,15 +639,17 @@ static void video_packet(Tsp *t, Pkt *p)
     }
     int r;
     for (;;) {
-        int s1 = take_free_slot2(t, s);
-        r = decode_au(t, s, s1, n, pts);
-        if ((unsigned)r == 0x80620003u && s1 < 0 && t->st.decoded > 0) {   /* maybe it needs room for two pictures */
+        /* One output picture per call, as the library is known to accept (asking for two from the start
+         * made the real decoder answer 0x80620002 to every picture). Two only as a way out of 0x80620003. */
+        r = decode_au(t, s, -1, n, pts);
+        if ((unsigned)r == 0x80620003u && t->st.decoded > 0 && !t->no_two) {   /* maybe it needs room for two pictures */
             int s2 = -1;
             for (int w = 0; w < 100 && (s2 = take_free_slot2(t, s)) < 0 && !t->cancel; w++) sceKernelDelayThread(2000);
             if (s2 >= 0) {
                 plog("tsp: out of memory with one picture slot, trying again with two");
-                r = decode_au(t, s, s2, n, pts);
-                if (r >= 0 && t->oom_fixed++ < 3) plog("tsp: two picture slots fixed it");
+                int r2 = decode_au(t, s, s2, n, pts);
+                if (r2 >= 0) { r = r2; if (t->oom_fixed++ < 3) plog("tsp: two picture slots fixed it"); }
+                else if (is_param_error(r2)) { t->no_two = 1; plog("tsp: the decoder does not take two pictures per call; not trying that again"); }
             }
         }
         if (r >= 0 || t->st.decoded > 0 || !is_mem_error(r) || t->plan + 1 >= NPLANS) break;

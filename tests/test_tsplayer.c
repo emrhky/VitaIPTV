@@ -22,7 +22,7 @@ extern int mock_http_sessions;
 void mock_http_reset(void);
 
 /* ---- fake hardware decoder: needs SPS/PPS first, reorders pictures by 2 like B-frames ---- */
-static int refuse_refs;
+static int refuse_refs, reject_two;
 static int lib_open, dec_open, sps_seen, reject_pts, npend, need_refs, created_refs, decode_calls, creates, lib_max_refs;
 static int lib_l31, wedge_mode, wedged, need_two, two_calls, gave_two;
 static int64_t refused_pts = -2;
@@ -87,6 +87,7 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
     int has_ts = !(au->pts.upper == 0xFFFFFFFFu && au->pts.lower == 0xFFFFFFFFu);
     if (refuse_refs && created_refs == refuse_refs) return (int)0x80620002;   /* a decoder that dislikes this reference count */
     if (reject_pts && has_ts) return (int)0x80620002;
+    if (reject_two && arr->numOfElm == 2) return (int)0x80620002;   /* the real Vita: only one picture per call works */
     if (arr->numOfElm < 1 || arr->numOfElm > 2) return (int)0x80620002;
     for (unsigned e = 0; e < arr->numOfElm; e++) {
         SceAvcdecPicture *q = arr->pPicture[e];
@@ -353,6 +354,13 @@ int main(int argc, char **argv)
     printf("               decoder created with %d refs, %d time(s)\n", created_refs, creates);
     assert(created_refs == 5 && creates == 1 && r.st.errors <= 2 && r.st.decoded >= 60 && r.synced);  /* drops B pictures, no freeze */
     lib_max_refs = 0;
+
+    /* a decoder that refuses two output pictures per call: playback must not depend on it */
+    reject_two = 1; creates = 0; need_refs = 0; lib_max_refs = 0;
+    r = play(argv[1], 10);
+    show("one picture per call", &r);
+    assert(r.st.state == TSP_ENDED && r.st.errors == 0 && r.st.decoded >= 140 && creates == 1 && r.synced);
+    reject_two = 0;
 
     /* the decoder opens with 5 refs but refuses every picture: reopened with fewer */
     refuse_refs = 5; need_refs = 0; creates = 0;

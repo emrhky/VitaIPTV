@@ -243,3 +243,6 @@ Kanal ekranında sol analog çubuk kategorilerde, sağ analog çubuk kanallarda 
 - Çözücü açılıyor ama her kareyi `0x80620002` ile reddediyorsa (log: "decoder refuses every picture"), 2, 3, 4 referansla yeniden açılır. Eski sürümlerde bu yayınlar 2 referansla çalışmıştı.
 - Bu hata aynı yayınların daha önce çalıştığı bir cihazda çıkıyorsa kalıcı cihaz durumu olabilir (dahili çözücü denemeleri/çökmeler sonrası): Vita'yı **tamamen kapatıp** (Ayarlar > Güç > Kapat, uyku değil) yeniden açın.
 - Liste indirme hataları log'a yazılır (`http: GET https://host failed: ...`). HTTPS el sıkışması başarısızsa (`0x8043....`) uygulama bunu söyler ve `.m3u` dosyasını PC'den `ux0:data/VitaIPTV/` içine kopyalamayı önerir (yerel dosya olarak otomatik eklenir).
+
+### Sürüm 14d: 720p görüntü yok sorununun asıl nedeni
+Eski sürümle (VitaIPTV12.zip) karşılaştırınca bulundu: yeni oynatıcı her kare için çözücüden **iki** çıktı resmi istiyordu (`numOfElm = 2`); gerçek Vita bunu `0x80620002` (geçersiz parametre) ile reddediyor, eski sürüm hep tek resim istiyordu. Artık her çağrıda tek resim istenir; ikinci resim yalnızca `0x80620003` (bellek yetmedi) durumunda bir kez denenir ve cihaz bunu da reddederse bir daha denenmez. Test düzeneği "iki resmi reddeden çözücü" durumunu da kapsar. Önceki ek önlemler (referans sayısı sınırı, 2/3/4 ile yeniden açma) yedek olarak durur.
