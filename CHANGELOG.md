@@ -12,7 +12,6 @@
   Select stream analysis, Up / Down previous / next, O back. Live TV can be paused for a short while.
 - **Stream analysis** (Select) now works for HLS, https and MP4 / MKV films, and shows the download speed.
 - Bigger buffers and recovery when an HLS stream stalls; clearer messages for videos the decoder refuses.
-- Fixed a crash (GPU) after a playlist failed to load.
 - `tools/xtream_test_server.py`: serve a folder of your own videos as an Xtream account to try films and series.
 - The transcoding server can start films at a position.
 
