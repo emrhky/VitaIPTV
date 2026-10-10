@@ -28,9 +28,28 @@ typedef struct {
     volatile int av_sync;               /* video is following the audio clock */
     volatile int av_late_ms;            /* how late pictures are shown against the audio, on average */
     volatile int audio_level;           /* loudness of the last audio frame, 0..1000 */
+    volatile int hd;                    /* decoding above 720p through the HD decoder (internal entry points) */
+    volatile int hls_hd;                /* HLS offers a 1080p variant (the player can switch to it) */
+    /* films and episodes */
+    volatile int dur_ms;                /* length (0 = unknown) */
+    volatile int seekable;              /* tsp_start_vod at another time works */
+    volatile int paused;
+    char note[64];                      /* what a film is waiting for (reading its index...), "" = nothing */
 } TspStatus;
 
+/* For the next tsp_start: hd1080 = decode above 720p; hls_max_h = 720 or 1080, the
+ * tallest HLS variant to choose (1080 only counts with hd1080). */
+void              tsp_set_options(int hd1080, int hls_max_h);
 int               tsp_start(const char *url);       /* 0 = started */
+/* A film or episode (a file on a server that sends parts of it): starts at start_ms (the keyframe at or
+ * before it). MKV, MP4 and TS files. */
+int               tsp_start_vod(const char *url, int start_ms);
+/* A film as a plain stream that starts offset_ms into it (the transcoding server cut it there): pause works,
+ * the position counts from offset_ms, jumping means starting the server again. */
+int               tsp_start_vod_stream(const char *url, int offset_ms);
+void              tsp_pause(int on);
+/* Position of the picture on screen and the length, in ms. Returns 0 if no film is playing. */
+int               tsp_vod_pos(int *pos_ms, int *dur_ms);
 void              tsp_stop(void);                    /* waits for the worker, frees everything */
 /* Picture to draw now (NULL if none yet). *w, *h = visible part of the texture. */
 vita2d_texture   *tsp_frame(int *w, int *h);

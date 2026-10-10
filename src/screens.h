@@ -63,6 +63,8 @@ typedef struct {
     int spinner;
     unsigned t_ms;
     int backdrop;                       /* no picture yet: draw the waiting background */
+    /* films: time line (pos/dur in ms; seek_ms >= 0 = a jump being chosen) and the pause sign */
+    int film, pos_ms, dur_ms, seek_ms, paused;
 } ScrPlayer;
 void scr_player(const ScrPlayer *p);
 

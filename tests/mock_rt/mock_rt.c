@@ -54,6 +54,8 @@ int sceKernelGetMemBlockBase(SceUID uid, void **base) { *base = blocks[uid]; ret
 int sceKernelFreeMemBlock(SceUID uid)
 { if (block_type[uid] == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW) mock_phycont_left += block_size[uid];
   free(blocks[uid]); blocks[uid] = NULL; mock_live_blocks--; return 0; }
+int sceKernelGetFreeMemorySize(SceKernelFreeMemorySizeInfo *info)
+{ info->size_user = 100 << 20; info->size_cdram = 60 << 20; info->size_phycont = (int)mock_phycont_left; return 0; }
 int mock_mem_type(const void *p)
 { for (int i = 1; i < 1024; i++) if (blocks[i] && (const char *)p >= (char *)blocks[i] && (const char *)p < (char *)blocks[i] + block_size[i]) return block_type[i];
   return 0; }
@@ -75,6 +77,12 @@ int mock_http_status = 200;
 int mock_http_sessions;
 static FILE *http_f;
 static long http_pos, http_sess_bytes;
+/* Range requests (films): "Range: bytes=a-b" is honoured unless mock_http_no_ranges */
+int mock_http_no_ranges;
+int mock_http_range_requests;
+static int http_range;
+static long http_rfrom, http_rto, http_end;
+static char http_hdrs[256];
 static double http_t0;
 #include <time.h>
 #include <unistd.h>
@@ -110,13 +118,45 @@ int sceHttpCreateRequestWithURL(int c, int m, const char *u, unsigned long long 
   if (mf) { if (http_f) fclose(http_f); http_f = fopen(mf, "rb"); http_pos = 0; http_mapped = 1; }
   else if (mock_http_map[0][0]) { if (http_f) fclose(http_f); http_f = NULL; http_mapped = 1; }   /* unknown address: 404 */
   else if (!http_f) { http_f = fopen(mock_http_file, "rb"); http_pos = 0; }
-  http_sess_bytes = 0; http_t0 = mock_now(); mock_http_sessions++; return 3; }
+  http_sess_bytes = 0; http_t0 = mock_now(); mock_http_sessions++; http_range = 0; http_end = -1; return 3; }
 int sceHttpDeleteRequest(int i) { (void)i; return 0; }
 int sceHttpAbortRequest(int i) { (void)i; return 0; }
-int sceHttpAddRequestHeader(int i, const char *n, const char *v, unsigned m) { (void)i;(void)n;(void)v;(void)m; return 0; }
-int sceHttpSendRequest(int r, const void *p, unsigned s) { (void)r;(void)p;(void)s; return http_f || http_mapped ? 0 : -1; }
-int sceHttpGetStatusCode(int r, int *s) { (void)r; *s = (http_mapped && !http_f) ? 404 : mock_http_status; return 0; }
-int sceHttpGetResponseContentLength(int r, unsigned long long *l) { (void)r; *l = 0; return -1; }
+int sceHttpAddRequestHeader(int i, const char *n, const char *v, unsigned m)
+{
+    (void)i; (void)m;
+    if (!strcmp(n, "Range")) {
+        http_range = 1;
+        http_rto = -1;
+        sscanf(v, "bytes=%ld-%ld", &http_rfrom, &http_rto);
+    }
+    return 0;
+}
+static long http_file_size(void) { long c = ftell(http_f); fseek(http_f, 0, SEEK_END); long z = ftell(http_f); fseek(http_f, c, SEEK_SET); return z; }
+int sceHttpGetAllResponseHeaders(int r, char **h, unsigned int *n) { (void)r; *h = http_hdrs; *n = (unsigned)strlen(http_hdrs); return 0; }
+int sceHttpSendRequest(int r, const void *p, unsigned s)
+{
+    (void)r; (void)p; (void)s;
+    http_end = -1;
+    http_hdrs[0] = 0;
+    if (http_f && http_range && !mock_http_no_ranges) {
+        long z = http_file_size();
+        mock_http_range_requests++;
+        http_pos = http_rfrom;
+        http_end = http_rto >= 0 && http_rto + 1 < z ? http_rto + 1 : z;
+        snprintf(http_hdrs, sizeof http_hdrs, "Content-Length: %ld\r\nContent-Range: bytes %ld-%ld/%ld\r\n", http_end - http_pos, http_pos, http_end - 1, z);
+    } else if (http_f && mock_http_no_ranges) {
+        http_pos = 0;                                       /* a server that ignores ranges sends it all, every time */
+    }
+    return http_f || http_mapped ? 0 : -1;
+}
+int sceHttpGetStatusCode(int r, int *s)
+{
+    (void)r;
+    *s = (http_mapped && !http_f) ? 404 : mock_http_status;
+    if (*s == 200 && http_range && !mock_http_no_ranges) *s = 206;
+    return 0;
+}
+int sceHttpGetResponseContentLength(int r, unsigned long long *l) { (void)r; if (!http_f || !http_range) { *l = 0; return -1; } *l = (unsigned long long)http_file_size(); return 0; }
 int sceHttpReadData(int r, void *d, unsigned n)
 {
     (void)r;
@@ -128,6 +168,8 @@ int sceHttpReadData(int r, void *d, unsigned n)
         if (due > now) usleep((useconds_t)((due - now) * 1e6));
     }
     fseek(http_f, http_pos, SEEK_SET);
+    if (http_end >= 0 && http_pos + (long)n > http_end) n = http_end > http_pos ? (unsigned)(http_end - http_pos) : 0;
+    if (!n) return 0;
     size_t k = fread(d, 1, n, http_f);
     http_pos += (long)k; http_sess_bytes += (long)k;
     return (int)k;

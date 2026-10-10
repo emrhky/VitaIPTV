@@ -68,10 +68,53 @@ void scr_loading(const char *title, const char *line, unsigned t_ms)
     ui_message(title, line, UI_TEXT, 1, t_ms);
 }
 
+static void fmt_clock(char *b, size_t n, int ms)
+{
+    int sec = ms < 0 ? 0 : ms / 1000;
+    if (sec >= 3600) snprintf(b, n, "%d:%02d:%02d", sec / 3600, sec / 60 % 60, sec % 60);
+    else snprintf(b, n, "%d:%02d", sec / 60, sec % 60);
+}
+
+/* films: position, length and a bar; a jump being chosen shows where it goes */
+static int time_line(const ScrPlayer *p, int y)
+{
+    y -= 40;
+    vita2d_draw_rectangle(0, y, 960, 40, UI_SHADE);
+    char a[16], b[16];
+    int shown = p->seek_ms >= 0 ? p->seek_ms : p->pos_ms;
+    fmt_clock(a, sizeof a, shown);
+    if (p->dur_ms > 0) fmt_clock(b, sizeof b, p->dur_ms); else snprintf(b, sizeof b, "--:--");
+    ui_text(18, y + 27, p->seek_ms >= 0 ? UI_WARN : UI_TEXT, 1.0f, a);
+    int bw = ui_text_w(1.0f, b);
+    ui_text(942 - bw, y + 27, UI_DIM, 1.0f, b);
+    int x0 = 120, x1 = 942 - bw - 24;
+    if (x1 > x0 + 40) {
+        vita2d_draw_rectangle(x0, y + 17, x1 - x0, 6, UI_LINE);
+        if (p->dur_ms > 0) {
+            float f = (float)p->pos_ms / (float)p->dur_ms;
+            if (f < 0) f = 0;
+            if (f > 1) f = 1;
+            vita2d_draw_rectangle(x0, y + 17, (x1 - x0) * f, 6, UI_ACCENT);
+            if (p->seek_ms >= 0) {
+                float g = (float)p->seek_ms / (float)p->dur_ms;
+                if (g < 0) g = 0;
+                if (g > 1) g = 1;
+                vita2d_draw_rectangle(x0 + (x1 - x0) * g - 2, y + 10, 4, 20, UI_WARN);
+            }
+        }
+    }
+    return y;
+}
+
 void scr_player(const ScrPlayer *p)
 {
     if (p->backdrop) scr_backdrop();
     if (p->center_title) ui_message(p->center_title, p->center_line, p->center_col, p->spinner, p->t_ms);
+    if (p->paused && !p->center_title) {                    /* the pause sign */
+        ui_round_rect(430, 222, 100, 100, 18, UI_PANEL);
+        vita2d_draw_rectangle(456, 245, 16, 54, UI_TEXT);
+        vita2d_draw_rectangle(488, 245, 16, 54, UI_TEXT);
+    }
     if (!p->osd) return;
     vita2d_draw_rectangle(0, 0, 960, 62, UI_SHADE);
     vita2d_draw_rectangle(0, 62, 960, 2, UI_ACCENT);
@@ -81,6 +124,7 @@ void scr_player(const ScrPlayer *p)
     if (p->group && p->group[0]) ui_text_fit(20, 52, UI_DIM, 0.9f, p->group, 700);
     if (p->info && p->info[0]) ui_text(940 - iw, 30, UI_DIM, 0.9f, p->info);
     int y = UI_FOOTER_Y;
+    if (p->film) y = time_line(p, y);
     if (p->stats2 && p->stats2[0]) { y -= 26; vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE); ui_text_fit(18, y + 19, UI_DIM, 0.9f, p->stats2, 924); }
     if (p->stats1 && p->stats1[0]) { y -= 26; vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE); ui_text_fit(18, y + 19, UI_DIM, 0.9f, p->stats1, 924); }
     ui_footer(p->hints, p->nhints, NULL, 0);
@@ -126,33 +170,35 @@ void scr_form(const char *title, const char *subtitle, const ScrField *f, int n,
               const UiHint *hints, int nhints, const char *status, int status_err)
 {
     ui_header(title, subtitle, NULL);
+    int fh = n > 8 ? 8 * FORM_H / n : FORM_H;              /* more than 8 rows: squeeze them to fit */
+    int ty = fh - 17;                                       /* text baseline inside a row */
     for (int i = 0; i < n; i++) {
-        int y = FORM_Y + i * FORM_H, on = f[i].enabled;
+        int y = FORM_Y + i * fh, on = f[i].enabled;
         unsigned lc = on ? UI_DIM : RGBA8(80, 84, 100, 255), vc = on ? UI_TEXT : RGBA8(90, 94, 110, 255);
         if (f[i].kind == SCR_F_BUTTON) {
             int bw = 300, bx = 480 - bw / 2;
-            vita2d_draw_rectangle(bx, y + 6, bw, FORM_H - 12, i == sel ? UI_ACCENT : UI_PANEL2);
-            ui_text_center(480, y + 30, i == sel ? RGBA8(255, 255, 255, 255) : vc, 1.05f, f[i].label);
+            vita2d_draw_rectangle(bx, y + 6, bw, fh - 12, i == sel ? UI_ACCENT : UI_PANEL2);
+            ui_text_center(480, y + ty + 1, i == sel ? RGBA8(255, 255, 255, 255) : vc, 1.05f, f[i].label);
             continue;
         }
         if (i == sel) {
-            vita2d_draw_rectangle(10, y + 2, 940, FORM_H - 4, UI_SEL);
-            vita2d_draw_rectangle(10, y + 2, 4, FORM_H - 4, UI_ACCENT);
+            vita2d_draw_rectangle(10, y + 2, 940, fh - 4, UI_SEL);
+            vita2d_draw_rectangle(10, y + 2, 4, fh - 4, UI_ACCENT);
         }
-        ui_text(36, y + 29, i == sel ? UI_TEXT : lc, 1.0f, f[i].label);
+        ui_text(36, y + ty, i == sel ? UI_TEXT : lc, 1.0f, f[i].label);
         int bx = 290, bw = 640;
-        vita2d_draw_rectangle(bx, y + 8, bw, FORM_H - 16, i == sel ? RGBA8(30, 52, 110, 255) : UI_PANEL);
+        vita2d_draw_rectangle(bx, y + 8, bw, fh - 16, i == sel ? RGBA8(30, 52, 110, 255) : UI_PANEL);
         const char *v = f[i].value && f[i].value[0] ? f[i].value : (on ? T("(empty)") : "-");
         unsigned col = f[i].value && f[i].value[0] ? vc : RGBA8(100, 104, 122, 255);
         if (f[i].kind == SCR_F_CHOICE) {
-            ui_text(bx + 12, y + 29, i == sel ? UI_ACCENT : lc, 1.0f, "<");
-            ui_text_center(bx + bw / 2, y + 29, col, 1.0f, v);
-            ui_text(bx + bw - 24, y + 29, i == sel ? UI_ACCENT : lc, 1.0f, ">");
+            ui_text(bx + 12, y + ty, i == sel ? UI_ACCENT : lc, 1.0f, "<");
+            ui_text_center(bx + bw / 2, y + ty, col, 1.0f, v);
+            ui_text(bx + bw - 24, y + ty, i == sel ? UI_ACCENT : lc, 1.0f, ">");
         } else if (f[i].kind == SCR_F_TOGGLE) {
             int onv = !strcmp(v, T("On"));
-            ui_badge(bx + 12, y + 14, v, onv ? RGBA8(40, 160, 90, 255) : RGBA8(110, 110, 130, 255));
+            ui_badge(bx + 12, y + (fh - 18) / 2, v, onv ? RGBA8(40, 160, 90, 255) : RGBA8(110, 110, 130, 255));
         } else {
-            ui_text_fit(bx + 12, y + 29, col, 1.0f, v, bw - 24);
+            ui_text_fit(bx + 12, y + ty, col, 1.0f, v, bw - 24);
         }
     }
     ui_footer(hints, nhints, status, status_err);

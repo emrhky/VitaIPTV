@@ -3,6 +3,9 @@
 #include "tsdemux.h"
 #include "mkvdemux.h"
 #include "httpio.h"                     /* plog() */
+#include "curlio.h"
+#include "hls.h"
+#include "vod.h"
 #include <psp2/net/http.h>
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
@@ -97,8 +100,9 @@ static void summarize(ProbeResult *r, const TsInfo *i, int http_status, unsigned
                      i->frame_mbs_only ? "" : " interlaced", ts_video_fps(i), i->bit_depth);
             add_line(r, "Keyframes: %u (+%u other I-pictures) of %u pictures, reference frames: %d", i->keyframes, i->intra_aus, i->video_aus, i->ref_frames);
             if (i->bit_depth != 8 || i->chroma_format != 1) verdict = "NO: Vita cannot decode this H.264 variant";
-            else if (i->width > 1280 || i->height > 720) verdict = "MAYBE: above 720p, hardware limit unknown";
-            else verdict = "YES: H.264 8-bit up to 720p";
+            else if (i->width > 1920 || i->height > 1088) verdict = "NO: above 1080p";
+            else if ((i->width > 1280 || i->height > 720) && !i->frame_mbs_only) verdict = "MAYBE: 1080i (interlaced) may stutter";
+            else verdict = i->width > 1280 || i->height > 720 ? "YES: H.264 8-bit 1080p" : "YES: H.264 8-bit up to 720p";
         }
     } else if (i->video_codec == TS_CODEC_HEVC) {
         add_line(r, "Video: HEVC (H.265), %u pictures", i->video_aus);
@@ -120,53 +124,194 @@ static void summarize(ProbeResult *r, const TsInfo *i, int http_status, unsigned
     add_line(r, "Playable by hardware: %s", verdict);
 }
 
-/* Reads data and feeds the demuxer. Returns 0 if data was read, -1 with res->error set. */
-static int read_http(ProbeCtx *c, Demux *d, uint8_t *buf, int *status_out, unsigned long long t0)
-{
-    ProbeResult *r = &c->res;
-    int tpl = -1, conn = -1, req = -1, rc = -1, status = 0, n, first = 1;
-    uint32_t total = 0;
+/* ---- one GET: http through sceHttp, https through the built-in TLS; optionally a byte range ---- */
+typedef int (*PData)(void *ctx, const uint8_t *d, size_t n);       /* non-zero: stop */
+typedef struct { ProbeCtx *c; PData fn; void *ctx; } PgCtx;
+static int pg_data(void *x, const uint8_t *d, size_t n) { PgCtx *g = x; return g->c->cancel || g->fn(g->ctx, d, n); }
+static int pg_stop(void *x) { return ((PgCtx *)x)->c->cancel; }
 
+/* Returns 0 when the body ended or fn stopped it, < 0 on a network error (err says why). */
+static int pget(ProbeCtx *c, const char *url, long long from, long long to, PData fn, void *ctx, int *status, char *err, size_t errsz)
+{
+    *status = 0;
+    err[0] = 0;
+    if (cio_available() && !strncasecmp(url, "https:", 6)) {
+        PgCtx g = { c, fn, ctx };
+        CioRequest rq = { url, NULL, NULL, 10, 5, pg_data, pg_stop, &g, from >= 0, from >= 0 ? (uint64_t)from : 0,
+                          to >= 0 ? (uint64_t)to : 0, NULL };
+        int r = cio_get(&rq, status, err, errsz);
+        return r == -2 ? 0 : r;
+    }
+    int tpl = -1, conn = -1, req = -1, rc = -1, n;
+    uint8_t *buf = malloc(CHUNK);
+    if (!buf) { snprintf(err, errsz, "Out of memory"); return -1; }
     tpl = sceHttpCreateTemplate(NET_UA, SCE_HTTP_VERSION_1_1, 1);
-    if (tpl < 0) { fail(r, "HTTP init failed"); goto done; }
+    if (tpl < 0) { snprintf(err, errsz, "HTTP init failed"); goto done; }
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);
-    sceHttpSetRecvTimeOut(tpl, 3 * 1000 * 1000);
+    sceHttpSetRecvTimeOut(tpl, 5 * 1000 * 1000);
     sceHttpSetAutoRedirect(tpl, 1);
     net_tls_relax(tpl);
-    conn = sceHttpCreateConnectionWithURL(tpl, c->url, 1);
-    if (conn < 0) { fail(r, "Bad address"); goto done; }
-    req = sceHttpCreateRequestWithURL(conn, SCE_HTTP_METHOD_GET, c->url, 0);
-    if (req < 0) { fail(r, "Request failed"); goto done; }
+    conn = sceHttpCreateConnectionWithURL(tpl, url, 1);
+    if (conn < 0) { snprintf(err, errsz, "Bad address"); goto done; }
+    req = sceHttpCreateRequestWithURL(conn, SCE_HTTP_METHOD_GET, url, 0);
+    if (req < 0) { snprintf(err, errsz, "Request failed"); goto done; }
+    if (from >= 0) {
+        char range[64];
+        if (to >= 0) snprintf(range, sizeof range, "bytes=%lld-%lld", from, to);
+        else snprintf(range, sizeof range, "bytes=%lld-", from);
+        sceHttpAddRequestHeader(req, "Range", range, SCE_HTTP_HEADER_ADD);
+    }
     n = sceHttpSendRequest(req, NULL, 0);
-    if (n < 0) { char m[64]; snprintf(m, sizeof m, "Connection failed (0x%08X)", (unsigned)n); fail(r, m); goto done; }
-    sceHttpGetStatusCode(req, &status);
-    *status_out = status;
-    plog("probe: HTTP status %d", status);
-    if (status >= 400) { char m[64]; snprintf(m, sizeof m, "Server answered HTTP %d", status); fail(r, m); goto done; }
-
+    if (n < 0) { snprintf(err, errsz, "Connection failed (0x%08X)", (unsigned)n); goto done; }
+    sceHttpGetStatusCode(req, status);
+    rc = 0;
+    if (*status >= 400) goto done;
     while (!c->cancel) {
         n = sceHttpReadData(req, buf, CHUNK);
-        if (n < 0) { if (total == 0) { fail(r, "Read error"); goto done; } break; }
-        if (n == 0) break;
-        if (first) {
-            first = 0;
-            plog("probe: first bytes %02X %02X %02X %02X %02X %02X %02X %02X", buf[0], buf[1], buf[2], buf[3],
-                 n > 4 ? buf[4] : 0, n > 5 ? buf[5] : 0, n > 6 ? buf[6] : 0, n > 7 ? buf[7] : 0);
-            if (n >= 7 && !memcmp(buf, "#EXTM3U", 7)) { fail(r, "HLS playlist (.m3u8): not supported yet"); goto done; }
-            if (buf[0] == '<') { fail(r, "Server sent a web page, not video"); goto done; }
-        }
-        { TsSink sk = { NULL, NULL, NULL }; dmx_feed(d, &sk, buf, (size_t)n, total == 0); }
-        total += (uint32_t)n;
-        r->bytes = total;
-        if (total >= PROBE_MAX || sceKernelGetProcessTimeWide() - t0 >= PROBE_US) break;
+        if (n < 0) { snprintf(err, errsz, "Read error (0x%08X)", (unsigned)n); rc = n; break; }
+        if (n == 0 || fn(ctx, buf, (size_t)n)) break;
     }
-    rc = 0;
 done:
     if (req >= 0) sceHttpDeleteRequest(req);
     if (conn >= 0) sceHttpDeleteConnection(conn);
     if (tpl >= 0) sceHttpDeleteTemplate(tpl);
+    free(buf);
     return rc;
+}
+
+/* ---- a stream (TS or MKV) into the demuxer; what the first bytes are decides the rest ---- */
+enum { SNIFF_STREAM, SNIFF_PLAYLIST, SNIFF_MP4, SNIFF_WEB };
+typedef struct { ProbeCtx *c; Demux *d; uint32_t got; unsigned long long t0; int sniff, first; } StCtx;
+
+static int st_data(void *x, const uint8_t *b, size_t n)
+{
+    StCtx *s = x;
+    if (s->first) {
+        s->first = 0;
+        plog("probe: first bytes %02X %02X %02X %02X %02X %02X %02X %02X", b[0], n > 1 ? b[1] : 0, n > 2 ? b[2] : 0,
+             n > 3 ? b[3] : 0, n > 4 ? b[4] : 0, n > 5 ? b[5] : 0, n > 6 ? b[6] : 0, n > 7 ? b[7] : 0);
+        if (s->c->res.bytes == 0) {                         /* only the first thing fetched can be a playlist */
+            if (hls_is_playlist((const char *)b, n)) { s->sniff = SNIFF_PLAYLIST; return 1; }
+            if (vod_container(b, n) == VOD_MP4) { s->sniff = SNIFF_MP4; return 1; }
+            if (b[0] == '<') { s->sniff = SNIFF_WEB; return 1; }
+        }
+    }
+    TsSink sk = { NULL, NULL, NULL };
+    dmx_feed(s->d, &sk, b, n, s->c->res.bytes == 0);
+    s->got += (uint32_t)n;
+    s->c->res.bytes += (uint32_t)n;
+    return s->c->res.bytes >= PROBE_MAX || sceKernelGetProcessTimeWide() - s->t0 >= PROBE_US;
+}
+
+static int probe_stream(ProbeCtx *c, const char *url, Demux *d, int *status, unsigned long long t0, int *sniff)
+{
+    StCtx s = { c, d, 0, t0, SNIFF_STREAM, 1 };
+    char err[100];
+    int r = pget(c, url, -1, -1, st_data, &s, status, err, sizeof err);
+    *sniff = s.sniff;
+    plog("probe: HTTP status %d, %u KB", *status, (unsigned)(s.got / 1024));
+    if (*status >= 400) { char m[64]; snprintf(m, sizeof m, "Server answered HTTP %d", *status); fail(&c->res, m); return -1; }
+    if (s.sniff == SNIFF_WEB) { fail(&c->res, "Server sent a web page, not video"); return -1; }
+    if (r < 0 && s.got == 0 && s.sniff == SNIFF_STREAM) { fail(&c->res, err[0] ? err : "Connection failed"); return -1; }
+    return 0;
+}
+
+/* ---- whole small files (playlists) and byte ranges (an MP4's index) ---- */
+typedef struct { uint8_t *out; size_t cap, n; } Buf;
+static int buf_data(void *x, const uint8_t *d, size_t n)
+{
+    Buf *b = x;
+    size_t k = b->cap - b->n < n ? b->cap - b->n : n;
+    memcpy(b->out + b->n, d, k);
+    b->n += k;
+    return b->n >= b->cap;
+}
+
+static int fetch_text(ProbeCtx *c, const char *url, char *out, size_t cap, int *status)
+{
+    Buf b = { (uint8_t *)out, cap - 1, 0 };
+    char err[100];
+    int r = pget(c, url, -1, -1, buf_data, &b, status, err, sizeof err);
+    out[b.n] = 0;
+    if (*status >= 400) { char m[64]; snprintf(m, sizeof m, "Server answered HTTP %d", *status); fail(&c->res, m); return -1; }
+    if (r < 0 && !b.n) { fail(&c->res, err[0] ? err : "Connection failed"); return -1; }
+    return (int)b.n;
+}
+
+typedef struct { ProbeCtx *c; const char *url; } RangeCtx;
+static int range_read(void *x, uint64_t off, uint8_t *out, size_t len)
+{
+    RangeCtx *rc = x;
+    Buf b = { out, len, 0 };
+    int status;
+    char err[100];
+    int r = pget(rc->c, rc->url, (long long)off, (long long)(off + len - 1), buf_data, &b, &status, err, sizeof err);
+    if (status >= 400 || (r < 0 && !b.n)) return -1;
+    if (status == 200 && off > 0) return -1;                 /* the server ignores ranges */
+    rc->c->res.bytes += (uint32_t)b.n;
+    return (int)b.n;
+}
+
+/* ---- HLS: the variant the player would choose, then a few of its segments ---- */
+static int probe_hls(ProbeCtx *c, const char *url, Demux *d, int *status, unsigned long long t0)
+{
+    char *text = malloc(512 * 1024), cur[HLS_URL_MAX], seg[HLS_URL_MAX];
+    HlsVariant *v = malloc(sizeof *v * 16);
+    int rc = -1;
+    if (!text || !v) { fail(&c->res, "Out of memory"); goto out; }
+    snprintf(cur, sizeof cur, "%s", url);
+    if (fetch_text(c, cur, text, 512 * 1024, status) < 0) goto out;
+    if (hls_is_master(text)) {
+        int n = hls_parse_master(text, cur, v, 16);
+        int k = hls_pick_variant(v, n, 720);
+        if (k < 0) { fail(&c->res, "HLS playlist without a usable stream"); goto out; }
+        add_line(&c->res, "HLS: %d variants, analysing %dx%d %ld kbit/s", n, v[k].width, v[k].height, v[k].bandwidth / 1000);
+        snprintf(cur, sizeof cur, "%s", v[k].uri);
+        if (fetch_text(c, cur, text, 512 * 1024, status) < 0) goto out;
+    }
+    HlsMedia m;
+    if (hls_parse_media(text, &m) < 0 || !m.nseg) { hls_media_free(&m); fail(&c->res, "HLS playlist without segments"); goto out; }
+    if (m.encrypted) { hls_media_free(&m); fail(&c->res, "Encrypted HLS stream (AES): not supported"); goto out; }
+    if (m.fmp4) { hls_media_free(&m); fail(&c->res, "HLS with MP4 segments: not supported"); goto out; }
+    int first = m.endlist || m.nseg <= 3 ? 0 : m.nseg - 3;     /* live: near the newest, like the player */
+    for (int i = first; i < m.nseg && !c->cancel; i++) {
+        hls_resolve(cur, m.seg[i].uri, m.seg[i].uri_len, seg, sizeof seg);
+        int sn;
+        if (probe_stream(c, seg, d, status, t0, &sn) < 0) break;
+        rc = 0;
+        if (c->res.bytes >= PROBE_MAX || sceKernelGetProcessTimeWide() - t0 >= PROBE_US) break;
+    }
+    hls_media_free(&m);
+out:
+    free(text);
+    free(v);
+    return rc;
+}
+
+/* ---- MP4 files (films): the index, then the start of the film ---- */
+static Mp4Demux *probe_mp4(ProbeCtx *c, const char *url)
+{
+    RangeCtx rc = { c, url };
+    uint8_t *moov = NULL;
+    size_t ml = 0;
+    int r = mp4_read_moov(range_read, &rc, 0, &moov, &ml);
+    if (r != 0) { fail(&c->res, r == -2 ? "MP4 index too big" : "MP4: index not readable (the server may not send parts of files)"); return NULL; }
+    TsSink sk = { NULL, NULL, NULL };
+    char err[96];
+    Mp4Demux *m = mp4_create(moov, ml, &sk, err, sizeof err);
+    free(moov);
+    if (!m) { fail(&c->res, err); return NULL; }
+    uint64_t off = mp4_seek(m, 0, NULL);                    /* a little of the film, to count pictures */
+    uint8_t *b = malloc(CHUNK);
+    for (int k = 0; b && k < 64 && !c->cancel; k++) {
+        int n = range_read(&rc, off, b, CHUNK);
+        if (n <= 0) break;
+        mp4_feed(m, off, b, (size_t)n);
+        off += (uint64_t)n;
+    }
+    free(b);
+    return m;
 }
 
 static int read_local(ProbeCtx *c, Demux *d, uint8_t *buf, unsigned long long t0)
@@ -202,15 +347,24 @@ static int probe_main(SceSize args, void *argp)
         fail(r, "Out of memory");
     } else {
         int http = !strncasecmp(c->url, "http://", 7) || !strncasecmp(c->url, "https://", 8);
-        ok = (http ? read_http(c, d, buf, &status, t0) : read_local(c, d, buf, t0)) == 0;
+        Mp4Demux *mp4 = NULL;
+        if (http) {
+            int sniff = SNIFF_STREAM;
+            ok = probe_stream(c, c->url, d, &status, t0, &sniff) == 0;
+            if (ok && sniff == SNIFF_PLAYLIST) ok = probe_hls(c, c->url, d, &status, t0) == 0;
+            else if (ok && sniff == SNIFF_MP4) { mp4 = probe_mp4(c, c->url); ok = mp4 != NULL; if (ok) plog("probe: MP4 file"); }
+        } else {
+            ok = read_local(c, d, buf, t0) == 0;
+        }
         if (ok && !c->cancel) {
-            if (d->mkv) mkv_flush(d->mkv); else ts_flush(d->ts);
-            const TsInfo *info = d->mkv ? mkv_info(d->mkv) : ts_info(d->ts);
+            if (d->mkv) mkv_flush(d->mkv); else if (!mp4) ts_flush(d->ts);
+            const TsInfo *info = mp4 ? mp4_info(mp4) : d->mkv ? mkv_info(d->mkv) : ts_info(d->ts);
             if (d->mkv) plog("probe: Matroska (MKV) container");
             if (r->bytes == 0) { fail(r, "No data received"); ok = 0; }
-            else if (info->program < 0) { fail(r, "No MPEG-TS data found (not a TS stream?)"); ok = 0; }
+            else if (info->program < 0) { fail(r, "No video stream recognised (not TS, MKV or MP4?)"); ok = 0; }
             else summarize(r, info, status, sceKernelGetProcessTimeWide() - t0);
         }
+        mp4_destroy(mp4);
     }
     if (d->ts) ts_destroy(d->ts);
     mkv_destroy(d->mkv);
@@ -232,7 +386,7 @@ int probe_start(const char *url)
     c->res.state = PROBE_RUNNING;
     c->refs = 2;
     g_cur = c;
-    SceUID th = sceKernelCreateThread("iptv_probe", probe_main, 0x10000100, 0x20000, 0, 0, NULL);
+    SceUID th = sceKernelCreateThread("iptv_probe", probe_main, 0x10000100, 0x40000, 0, 0, NULL);
     if (th < 0) { g_cur = NULL; free(c); return th; }
     sceKernelStartThread(th, sizeof c, &c);
     return 0;

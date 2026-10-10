@@ -54,6 +54,10 @@ void plog(const char *fmt, ...)
 
 void player_log_reset(void)
 {
+    /* the previous run's log stays as log_prev.txt (after a freeze the app is restarted, which used to
+     * wipe the log that showed what happened) */
+    remove("ux0:data/VitaIPTV/log_prev.txt");
+    rename(LOG_PATH, "ux0:data/VitaIPTV/log_prev.txt");
     FILE *f = fopen(LOG_PATH, "w");
     if (f) { fputs("Vita IPTV log\n", f); fclose(f); }
 }
@@ -196,7 +200,7 @@ void player_stop(void)
 void player_shutdown(void)
 {
     player_stop();
-    if (g_tex) { vita2d_free_texture(g_tex); g_tex = NULL; }
+    if (g_tex) { vita2d_wait_rendering_done(); vita2d_free_texture(g_tex); g_tex = NULL; }
 }
 
 /* ---- video ------------------------------------------------------------- */
@@ -208,7 +212,7 @@ static void convert_frame(const uint8_t *src, int w, int h)
     if (ow <= 0 || oh <= 0) return;
 
     if (!g_tex || g_tex_w != ow || g_tex_h != oh) {
-        if (g_tex) vita2d_free_texture(g_tex);
+        if (g_tex) { vita2d_wait_rendering_done(); vita2d_free_texture(g_tex); }   /* the GPU may still draw it */
         g_tex = vita2d_create_empty_texture(ow, oh);
         vita2d_texture_set_filters(g_tex, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
         g_tex_w = ow; g_tex_h = oh;

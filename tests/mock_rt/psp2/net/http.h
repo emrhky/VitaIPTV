@@ -21,4 +21,5 @@ int sceHttpGetStatusCode(int req, int *status);
 int sceHttpGetResponseContentLength(int req, unsigned long long *len);
 int sceHttpReadData(int req, void *data, unsigned size);
 int sceHttpAbortRequest(int req);
+int sceHttpGetAllResponseHeaders(int req, char **header, unsigned int *size);
 #endif

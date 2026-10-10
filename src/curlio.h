@@ -19,6 +19,9 @@ typedef struct {
     CioData data;
     CioStop stop;
     void *ctx;
+    int range;                          /* 1: ask only for bytes range_from..range_to (range_to 0 = to the end) */
+    uint64_t range_from, range_to;
+    uint64_t *total;                    /* out, may be NULL: the whole file's size when the server tells it */
 } CioRequest;
 
 int  cio_available(void);

@@ -32,6 +32,7 @@ void mock_http_reset(void);
 static int refuse_refs, reject_two, oom_every = 5, decode_order;
 static int lib_open, dec_open, sps_seen, reject_pts, npend, need_refs, created_refs, decode_calls, creates, lib_max_refs;
 static int lib_l31, wedge_mode, wedged, need_two, two_calls, gave_two;
+static int int_lib, unmaps_open;                           /* Internal decoder (see below) */
 static int64_t refused_pts = -2;
 static int64_t pend[8];
 static uint32_t lib_w, lib_h;
@@ -53,7 +54,7 @@ int sceVideodecInitLibrary(SceVideodecType c, const SceVideodecQueryInitInfoHwAv
   unsigned mbs = (i->horizontal / 16) * (i->vertical / 16);
   if (lib_l31 && (mbs > 3600 || mbs * i->numOfRefFrames > 18000)) return (int)0x80620802;   /* level 3.1, as on the Vita */
   lib_open = 1; lib_w = i->horizontal; lib_h = i->vertical; return 0; }
-int sceVideodecTermLibrary(SceVideodecType c) { (void)c; lib_open = 0; return 0; }
+int sceVideodecTermLibrary(SceVideodecType c) { (void)c; lib_open = 0; int_lib = 0; return 0; }
 int sceAvcdecQueryDecoderMemSize(SceVideodecType c, const SceAvcdecQueryDecoderInfo *q, SceAvcdecDecoderInfo *d)
 { (void)c; if (!lib_open) return (int)0x8062000C; d->frameMemSize = q->horizontal * q->vertical * 3 / 2 * (q->numOfRefFrames + 2); return 0; }
 int sceAvcdecCreateDecoder(SceVideodecType c, SceAvcdecCtrl *d, const SceAvcdecQueryDecoderInfo *q)
@@ -134,6 +135,70 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
     return 0;
 }
 
+/* ---- fake Internal decoder (above 720p): pictures come out two units after they go in ---- */
+typedef struct { SceAvcdecBuf memBuf; SceUID memBufUid; SceUIntVAddr vaContext; SceUInt32 contextSize; } MockVdCtrl;
+static int int_cfg, int_mode, int_creates, int_units, int_soft_every;
+int sceVideodecSetConfigInternal(SceVideodecType c, SceInt32 cfg) { (void)c; int_cfg = cfg; return 0; }
+int sceAvcdecSetDecodeMode(SceVideodecType c, SceInt32 m) { (void)c; int_mode = m; return 0; }
+int sceVideodecQueryMemSizeInternal(SceVideodecType c, SceVideodecQueryInitInfo *q, SceUInt32 *size)
+{ (void)c; if (q->hwAvc.size != sizeof q->hwAvc || q->hwAvc.numOfStreams != 1) return (int)0x80620802;
+  *size = q->hwAvc.horizontal * q->hwAvc.vertical * 5 / 2 + 300000; return 0; }
+int sceAvcdecQueryDecoderMemSizeInternal(SceVideodecType c, SceAvcdecQueryDecoderInfo *q, SceAvcdecDecoderInfo *d)
+{ (void)c; d->frameMemSize = q->horizontal * q->vertical * 3 / 2 * (q->numOfRefFrames + 1); return 0; }
+SceUID sceCodecEngineOpenUnmapMemBlock(void *b, SceSize n)
+{ if (!b || !n || mock_mem_type(b) != SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW || ((uintptr_t)n & 0xFFFFF)) return (int)0x80020000;
+  unmaps_open++; return 0x40010133; }
+int sceCodecEngineCloseUnmapMemBlock(SceUID u) { assert(u == 0x40010133); unmaps_open--; return 0; }
+SceUIntVAddr sceCodecEngineAllocMemoryFromUnmapMemBlock(SceUID u, SceUInt32 n, SceUInt32 a) { (void)n; (void)a; return u == 0x40010133 ? 0x62740000 : 0; }
+int sceCodecEngineFreeMemoryFromUnmapMemBlock(SceUID u, SceUIntVAddr v) { (void)u; assert(v == 0x62740000); return 0; }
+int sceVideodecInitLibraryWithUnmapMemInternal(SceVideodecType c, MockVdCtrl *vc, SceVideodecQueryInitInfo *q)
+{ (void)c; if (lib_open) return (int)0x80620808; if (!vc->vaContext || !vc->contextSize || int_cfg != 2) return (int)0x80620002;
+  lib_open = 1; int_lib = 1; lib_w = q->hwAvc.horizontal; lib_h = q->hwAvc.vertical; return 0; }
+int sceAvcdecCreateDecoderInternal(SceVideodecType c, SceAvcdecCtrl *d, SceAvcdecQueryDecoderInfo *q)
+{ (void)c; (void)q; if (!int_lib || !d->frameBuf.pBuf || mock_mem_type(d->frameBuf.pBuf) != SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) return (int)0x80620009;
+  d->handle = 2; dec_open = 1; sps_seen = 0; npend = 0; int_creates++; return 0; }
+int sceAvcdecDecodeAuInternal(SceAvcdecCtrl *d, SceAvcdecAu *au, SceInt32 *st)
+{
+    (void)d; (void)st;
+    const uint8_t *b = au->es.pBuf;
+    size_t n = au->es.size;
+    usleep(1500);
+    if (n < 4 || b[0] || b[1] || !(b[2] == 1 || (b[2] == 0 && b[3] == 1))) return (int)0x8062000D;
+    if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
+    if (npend >= 8) return (int)0x8062000A;                 /* ES buffer full */
+    int has_ts = !(au->pts.upper == 0xFFFFFFFFu && au->pts.lower == 0xFFFFFFFFu);
+    pend[npend++] = has_ts ? (int64_t)(((uint64_t)au->pts.upper << 32) | au->pts.lower) : -1;
+    if (int_soft_every && ++int_units % int_soft_every == 0) return (int)0x8062000D;   /* seen on the device, unit still decoded */
+    return 0;
+}
+int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdecArrayPicture *arr, SceAvcdecArrayPicture *work, SceInt32 *st)
+{
+    (void)d; (void)st; (void)work;
+    if (arr->numOfElm != 1) return (int)0x80620002;
+    SceAvcdecPicture *p = arr->pPicture[0];
+    if (!p || p->size != sizeof *p || !p->frame.pPicture[0] || p->frame.framePitch < lib_w || p->frame.frameHeight < lib_h) return (int)0x80620002;
+    arr->numOfOutput = 0;
+    if (npend < 3) return 0;                                /* two units of delay, as on the device */
+    int64_t o;
+    if (decode_order) {                                     /* the order they went in (B-pictures late), as seen on the device */
+        o = pend[0];
+        memmove(&pend[0], &pend[1], sizeof pend[0] * (size_t)(--npend));
+    } else {
+        int k = 0;
+        for (int i = 1; i < npend; i++) if (pend[i] < pend[k]) k = i;
+        o = pend[k];
+        pend[k] = pend[--npend];
+    }
+    uint8_t *pix = p->frame.pPicture[0];
+    memcpy(pix, &o, 8);
+    pix[(size_t)p->frame.framePitch * p->frame.frameHeight * 4 - 1] = 0x5A;
+    p->info.pts.upper = o < 0 ? 0xFFFFFFFFu : (uint32_t)((uint64_t)o >> 32);
+    p->info.pts.lower = o < 0 ? 0xFFFFFFFFu : (uint32_t)o;
+    p->frame.horizontalSize = lib_w; p->frame.verticalSize = lib_h;
+    arr->numOfOutput = 1;
+    return 0;
+}
+
 /* ---- fake audio decoder and output (output blocks in real time like the hardware) ---- */
 static int alib_open, adec_open, ports_open, port_len, port_rate, port_ch;
 static uint64_t pcm_frames_out;
@@ -207,7 +272,7 @@ static Run play(const char *path, double max_s)
     r.st = *tsp_status();
     r.play_time = r.last_show - r.first_show;
     tsp_stop();
-    assert(!lib_open && !dec_open && mock_live_blocks == 0 && mock_mapped == 0);   /* everything released */
+    assert(!lib_open && !dec_open && mock_live_blocks == 0 && mock_mapped == 0 && unmaps_open == 0);   /* everything released */
     assert(!alib_open && !adec_open && ports_open == 0);
     return r;
 }
@@ -219,6 +284,74 @@ static void show(const char *name, const Run *r)
            name, r->st.state, r->st.decoded, r->st.shown, r->st.dropped, r->st.late, r->st.damaged, r->st.errors, r->w, r->h,
            r->play_time, r->nonmono, r->st.audio_rate, r->st.audio_ch, r->st.audio_frames, r->avn, r->av_bad, r->av_max, r->synced,
            r->st.audio_only ? " AUDIO-ONLY" : "", r->st.msg, r->st.audio_msg);
+}
+
+
+/* ---- films: start at a time, pause, read position ---- */
+extern int mock_http_no_ranges, mock_http_range_requests;
+typedef struct { Run r; int first_pos, last_pos, dur, pos_during_pause_a, pos_during_pause_b, froze; } VRun;
+
+static VRun play_vod_url(const char *url, const char *file, int start_ms, double max_s, double pause_at, double pause_len)
+{
+    VRun v; memset(&v, 0, sizeof v);
+    Run *r = &v.r; r->first_pts = r->last_pts = -1;
+    v.first_pos = -1;
+    if (file) { mock_http_reset(); mock_http_file = file; }
+    assert(tsp_start_vod(url, start_ms) == 0);
+    double t0 = now_s(), end_seen = 0, paused_at = 0;
+    vita2d_texture *last = NULL;
+    int pausing = 0, changes_in_pause = 0;
+    while (now_s() - t0 < max_s) {
+        int w = 0, h = 0;
+        vita2d_texture *tx = tsp_frame(&w, &h);
+        if (tx && tx != last) {
+            int64_t pts; memcpy(&pts, tx->gxm_tex.data, 8);
+            if (r->changes == 0) {
+                r->first_show = now_s(); r->first_pts = pts;
+                int pos, dur;
+                assert(tsp_vod_pos(&pos, &dur));
+                v.first_pos = pos;
+            } else if (pts >= 0 && r->last_pts >= 0 && pts <= r->last_pts) r->nonmono++;
+            if (pausing) changes_in_pause++;
+            r->last_pts = pts; r->last_show = now_s(); r->changes++; r->w = w; r->h = h; last = tx;
+            if (tsp_status()->av_sync) r->synced = 1;
+        }
+        if (pause_len > 0 && !pausing && !paused_at && r->changes && now_s() - r->first_show > pause_at) {
+            tsp_pause(1); pausing = 1; paused_at = now_s();
+            usleep(100000);
+            int d; tsp_vod_pos(&v.pos_during_pause_a, &d);
+            changes_in_pause = 0;
+        }
+        if (pausing && now_s() - paused_at > pause_len) {
+            int d; tsp_vod_pos(&v.pos_during_pause_b, &d);
+            v.froze = changes_in_pause == 0;
+            tsp_pause(0); pausing = 0;
+        }
+        const TspStatus *s = tsp_status();
+        if (s->state == TSP_ERROR) break;
+        if (s->state == TSP_ENDED) { if (!end_seen) end_seen = now_s(); else if (now_s() - end_seen > 0.6) break; }
+        usleep(16000);
+    }
+    int pos;
+    tsp_vod_pos(&pos, &v.dur);
+    v.last_pos = pos;
+    r->st = *tsp_status();
+    r->play_time = r->last_show - r->first_show;
+    tsp_stop();
+    assert(!lib_open && !dec_open && mock_live_blocks == 0 && mock_mapped == 0 && unmaps_open == 0);
+    assert(!alib_open && !adec_open && ports_open == 0);
+    if (file) { mock_http_reset(); mock_http_file = NULL; }
+    return v;
+}
+
+static VRun play_vod(const char *file, int start_ms, double max_s, double pause_at, double pause_len)
+{ return play_vod_url("http://example.invalid/movie/u/p/1.mkv", file, start_ms, max_s, pause_at, pause_len); }
+
+static void vshow(const char *name, const VRun *v)
+{
+    show(name, &v->r);
+    printf("               film: length %d ms, first position %d ms (pts %lld ms), last %d ms, ranges %d\n",
+           v->dur, v->first_pos, (long long)(v->r.first_pts / 90), v->last_pos, mock_http_range_requests);
 }
 
 int main(int argc, char **argv)
@@ -241,13 +374,21 @@ int main(int argc, char **argv)
         h = play(u, 8);
         show("https 404", &h);
         assert(h.st.state == TSP_ERROR && strstr(h.st.msg, "404"));
+        snprintf(u, sizeof u, "%s/film.mp4", b);                /* a film over HTTPS: ranges, from the middle */
+        VRun v = play_vod_url(u, NULL, 6500, 15, 0, 0);
+        vshow("https film", &v);
+        assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.first_pos >= 5900 && v.first_pos <= 6600 && v.r.changes >= 130);
+        snprintf(u, sizeof u, "%s/film.mkv", b);
+        v = play_vod_url(u, NULL, 7200, 15, 0, 0);
+        vshow("https mkv", &v);
+        assert(v.r.st.state == TSP_ENDED && v.first_pos >= 6900 && v.first_pos <= 7300 && v.r.changes >= 100);
         puts("all https tests passed");
         return 0;
     }
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17);
+    assert(argc == 17 || argc == 20);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r = play(argv[1], 10);
@@ -260,10 +401,32 @@ int main(int argc, char **argv)
     assert(r.w == 1280 && r.h == 720);
     assert(r.play_time > 4.2 && r.play_time < 5.6);          /* 148 pictures at 30 fps = 4.9 s: paced, not dumped */
 
+    /* 1080p: the public decoder refuses it (level 3.1, as on the Vita); with the option on it goes through
+     * the Internal decoder, pictures two units late, one unit in 9 called "invalid" but decoded */
+    lib_l31 = 1; int_creates = 0; int_soft_every = 9;
+    tsp_set_options(1, 720);
     r = play(argv[2], 10);
-    show("1080p25", &r);
-    assert(r.st.state == TSP_ENDED && r.w == 1920 && r.h == 1080 && r.nonmono == 0);
+    show("1080p25 HD", &r);
+    assert(r.st.state == TSP_ENDED && r.w == 1920 && r.h == 1080 && r.nonmono == 0 && r.st.hd && int_creates == 1);
+    assert(r.st.errors == 0 && r.st.decoded >= 118 && int_mode == 0x80);
     assert(r.play_time > 4.0 && r.play_time < 5.4);          /* 123 pictures at 25 fps = 4.9 s */
+    /* 1080p whose pictures come out in decode order (B-pictures after their reference): shown in time
+     * order with few losses (with 3 pictures in flight about a third were lost on the device) */
+    decode_order = 1; int_creates = 0;
+    r = play(argv[2], 10);
+    show("1080p dec.ord", &r);
+    assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.dropped * 10 <= r.st.decoded && r.changes >= 105);
+    decode_order = 0;
+    tsp_set_options(0, 720);
+    r = play(argv[2], 6);
+    show("1080p off", &r);
+    assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "above 720p"));
+    lib_l31 = 0; int_soft_every = 0;
+    tsp_set_options(1, 720);                                 /* 720p stays on the public decoder with the option on */
+    r = play(argv[1], 10);
+    show("720p, HD on", &r);
+    assert(r.st.state == TSP_ENDED && !r.st.hd && r.changes >= 140);
+    tsp_set_options(0, 720);
 
     reject_pts = 1;                                          /* decoder refuses timestamps: falls back to frame cadence */
     r = play(argv[1], 10);
@@ -476,6 +639,22 @@ int main(int argc, char **argv)
         show("hls video", &r);
         printf("               %d HTTP requests\n", mock_http_requests);
         assert(r.st.state == TSP_ENDED && r.changes >= 130 && r.st.audio_frames > 200 && r.synced && r.nonmono == 0 && r.w == 1280);
+        assert(!r.st.hls_hd);                                /* 1080p option off: no switch offered */
+        /* 1080p option on: 720p first, the switch is offered; switched to 1080p, whose playlist is gone here,
+         * it falls back to the 720p variant */
+        tsp_set_options(1, 720);
+        r = play("http://example.invalid/tv/master.m3u8?app=web", 12);
+        show("hls hd offered", &r);
+        assert(r.st.state == TSP_ENDED && r.st.hls_hd && r.w == 1280);
+        int req720 = mock_http_requests;
+        mock_http_requests = 0;
+        tsp_set_options(1, 1080);
+        r = play("http://example.invalid/tv/master.m3u8?app=web", 12);
+        show("hls 1080 gone", &r);
+        printf("               %d HTTP requests (720p alone: %d)\n", mock_http_requests, req720);
+        assert(r.st.state == TSP_ENDED && r.w == 1280 && r.changes >= 130);
+        tsp_set_options(0, 720);
+        mock_http_requests = 0;
         /* the chosen variant is gone (404): the next one plays */
         r = play("http://example.invalid/tv/master2.m3u8", 12);
         show("hls fallback", &r);
@@ -500,6 +679,71 @@ int main(int argc, char **argv)
     assert(created_refs == 5 && creates == 1 && r.st.errors <= 20 && r.changes >= 120);  /* never grows past 720p; a lost picture now and then */
     assert(r.synced && r.av_bad * 5 <= r.avn);               /* out-of-memory errors no longer turn timestamps off */
     need_refs = 0;
+
+    /* films: MP4 (index at the end), MKV and TS files, from the start and from the middle, paused */
+    if (argc > 19) {
+        const char *mp4 = argv[17], *mkv = argv[18], *tsf = argv[19];
+        VRun v = play_vod(mp4, 0, 20, 0, 0);
+        vshow("mp4 film", &v);
+        assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.r.changes >= 280 && v.r.nonmono == 0);
+        assert(v.r.st.audio_frames > 500 && v.r.synced && v.first_pos < 200);
+        v = play_vod(mp4, 6500, 15, 0, 0);
+        vshow("mp4 from 6.5s", &v);
+        assert(v.r.st.state == TSP_ENDED && v.first_pos >= 5900 && v.first_pos <= 6600 && v.r.first_pts / 90 >= 5900);
+        assert(v.r.changes >= 130 && v.r.changes <= 170 && v.r.nonmono == 0 && v.r.synced);
+        v = play_vod(mkv, 7200, 15, 0, 0);
+        vshow("mkv from 7.2s", &v);
+        assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.first_pos >= 6900 && v.first_pos <= 7300);
+        assert(v.r.changes >= 100 && v.r.changes <= 140 && v.r.nonmono == 0 && v.r.synced);
+        v = play_vod(tsf, 5000, 15, 0, 0);
+        vshow("ts from 5s", &v);
+        assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 400 && v.first_pos <= 5100 && v.first_pos >= 1000);
+        assert(v.r.changes >= 150 && v.r.nonmono == 0);
+        v = play_vod(mkv, 0, 25, 2.0, 1.5);
+        vshow("mkv paused", &v);
+        printf("               position in the pause %d -> %d ms, picture frozen %d, played %.2f s\n",
+               v.pos_during_pause_a, v.pos_during_pause_b, v.froze, v.r.play_time);
+        assert(v.r.st.state == TSP_ENDED && v.froze && abs(v.pos_during_pause_a - v.pos_during_pause_b) < 50);
+        assert(v.r.play_time > 12.0 + 1.2 && v.r.changes >= 280 && v.r.nonmono == 0);
+        mock_http_fail_after = 150 * 1024;                  /* connection lost now and then: goes on where it stopped */
+        v = play_vod(mp4, 0, 25, 0, 0);
+        mock_http_fail_after = 0;
+        vshow("mp4 drops", &v);
+        assert(v.r.st.state == TSP_ENDED && v.r.st.reconnects >= 2 && v.r.changes >= 280 && v.r.nonmono == 0);
+        {   /* a film through the transcoding server: a plain stream cut at 40 s; position counts from there */
+            mock_http_reset();
+            mock_http_file = tsf;
+            assert(tsp_start_vod_stream("http://pc:8090/play?url=x&start=40", 40000) == 0);
+            double t0 = now_s();
+            int pos = -1, dur = -1, shown = 0, paused_ok = 0;
+            while (now_s() - t0 < 6) {
+                int w, h;
+                if (tsp_frame(&w, &h)) shown++;
+                if (shown && now_s() - t0 > 2 && !paused_ok) {
+                    tsp_pause(1);
+                    int a, b2, d;
+                    tsp_vod_pos(&a, &d);
+                    usleep(500000);
+                    (void)tsp_frame(&w, &h);
+                    tsp_vod_pos(&b2, &d);
+                    paused_ok = a == b2 && tsp_status()->paused;
+                    tsp_pause(0);
+                }
+                usleep(16000);
+            }
+            assert(tsp_vod_pos(&pos, &dur));
+            printf("film via server: position %d ms after ~5.5 s of play from 40 s, pause %d, seekable %d\n", pos, paused_ok, tsp_status()->seekable);
+            assert(pos >= 43000 && pos <= 46500 && paused_ok && !tsp_status()->seekable);
+            tsp_stop();
+            mock_http_reset();
+            mock_http_file = NULL;
+        }
+        mock_http_no_ranges = 1;                            /* a server without ranges: from the start, no seeking */
+        v = play_vod(mkv, 0, 20, 0, 0);
+        mock_http_no_ranges = 0;
+        vshow("no ranges", &v);
+        assert(v.r.changes >= 280 && v.r.nonmono == 0);
+    }
 
     r = play("/nonexistent/file.ts", 2);
     show("missing file", &r);
