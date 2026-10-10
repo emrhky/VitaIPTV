@@ -33,9 +33,11 @@ ACTIVE = {}
 ACTIVE_LOCK = threading.Lock()
 
 
-def ffmpeg_command(url):
+def ffmpeg_command(url, start=0):
     a = ARGS
     cmd = [a.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "+genpts"]
+    if start > 0:
+        cmd += ["-ss", str(start)]                                    # a film from the middle
     if url.startswith(("http://", "https://")):
         cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
         if a.user_agent:
@@ -83,7 +85,11 @@ class Handler(BaseHTTPRequestHandler):
         if not url:
             return self._text(400, "missing url parameter")
 
-        cmd = ffmpeg_command(url)
+        try:
+            start = max(0, int(parse_qs(u.query).get("start", ["0"])[0]))
+        except ValueError:
+            start = 0
+        cmd = ffmpeg_command(url, start)
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
         except OSError as e:

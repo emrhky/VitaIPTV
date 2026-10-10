@@ -75,6 +75,19 @@ static void get_display_name(const char *line, char *out, size_t outsz)
     }
 }
 
+int iptv_is_film_url(const char *url)
+{
+    if (strncasecmp(url, "http://", 7) && strncasecmp(url, "https://", 8)) return 0;
+    if (strstr(url, "/movie/") || strstr(url, "/series/")) return 1;   /* Xtream links in an M3U list */
+    size_t n = strcspn(url, "?#");
+    static const char *const EXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm" };
+    for (size_t i = 0; i < sizeof EXT / sizeof EXT[0]; i++) {
+        size_t k = strlen(EXT[i]);
+        if (n > k && !strncasecmp(url + n - k, EXT[i], k)) return 1;
+    }
+    return 0;
+}
+
 int m3u_parse(const char *text, size_t len, ChannelList *out)
 {
     Channel pending;
@@ -131,6 +144,7 @@ int m3u_parse(const char *text, size_t len, ChannelList *out)
         else copy_trunc(c.name, sizeof c.name, url, strlen(url));
         if (!c.name[0]) copy_trunc(c.name, sizeof c.name, url, strlen(url));
         memcpy(c.url, url, n + 1);
+        if (iptv_is_film_url(c.url)) c.kind = CH_FILM;      /* films in M3U lists: pause, jumps, resume */
 
         if (list_push(out, &c) != 0) break;
         added++;
@@ -187,8 +201,53 @@ int xtream_api_url(const Source *s, const char *action, char *out, size_t outsz)
     char base[IPTV_URL_MAX + 16], u[IPTV_CRED_MAX * 3 + 1], p[IPTV_CRED_MAX * 3 + 1];
     if (source_xtream_base(s, base, sizeof base)) return -1;
     if (url_encode(u, sizeof u, s->user) || url_encode(p, sizeof p, s->pass)) return -1;
-    int n = snprintf(out, outsz, "%s/player_api.php?username=%s&password=%s&action=%s", base, u, p, action);
+    int n = action ? snprintf(out, outsz, "%s/player_api.php?username=%s&password=%s&action=%s", base, u, p, action)
+                   : snprintf(out, outsz, "%s/player_api.php?username=%s&password=%s", base, u, p);
     return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
+/* Value of "key" inside text[0..len): a string's contents, a number, true/false/null as written. */
+static int json_field(const char *text, size_t len, const char *key, char *out, size_t outsz)
+{
+    char pat[48];
+    int pn = snprintf(pat, sizeof pat, "\"%s\"", key);
+    if (pn <= 0 || (size_t)pn >= sizeof pat) return -1;
+    const char *end = text + len;
+    for (const char *p = text; p + pn <= end; p++) {
+        if (memcmp(p, pat, (size_t)pn)) continue;
+        const char *q = p + pn;
+        while (q < end && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n')) q++;
+        if (q >= end || *q != ':') continue;
+        q++;
+        while (q < end && (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n')) q++;
+        size_t k = 0;
+        if (q < end && *q == '"') {
+            q++;
+            while (q < end && *q != '"' && k + 1 < outsz) { if (*q == '\\' && q + 1 < end) q++; out[k++] = *q++; }
+        } else {
+            while (q < end && *q != ',' && *q != '}' && *q != ']' && *q != ' ' && k + 1 < outsz) out[k++] = *q++;
+        }
+        out[k] = 0;
+        return 0;
+    }
+    return -1;
+}
+
+int xtream_parse_account(const char *json, size_t len, XtAccount *a)
+{
+    memset(a, 0, sizeof *a);
+    const char *ui = NULL;
+    for (size_t i = 0; i + 11 <= len; i++) if (!memcmp(json + i, "\"user_info\"", 11)) { ui = json + i; break; }
+    if (!ui) return -1;
+    size_t n = len - (size_t)(ui - json);
+    char v[64];
+    a->found = 1;
+    a->auth = json_field(ui, n, "auth", v, sizeof v) == 0 && (atoi(v) == 1 || !strcmp(v, "true"));
+    if (json_field(ui, n, "status", a->status, sizeof a->status) != 0) a->status[0] = 0;
+    if (json_field(ui, n, "exp_date", v, sizeof v) == 0) a->exp = atol(v);
+    if (json_field(ui, n, "active_cons", v, sizeof v) == 0) a->active = atoi(v);
+    if (json_field(ui, n, "max_connections", v, sizeof v) == 0) a->max = atoi(v);
+    return 0;
 }
 
 /* ---- minimal tolerant JSON reader (only what the Xtream API needs) ---- */
@@ -319,6 +378,11 @@ typedef struct {
     char id[24];
     char cat[24];
     char adult[8];
+    char sid[24];                       /* series_id */
+    char eid[24];                       /* "id" (episodes) */
+    char ext[12];                       /* container_extension */
+    char title[IPTV_NAME_MAX];          /* episode title */
+    char epnum[12], season[12];
 } XtObj;
 
 /* p points at '{'. Returns position after the matching '}', or NULL on malformed input. */
@@ -348,6 +412,12 @@ static const char *xt_object(const char *p, const char *end, XtObj *o)
         else if (!strcmp(key, "stream_id"))     { dst = o->id;    dsz = sizeof o->id; }
         else if (!strcmp(key, "category_id"))   { dst = o->cat;   dsz = sizeof o->cat; }
         else if (!strcmp(key, "is_adult"))      { dst = o->adult; dsz = sizeof o->adult; }
+        else if (!strcmp(key, "series_id"))     { dst = o->sid;   dsz = sizeof o->sid; }
+        else if (!strcmp(key, "id"))            { dst = o->eid;   dsz = sizeof o->eid; }
+        else if (!strcmp(key, "container_extension")) { dst = o->ext; dsz = sizeof o->ext; }
+        else if (!strcmp(key, "title"))         { dst = o->title; dsz = sizeof o->title; }
+        else if (!strcmp(key, "episode_num"))   { dst = o->epnum; dsz = sizeof o->epnum; }
+        else if (!strcmp(key, "season"))        { dst = o->season; dsz = sizeof o->season; }
 
         if (!dst) {
             p = json_skip_value(p, end);
@@ -412,38 +482,78 @@ typedef struct {
     ChannelList *out;
     const XtCategory *cats;
     int ncats, added;
+    int mode;                           /* 0 live, 1 films, 2 series */
     char base[IPTV_URL_MAX + 16], eu[IPTV_CRED_MAX * 3 + 1], ep[IPTV_CRED_MAX * 3 + 1];
 } LiveCtx;
+
+static int id_ok(const char *id)
+{
+    if (!id[0]) return 0;
+    for (const char *q = id; *q; q++)
+        if (!isalnum((unsigned char)*q) && *q != '_' && *q != '-') return 0;
+    return 1;
+}
+
+/* the file extension the server gives, or mp4 (letters and digits only) */
+static const char *ext_or(const char *e, const char *dflt)
+{
+    if (!e[0] || strlen(e) > 5) return dflt;
+    for (const char *q = e; *q; q++) if (!isalnum((unsigned char)*q)) return dflt;
+    return e;
+}
 
 static int live_cb(const XtObj *o, void *vctx)
 {
     LiveCtx *c = vctx;
-    if (!o->id[0]) return 0;
-    for (const char *q = o->id; *q; q++)
-        if (!isalnum((unsigned char)*q) && *q != '_' && *q != '-') return 0;
+    const char *id = c->mode == 2 ? o->sid : o->id;
+    if (!id_ok(id)) return 0;
 
     Channel ch;
     memset(&ch, 0, sizeof ch);
-    snprintf(ch.name, sizeof ch.name, "%s", o->name[0] ? o->name : o->id);
+    snprintf(ch.name, sizeof ch.name, "%s", o->name[0] ? o->name : id);
     ch.adult = o->adult[0] == '1';
     for (int i = 0; i < c->ncats; i++)
         if (!strcmp(c->cats[i].id, o->cat)) {
             snprintf(ch.group, sizeof ch.group, "%s", c->cats[i].name);
             break;
         }
-    int n = snprintf(ch.url, sizeof ch.url, "%s/live/%s/%s/%s.ts", c->base, c->eu, c->ep, o->id);
+    int n;
+    if (c->mode == 1) {
+        ch.kind = CH_FILM;
+        n = snprintf(ch.url, sizeof ch.url, "%s/movie/%s/%s/%s.%s", c->base, c->eu, c->ep, id, ext_or(o->ext, "mp4"));
+    } else if (c->mode == 2) {
+        ch.kind = CH_SERIES;
+        n = snprintf(ch.url, sizeof ch.url, "%s", id);           /* the series id: get_series_info lists its episodes */
+    } else {
+        n = snprintf(ch.url, sizeof ch.url, "%s/live/%s/%s/%s.ts", c->base, c->eu, c->ep, id);
+    }
     if (n < 0 || (size_t)n >= sizeof ch.url) return 0;
     if (list_push(c->out, &ch) != 0) return -1;
     c->added++;
     return 0;
 }
 
-int xtream_parse_live(const char *json, size_t len, const Source *s,
-                      const XtCategory *cats, int ncats, ChannelList *out)
+static int parse_list(const char *json, size_t len, const Source *s,
+                      const XtCategory *cats, int ncats, ChannelList *out, int mode)
 {
     LiveCtx *c = malloc(sizeof *c);
     if (!c) return 0;
-    c->out = out; c->cats = cats; c->ncats = ncats; c->added = 0;
+    c->out = out; c->cats = cats; c->ncats = ncats; c->added = 0; c->mode = mode;
+    /* room for all channels at once: growing by doubling needs twice the memory while copying */
+    int want = 0;
+    const char *key = mode == 2 ? "\"series_id\"" : "\"stream_id\"";
+    size_t kl = strlen(key);
+    for (const char *q = json; q && (size_t)(q - json) < len; ) {
+        q = strstr(q, key);
+        if (!q || (size_t)(q - json) >= len) break;
+        want++;
+        q += kl;
+    }
+    if (want > IPTV_MAX_CHANNELS) want = IPTV_MAX_CHANNELS;
+    if (want > out->cap) {
+        Channel *n = realloc(out->items, (size_t)want * sizeof(Channel));
+        if (n) { out->items = n; out->cap = want; }
+    }
     if (source_xtream_base(s, c->base, sizeof c->base) ||
         url_encode(c->eu, sizeof c->eu, s->user) ||
         url_encode(c->ep, sizeof c->ep, s->pass)) { free(c); return 0; }
@@ -451,6 +561,94 @@ int xtream_parse_live(const char *json, size_t len, const Source *s,
     int n = c->added;
     free(c);
     return n;
+}
+
+int xtream_parse_live(const char *json, size_t len, const Source *s, const XtCategory *cats, int ncats, ChannelList *out)
+{ return parse_list(json, len, s, cats, ncats, out, 0); }
+int xtream_parse_vod(const char *json, size_t len, const Source *s, const XtCategory *cats, int ncats, ChannelList *out)
+{ return parse_list(json, len, s, cats, ncats, out, 1); }
+int xtream_parse_series(const char *json, size_t len, const Source *s, const XtCategory *cats, int ncats, ChannelList *out)
+{ return parse_list(json, len, s, cats, ncats, out, 2); }
+
+/* get_series_info: "episodes" is an object of seasons ({"1": [...], "2": [...]}) or an array of them. */
+typedef struct { ChannelList *out; LiveCtx *c; int added; } EpCtx;
+
+static void add_episode(EpCtx *e, const XtObj *o)
+{
+    if (!id_ok(o->eid)) return;
+    Channel ch;
+    memset(&ch, 0, sizeof ch);
+    int se = atoi(o->season), ep = atoi(o->epnum);
+    if (o->title[0]) snprintf(ch.name, sizeof ch.name, "%s", o->title);
+    else snprintf(ch.name, sizeof ch.name, "S%02dE%02d", se, ep);
+    if (se > 0) snprintf(ch.group, sizeof ch.group, "Season %d", se);
+    ch.kind = CH_FILM;
+    ch.episode = (unsigned short)(ep > 0 && ep < 65536 ? ep : 0);
+    int n = snprintf(ch.url, sizeof ch.url, "%s/series/%s/%s/%s.%s", e->c->base, e->c->eu, e->c->ep, o->eid, ext_or(o->ext, "mkv"));
+    if (n < 0 || (size_t)n >= sizeof ch.url) return;
+    if (list_push(e->out, &ch) == 0) e->added++;
+}
+
+/* p at '[': every object inside (one level of nested arrays too) is an episode. */
+static const char *episode_array(EpCtx *e, const char *p, const char *end)
+{
+    p++;
+    for (;;) {
+        p = skip_ws(p, end);
+        if (p >= end) return NULL;
+        if (*p == ']') return p + 1;
+        if (*p == ',') { p++; continue; }
+        if (*p == '{') {
+            XtObj o;
+            p = xt_object(p, end, &o);
+            if (!p) return NULL;
+            add_episode(e, &o);
+        } else if (*p == '[') {
+            p = episode_array(e, p, end);
+            if (!p) return NULL;
+        } else {
+            p = json_skip_value(p, end);
+            if (!p) return NULL;
+        }
+    }
+}
+
+int xtream_parse_episodes(const char *json, size_t len, const Source *s, ChannelList *out)
+{
+    LiveCtx *c = malloc(sizeof *c);
+    if (!c) return 0;
+    memset(c, 0, sizeof *c);
+    if (source_xtream_base(s, c->base, sizeof c->base) || url_encode(c->eu, sizeof c->eu, s->user) ||
+        url_encode(c->ep, sizeof c->ep, s->pass)) { free(c); return 0; }
+    EpCtx e = { out, c, 0 };
+    const char *end = json + len, *p = NULL;
+    /* the top-level "episodes" key (a nested one would be inside "info", which comes as a string or object) */
+    for (const char *q = json; q + 10 < end; q++) if (!memcmp(q, "\"episodes\"", 10)) { p = q + 10; break; }
+    if (p) {
+        p = skip_ws(p, end);
+        if (p < end && *p == ':') p = skip_ws(p + 1, end);
+        if (p < end && *p == '[') episode_array(&e, p, end);
+        else if (p < end && *p == '{') {                       /* "1": [...], "2": [...] */
+            p++;
+            for (;;) {
+                p = skip_ws(p, end);
+                if (p >= end || *p == '}') break;
+                if (*p == ',') { p++; continue; }
+                if (*p != '"') break;
+                char key[16];
+                p = json_string(p, end, key, sizeof key);
+                if (!p) break;
+                p = skip_ws(p, end);
+                if (p >= end || *p != ':') break;
+                p = skip_ws(p + 1, end);
+                if (p < end && *p == '[') p = episode_array(&e, p, end);
+                else p = json_skip_value(p, end);
+                if (!p) break;
+            }
+        }
+    }
+    free(c);
+    return e.added;
 }
 
 /* sources.txt:  Name | type | arg1 | arg2 | arg3
@@ -706,6 +904,7 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "lang")) { st->lang = atoi(v); if (st->lang < 0 || st->lang > 2) st->lang = 0; }
             else if (!strcmp(k, "hide_adult")) st->hide_adult = atoi(v) != 0;
             else if (!strcmp(k, "hide_1080p")) st->hide_1080p = atoi(v) != 0;
+            else if (!strcmp(k, "hd_1080p")) st->hd1080 = atoi(v) != 0;
         }
         p += n;
         if (*p == '\n') p++;
@@ -714,9 +913,18 @@ void settings_parse(const char *text, Settings *st)
 
 int settings_format(const Settings *st, char *out, size_t outsz)
 {
-    int w = snprintf(out, outsz, "# Vita IPTV settings\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_1080p=%d\n",
-                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_1080p);
+    int w = snprintf(out, outsz, "# Vita IPTV settings\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_1080p=%d\nhd_1080p=%d\n",
+                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_1080p, st->hd1080);
     return (w < 0 || (size_t)w >= outsz) ? -1 : w;
+}
+
+int proxy_url_at(const Settings *st, const char *url, int start_s, char *out, size_t outsz)
+{
+    if (proxy_url(st, url, out, outsz) != 0) return -1;
+    if (start_s <= 0) return 0;
+    size_t n = strlen(out);
+    int w = snprintf(out + n, outsz - n, "&start=%d", start_s);
+    return (w < 0 || (size_t)w >= outsz - n) ? -1 : 0;
 }
 
 int proxy_url(const Settings *st, const char *url, char *out, size_t outsz)
@@ -840,4 +1048,70 @@ int iptv_remove_hd1080(ChannelList *l)
     }
     l->count = o;
     return removed;
+}
+
+/* ---- where films were left (resume.txt: "position_ms length_ms url" per line, newest first) ---- */
+int resume_parse(const char *text, ResumeEntry *out, int max)
+{
+    int n = 0;
+    const char *p = text;
+    while (p && *p && n < max) {
+        const char *eol = p + strcspn(p, "\r\n");
+        long pos = 0, dur = 0;
+        int used = 0;
+        if (sscanf(p, "%ld %ld %n", &pos, &dur, &used) >= 2 && used > 0 && p + used < eol && pos > 0) {
+            size_t ul = (size_t)(eol - (p + used));
+            if (ul < sizeof out[n].url) {
+                memcpy(out[n].url, p + used, ul);
+                out[n].url[ul] = 0;
+                out[n].pos_ms = (int)pos;
+                out[n].dur_ms = (int)dur;
+                n++;
+            }
+        }
+        p = eol;
+        while (*p == '\r' || *p == '\n') p++;
+    }
+    return n;
+}
+
+int resume_format(const ResumeEntry *e, int n, char *out, size_t outsz)
+{
+    size_t o = 0;
+    if (outsz) out[0] = 0;
+    for (int i = 0; i < n; i++) {
+        int k = snprintf(out + o, outsz - o, "%d %d %s\n", e[i].pos_ms, e[i].dur_ms, e[i].url);
+        if (k < 0 || (size_t)k >= outsz - o) return -1;
+        o += (size_t)k;
+    }
+    return (int)o;
+}
+
+int resume_find(const ResumeEntry *e, int n, const char *url)
+{
+    for (int i = 0; i < n; i++) if (!strcmp(e[i].url, url)) return i;
+    return -1;
+}
+
+int resume_worth(int pos_ms, int dur_ms)
+{
+    if (pos_ms < 30000) return 0;                            /* hardly started */
+    if (dur_ms > 0) {
+        int tail = dur_ms / 20 > 60000 ? dur_ms / 20 : 60000;
+        if (pos_ms > dur_ms - tail) return 0;                /* watched to the end */
+    }
+    return 1;
+}
+
+int resume_update(ResumeEntry *e, int n, int max, const char *url, int pos_ms, int dur_ms)
+{
+    int k = resume_find(e, n, url);
+    if (k >= 0) { memmove(&e[k], &e[k + 1], sizeof *e * (size_t)(n - k - 1)); n--; }
+    if (!resume_worth(pos_ms, dur_ms) || strlen(url) >= sizeof e[0].url || max < 1) return n;
+    if (n >= max) n = max - 1;                               /* the oldest goes */
+    memmove(&e[1], &e[0], sizeof *e * (size_t)n);
+    snprintf(e[0].url, sizeof e[0].url, "%s", url);
+    e[0].pos_ms = pos_ms;
+    e[0].dur_ms = dur_ms;
+    return n + 1;
 }

@@ -30,8 +30,9 @@ static int raw_w(float scale, const char *s)
     return g_pvf ? vita2d_pvf_text_width(g_pvf, scale, s) : vita2d_pgf_text_width(g_pgf, scale, s);
 }
 
-/* Turkish letters are drawn as their plain Latin forms (ğ->g, ı->i, ş->s, ç->c, ü->u, ö->o),
- * which reads better than the font's missing or odd glyphs. Returns s itself if nothing changes. */
+/* Turkish letters are drawn as their plain Latin forms (g, i, s, c, u, o), which read better than the
+ * font's glyphs; everything else is drawn as it is (as in v0.1, which shows the big Xtream list fine).
+ * Returns s itself if nothing changes. */
 const char *ui_plain(const char *s, char *buf, size_t cap)
 {
     const unsigned char *p = (const unsigned char *)s;

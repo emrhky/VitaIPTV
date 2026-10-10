@@ -97,10 +97,20 @@ int main(int argc, char **argv)
                      "Cannot play this channel", "1920x1080 is above the Vita decoder limit (720p)", UI_ERR, 0, 0 };
     preview_clear(0); scr_player(&pe); shot("7_error");
 
+    UiHint hfilm[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_LR, "Seek" }, { UI_BTN_UPDOWN, "Next" },
+                    { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_SQUARE, "720p" }, { UI_BTN_CIRCLE, "Back" } };
+    ScrPlayer pf;
+    memset(&pf, 0, sizeof pf);
+    pf.name = "Film A (2020)"; pf.group = "Aksiyon"; pf.info = "1920x1080  H.264  AAC"; pf.osd = 1; pf.hints = hfilm; pf.nhints = 6;
+    pf.film = 1; pf.pos_ms = 2470000; pf.dur_ms = 6312000; pf.seek_ms = 3070000; pf.paused = 1;
+    preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pf); shot("5b_film");
+    const char *rm[2] = { "Continue from 41:10", "Start from the beginning" };
+    preview_clear(UI_BG); scr_menu("Film A (2020)", rm, 2, 0); shot("5c_resume");
+
     UiHint hr[] = { { UI_BTN_UPDOWN, "Station" }, { UI_BTN_CIRCLE, "Back" } };
     for (int k = 0; k < 12; k++) { preview_clear(UI_BG); scr_radio("Radyo Fenomen", "Radyolar", "AAC  48 kHz  stereo", 760, 1234 + k * 16, hr, 2, ""); }
     preview_clear(UI_BG);
-    scr_radio("Radyo Fenomen", "Radyolar", "AAC  48 kHz  stereo", 760, 1234, hr, 2, T("START turns the screen off; the radio keeps playing."));
+    scr_radio("Radyo Fenomen", "Radyolar", "AAC  48 kHz  stereo", 760, 1234, hr, 2, NULL);
     shot("8_radio");
 
     const char *lines[] = { "HTTP 200, 4192 KB in 6.0 s (5694 kbit/s)", "Streams: 0x1B=h264, 0x0F=aac",
@@ -123,7 +133,7 @@ int main(int argc, char **argv)
     ScrField fs[] = { { T("Transcoding server"), "http://192.168.1.20:8090", SCR_F_TEXT, 1 }, { T("Use automatically"), T("On"), SCR_F_TOGGLE, 1 },
                       { T("Language"), T("Automatic (system)"), SCR_F_CHOICE, 1 }, { T("Hide adult channels"), T("On"), SCR_F_TOGGLE, 1 }, { T("Hide 1080p channels"), T("Off"), SCR_F_TOGGLE, 1 },
                       { T("Test server"), NULL, SCR_F_BUTTON, 1 }, { T("Save"), NULL, SCR_F_BUTTON, 1 }, { T("Cancel"), NULL, SCR_F_BUTTON, 1 } };
-    preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays 1080p, HEVC, MKV, MP2/AC-3 (tools/vita_iptv_proxy.py)"), fs, 8, 4, hf, 3, T("Server is running"), 0); shot("d_settings");
+    preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), fs, 8, 5, hf, 3, T("Server is running"), 0); shot("d_settings");
     preview_clear(UI_BG); scroll = 0; scr_list(&sl2); scr_about("v1.0"); shot("e_about");
     preview_clear(UI_BG); scr_splash(NULL, "Loading playlists...", "v1.0", 900); shot("f_splash_drawn");
     /* two-pane channel screen */

@@ -13,7 +13,7 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "Vita IPTV")
 set(VITA_TITLEID  "VIPTV0001")
-set(VITA_VERSION  "00.10")
+set(VITA_VERSION  "00.20")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O2 -std=gnu99")
 
@@ -32,6 +32,7 @@ add_executable(${PROJECT_NAME}.elf
   src/mpadec.c
   src/hls.c
   src/curlio.c
+  src/vod.c
 )
 
 # https:// with the app's own TLS: mbedTLS 3.6 (third_party/mbedtls, Apache-2.0) and a small HTTP client
@@ -58,7 +59,7 @@ message(STATUS "Extra stubs: ${EXTRA_STUBS}")
 target_link_libraries(${PROJECT_NAME}.elf
   vita2d
   freetype png jpeg z m pthread
-  SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceAudiodec_stub
+  SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceCodecEngine_stub SceAudiodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
   SceCtrl_stub SceSysmodule_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub
   ScePgf_stub ScePvf_stub SceAppUtil_stub ScePower_stub

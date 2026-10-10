@@ -97,6 +97,11 @@ static int tcp_connect(const char *host, int port, char *err, size_t errsz)
     for (struct addrinfo *a = res; a; a = a->ai_next) {
         fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
         if (fd < 0) continue;
+        /* A big receive buffer, set before connecting so TCP can offer a big window: with the small default
+         * the speed stops near buffer / round trip (films over https stayed at about 300 KB/s while the
+         * Vita's own HTTP reached 800 KB/s). */
+        int rcv = 1024 * 1024;
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
         if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) break;
         close(fd);
         fd = -1;
@@ -352,6 +357,11 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
             b64(auth, enc);
             k += snprintf(req + k, sizeof req - (size_t)k, "Authorization: Basic %s\r\n", enc);
         }
+        if (rq->range) {
+            if (rq->range_to) k += snprintf(req + k, sizeof req - (size_t)k, "Range: bytes=%llu-%llu\r\n",
+                                            (unsigned long long)rq->range_from, (unsigned long long)rq->range_to);
+            else k += snprintf(req + k, sizeof req - (size_t)k, "Range: bytes=%llu-\r\n", (unsigned long long)rq->range_from);
+        }
         k += snprintf(req + k, sizeof req - (size_t)k, "\r\n");
         if (conn_write(&c, req, (size_t)k) < 0) { conn_close(&c); snprintf(err, errsz, "Could not send the request"); ret = -1007; break; }
         /* headers */
@@ -392,6 +402,14 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
         if (header((char *)hb, "Transfer-Encoding", val, sizeof val) && strstr(val, "chunked")) { b.chunked = 1; b.left = -1; }
         else if (header((char *)hb, "Content-Length", val, sizeof val)) b.left = atoll(val);
         if (b.chunked) b.left = -1;
+        if (rq->total) {
+            uint64_t tot = 0;
+            if (header((char *)hb, "Content-Range", val, sizeof val)) {
+                const char *sl = strchr(val, '/');
+                if (sl && sl[1] != '*') tot = strtoull(sl + 1, NULL, 10);
+            } else if (code == 200 && b.left > 0) tot = (uint64_t)b.left;
+            *rq->total = tot;
+        }
         ret = 0;
         for (;;) {
             int n = body_read(&b, buf, 16384);

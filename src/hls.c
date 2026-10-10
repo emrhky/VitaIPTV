@@ -105,6 +105,12 @@ int hls_parse_master(const char *text, const char *base_url, HlsVariant *v, int 
                 for (char *c = val; *c; c++) *c = (char)tolower((unsigned char)*c);
                 cur.hevc = strstr(val, "hvc1") || strstr(val, "hev1");
                 cur.audio_only = !strstr(val, "avc") && !cur.hevc && (strstr(val, "mp4a") != NULL);
+                const char *avc = strstr(val, "avc1.");                 /* avc1.PPCCLL: LL = level x10, in hex */
+                if (!avc) avc = strstr(val, "avc3.");
+                if (avc && isxdigit((unsigned char)avc[9]) && isxdigit((unsigned char)avc[10])) {
+                    char lv[3] = { avc[9], avc[10], 0 };
+                    cur.avc_level = (int)strtol(lv, NULL, 16);
+                }
             }
             pending = 1;
         } else if (*s == '#') {
@@ -120,27 +126,49 @@ int hls_parse_master(const char *text, const char *base_url, HlsVariant *v, int 
     return n;
 }
 
-int hls_pick_variant(const HlsVariant *v, int n)
+/* Does the variant fit a decoder that plays up to max_h lines? 1 yes, 0 no, -1 unknown (no size given). */
+static int variant_fits(const HlsVariant *v, int max_h)
 {
-    int best = -1, fallback = -1;
+    int max_w = max_h > 720 ? 1920 : 1280;
+    if (v->height > 0) return v->height <= max_h && v->width <= max_w;
+    if (v->avc_level > 0) return v->avc_level <= (max_h > 720 ? 42 : 32);   /* 720p fits level 3.2, 1080p level 4.2 */
+    return -1;
+}
+
+int hls_pick_variant(const HlsVariant *v, int n, int max_h)
+{
+    int best = -1, unsized = -1, unsized_small = -1, fallback = -1;
+    /* No size given: the highest bit rate below this is most likely the best that still fits. */
+    long cap = max_h > 720 ? 6000000L : 2600000L;
     for (int i = 0; i < n; i++) {
         if (v[i].hevc || v[i].audio_only) continue;
-        if (v[i].height > 0) {
-            if (v[i].height > 720 || v[i].width > 1280) {    /* too big for the decoder: only if nothing else */
-                if (fallback < 0 || v[i].height < v[fallback].height ||
-                    (v[i].height == v[fallback].height && v[i].bandwidth < v[fallback].bandwidth)) fallback = i;
-                continue;
-            }
-            if (best < 0 || v[best].height <= 0 || v[i].height > v[best].height ||
+        int fits = variant_fits(&v[i], max_h);
+        if (fits == 1 && v[i].height > 0) {
+            if (best < 0 || v[i].height > v[best].height ||
                 (v[i].height == v[best].height && v[i].bandwidth > v[best].bandwidth)) best = i;
-        } else if (best < 0 || (v[best].height <= 0 && v[i].bandwidth < v[best].bandwidth)) {
-            best = i;                                       /* no size given: the smallest is the safest */
+        } else if (fits != 0) {                             /* no size: level fits, or nothing known */
+            if (unsized_small < 0 || v[i].bandwidth < v[unsized_small].bandwidth) unsized_small = i;
+            if ((fits == 1 || v[i].bandwidth <= cap) && (unsized < 0 || v[i].bandwidth > v[unsized].bandwidth)) unsized = i;
+        } else {                                            /* too big for the decoder: only if nothing else */
+            if (fallback < 0 || (v[i].height > 0 && v[fallback].height > 0 && v[i].height < v[fallback].height) ||
+                (v[i].height == v[fallback].height && v[i].bandwidth < v[fallback].bandwidth)) fallback = i;
         }
     }
     if (best >= 0) return best;
+    if (unsized >= 0) return unsized;
+    if (unsized_small >= 0) return unsized_small;
     if (fallback >= 0) return fallback;
     for (int i = 0; i < n; i++) if (!v[i].audio_only) return i;
     return n > 0 ? 0 : -1;
+}
+
+int hls_has_variant_above(const HlsVariant *v, int n, int h_low, int max_h)
+{
+    for (int i = 0; i < n; i++) {
+        if (v[i].hevc || v[i].audio_only) continue;
+        if (v[i].height > h_low && variant_fits(&v[i], max_h) == 1) return 1;
+    }
+    return 0;
 }
 
 int hls_parse_media(const char *text, HlsMedia *m)

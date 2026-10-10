@@ -33,13 +33,27 @@ int main(void)
     HlsVariant v[8];
     int n = hls_parse_master(master, "http://a.tv/ch/master.m3u8", v, 8);
     assert(n == 6 && v[0].height == 1080 && v[4].hevc && v[5].audio_only);
-    int k = hls_pick_variant(v, n);
+    assert(v[0].avc_level == 40 && v[1].avc_level == 31 && v[2].avc_level == 0);
+    int k = hls_pick_variant(v, n, 720);
     assert(k == 1 && !strcmp(v[k].uri, "http://a.tv/ch/mid/index.m3u8"));      /* best 720p, H.264 */
+    assert(hls_pick_variant(v, n, 1080) == 0);                                   /* 1080p mode: the 1080p one */
+    assert(hls_has_variant_above(v, n, 720, 1080) && !hls_has_variant_above(v, n, 1080, 1080));
     HlsVariant only1080[1] = { v[0] };
-    assert(hls_pick_variant(only1080, 1) == 0);                                  /* nothing smaller: still try */
+    assert(hls_pick_variant(only1080, 1, 720) == 0);                             /* nothing smaller: still try */
     const char *nosize = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=3000000\na.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1200000\nb.m3u8\n";
     n = hls_parse_master(nosize, "http://x/y.m3u8", v, 8);
-    assert(n == 2 && hls_pick_variant(v, n) == 1);                               /* no sizes: the smallest */
+    assert(n == 2 && hls_pick_variant(v, n, 720) == 1);                          /* no sizes: highest under 2.6 Mbit/s */
+    assert(hls_pick_variant(v, n, 1080) == 0);                                   /* 1080p mode: under 6 Mbit/s */
+    /* seen on a real channel: five variants without sizes; the smallest (240p) used to be chosen */
+    const char *ladder = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=331000\na.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=492000\nb.m3u8\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=775000\nc.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1013000\nd.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1577000\ne.m3u8\n";
+    n = hls_parse_master(ladder, "http://x/y.m3u8", v, 8);
+    assert(n == 5 && hls_pick_variant(v, n, 720) == 4);
+    /* no sizes but levels in CODECS: level 4.0 is 1080p, 3.1 fits 720p */
+    const char *lv = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2400000,CODECS=\"avc1.640028,mp4a.40.2\"\nhd.m3u8\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=2000000,CODECS=\"avc1.64001F,mp4a.40.2\"\nmid.m3u8\n";
+    n = hls_parse_master(lv, "http://x/y.m3u8", v, 8);
+    assert(n == 2 && hls_pick_variant(v, n, 720) == 1 && hls_pick_variant(v, n, 1080) == 0);
 
     const char *media =
         "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:6\n#EXT-X-MEDIA-SEQUENCE:1520\n"

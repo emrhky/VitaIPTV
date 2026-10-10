@@ -94,6 +94,40 @@ int main(void)
     assert(!strcmp(xl.items[1].url, "http://host.example:8080/live/ali/p%40ss/202.ts"));
     channel_list_free(&xl);
 
+    /* films, series and episodes */
+    const char *vj = "[{\"num\":1,\"name\":\"Film A (2020)\",\"stream_type\":\"movie\",\"stream_id\":5001,\"rating\":\"7.1\","
+                     "\"category_id\":\"1\",\"container_extension\":\"mkv\",\"direct_source\":\"\"},"
+                     "{\"name\":\"Film B\",\"stream_id\":\"5002\",\"category_id\":\"2\"},"
+                     "{\"name\":\"Bad ext\",\"stream_id\":\"5003\",\"container_extension\":\"m/kv\"}]";
+    assert(xtream_parse_vod(vj, strlen(vj), &xs, cats, nc, &xl) == 3);
+    assert(!strcmp(xl.items[0].url, "http://host.example:8080/movie/ali/p%40ss/5001.mkv") && xl.items[0].kind == CH_FILM);
+    assert(!strcmp(xl.items[1].url, "http://host.example:8080/movie/ali/p%40ss/5002.mp4"));   /* no extension: mp4 */
+    assert(!strcmp(xl.items[2].url, "http://host.example:8080/movie/ali/p%40ss/5003.mp4"));
+    channel_list_free(&xl);
+    channel_list_init(&xl);
+    const char *srj = "[{\"num\":1,\"name\":\"Dizi\",\"series_id\":77,\"cover\":\"x\",\"category_id\":\"1\"},{\"name\":\"no id\"}]";
+    assert(xtream_parse_series(srj, strlen(srj), &xs, cats, nc, &xl) == 1);
+    assert(xl.items[0].kind == CH_SERIES && !strcmp(xl.items[0].url, "77") && !strcmp(xl.items[0].name, "Dizi"));
+    channel_list_free(&xl);
+    channel_list_init(&xl);
+    const char *ej = "{\"seasons\":[{\"episode_count\":2,\"season_number\":1}],\"info\":{\"name\":\"Dizi\"},"
+                     "\"episodes\":{\"1\":[{\"id\":\"9001\",\"episode_num\":1,\"title\":\"Dizi - S01E01 - Pilot\","
+                     "\"container_extension\":\"mp4\",\"info\":{\"duration\":\"00:45:00\",\"name\":\"x\"},\"season\":1},"
+                     "{\"id\":\"9002\",\"episode_num\":\"2\",\"title\":\"\",\"container_extension\":\"mkv\",\"season\":1}],"
+                     "\"2\":[{\"id\":9003,\"episode_num\":1,\"title\":\"Yeni sezon\",\"season\":2}]}}";
+    assert(xtream_parse_episodes(ej, strlen(ej), &xs, &xl) == 3);
+    assert(!strcmp(xl.items[0].name, "Dizi - S01E01 - Pilot") && !strcmp(xl.items[0].group, "Season 1"));
+    assert(!strcmp(xl.items[0].url, "http://host.example:8080/series/ali/p%40ss/9001.mp4") && xl.items[0].kind == CH_FILM);
+    assert(!strcmp(xl.items[1].name, "S01E02") && xl.items[1].episode == 2);
+    assert(!strcmp(xl.items[2].group, "Season 2") && !strcmp(xl.items[2].url, "http://host.example:8080/series/ali/p%40ss/9003.mkv"));
+    channel_list_free(&xl);
+    channel_list_init(&xl);
+    const char *ej2 = "{\"episodes\":[[{\"id\":\"1\",\"episode_num\":1,\"title\":\"a\",\"season\":1}],[{\"id\":\"2\",\"episode_num\":1,\"season\":2}]]}";
+    assert(xtream_parse_episodes(ej2, strlen(ej2), &xs, &xl) == 2);
+    assert(xtream_parse_episodes("{\"episodes\":[", 13, &xs, &xl) == 0 && xl.count == 2);   /* cut off: no crash */
+    channel_list_free(&xl);
+    channel_list_init(&xl);
+
     char api[IPTV_URL_MAX];
     assert(xtream_api_url(&xs, "get_live_streams", api, sizeof api) == 0);
     assert(!strcmp(api, "http://host.example:8080/player_api.php?username=ali&password=p%40ss&action=get_live_streams"));
@@ -150,6 +184,18 @@ int main(void)
     char fld[64] = "  a|b\nc  "; source_clean_field(fld); assert(!strcmp(fld, "a b c"));
 
     /* settings and the transcoding-server address */
+    {   /* Xtream account answer */
+        XtAccount a;
+        const char *ok = "{\"user_info\":{\"username\":\"u\",\"auth\":1,\"status\":\"Active\",\"exp_date\":\"1767225600\",\"active_cons\":\"1\",\"max_connections\":\"1\"},\"server_info\":{\"url\":\"x\"}}";
+        assert(xtream_parse_account(ok, strlen(ok), &a) == 0 && a.auth && !strcmp(a.status, "Active") && a.exp == 1767225600L && a.active == 1 && a.max == 1);
+        const char *bad = "{\"user_info\":{\"auth\":0}}";
+        assert(xtream_parse_account(bad, strlen(bad), &a) == 0 && a.found && !a.auth);
+        const char *exp = "{\"user_info\": {\"auth\": 1, \"status\": \"Expired\", \"exp_date\": null, \"active_cons\": 0, \"max_connections\": 2}}";
+        assert(xtream_parse_account(exp, strlen(exp), &a) == 0 && a.auth && !strcmp(a.status, "Expired") && a.exp == 0 && a.max == 2);
+        assert(xtream_parse_account("<html>", 6, &a) == -1);
+        Source xs; memset(&xs, 0, sizeof xs); snprintf(xs.url, sizeof xs.url, "http://h:8080"); snprintf(xs.user, sizeof xs.user, "a b"); snprintf(xs.pass, sizeof xs.pass, "p&q");
+        char xu[256]; assert(xtream_api_url(&xs, NULL, xu, sizeof xu) == 0 && !strcmp(xu, "http://h:8080/player_api.php?username=a%20b&password=p%26q"));
+    }
     Settings st; settings_parse("# x\nproxy = 192.168.1.20:8090/ \nauto_proxy=0\n", &st);
     assert(!strcmp(st.proxy, "192.168.1.20:8090/") && st.auto_proxy == 0);
     char pu[1024];
@@ -174,6 +220,10 @@ int main(void)
     assert(!strcmp(T("Back"), "Geri") && !strcmp(T("Something unknown"), "Something unknown"));
     assert(!strcmp(T_msg("Server answered HTTP 407"), "Sunucu HTTP 407 yanıtı verdi"));
     assert(!strcmp(T_msg("1920x1080 is above the Vita decoder limit (720p)"), "1920x1080, Vita çözücüsünün sınırının (720p) üstünde"));
+    assert(!strcmp(T_msg("1920x1080 is above 720p"), "1920x1080, 720p üstünde"));
+    assert(!strcmp(T_msg("1080p decoder could not start (0x80620003), see log.txt"), "1080p çözücü başlatılamadı (0x80620003), log.txt'ye bakın"));
+    assert(!strcmp(T_msg("Account in use: 1 of 1 connections (channels may not open)"), "Hesap kullanımda: 1 / 1 bağlantı (kanallar açılmayabilir)"));
+    assert(!strcmp(T_msg("Account Expired"), "Hesap durumu: Expired"));
     assert(!strcmp(T_msg("Connection failed (0x80431068)"), "Bağlantı kurulamadı (0x80431068)"));
     assert(!strcmp(T_msg("Audio mpeg_audio: not supported"), "Ses mpeg_audio: desteklenmiyor"));
     assert(!strcmp(T_msg("Failed: Out of memory"), "Başarısız: Bellek yetersiz"));       /* the inner text is translated too */
@@ -214,10 +264,44 @@ int main(void)
             for (unsigned k = 0; k < sizeof no / sizeof no[0]; k++) { snprintf(hc.name, sizeof hc.name, "%s", no[k]); assert(!iptv_is_hd1080(&hc)); }
             Settings sh; settings_parse("hide_1080p=1\n", &sh); assert(sh.hide_1080p == 1);
             char shf[256]; settings_format(&sh, shf, sizeof shf); Settings sj; settings_parse(shf, &sj); assert(sj.hide_1080p == 1);
+            Settings sx; settings_parse("hd_1080p=1\n", &sx); assert(sx.hd1080 == 1 && !sh.hd1080);
+            char sxf[256]; settings_format(&sx, sxf, sizeof sxf); Settings sy; settings_parse(sxf, &sy); assert(sy.hd1080 == 1);
         }
         char saf[256]; settings_format(&sa, saf, sizeof saf); Settings sb; settings_parse(saf, &sb); assert(sb.hide_adult == 1);
     }
 
+    {   /* resume positions */
+        static ResumeEntry re[3];
+        int n = 0;
+        n = resume_update(re, n, 3, "http://h/movie/u/p/1.mkv", 600000, 5400000);
+        n = resume_update(re, n, 3, "http://h/movie/u/p/2.mp4", 10000, 5400000);      /* too early: not kept */
+        assert(n == 1);
+        n = resume_update(re, n, 3, "http://h/movie/u/p/2.mp4", 120000, 0);
+        n = resume_update(re, n, 3, "http://h/movie/u/p/3.mp4", 99000, 100000);      /* at the end: not kept */
+        assert(n == 2 && !strcmp(re[0].url, "http://h/movie/u/p/2.mp4"));
+        n = resume_update(re, n, 3, "http://h/movie/u/p/1.mkv", 700000, 5400000);     /* moves to the front */
+        assert(n == 2 && re[0].pos_ms == 700000 && resume_find(re, n, "http://h/movie/u/p/2.mp4") == 1);
+        n = resume_update(re, n, 3, "a", 40000, 0);
+        n = resume_update(re, n, 3, "b", 40000, 0);                                   /* full: the oldest goes */
+        assert(n == 3 && !strcmp(re[0].url, "b") && resume_find(re, n, "http://h/movie/u/p/2.mp4") < 0);
+        char buf[4096];
+        assert(resume_format(re, n, buf, sizeof buf) > 0);
+        static ResumeEntry back[3];
+        assert(resume_parse(buf, back, 3) == 3 && back[2].pos_ms == 700000 && !strcmp(back[2].url, "http://h/movie/u/p/1.mkv"));
+        assert(resume_parse("junk\n12 x\n\n", back, 3) == 0);
+        n = resume_update(re, n, 3, "b", 0, 0);                                       /* finished: removed */
+        assert(n == 2 && resume_find(re, n, "b") < 0);
+    }
+    assert(iptv_is_film_url("https://example.org/films/Sintel.2010.720p.mkv"));
+    assert(iptv_is_film_url("http://h:8080/movie/u/p/123.mp4") && iptv_is_film_url("http://h/series/u/p/9.ts"));
+    assert(iptv_is_film_url("http://h/a.MOV?token=1") && !iptv_is_film_url("http://h/live/u/p/1.ts"));
+    assert(!iptv_is_film_url("http://h/index.m3u8") && !iptv_is_film_url("ux0:data/VitaIPTV/a.mkv"));
+    {
+        const char *m = "#EXTM3U\n#EXTINF:-1,Film\nhttp://h/f.mkv\n#EXTINF:-1,TV\nhttp://h/live/1.ts\n";
+        ChannelList fl; channel_list_init(&fl);
+        assert(m3u_parse(m, strlen(m), &fl) == 2 && fl.items[0].kind == CH_FILM && fl.items[1].kind == CH_LIVE);
+        channel_list_free(&fl);
+    }
     puts("all host tests passed");
     return 0;
 }
