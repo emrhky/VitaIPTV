@@ -13,7 +13,7 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "Vita IPTV")
 set(VITA_TITLEID  "VIPTV0001")
-set(VITA_VERSION  "00.22")
+set(VITA_VERSION  "00.23")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O2 -std=gnu99")
 
@@ -77,4 +77,7 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE sce_sys/livearea/contents/template.xml sce_sys/livearea/contents/template.xml
   FILE resources/splash.png resources/splash.png
   FILE resources/waiting.png resources/waiting.png
+  FILE LICENSE LICENSE.txt
+  FILE THIRD_PARTY_NOTICES.md THIRD_PARTY_NOTICES.txt
+  FILE third_party/mbedtls/LICENSE licenses/mbedtls-LICENSE.txt
 )
