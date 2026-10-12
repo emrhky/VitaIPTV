@@ -17,6 +17,7 @@
 - Radio: Square turns the screen off; the sound goes on, any button turns it on again.
 - Full CPU speed only while playing, loading or analysing; normal speed in the menus (less heat and battery).
 - Stream analysis compares the download speed with what an HLS stream needs.
+- New round LiveArea bubble; the start screen no longer shows an old version number under the new one.
 - Smaller fixes: the old 1080p setting is gone from settings.txt; safer stopping of network requests;
   FLV films that do not start at 0 show the right position.
 
