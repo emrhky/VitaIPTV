@@ -5,6 +5,8 @@
 #include <psp2/io/fcntl.h>
 #include <psp2/net/net.h>
 #include <psp2/net/netctl.h>
+#include <psp2/avconfig.h>
+#include <psp2/registrymgr.h>
 #include <psp2/sysmodule.h>
 #include <vita2d.h>
 #include <psp2/net/http.h>
@@ -17,6 +19,7 @@
 #include "nettls.h"
 #include "curlio.h"
 #include "iptv.h"
+#include "urlhdr.h"
 #include "player.h"
 #include "probe.h"
 #include "tsplayer.h"
@@ -46,7 +49,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define SETTINGS_FILE DATA_DIR "/settings.txt"
 #define RESUME_FILE   DATA_DIR "/resume.txt"
 #define MAX_RESUME    200
-#define APP_VERSION   "v0.2"
+#define APP_VERSION   "v0.2.2"
 #define MAX_SOURCES   64
 #define MAX_GROUPS    1024
 #define MAX_DOWNLOAD  (24 * 1024 * 1024)
@@ -361,7 +364,7 @@ static void add_local_files(void)
         const char *dot = strrchr(e.d_name, '.');
         int video = dot && (!strcasecmp(dot, ".mp4") || !strcasecmp(dot, ".m4v") || !strcasecmp(dot, ".mov") ||
                             !strcasecmp(dot, ".ts") || !strcasecmp(dot, ".m2ts") || !strcasecmp(dot, ".mts") ||
-                            !strcasecmp(dot, ".mkv") || !strcasecmp(dot, ".webm"));
+                            !strcasecmp(dot, ".mkv") || !strcasecmp(dot, ".webm") || !strcasecmp(dot, ".flv"));
         int list = dot && (!strcasecmp(dot, ".m3u") || !strcasecmp(dot, ".m3u8"));   /* drop playlists here in bulk */
         if (!SCE_S_ISDIR(e.d_stat.st_mode) && (video || list)) {
             Source *s = &sources[nsources++];
@@ -484,7 +487,6 @@ static int frames_after_fail = 99;          /* ... and the first frames after a 
 
 static volatile int job_active, job_done;
 static volatile const char *job_stage = "";
-static SceUID job_tid = -1;
 static int job_pending;                     /* load_start asked for a load: it runs at the top of the next frame */
 
 /* The list is loaded on the main thread, as in v0.1: a loader thread drawing nothing still made the GPU
@@ -673,15 +675,14 @@ static int load_vod(LoadJob *j)
     return n ? 0 : -1;
 }
 
-static int load_thread(SceSize args, void *argp)
+/* runs the load job (on the main thread, between frames) */
+static void load_run(void)
 {
-    (void)args; (void)argp;
     if (job.what != LOAD_LIVE) job.rc = load_vod(&job);
     else job.rc = load_list(&job.src, &job.list, job.err, sizeof job.err, job.note, sizeof job.note);
     if (net_cancel && job.rc != 0) snprintf(job.err, sizeof job.err, "Cancelled");
     __sync_synchronize();
     job_done = 1;
-    return 0;
 }
 
 static void leave_episodes(void);
@@ -725,7 +726,6 @@ static int load_poll(unsigned p)
     scr_loading(T((const char *)job_stage), net_cancel ? T("Cancelling...") : job.src.name, now_ms());
     ui_footer(H, 1, NULL, 0);
     if (!job_done) return 0;
-    if (job_tid >= 0) { sceKernelWaitThreadEnd(job_tid, NULL, NULL); sceKernelDeleteThread(job_tid); job_tid = -1; }
     job_active = 0;
     if (job.rc != 0) {
         channel_list_free(&job.list);
@@ -869,7 +869,7 @@ static const UiHint HINTS_VIDEO[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_UPDOWN
                                       { UI_BTN_SELECT, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
 static const UiHint HINTS_VIDEO_SRV[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_SQUARE, "Server" },
                                           { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_SELECT, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
-static const UiHint HINTS_RADIO[] = { { UI_BTN_UPDOWN, "Station" }, { UI_BTN_TRIANGLE, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
+static const UiHint HINTS_RADIO[] = { { UI_BTN_UPDOWN, "Station" }, { UI_BTN_SQUARE, "Screen off" }, { UI_BTN_TRIANGLE, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
 static const UiHint HINTS_FILM[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_LR, "Seek" }, { UI_BTN_UPDOWN, "Next" },
                                      { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_SQUARE, "720p" }, { UI_BTN_CIRCLE, "Back" } };
 static const UiHint HINTS_PROBE[] = { { UI_BTN_CROSS, "Again" }, { UI_BTN_SELECT, "Play" }, { UI_BTN_CIRCLE, "Back" } };
@@ -960,9 +960,13 @@ static void activate_item(int vi)
     }
 }
 
-static void draw_video_texture(vita2d_texture *t, int w, int h)
+static void draw_video_texture(vita2d_texture *t, int w, int h, int fields)
 {
     float sx = 960.0f / w, sy = 544.0f / h, s = sx < sy ? sx : sy;
+    if (fields) {                                    /* two fields one above the other: the top one, stretched */
+        vita2d_draw_texture_part_scale(t, (960.0f - w * s) / 2, (544.0f - h * s) / 2, 0, 0, w, h / 2, s, s * 2);
+        return;
+    }
     vita2d_draw_texture_part_scale(t, (960.0f - w * s) / 2, (544.0f - h * s) / 2, 0, 0, w, h, s, s);
 }
 
@@ -997,10 +1001,10 @@ static void draw_tsp_screen(int osd)
         else if (st->audio_frames) snprintf(ai, sizeof ai, "AAC   %s   %s", kr, st->audio_ch == 1 ? "mono" : "stereo");
         else snprintf(ai, sizeof ai, "%s", T("Buffering..."));
         scr_radio(c->name, c->group, ai, st->audio_level, now_ms(), HINTS_RADIO, NH(HINTS_RADIO),
-                  st->state == TSP_ENDED ? T("Stream ended") : NULL);
+                  st->state == TSP_ENDED ? T("Stream ended") : now_ms() < film_note_until ? film_note : NULL);
         return;
     }
-    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh); got_frame = 1; }
+    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields); got_frame = 1; }
 
     ScrPlayer sp;
     char info[48] = "", s1[200] = "", s2[200] = "";
@@ -1034,6 +1038,15 @@ static void draw_tsp_screen(int osd)
         if (st->paused || seek_target >= 0) osd = 1;
     }
     if (now_ms() < film_note_until) { sp.stats1 = film_note; osd = 1; }   /* a short note (live TV too) */
+    static char buf_line[16];
+    if (st && st->buffering && !st->paused) {                /* film: waiting for the network */
+        snprintf(buf_line, sizeof buf_line, "%d%%", st->buf_pct);
+        sp.center_title = T("Buffering...");
+        sp.center_line = buf_line;
+        sp.center_col = UI_TEXT;
+        sp.spinner = 1;
+        osd = 1;
+    }
     if (st && st->paused) {                                  /* live TV pauses too */
         for (int k = 0; k < nh; k++) if (hints[k].btn == UI_BTN_CROSS) hints[k].label = "Play";
         sp.paused = 1;
@@ -1052,7 +1065,12 @@ static void draw_tsp_screen(int osd)
     } else {
         switch (st->state) {
         case TSP_CONNECTING:
-            if (!tx) { sp.center_title = "Connecting..."; sp.center_line = st->note[0] ? T(st->note) : "Waiting for the stream"; sp.center_col = UI_TEXT; sp.spinner = 1; }
+            if (!tx) {
+                static char note_line[96];
+                if (st->note[0] && st->note_pct > 0 && st->note_pct < 100) snprintf(note_line, sizeof note_line, "%s %d%%", T(st->note), st->note_pct);
+                else snprintf(note_line, sizeof note_line, "%s", st->note[0] ? T(st->note) : T("Waiting for the stream"));
+                sp.center_title = "Connecting..."; sp.center_line = note_line; sp.center_col = UI_TEXT; sp.spinner = 1;
+            }
             break;
         case TSP_WAIT_KEY:
             if (!tx) { sp.center_title = "Starting video..."; sp.center_line = "Waiting for a keyframe"; sp.center_col = UI_TEXT; sp.spinner = 1; }
@@ -1101,7 +1119,7 @@ static void draw_mp4_screen(int osd)
 {
     const Channel *c = cur_channel();
     vita2d_texture *t = player_poll();
-    if (t) { got_frame = 1; draw_video_texture(t, vita2d_texture_get_width(t), vita2d_texture_get_height(t)); }
+    if (t) { got_frame = 1; draw_video_texture(t, vita2d_texture_get_width(t), vita2d_texture_get_height(t), 0); }
     ScrPlayer sp;
     memset(&sp, 0, sizeof sp);
     sp.backdrop = !got_frame;
@@ -1351,9 +1369,16 @@ static void open_settings_form(void)
     f_hd = settings.hide_1080p;
 }
 
+/* fields 3 / 4 mean username / password, or Referer / User-Agent for a single stream: clear them when that changes */
+static void set_form_type(int type)
+{
+    if ((type == 2) != (f_type == 2)) f_user[0] = f_pass[0] = 0;
+    f_type = type;
+}
+
 static int source_field_enabled(int i)
 {
-    if (i == 3 || i == 4) return f_type != 2;               /* username / password */
+    (void)i;                                                 /* single streams use 3 / 4 for Referer / User-Agent */
     return 1;
 }
 
@@ -1409,7 +1434,8 @@ static void save_source_form(void)
     if (!f_name[0]) host_of(f_url, f_name, sizeof f_name);
     snprintf(s.name, sizeof s.name, "%s", f_name);
     snprintf(s.url, sizeof s.url, "%s", f_url);
-    if (s.type != SRC_STREAM) { snprintf(s.user, sizeof s.user, "%s", f_user); snprintf(s.pass, sizeof s.pass, "%s", f_pass); }
+    snprintf(s.user, sizeof s.user, "%s", f_user);          /* single stream: Referer and User-Agent */
+    snprintf(s.pass, sizeof s.pass, "%s", f_pass);
     if (edit_index >= 0) sources[edit_index] = s;
     else {
         int n = 0;                                           /* new entries go before the auto-found files */
@@ -1446,11 +1472,11 @@ static void form_activate(void)
 {
     if (form_kind == FORM_SOURCE) {
         switch (form_sel) {
-        case 0: f_type = (f_type + 1) % 3; break;
+        case 0: set_form_type((f_type + 1) % 3); break;
         case 1: ime_open("Name", f_name, 0, IME_FIELD, f_name, sizeof f_name); break;
         case 2: ime_open(f_type == 0 ? "Server address (e.g. http://host:8080)" : "Link", f_url, 0, IME_FIELD, f_url, sizeof f_url); break;
-        case 3: ime_open("Username", f_user, 0, IME_FIELD, f_user, sizeof f_user); break;
-        case 4: ime_open("Password", f_pass, 1, IME_FIELD, f_pass, sizeof f_pass); break;
+        case 3: ime_open(f_type == 2 ? "Referer (e.g. https://site/page)" : "Username", f_user, 0, IME_FIELD, f_user, sizeof f_user); break;
+        case 4: ime_open(f_type == 2 ? "User-Agent" : "Password", f_pass, f_type != 2, IME_FIELD, f_pass, sizeof f_pass); break;
         case 5: save_source_form(); break;
         default: form_kind = FORM_NONE; status[0] = 0; break;
         }
@@ -1491,8 +1517,9 @@ static void draw_form(void)
         f[0] = (ScrField){ T("Type"), T(TYPE_NAMES[f_type]), SCR_F_CHOICE, 1 };
         f[1] = (ScrField){ T("Name"), f_name, SCR_F_TEXT, 1 };
         f[2] = (ScrField){ T(f_type == 0 ? "Server address" : f_type == 1 ? "Playlist link" : "Stream link"), f_url, SCR_F_TEXT, 1 };
-        f[3] = (ScrField){ T(f_type == 1 ? "Username (if needed)" : "Username"), f_user, SCR_F_TEXT, source_field_enabled(3) };
-        f[4] = (ScrField){ T(f_type == 1 ? "Password (if needed)" : "Password"), stars, SCR_F_TEXT, source_field_enabled(4) };
+        f[3] = (ScrField){ T(f_type == 2 ? "Referer (if needed)" : f_type == 1 ? "Username (if needed)" : "Username"), f_user, SCR_F_TEXT, 1 };
+        f[4] = (ScrField){ T(f_type == 2 ? "User-Agent (if needed)" : f_type == 1 ? "Password (if needed)" : "Password"),
+                           f_type == 2 ? f_pass : stars, SCR_F_TEXT, 1 };
         f[5] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
         f[6] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
         scr_form(T(edit_index >= 0 ? "Edit playlist" : "Add playlist"),
@@ -1519,6 +1546,34 @@ static int radio_playing(void)
     if (state != ST_PLAYING || play_mode != 2) return 0;
     const TspStatus *st = tsp_status();
     return st && st->audio_only && st->state < TSP_ENDED;
+}
+
+/* Radio: Square turns the screen off (its light, not the system: the Wi-Fi and the sound go on; putting the
+ * Vita to sleep stopped both). Any button turns it on again at the brightness it had. */
+static int screen_off, screen_brightness = -1;
+
+static void screen_off_set(int off)
+{
+    if (off == screen_off) return;
+    if (off) {
+        int b = -1;
+        if (sceRegMgrGetKeyInt("/CONFIG/DISPLAY", "brightness", &b) < 0 || b <= 0) b = -1;
+        if (b < 0) {                                         /* cannot put it back afterwards: do not turn it off */
+            snprintf(film_note, sizeof film_note, "%s", T("The screen cannot be turned off here"));
+            film_note_until = now_ms() + 3000;
+            plog("screen: brightness not readable, staying on");
+            return;
+        }
+        screen_brightness = b;
+        int r = sceAVConfigSetDisplayBrightness(0);
+        plog("screen: off (brightness was %d) -> 0x%08X", b, (unsigned)r);
+        if (r < 0) return;
+        screen_off = 1;
+    } else {
+        int r = sceAVConfigSetDisplayBrightness(screen_brightness > 0 ? screen_brightness : 65536 / 2);
+        plog("screen: on (brightness %d) -> 0x%08X", screen_brightness, (unsigned)r);
+        screen_off = 0;
+    }
 }
 
 static void keep_awake(void)
@@ -1621,6 +1676,24 @@ static void stop_all(void)
 /* ---- start-up -------------------------------------------------------------- */
 static vita2d_texture *splash_img, *wait_img;
 static int clocks_rc[4];
+static int clocks_fast = 1;                 /* started fast (loading the playlists) */
+static unsigned clocks_busy_ms;
+
+/* Full speed (444 MHz) while something plays, loads or is analysed; the normal speed (333) in the menus:
+ * less heat and battery. It goes down only after 5 s in the menus, so zapping does not switch back and forth. */
+static void update_clocks(int busy)
+{
+    unsigned now = now_ms();
+    if (busy) clocks_busy_ms = now;
+    int fast = busy || now - clocks_busy_ms < 5000;
+    if (fast == clocks_fast) return;
+    clocks_fast = fast;
+    int a = scePowerSetArmClockFrequency(fast ? 444 : 333);
+    int b = scePowerSetBusClockFrequency(fast ? 222 : 166);
+    int g = scePowerSetGpuClockFrequency(fast ? 222 : 111);
+    plog("clocks: %s (cpu %d) -> 0x%08X 0x%08X 0x%08X", fast ? "playing / loading" : "menus", fast ? 444 : 333,
+         (unsigned)a, (unsigned)b, (unsigned)g);
+}
 
 static void splash_frame(const char *status_line)
 {
@@ -1695,10 +1768,12 @@ int main(void)
     for (;;) {
         unsigned p = read_pressed();
         if (ime_active) p = 0;                               /* the keyboard owns the buttons */
+        if (screen_off && (p || !radio_playing())) { screen_off_set(0); p = 0; }   /* any button: screen on again */
         keep_awake();
+        update_clocks(state == ST_PLAYING || job_active || job_pending);
         if (job_pending) {                                   /* load the list now, outside a frame */
             job_pending = 0;
-            load_thread(0, NULL);
+            load_run();
             p = 0;
         }
         frame_begin();
@@ -1713,7 +1788,7 @@ int main(void)
             if (p & SCE_CTRL_DOWN) form_move(1);
             if (p & SCE_CTRL_UP) form_move(-1);
             if (form_kind == FORM_SOURCE && form_sel == 0 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
-                f_type = (f_type + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3;
+                set_form_type((f_type + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3);
             if (form_kind == FORM_SETTINGS && form_sel == 1 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_auto = !f_auto;
             if (form_kind == FORM_SETTINGS && form_sel == 3 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_adult = !f_adult;
             if (form_kind == FORM_SETTINGS && form_sel == 4 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_hd = !f_hd;
@@ -1779,7 +1854,7 @@ int main(void)
                         if (chans.items) {
                             memset(chans.items, 0, sizeof(Channel));
                             snprintf(chans.items[0].name, IPTV_NAME_MAX, "%s", s->name);
-                            snprintf(chans.items[0].url, IPTV_URL_MAX, "%s", s->url);
+                            url_join_headers(s->url, s->user, s->pass, chans.items[0].url, IPTV_URL_MAX);   /* Referer / User-Agent */
                             if (iptv_is_film_url(s->url)) chans.items[0].kind = CH_FILM;
                             chans.count = chans.cap = 1;
                             free(vis);
@@ -1988,6 +2063,10 @@ int main(void)
                     if (film) { save_film_position(); probe_return_ms = pos; }
                     start_probe();
                 }
+                if ((p & SCE_CTRL_SQUARE) && radio_playing()) {   /* radio: screen off, sound and Wi-Fi go on */
+                    screen_off_set(1);
+                    p &= ~(unsigned)SCE_CTRL_SQUARE;
+                }
                 if ((p & SCE_CTRL_SQUARE) && film && fs) {
                     /* a film file has one picture size; a smaller one needs the transcoding server, which
                      * converts it to 720p from where it is now */
@@ -2048,6 +2127,7 @@ int main(void)
     sceHttpTerm();
     sceNetCtlTerm();
     sceNetTerm();
+    screen_off_set(0);
     sceKernelExitProcess(0);
     return 0;
 }

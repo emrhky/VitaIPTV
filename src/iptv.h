@@ -6,7 +6,7 @@
 #define IPTV_NAME_MAX     96
 #define IPTV_GROUP_MAX    48
 #define IPTV_URL_MAX      512
-#define IPTV_CRED_MAX     96
+#define IPTV_CRED_MAX     256                /* also holds a user agent (single streams) */
 #define IPTV_MAX_CHANNELS 30000
 
 typedef struct {
@@ -37,8 +37,8 @@ typedef struct {
     char name[IPTV_NAME_MAX];
     SourceType type;
     char url[IPTV_URL_MAX];     /* url, file path, or Xtream host */
-    char user[IPTV_CRED_MAX];
-    char pass[IPTV_CRED_MAX];
+    char user[IPTV_CRED_MAX];   /* single stream: Referer */
+    char pass[IPTV_CRED_MAX];   /* single stream: User-Agent */
     int auto_added;             /* found in the data folder, not saved to sources.txt */
 } Source;
 
@@ -48,7 +48,6 @@ typedef struct {
     int lang;                   /* 0 = like the console, 1 = English, 2 = Turkish */
     int hide_adult;             /* leave adult channels out of the lists */
     int hide_1080p;             /* leave channels labelled 1080p/FHD/UHD/4K out (the Vita plays up to 720p) */
-    int hd1080;                 /* unused since v0.2 (1080p is always on); kept so old settings.txt files load */
 } Settings;
 
 void channel_list_init(ChannelList *l);

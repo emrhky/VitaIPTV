@@ -19,7 +19,7 @@
 #include <stdint.h>
 #include "tsdemux.h"
 
-enum { VOD_UNKNOWN = 0, VOD_MKV, VOD_MP4, VOD_TS, VOD_AVI };
+enum { VOD_UNKNOWN = 0, VOD_MKV, VOD_MP4, VOD_TS, VOD_AVI, VOD_FLV };
 
 /* Returns the number of bytes read at off (fewer at the end of the file), or < 0 on error. */
 typedef int (*VodRead)(void *ctx, uint64_t off, uint8_t *buf, size_t len);
@@ -44,6 +44,7 @@ typedef struct {
 int  mkv_layout(VodRead rd, void *ctx, uint64_t total, MkvLayout *L);
 void mkv_layout_free(MkvLayout *L);
 /* The Cluster that starts at or before target_ms (as close as can be found). *at_ms = its time. 0 = ok. */
+extern char vod_seek_note[96];          /* how the last mkv_seek found its place (for the log) */
 int  mkv_seek(VodRead rd, void *ctx, uint64_t total, const MkvLayout *L, int64_t target_ms,
               uint64_t *off, int64_t *at_ms);
 /* Finds the first Cluster start in p[0..n) with its timecode (ticks). Returns 1 if found. */

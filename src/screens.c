@@ -249,8 +249,8 @@ void scr_splash(const vita2d_texture *img, const char *status, const char *versi
         ui_text_center(480, 336, UI_TEXT, 2.0f, "Vita IPTV");
         ui_text_center(481, 336, UI_TEXT, 2.0f, "Vita IPTV");
         ui_text_center(480, 372, UI_DIM, 1.0f, T("Live TV and radio on your Vita"));
-        if (version) ui_text(900 - ui_text_w(0.9f, version), 520, UI_DIM, 0.9f, version);
     }
+    if (version) ui_text(900 - ui_text_w(0.9f, version), 520, UI_DIM, 0.9f, version);   /* not in the picture */
     if (status && status[0]) {
         ui_spinner(480, 440, t_ms);
         ui_text_center(480, 490, UI_DIM, 0.9f, status);

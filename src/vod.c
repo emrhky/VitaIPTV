@@ -14,6 +14,7 @@ int vod_container(const uint8_t *b, size_t n)
 {
     if (n >= 4 && b[0] == 0x1A && b[1] == 0x45 && b[2] == 0xDF && b[3] == 0xA3) return VOD_MKV;
     if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "AVI ", 4)) return VOD_AVI;
+    if (n >= 9 && b[0] == 'F' && b[1] == 'L' && b[2] == 'V' && b[3] == 1) return VOD_FLV;
     if (n >= 8 && (!memcmp(b + 4, "ftyp", 4) || !memcmp(b + 4, "moov", 4) || !memcmp(b + 4, "mdat", 4) ||
                    !memcmp(b + 4, "free", 4) || !memcmp(b + 4, "wide", 4) || !memcmp(b + 4, "skip", 4))) return VOD_MP4;
     for (size_t k = 0; k < 188 && k + 2 * 188 < n; k++)
@@ -26,6 +27,7 @@ const char *vod_container_name(int c)
     switch (c) {
     case VOD_MKV: return "Matroska";
     case VOD_MP4: return "MP4";
+    case VOD_FLV: return "FLV";
     case VOD_TS:  return "MPEG-TS";
     case VOD_AVI: return "AVI";
     default:      return "unknown";
@@ -269,6 +271,8 @@ int mkv_find_cluster(const uint8_t *p, size_t n, size_t *at, uint64_t *tc)
 
 static int64_t ticks_ms(const MkvLayout *L, uint64_t ticks) { return (int64_t)(ticks * (L->scale / 1000) / 1000); }
 
+char vod_seek_note[96];
+
 static int seek_by_cues(VodRead rd, void *ctx, const MkvLayout *L, int64_t target_ms, uint64_t *off, int64_t *at_ms)
 {
     uint8_t hb[16];
@@ -276,10 +280,10 @@ static int seek_by_cues(VodRead rd, void *ctx, const MkvLayout *L, int64_t targe
     int r = rd(ctx, L->cues_pos, hb, sizeof hb);
     if (r < 4) return -1;
     int h = ebml_head(hb, (size_t)r, &id, &sz, &unk);
-    if (!h || id != ID_CUES || unk || sz > MKV_MAX_CUES) return -1;
+    if (!h || id != ID_CUES || unk || sz > MKV_MAX_CUES) { snprintf(vod_seek_note, sizeof vod_seek_note, "index not usable"); return -1; }
     uint8_t *c = read_all(rd, ctx, L->cues_pos + (uint64_t)h, (size_t)sz);
-    if (!c) return -1;
-    int found = 0;
+    if (!c) { snprintf(vod_seek_note, sizeof vod_seek_note, "index (%u KB) could not be read", (unsigned)(sz / 1024)); return -1; }
+    int found = 0, points = 0, after = 0;
     int64_t best_ms = -1;
     uint64_t best_off = 0;
     size_t pos = 0, n = (size_t)sz;
@@ -312,13 +316,23 @@ static int seek_by_cues(VodRead rd, void *ctx, const MkvLayout *L, int64_t targe
             }
             if (have_t && have_c) {
                 int64_t ms = ticks_ms(L, time);
+                points++;
                 if (ms <= target_ms && ms >= best_ms) { best_ms = ms; best_off = L->seg_data + cl; found = 1; }
+                if (ms > target_ms) after = 1;
             }
         }
         pos += (size_t)ph + (size_t)psz;
     }
     free(c);
-    if (!found) return -1;
+    /* The index stopped making sense part way (it came damaged or cut short): the last entry read may be far
+     * before the wanted place (a film asked for at 39:56 started at 0:27). Trust it only if it went past it. */
+    if (pos < n && !after) {
+        snprintf(vod_seek_note, sizeof vod_seek_note, "index damaged after %d entries (%u of %u KB)", points,
+                 (unsigned)(pos / 1024), (unsigned)(n / 1024));
+        return -1;
+    }
+    if (!found) { snprintf(vod_seek_note, sizeof vod_seek_note, "no index entry before that time"); return -1; }
+    snprintf(vod_seek_note, sizeof vod_seek_note, "index, %d entries", points);
     *off = best_off;
     *at_ms = best_ms;
     return 0;
@@ -331,7 +345,9 @@ int mkv_seek(VodRead rd, void *ctx, uint64_t total, const MkvLayout *L, int64_t 
     *off = L->first_cluster;
     *at_ms = 0;
     if (target_ms <= 0) return 0;
+    vod_seek_note[0] = 0;
     if (L->cues_pos && seek_by_cues(rd, ctx, L, target_ms, off, at_ms) == 0) return 0;
+    if (!L->cues_pos) snprintf(vod_seek_note, sizeof vod_seek_note, "no index");
     if (!total || L->duration_ms <= 0) return -1;
     /* no index: guess from the bit rate, look at the cluster found there, narrow down */
     uint8_t *b = malloc(PROBE_LEN);
@@ -362,6 +378,8 @@ int mkv_seek(VodRead rd, void *ctx, uint64_t total, const MkvLayout *L, int64_t 
         }
     }
     free(b);
+    size_t nl = strlen(vod_seek_note);
+    snprintf(vod_seek_note + nl, sizeof vod_seek_note - nl, "%sestimated from the size", nl ? ", " : "");
     *off = best_off;
     *at_ms = best_ms;
     return 0;

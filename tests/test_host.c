@@ -1,5 +1,6 @@
 /* Host-side test (PC): gcc -Wall -Isrc tests/test_host.c src/iptv.c -o test_host && ./test_host */
 #include "iptv.h"
+#include "urlhdr.h"
 #include "lang.h"
 #include <assert.h>
 #include <stdio.h>
@@ -264,8 +265,8 @@ int main(void)
             for (unsigned k = 0; k < sizeof no / sizeof no[0]; k++) { snprintf(hc.name, sizeof hc.name, "%s", no[k]); assert(!iptv_is_hd1080(&hc)); }
             Settings sh; settings_parse("hide_1080p=1\n", &sh); assert(sh.hide_1080p == 1);
             char shf[256]; settings_format(&sh, shf, sizeof shf); Settings sj; settings_parse(shf, &sj); assert(sj.hide_1080p == 1);
-            Settings sx; settings_parse("hd_1080p=1\n", &sx); assert(sx.hd1080 == 1 && !sh.hd1080);
-            char sxf[256]; settings_format(&sx, sxf, sizeof sxf); Settings sy; settings_parse(sxf, &sy); assert(sy.hd1080 == 1);
+            Settings sx; settings_parse("hd_1080p=1\nhide_adult=1\n", &sx); assert(sx.hide_adult == 1);   /* an old line is ignored */
+            char sxf[256]; settings_format(&sx, sxf, sizeof sxf); assert(!strstr(sxf, "hd_1080p"));
         }
         char saf[256]; settings_format(&sa, saf, sizeof saf); Settings sb; settings_parse(saf, &sb); assert(sb.hide_adult == 1);
     }
@@ -301,6 +302,37 @@ int main(void)
         ChannelList fl; channel_list_init(&fl);
         assert(m3u_parse(m, strlen(m), &fl) == 2 && fl.items[0].kind == CH_FILM && fl.items[1].kind == CH_LIVE);
         channel_list_free(&fl);
+    }
+    {   /* HTTP headers for a channel: #EXTVLCOPT, #EXTHTTP and Kodi's link|Key=Value */
+        const char *m = "#EXTM3U\n"
+            "#EXTINF:-1 group-title=\"G\",Chan A\n"
+            "#EXTVLCOPT:http-referrer=https://example.org/page_a\n"
+            "#EXTVLCOPT:http-user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0 Safari/537.36\n"
+            "https://cdn.example.org/play/live_a.flv\n"
+            "#EXTINF:-1,Chan B\n"
+            "http://h/live/b.ts\n"
+            "#EXTHTTP:{\"User-Agent\":\"Agent/1.0\",\"Referer\":\"http://r.example/\"}\n"
+            "#EXTINF:-1,Film C\n"
+            "http://h/f.mkv\n"
+            "#EXTINF:-1,Chan D\n"
+            "http://h/d.ts|User-Agent=Kodi%2F20&Referer=http%3A%2F%2Fk.example%2F\n";
+        ChannelList hl; channel_list_init(&hl);
+        assert(m3u_parse(m, strlen(m), &hl) == 4);
+        char u[IPTV_URL_MAX], ua[300], ref[300];
+        assert(url_split_headers(hl.items[0].url, u, sizeof u, ua, sizeof ua, ref, sizeof ref) == 1);
+        assert(!strcmp(u, "https://cdn.example.org/play/live_a.flv") && !strcmp(ref, "https://example.org/page_a"));
+        assert(!strcmp(ua, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/150.0 Safari/537.36"));
+        assert(!strcmp(hl.items[1].url, "http://h/live/b.ts"));                       /* not carried to the next link */
+        assert(url_split_headers(hl.items[2].url, u, sizeof u, ua, sizeof ua, ref, sizeof ref) == 1);
+        assert(!strcmp(u, "http://h/f.mkv") && !strcmp(ua, "Agent/1.0") && !strcmp(ref, "http://r.example/"));
+        assert(hl.items[2].kind == CH_FILM);                                           /* still a film with headers */
+        assert(url_split_headers(hl.items[3].url, u, sizeof u, ua, sizeof ua, ref, sizeof ref) == 1);
+        assert(!strcmp(u, "http://h/d.ts") && !strcmp(ua, "Kodi/20") && !strcmp(ref, "http://k.example/"));
+        assert(url_split_headers("http://plain/x.ts", u, sizeof u, ua, sizeof ua, ref, sizeof ref) == 0 && !strcmp(u, "http://plain/x.ts") && !ua[0]);
+        char j[IPTV_URL_MAX];
+        assert(url_join_headers("http://a/b", "http://r/?x=1&y=2", "UA 1", j, sizeof j) == 0);
+        assert(url_split_headers(j, u, sizeof u, ua, sizeof ua, ref, sizeof ref) && !strcmp(ref, "http://r/?x=1&y=2") && !strcmp(ua, "UA 1") && !strcmp(u, "http://a/b"));
+        channel_list_free(&hl);
     }
     puts("all host tests passed");
     return 0;

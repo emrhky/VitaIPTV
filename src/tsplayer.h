@@ -34,6 +34,11 @@ typedef struct {
     volatile int dur_ms;                /* length (0 = unknown) */
     volatile int seekable;              /* tsp_start_vod at another time works */
     volatile int paused;
+    int fields;                         /* pictures are two fields one above the other: draw the top half */
+    volatile int buffering;             /* film: waiting for the network (shown as "Buffering...") */
+    int buf_pct;                        /* ... how far (0-100) */
+    unsigned rebuffers;                 /* how many times */
+    int note_pct;                       /* how far the note's work is (0 = not shown) */
     char note[64];                      /* what a film is waiting for (reading its index...), "" = nothing */
 } TspStatus;
 

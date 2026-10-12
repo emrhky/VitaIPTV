@@ -1,3 +1,4 @@
+#include <sys/stat.h>
 /* Integration test of tsplayer.c with a fake hardware decoder and real threads.
  * Built and run by tests/run_player_tests.py */
 #include "tsplayer.h"
@@ -137,7 +138,8 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
 
 /* ---- fake Internal decoder (above 720p): pictures come out two units after they go in ---- */
 typedef struct { SceAvcdecBuf memBuf; SceUID memBufUid; SceUIntVAddr vaContext; SceUInt32 contextSize; } MockVdCtrl;
-static int int_cfg, int_mode, int_creates, int_units, int_soft_every;
+static int int_cfg, int_mode, int_creates, int_units, int_soft_every, int_full_every, int_full_left, int_full_hits;
+static int paint_mode;                   /* 1: a normal picture (a gradient top to bottom), 2: two fields one above the other */
 int sceVideodecSetConfigInternal(SceVideodecType c, SceInt32 cfg) { (void)c; int_cfg = cfg; return 0; }
 int sceAvcdecSetDecodeMode(SceVideodecType c, SceInt32 m) { (void)c; int_mode = m; return 0; }
 int sceVideodecQueryMemSizeInternal(SceVideodecType c, SceVideodecQueryInitInfo *q, SceUInt32 *size)
@@ -166,6 +168,9 @@ int sceAvcdecDecodeAuInternal(SceAvcdecCtrl *d, SceAvcdecAu *au, SceInt32 *st)
     if (n < 4 || b[0] || b[1] || !(b[2] == 1 || (b[2] == 0 && b[3] == 1))) return (int)0x8062000D;
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
     if (npend >= 8) return (int)0x8062000A;                 /* ES buffer full */
+    static int full_at = -1;
+    if (int_full_every && !int_full_left && (int_units + 1) % int_full_every == 0 && full_at != int_units) { int_full_left = 4; full_at = int_units; }
+    if (int_full_left) { int_full_left--; int_full_hits++; if (int_full_left) return (int)0x8062000A; }   /* busy for a while */
     int has_ts = !(au->pts.upper == 0xFFFFFFFFu && au->pts.lower == 0xFFFFFFFFu);
     pend[npend++] = has_ts ? (int64_t)(((uint64_t)au->pts.upper << 32) | au->pts.lower) : -1;
     if (int_soft_every && ++int_units % int_soft_every == 0) return (int)0x8062000D;   /* seen on the device, unit still decoded */
@@ -190,6 +195,15 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
         pend[k] = pend[--npend];
     }
     uint8_t *pix = p->frame.pPicture[0];
+    if (paint_mode) {                                       /* picture content for the field detection */
+        uint32_t fh = p->frame.frameHeight, half = fh / 2;
+        for (uint32_t y = 0; y < fh; y++) {
+            uint32_t line = paint_mode == 2 ? (y < half ? 2 * y : 2 * (y - half) + 1) : y;   /* frame line shown on this row */
+            uint8_t v = (uint8_t)(line * 255 / fh);
+            uint8_t *row = pix + (size_t)y * p->frame.framePitch * 4;
+            for (uint32_t x = 0; x < p->frame.framePitch; x++) { row[x * 4] = v; row[x * 4 + 1] = (uint8_t)(x & 0xFF); row[x * 4 + 2] = 255 - v; row[x * 4 + 3] = 255; }
+        }
+    }
     memcpy(pix, &o, 8);
     pix[(size_t)p->frame.framePitch * p->frame.frameHeight * 4 - 1] = 0x5A;
     p->info.pts.upper = o < 0 ? 0xFFFFFFFFu : (uint32_t)((uint64_t)o >> 32);
@@ -388,7 +402,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r = play(argv[1], 10);
@@ -417,6 +431,25 @@ int main(int argc, char **argv)
     show("1080p dec.ord", &r);
     assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.dropped * 10 <= r.st.decoded && r.changes >= 105);
     decode_order = 0;
+    /* the HD decoder stays "buffer full" for a few calls now and then (seen on the device after buffering
+     * and after a sound pause): v0.2.1 dropped everything up to the next keyframe; now it waits */
+    int_full_every = 30; int_full_hits = 0; int_units = 0;
+    r = play(argv[2], 10);
+    show("1080p busy", &r);
+    printf("               decoder busy %d time(s)\n", int_full_hits);
+    assert(int_full_hits >= 6 && r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.dropped <= 3 && r.changes >= 115);
+    int_full_every = 0;
+    if (argc > 22) {                                         /* 1080i: fields one above the other are found */
+        paint_mode = 2;
+        r = play(argv[22], 8);
+        show("1080i fields", &r);
+        assert(r.st.fields == 1 && r.st.decoded >= 40 && r.nonmono == 0);
+        paint_mode = 1;                                      /* ... and normal pictures are left alone */
+        r = play(argv[22], 8);
+        show("1080i frames", &r);
+        assert(r.st.fields == 0 && r.st.decoded >= 40);
+        paint_mode = 0;
+    }
     tsp_set_options(0, 720);
     r = play(argv[2], 6);
     show("1080p off", &r);
@@ -474,6 +507,11 @@ int main(int argc, char **argv)
     r = play(argv[12], 10);                                 /* AC-3 audio: picture plays, audio says why not */
     show("ac3 audio", &r);
     assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames == 0 && strstr(r.st.audio_msg, "ac3"));
+    if (argc > 23) {                                         /* a few AAC frames claiming 7 channels: skipped, sound stays on */
+        r = play(argv[23], 10);
+        show("aac glitch", &r);
+        assert(r.st.state == TSP_ENDED && !r.st.audio_msg[0] && r.st.audio_frames > 200 && r.synced);
+    }
     r = play(argv[15], 10);                                 /* MP2 audio (TV channels): decoded in software, in sync */
     show("mp2 audio", &r);
     assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames > 150 && r.st.audio_mpeg == 2 && !r.st.audio_msg[0]);
@@ -525,6 +563,52 @@ int main(int argc, char **argv)
     mock_http_reset();
     mock_http_fail_after = 0;
 
+    {   /* a link carrying headers (from #EXTVLCOPT): the player sends them, the link itself is clean */
+        extern char mock_http_ua[512], mock_http_referer[512];
+        mock_http_file = argv[1];
+        r = play("http://example.invalid/play/live_a.ts|User-Agent=Mozilla%2F5.0%20(Test)&Referer=https%3A%2F%2Fsite.example%2Fa", 4);
+        show("link headers", &r);
+        printf("               sent User-Agent '%s', Referer '%s'\n", mock_http_ua, mock_http_referer);
+        assert(r.st.decoded >= 60 && !strcmp(mock_http_ua, "Mozilla/5.0 (Test)") && !strcmp(mock_http_referer, "https://site.example/a"));
+        mock_http_reset();
+    }
+    {   /* standby: the network goes away for 8 s (reconnects fail meanwhile), then comes back */
+        extern int mock_net_state;
+        mock_http_reset();
+        mock_http_file = argv[1];
+        mock_http_rate = 400000;
+        assert(tsp_start("http://example.invalid/live/standby.ts") == 0);
+        double t0 = now_s();
+        int shown_after = 0;
+        vita2d_texture *last = NULL;
+        while (now_s() - t0 < 16) {
+            double e = now_s() - t0;
+            mock_net_state = (e > 1.5 && e < 9.5) ? 0 : 3;
+            int w, h;
+            vita2d_texture *tx = tsp_frame(&w, &h);
+            if (tx && tx != last) { last = tx; if (e > 10) shown_after++; }
+            if (tsp_status()->state == TSP_ERROR || tsp_status()->state == TSP_ENDED) break;
+            usleep(16000);
+        }
+        mock_net_state = 3;
+        TspStatus st = *tsp_status();
+        printf("standby        state=%d reconnects=%u pictures after the network came back=%d msg='%s'\n", st.state, st.reconnects, shown_after, st.msg);
+        tsp_stop();
+        mock_http_rate = 0;
+        mock_http_reset();
+        assert(st.state != TSP_ERROR && shown_after > 0);
+    }
+    if (argc > 21) {                                         /* FLV (HTTP-FLV live streams, .flv files) */
+        r = play(argv[21], 10);
+        show("flv", &r);
+        assert(r.st.state == TSP_ENDED && r.changes >= 140 && r.nonmono == 0 && r.synced && r.av_bad * 10 <= r.avn);
+        mock_http_file = argv[21];
+        r = play("http://example.invalid/live/stream.flv", 10);
+        show("flv http", &r);
+        assert(r.st.decoded >= 140 && r.synced && r.nonmono == 0);
+        mock_http_reset();
+    }
+
     /* picture memory: sized from the H.264 level, and grown if the stream still needs more */
     need_refs = 5; creates = 0;
     r = play(argv[1], 10);
@@ -574,6 +658,16 @@ int main(int argc, char **argv)
     printf("               decoders created %d\n", creates);
     assert(creates >= 2 && r.changes >= 30 && r.nonmono == 0);   /* pictures again after the restart */
     wedge_mode = 0; need_refs = 0; lib_max_refs = 0;
+
+    /* the same with the HD decoder available (v0.2.1): it switches to it with more pictures, once */
+    tsp_set_options(1, 720);
+    lib_max_refs = 5; need_refs = 9; oom_every = 5; wedge_mode = 1; creates = 0; int_creates = 0; decode_calls = 0;
+    r = play(argv[1], 10);
+    show("stuck -> HD", &r);
+    printf("               decoders created %d, HD decoders %d\n", creates, int_creates);
+    assert(creates == 1 && int_creates == 1 && r.changes >= 30 && r.nonmono == 0 && r.st.state != TSP_ERROR);
+    wedge_mode = 0; need_refs = 0; lib_max_refs = 0;
+    tsp_set_options(0, 720);
 
     /* pictures come out in decode order (B-frames before their reference): shown in time order */
     decode_order = 1; creates = 0;
@@ -687,6 +781,20 @@ int main(int argc, char **argv)
         vshow("mp4 film", &v);
         assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.r.changes >= 280 && v.r.nonmono == 0);
         assert(v.r.st.audio_frames > 500 && v.r.synced && v.first_pos < 200);
+        {   /* the network brings 60 % of what the film needs: it waits (buffering) instead of dropping pictures */
+            struct stat fs; assert(stat(mkv, &fs) == 0);
+            mock_http_rate = (long)(fs.st_size * 6 / 120);
+            v = play_vod(mkv, 0, 45, 0, 0);
+            mock_http_rate = 0;
+            vshow("slow network", &v);
+            printf("               buffered %u time(s)\n", v.r.st.rebuffers);
+            assert(v.r.st.rebuffers >= 1 && v.r.st.dropped <= 15 && v.r.nonmono == 0 && v.r.changes >= 250);
+        }
+        if (argc > 20) {                                     /* an FLV film: plays from the start, no jumping */
+            v = play_vod_url("http://example.invalid/movie/u/p/2.flv", argv[20], 0, 20, 0, 0);
+            vshow("flv film", &v);
+            assert(v.r.st.state == TSP_ENDED && v.r.changes >= 280 && v.r.nonmono == 0 && v.r.synced && !v.r.st.seekable && abs(v.dur - 12000) < 300);
+        }
         v = play_vod(mp4, 6500, 15, 0, 0);
         vshow("mp4 from 6.5s", &v);
         assert(v.r.st.state == TSP_ENDED && v.first_pos >= 5900 && v.first_pos <= 6600 && v.r.first_pts / 90 >= 5900);

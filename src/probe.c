@@ -2,6 +2,8 @@
 #include "probe.h"
 #include "tsdemux.h"
 #include "mkvdemux.h"
+#include "flvdemux.h"
+#include "urlhdr.h"
 #include "httpio.h"                     /* plog() */
 #include "curlio.h"
 #include "hls.h"
@@ -22,17 +24,21 @@
 typedef struct {
     TsDemux *ts;
     MkvDemux *mkv;
+    FlvDemux *flv;
 } Demux;
 
 static void dmx_feed(Demux *d, const TsSink *sink, const uint8_t *b, size_t n, int first)
 {
     if (first && mkv_probe(b, n)) d->mkv = mkv_create(sink);
-    if (d->mkv) mkv_feed(d->mkv, b, n); else ts_feed(d->ts, b, n);
+    else if (first && flv_probe(b, n)) d->flv = flv_create(sink);
+    if (d->mkv) mkv_feed(d->mkv, b, n); else if (d->flv) flv_feed(d->flv, b, n); else ts_feed(d->ts, b, n);
 }
 
 typedef struct {
     ProbeResult res;
     char url[512];
+    char ua[512], ref[512];             /* headers from link|User-Agent=...&Referer=... */
+    char speed[120];                    /* HLS: download speed against what the stream needs */
     volatile int cancel;
     int refs;                           /* UI + thread */
 } ProbeCtx;
@@ -139,13 +145,14 @@ static int pget(ProbeCtx *c, const char *url, long long from, long long to, PDat
         PgCtx g = { c, fn, ctx };
         CioRequest rq = { url, NULL, NULL, 10, 5, pg_data, pg_stop, &g, from >= 0, from >= 0 ? (uint64_t)from : 0,
                           to >= 0 ? (uint64_t)to : 0, NULL };
+        rq.ua = c->ua; rq.referer = c->ref;
         int r = cio_get(&rq, status, err, errsz);
         return r == -2 ? 0 : r;
     }
     int tpl = -1, conn = -1, req = -1, rc = -1, n;
     uint8_t *buf = malloc(CHUNK);
     if (!buf) { snprintf(err, errsz, "Out of memory"); return -1; }
-    tpl = sceHttpCreateTemplate(NET_UA, SCE_HTTP_VERSION_1_1, 1);
+    tpl = sceHttpCreateTemplate(c->ua[0] ? c->ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { snprintf(err, errsz, "HTTP init failed"); goto done; }
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);
@@ -156,6 +163,7 @@ static int pget(ProbeCtx *c, const char *url, long long from, long long to, PDat
     if (conn < 0) { snprintf(err, errsz, "Bad address"); goto done; }
     req = sceHttpCreateRequestWithURL(conn, SCE_HTTP_METHOD_GET, url, 0);
     if (req < 0) { snprintf(err, errsz, "Request failed"); goto done; }
+    if (c->ref[0]) sceHttpAddRequestHeader(req, "Referer", c->ref, SCE_HTTP_HEADER_ADD);
     if (from >= 0) {
         char range[64];
         if (to >= 0) snprintf(range, sizeof range, "bytes=%lld-%lld", from, to);
@@ -275,12 +283,25 @@ static int probe_hls(ProbeCtx *c, const char *url, Demux *d, int *status, unsign
     if (m.encrypted) { hls_media_free(&m); fail(&c->res, "Encrypted HLS stream (AES): not supported"); goto out; }
     if (m.fmp4) { hls_media_free(&m); fail(&c->res, "HLS with MP4 segments: not supported"); goto out; }
     int first = m.endlist || m.nseg <= 3 ? 0 : m.nseg - 3;     /* live: near the newest, like the player */
+    uint64_t full_bytes = 0, full_us = 0;
+    int full_ms = 0;
     for (int i = first; i < m.nseg && !c->cancel; i++) {
         hls_resolve(cur, m.seg[i].uri, m.seg[i].uri_len, seg, sizeof seg);
         int sn;
+        uint64_t b0 = c->res.bytes, s0 = sceKernelGetProcessTimeWide();
         if (probe_stream(c, seg, d, status, t0, &sn) < 0) break;
         rc = 0;
         if (c->res.bytes >= PROBE_MAX || sceKernelGetProcessTimeWide() - t0 >= PROBE_US) break;
+        if (m.seg[i].duration_ms > 0 && c->res.bytes > b0) {   /* a whole segment: its size, its play time, its download time */
+            full_bytes += c->res.bytes - b0;
+            full_us += sceKernelGetProcessTimeWide() - s0;
+            full_ms += m.seg[i].duration_ms;
+        }
+    }
+    if (full_ms > 0 && full_us > 0) {
+        unsigned need = (unsigned)(full_bytes * 8 / (uint64_t)full_ms), have = (unsigned)(full_bytes * 8000 / full_us);
+        snprintf(c->speed, sizeof c->speed, "Speed: network %u kbit/s, the stream needs %u kbit/s (%s)", have, need,
+                 have >= need * 13 / 10 ? "enough" : have >= need ? "just enough" : "too slow: it will stall and skip");
     }
     hls_media_free(&m);
 out:
@@ -337,7 +358,7 @@ static int probe_main(SceSize args, void *argp)
     ProbeCtx *c = *(ProbeCtx **)argp;
     ProbeResult *r = &c->res;
     TsSink sink = { NULL, NULL, NULL };
-    Demux dm = { ts_create(&sink), NULL }, *d = &dm;
+    Demux dm = { ts_create(&sink), NULL, NULL }, *d = &dm;
     uint8_t *buf = malloc(CHUNK);
     unsigned long long t0 = sceKernelGetProcessTimeWide();
     int status = 0, ok = 0;
@@ -357,17 +378,22 @@ static int probe_main(SceSize args, void *argp)
             ok = read_local(c, d, buf, t0) == 0;
         }
         if (ok && !c->cancel) {
-            if (d->mkv) mkv_flush(d->mkv); else if (!mp4) ts_flush(d->ts);
-            const TsInfo *info = mp4 ? mp4_info(mp4) : d->mkv ? mkv_info(d->mkv) : ts_info(d->ts);
+            if (d->mkv) mkv_flush(d->mkv); else if (d->flv) flv_flush(d->flv); else if (!mp4) ts_flush(d->ts);
+            const TsInfo *info = mp4 ? mp4_info(mp4) : d->mkv ? mkv_info(d->mkv) : d->flv ? flv_info(d->flv) : ts_info(d->ts);
             if (d->mkv) plog("probe: Matroska (MKV) container");
+            if (d->flv) plog("probe: FLV container");
             if (r->bytes == 0) { fail(r, "No data received"); ok = 0; }
             else if (info->program < 0) { fail(r, "No video stream recognised (not TS, MKV or MP4?)"); ok = 0; }
-            else summarize(r, info, status, sceKernelGetProcessTimeWide() - t0);
+            else {
+                summarize(r, info, status, sceKernelGetProcessTimeWide() - t0);
+                if (c->speed[0]) add_line(r, "%s", c->speed);
+            }
         }
         mp4_destroy(mp4);
     }
     if (d->ts) ts_destroy(d->ts);
     mkv_destroy(d->mkv);
+    flv_destroy(d->flv);
     free(buf);
     __sync_synchronize();
     r->state = ok && !c->cancel ? PROBE_DONE : PROBE_FAILED;
@@ -383,6 +409,7 @@ int probe_start(const char *url)
     ProbeCtx *c = calloc(1, sizeof *c);
     if (!c) return -1;
     snprintf(c->url, sizeof c->url, "%s", url);
+    url_split_headers(c->url, c->url, sizeof c->url, c->ua, sizeof c->ua, c->ref, sizeof c->ref);
     c->res.state = PROBE_RUNNING;
     c->refs = 2;
     g_cur = c;

@@ -6,6 +6,7 @@
 #include "curlio.h"
 #include "netua.h"
 #include "hls.h"                        /* hls_resolve() for redirects */
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -13,6 +14,7 @@
 
 #ifdef HAVE_TLS
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <poll.h>
 #include <unistd.h>
@@ -84,7 +86,37 @@ static int bio_recv_timeout(void *ctx, unsigned char *buf, size_t len, uint32_t 
     return (int)n;                      /* 0 = closed */
 }
 
-static int tcp_connect(const char *host, int port, char *err, size_t errsz)
+/* connect() with a time limit: a server that silently drops the connection would otherwise block for the
+ * system's own timeout (tens of seconds) and O could not stop it. Non-blocking connect + poll in ticks so
+ * stop() is honoured; the socket is made blocking again afterwards (the rest of the code expects that).
+ * Returns 0 connected, -2 stopped, -1 failed. */
+static int connect_wait(int fd, const struct sockaddr *addr, socklen_t alen, const CioRequest *rq)
+{
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0)
+        return connect(fd, addr, alen) == 0 ? 0 : -1;            /* no non-blocking mode: as before */
+    int ret = -1;
+    if (connect(fd, addr, alen) == 0) ret = 0;
+    else if (errno == EINPROGRESS || errno == EALREADY || errno == EWOULDBLOCK) {
+        int limit_ms = (rq && rq->connect_timeout_s > 0 ? rq->connect_timeout_s : 15) * 1000;
+        for (int waited = 0; waited < limit_ms; waited += TICK_MS) {
+            if (rq && stopped(rq)) { ret = -2; break; }
+            struct pollfd p = { fd, POLLOUT, 0 };
+            int r = poll(&p, 1, TICK_MS);
+            if (r < 0) break;
+            if (r == 0) continue;
+            int e = 0;
+            socklen_t el = sizeof e;
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el) < 0) e = (p.revents & (POLLERR | POLLHUP)) ? -1 : 0;
+            ret = e ? -1 : 0;
+            break;
+        }
+    }
+    fcntl(fd, F_SETFL, fl);
+    return ret;
+}
+
+static int tcp_connect(const char *host, int port, const CioRequest *rq, char *err, size_t errsz)
 {
     struct addrinfo hints, *res = NULL;
     char ps[8];
@@ -93,7 +125,7 @@ static int tcp_connect(const char *host, int port, char *err, size_t errsz)
     hints.ai_socktype = SOCK_STREAM;
     snprintf(ps, sizeof ps, "%d", port);
     if (getaddrinfo(host, ps, &hints, &res) != 0 || !res) { snprintf(err, errsz, "Could not resolve %s", host); return -1001; }
-    int fd = -1;
+    int fd = -1, st = 0;
     for (struct addrinfo *a = res; a; a = a->ai_next) {
         fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
         if (fd < 0) continue;
@@ -102,13 +134,28 @@ static int tcp_connect(const char *host, int port, char *err, size_t errsz)
          * Vita's own HTTP reached 800 KB/s). */
         int rcv = 1024 * 1024;
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
-        if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) break;
+        st = connect_wait(fd, a->ai_addr, a->ai_addrlen, rq);
+        if (st == 0) break;
         close(fd);
         fd = -1;
+        if (st == -2) break;
     }
     freeaddrinfo(res);
+    if (st == -2) { snprintf(err, errsz, "Stopped"); return -2; }
     if (fd < 0) { snprintf(err, errsz, "Could not connect to the server"); return -1002; }
     return fd;
+}
+
+/* appends to the request, never past its end (a long link plus long headers just makes k reach the end) */
+static void rq_add(char *b, size_t cap, int *k, const char *fmt, ...)
+{
+    if (*k < 0 || (size_t)*k >= cap - 1) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(b + *k, cap - (size_t)*k, fmt, ap);
+    va_end(ap);
+    if (n < 0) n = 0;
+    *k = (size_t)*k + (size_t)n >= cap - 1 ? (int)cap - 1 : *k + n;
 }
 
 /* ---- one connection (plain or TLS) ---- */
@@ -128,7 +175,7 @@ static void conn_close(Conn *c)
 
 static int conn_open(Conn *c, const char *host, int port, int tls, char *err, size_t errsz)
 {
-    c->fd = tcp_connect(host, port, err, errsz);
+    c->fd = tcp_connect(host, port, c->rq, err, errsz);
     if (c->fd < 0) return c->fd;
     if (!tls) return 0;
     c->tls = 1;
@@ -330,7 +377,7 @@ void cio_init(void)
 
 int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 {
-    char url[HLS_URL_MAX], host[256], req[2048], auth[400], enc[560], val[HLS_URL_MAX];
+    char url[HLS_URL_MAX], host[256], req[4096], auth[400], enc[560], val[HLS_URL_MAX];
     const char *path;
     int tls, port, ret = -1;
     char e2[1];
@@ -349,20 +396,24 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
         int r = conn_open(&c, host, port, tls, err, errsz);
         if (r < 0) { conn_close(&c); ret = r; break; }
         int def = (tls && port == 443) || (!tls && port == 80);
-        int k = snprintf(req, sizeof req, "GET %s HTTP/1.1\r\nHost: %s", path, host);
-        if (!def) k += snprintf(req + k, sizeof req - (size_t)k, ":%d", port);
-        k += snprintf(req + k, sizeof req - (size_t)k, "\r\nUser-Agent: %s\r\nAccept: */*\r\nConnection: close\r\n", NET_UA);
+        int k = 0;
+        rq_add(req, sizeof req, &k, "GET %s HTTP/1.1\r\nHost: %s", path, host);
+        if (!def) rq_add(req, sizeof req, &k, ":%d", port);
+        rq_add(req, sizeof req, &k, "\r\nUser-Agent: %s\r\nAccept: */*\r\nConnection: close\r\n",
+                      rq->ua && rq->ua[0] ? rq->ua : NET_UA);
+        if (rq->referer && rq->referer[0]) rq_add(req, sizeof req, &k, "Referer: %s\r\n", rq->referer);
         if (rq->user && rq->user[0] && redirect == 0) {
             snprintf(auth, sizeof auth, "%s:%s", rq->user, rq->pass ? rq->pass : "");
             b64(auth, enc);
-            k += snprintf(req + k, sizeof req - (size_t)k, "Authorization: Basic %s\r\n", enc);
+            rq_add(req, sizeof req, &k, "Authorization: Basic %s\r\n", enc);
         }
         if (rq->range) {
-            if (rq->range_to) k += snprintf(req + k, sizeof req - (size_t)k, "Range: bytes=%llu-%llu\r\n",
+            if (rq->range_to) rq_add(req, sizeof req, &k, "Range: bytes=%llu-%llu\r\n",
                                             (unsigned long long)rq->range_from, (unsigned long long)rq->range_to);
-            else k += snprintf(req + k, sizeof req - (size_t)k, "Range: bytes=%llu-\r\n", (unsigned long long)rq->range_from);
+            else rq_add(req, sizeof req, &k, "Range: bytes=%llu-\r\n", (unsigned long long)rq->range_from);
         }
-        k += snprintf(req + k, sizeof req - (size_t)k, "\r\n");
+        rq_add(req, sizeof req, &k, "\r\n");
+        if (k >= (int)sizeof req - 1) { conn_close(&c); snprintf(err, errsz, "Request too long"); ret = -1008; break; }
         if (conn_write(&c, req, (size_t)k) < 0) { conn_close(&c); snprintf(err, errsz, "Could not send the request"); ret = -1007; break; }
         /* headers */
         size_t hl = 0;

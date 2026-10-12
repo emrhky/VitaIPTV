@@ -11,7 +11,7 @@ def sh(c, check=True):
 def check(cond, msg):
     if not cond: fails.append(msg); print("  FAIL:", msg)
 san = "-O1 -g -fsanitize=address,undefined -Wall -Wextra"
-sh(f"gcc {san} -I{ROOT}/src {ROOT}/tests/tsinfo.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c -o {T}/tsinfo")
+sh(f"gcc {san} -I{ROOT}/src {ROOT}/tests/tsinfo.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c -o {T}/tsinfo")
 sh(f"gcc {san} -I{ROOT}/src {ROOT}/tests/fuzz_mkv.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c -o {T}/fuzz")
 def info(path, *a):
     d = {}

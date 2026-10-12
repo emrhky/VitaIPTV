@@ -87,7 +87,8 @@ static double http_t0;
 #include <time.h>
 #include <unistd.h>
 static double mock_now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
-int sceHttpCreateTemplate(const char *u, int v, int k) { (void)u;(void)v;(void)k; return 1; }
+char mock_http_ua[512], mock_http_referer[512];   /* what the last request sent */
+int sceHttpCreateTemplate(const char *u, int v, int k) { (void)v;(void)k; snprintf(mock_http_ua, sizeof mock_http_ua, "%s", u ? u : ""); mock_http_referer[0] = 0; return 1; }
 int sceHttpDeleteTemplate(int i) { (void)i; return 0; }
 int sceHttpSetResolveTimeOut(int i, unsigned u) { (void)i;(void)u; return 0; }
 int sceHttpSetConnectTimeOut(int i, unsigned u) { (void)i;(void)u; return 0; }
@@ -124,6 +125,7 @@ int sceHttpAbortRequest(int i) { (void)i; return 0; }
 int sceHttpAddRequestHeader(int i, const char *n, const char *v, unsigned m)
 {
     (void)i; (void)m;
+    if (!strcmp(n, "Referer")) snprintf(mock_http_referer, sizeof mock_http_referer, "%s", v);
     if (!strcmp(n, "Range")) {
         http_range = 1;
         http_rto = -1;
@@ -133,9 +135,11 @@ int sceHttpAddRequestHeader(int i, const char *n, const char *v, unsigned m)
 }
 static long http_file_size(void) { long c = ftell(http_f); fseek(http_f, 0, SEEK_END); long z = ftell(http_f); fseek(http_f, c, SEEK_SET); return z; }
 int sceHttpGetAllResponseHeaders(int r, char **h, unsigned int *n) { (void)r; *h = http_hdrs; *n = (unsigned)strlen(http_hdrs); return 0; }
+extern int mock_net_state;
 int sceHttpSendRequest(int r, const void *p, unsigned s)
 {
     (void)r; (void)p; (void)s;
+    if (mock_net_state != 3) return (int)0x80431068;      /* no network (standby, Wi-Fi coming back) */
     http_end = -1;
     http_hdrs[0] = 0;
     if (http_f && http_range && !mock_http_no_ranges) {
@@ -162,6 +166,7 @@ int sceHttpReadData(int r, void *d, unsigned n)
     (void)r;
     if (!http_f) return 0;
     if (mock_http_fail_after && http_sess_bytes >= mock_http_fail_after) return (int)0x80431068;   /* "connection lost" */
+    if (mock_net_state != 3) return (int)0x80431068;
     if (mock_http_rate > 0) {
         double due = http_t0 + (double)http_sess_bytes / (double)mock_http_rate;
         double now = mock_now();
@@ -175,3 +180,7 @@ int sceHttpReadData(int r, void *d, unsigned n)
     return (int)k;
 }
 void mock_http_reset(void) { if (http_f) fclose(http_f); http_f = NULL; mock_http_sessions = 0; http_mapped = 0; memset(mock_http_map, 0, sizeof mock_http_map); }
+
+/* ---- network state (sceNetCtl) ---- */
+int mock_net_state = 3;                 /* SCE_NETCTL_STATE_CONNECTED */
+int sceNetCtlInetGetState(int *state) { *state = mock_net_state; return 0; }

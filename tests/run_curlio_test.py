@@ -23,6 +23,9 @@ class H(BaseHTTPRequestHandler):
         elif self.path == "/auth":
             ok = self.headers.get("Authorization") == "Basic " + base64.b64encode(b"user:p@ss").decode()
             self.send_response(200 if ok else 401); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
+        elif self.path == "/hdr":                           # a CDN that checks Referer and User-Agent
+            ok = self.headers.get("Referer") == "https://site.example/page" and self.headers.get("User-Agent", "").startswith("Mozilla/5.0 (Test")
+            self.send_response(200 if ok else 403); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
         elif self.path == "/slow":                          # a live stream: chunked, never ends
             self.send_response(200); self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
             try:
