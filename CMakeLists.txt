@@ -63,7 +63,7 @@ target_link_libraries(${PROJECT_NAME}.elf
   SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceCodecEngine_stub SceAudiodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
   SceCtrl_stub SceSysmodule_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub
-  ScePgf_stub ScePvf_stub SceAppUtil_stub ScePower_stub SceAVConfig_stub SceRegMgr_stub
+  ScePgf_stub ScePvf_stub SceAppUtil_stub ScePower_stub SceAVConfig_stub SceRegistryMgr_stub
   ${EXTRA_STUBS}
 )
 
