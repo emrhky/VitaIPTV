@@ -43,6 +43,46 @@ def logo(size):
     return img.resize((size, size), Image.LANCZOS)
 
 
+def bubble(size):
+    """The LiveArea bubble (icon0): the system shows it as a circle, so the whole square is a shaded sphere
+    (no dark corners or rim), lit from the upper left, with a glossy highlight and the white TV sign."""
+    S = size * 4
+    img = Image.new("RGBA", (S, S))
+    px = img.load()
+    cx, cy, r = S * 0.5, S * 0.5, S * 0.5
+    lx, ly = S * 0.32, S * 0.26                                      # where the light hits
+    import math
+    for y in range(S):
+        for x in range(S):
+            dx, dy = (x - cx) / r, (y - cy) / r
+            dist = min(1.0, math.hypot(dx, dy))
+            t = min(1.0, math.hypot(x - lx, y - ly) / (S * 0.95))      # distance from the light
+            base = lerp((112, 150, 255), (88, 52, 210), t)            # light blue -> deep violet
+            shade = 1.0 - 0.28 * max(0.0, dist - 0.55) / 0.45         # darker towards the edge (round)
+            px[x, y] = tuple(int(c * shade) for c in base) + (255,)
+    gloss = Image.new("L", (S, S), 0)                                 # soft gloss on the top
+    ImageDraw.Draw(gloss).ellipse([S * 0.16, S * 0.05, S * 0.84, S * 0.50], fill=70)
+    gloss = gloss.filter(ImageFilter.GaussianBlur(radius=S // 28))
+    img = Image.alpha_composite(img, Image.merge("RGBA", (Image.new("L", (S, S), 255),) * 3 + (gloss,)))
+    sym = Image.new("RGBA", (S, S), (0, 0, 0, 0))                      # the TV sign, a little smaller than in the logo
+    d = ImageDraw.Draw(sym)
+    u = S / 100.0
+    def at(v): return 50 * u + (v - 50) * u * 0.78
+    white = (255, 255, 255, 255)
+    d.line([(at(50), at(36)), (at(37), at(20))], fill=white, width=int(3.4 * u))
+    d.line([(at(50), at(36)), (at(63), at(20))], fill=white, width=int(3.4 * u))
+    for x0 in (37, 63):
+        d.ellipse([at(x0) - 3.4 * u, at(20) - 3.4 * u, at(x0) + 3.4 * u, at(20) + 3.4 * u], fill=white)
+    d.rounded_rectangle([at(20), at(36), at(80), at(78)], radius=int(6 * u), outline=white, width=int(5 * u))
+    d.polygon([(at(44), at(46)), (at(44), at(68)), (at(62), at(57))], fill=white)
+    d.rounded_rectangle([at(38), at(83), at(62), at(87)], radius=int(2 * u), fill=(255, 255, 255, 220))
+    shadow = Image.merge("RGBA", (Image.new("L", (S, S), 20),) * 3 + (sym.split()[3].point(lambda a: a * 90 // 255),))
+    shadow = shadow.filter(ImageFilter.GaussianBlur(radius=S // 60))
+    img.alpha_composite(shadow, (int(1.2 * u), int(1.8 * u)))
+    img.alpha_composite(sym)
+    return img.resize((size, size), Image.LANCZOS)
+
+
 def background(w, h):
     img = Image.new("RGB", (w, h), NAVY)
     glow = Image.new("RGB", (w, h), NAVY)
@@ -139,11 +179,8 @@ def save_palette(img, path):
     img.convert("RGB").quantize(colors=256, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.FLOYDSTEINBERG).save(path, optimize=True)
 
 
-def main(version="v0.1"):
-    icon = Image.new("RGBA", (128, 128), NAVY + (255,))
-    lg = logo(120)
-    icon.alpha_composite(lg, (4, 4))
-    save_palette(icon, os.path.join(ROOT, "sce_sys", "icon0.png"))
+def main(version=""):
+    save_palette(bubble(128), os.path.join(ROOT, "sce_sys", "icon0.png"))
     save_palette(livearea_bg(840, 500), os.path.join(ROOT, "sce_sys", "livearea", "contents", "bg.png"))
     save_palette(startup(280, 158), os.path.join(ROOT, "sce_sys", "livearea", "contents", "startup.png"))
     with open(os.path.join(ROOT, "sce_sys", "livearea", "contents", "template.xml"), "w") as f:
