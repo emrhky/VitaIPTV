@@ -16,31 +16,14 @@ def lerp(a, b, t):
 
 
 def logo(size):
-    """Rounded gradient square with a TV, two antennas and a play sign (drawn 4x, then reduced)."""
+    """The app logo everywhere (splash, LiveArea, loading screens, README): the icon0 sphere cut to a
+    circle with soft (anti-aliased) edges on a transparent background."""
+    img = bubble(size)
     S = size * 4
-    grad = Image.new("RGBA", (S, S))
-    gd = ImageDraw.Draw(grad)
-    for y in range(S):
-        gd.line([(0, y), (S, y)], fill=lerp(TOP, BOTTOM, y / S) + (255,))
     mask = Image.new("L", (S, S), 0)
-    ImageDraw.Draw(mask).rounded_rectangle([0, 0, S - 1, S - 1], radius=int(S * 0.22), fill=255)
-    img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
-    img.paste(grad, (0, 0), mask)
-    hl = Image.new("L", (S, S), 0)                                    # soft light on the upper half
-    ImageDraw.Draw(hl).ellipse([-S * 0.3, -S * 0.75, S * 1.3, S * 0.45], fill=40)
-    hl = Image.composite(hl, Image.new("L", (S, S), 0), mask)
-    img = Image.alpha_composite(img, Image.merge("RGBA", (Image.new("L", (S, S), 255),) * 3 + (hl,)))
-    d = ImageDraw.Draw(img)
-    u = S / 100.0
-    white = (255, 255, 255, 255)
-    d.line([(50 * u, 34 * u), (36 * u, 18 * u)], fill=white, width=int(3.2 * u))   # antennas
-    d.line([(50 * u, 34 * u), (64 * u, 18 * u)], fill=white, width=int(3.2 * u))
-    for cx in (36, 64):
-        d.ellipse([(cx - 3.8) * u, 14.2 * u, (cx + 3.8) * u, 21.8 * u], fill=white)
-    d.rounded_rectangle([18 * u, 34 * u, 82 * u, 78 * u], radius=int(7 * u), outline=white, width=int(5 * u))   # TV
-    d.polygon([(43 * u, 45 * u), (43 * u, 67 * u), (61 * u, 56 * u)], fill=white)                              # play
-    d.rounded_rectangle([36 * u, 82 * u, 64 * u, 86 * u], radius=int(2 * u), fill=(255, 255, 255, 210))         # stand
-    return img.resize((size, size), Image.LANCZOS)
+    ImageDraw.Draw(mask).ellipse([0, 0, S - 1, S - 1], fill=255)
+    img.putalpha(mask.resize((size, size), Image.LANCZOS))
+    return img
 
 
 def bubble(size):
@@ -121,8 +104,8 @@ def startup(w, h):
     size = int(h * 0.56)
     lg = logo(size)
     shadow = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-    ImageDraw.Draw(shadow).rounded_rectangle([(w - size) // 2 + 2, int(h * 0.12) + 5, (w + size) // 2 + 2, int(h * 0.12) + size + 5],
-                                             radius=int(size * 0.22), fill=(0, 0, 0, 110))
+    ImageDraw.Draw(shadow).ellipse([(w - size) // 2 + 2, int(h * 0.12) + 5, (w + size) // 2 + 2, int(h * 0.12) + size + 5],
+                                   fill=(0, 0, 0, 110))
     img.alpha_composite(shadow.filter(ImageFilter.GaussianBlur(radius=5)))
     img.alpha_composite(lg, ((w - size) // 2, int(h * 0.12)))
     return img.convert("RGB")
