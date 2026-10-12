@@ -187,6 +187,8 @@ static const Pair PATTERNS[] = {
     { "Audio decoder failed (0x%08X)", "Ses çözücü başlatılamadı (0x%s)" },
     { "Audio decode failed (0x%08X)", "Ses çözülemedi (0x%s)" },
     { "Audio output failed (0x%08X)", "Ses çıkışı açılamadı (0x%s)" },
+    { "AAC Main audio: the Vita cannot play it (0x%08X)", "AAC Main ses: Vita bunu çalamıyor (0x%s)" },
+    { "AAC SSR audio: not supported", "AAC SSR ses: desteklenmiyor" },
     { "Player error 0x%08X (see ux0:data/VitaIPTV/log.txt)", "Oynatıcı hatası 0x%s (ux0:data/VitaIPTV/log.txt)" },
     { "No channels found in %s", "%s içinde kanal bulunamadı" },
     { "failed (0x%08X)", "yüklenemedi (0x%s)" },

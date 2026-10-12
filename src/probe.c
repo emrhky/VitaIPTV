@@ -27,6 +27,23 @@ typedef struct {
     FlvDemux *flv;
 } Demux;
 
+/* H.264 pictures that no other picture refers to (nal_ref_idc 0): the player can skip them when the
+ * decoder cannot keep up. Counted here for the report; one probe runs at a time. */
+static uint32_t g_pics, g_nonref;
+static void count_video(void *ctx, const uint8_t *d, size_t n, int64_t pts, int64_t dts, int flags)
+{
+    (void)ctx; (void)pts; (void)dts; (void)flags;
+    int slices = 0, ref = 0;
+    for (size_t i = 0; i + 3 < n; i++) {
+        if (d[i] || d[i + 1] || d[i + 2] != 1) continue;
+        int type = d[i + 3] & 0x1F;
+        if (type == 1 || type == 5) { slices++; if ((d[i + 3] >> 5) & 3) ref = 1; }
+        i += 3;
+    }
+    g_pics++;
+    if (slices && !ref) g_nonref++;
+}
+
 static void dmx_feed(Demux *d, const TsSink *sink, const uint8_t *b, size_t n, int first)
 {
     if (first && mkv_probe(b, n)) d->mkv = mkv_create(sink);
@@ -105,10 +122,15 @@ static void summarize(ProbeResult *r, const TsInfo *i, int http_status, unsigned
                      profile_name(i->profile), i->level / 10, i->level % 10, i->width, i->height,
                      i->frame_mbs_only ? "" : " interlaced", ts_video_fps(i), i->bit_depth);
             add_line(r, "Keyframes: %u (+%u other I-pictures) of %u pictures, reference frames: %d", i->keyframes, i->intra_aus, i->video_aus, i->ref_frames);
+            if (g_pics >= 10) add_line(r, "Non-reference pictures: %u of %u (%u%%)", g_nonref, g_pics, g_nonref * 100 / g_pics);
+            int big = i->width > 1280 || i->height > 720;
+            double fps = ts_video_fps(i);
             if (i->bit_depth != 8 || i->chroma_format != 1) verdict = "NO: Vita cannot decode this H.264 variant";
             else if (i->width > 1920 || i->height > 1088) verdict = "NO: above 1080p";
-            else if ((i->width > 1280 || i->height > 720) && !i->frame_mbs_only) verdict = "MAYBE: 1080i (interlaced) may stutter";
-            else verdict = i->width > 1280 || i->height > 720 ? "YES: H.264 8-bit 1080p" : "YES: H.264 8-bit up to 720p";
+            else if (big && !i->frame_mbs_only) verdict = "MAYBE: 1080i (interlaced) may stutter";
+            /* v0.2.2 logs: 1080p at 60 fps decoded at about 35 pictures/s, so it played in slow motion */
+            else if (big && fps > 40.0) verdict = "MAYBE: 1080p at 50/60 fps may be too fast for the Vita (slow motion, skips)";
+            else verdict = big ? "YES: H.264 8-bit 1080p" : "YES: H.264 8-bit up to 720p";
         }
     } else if (i->video_codec == TS_CODEC_HEVC) {
         add_line(r, "Video: HEVC (H.265), %u pictures", i->video_aus);
@@ -120,8 +142,11 @@ static void summarize(ProbeResult *r, const TsInfo *i, int http_status, unsigned
 
     if (i->audio_pid < 0) add_line(r, "Audio: none");
     else if (i->audio_codec == TS_CODEC_AAC)
-        add_line(r, "Audio: AAC%s %d Hz, %d ch, %u frames",
-                 i->aac_object == 2 ? "-LC" : i->aac_object == 1 ? " Main" : "", i->aac_rate, i->aac_channels, i->audio_frames);
+        add_line(r, "Audio: AAC%s %d Hz, %d ch, %u frames%s",
+                 i->aac_object == 2 ? "-LC" : i->aac_object == 1 ? " Main" : i->aac_object == 3 ? " SSR" : "", i->aac_rate,
+                 i->aac_channels, i->audio_frames,
+                 i->aac_object == 1 ? " (Vita: AAC-LC only; tried as LC)"
+                 : i->aac_object == 3 ? " (not supported)" : "");
     else add_line(r, "Audio: %s (not supported yet), %u frames", ts_codec_name(i->audio_codec), i->audio_frames);
 
     add_line(r, "Packet problems: lost %u, damaged pictures %u, sync lost %u",
@@ -205,7 +230,7 @@ static int st_data(void *x, const uint8_t *b, size_t n)
             if (b[0] == '<') { s->sniff = SNIFF_WEB; return 1; }
         }
     }
-    TsSink sk = { NULL, NULL, NULL };
+    TsSink sk = { count_video, NULL, NULL };
     dmx_feed(s->d, &sk, b, n, s->c->res.bytes == 0);
     s->got += (uint32_t)n;
     s->c->res.bytes += (uint32_t)n;
@@ -318,7 +343,7 @@ static Mp4Demux *probe_mp4(ProbeCtx *c, const char *url)
     size_t ml = 0;
     int r = mp4_read_moov(range_read, &rc, 0, &moov, &ml);
     if (r != 0) { fail(&c->res, r == -2 ? "MP4 index too big" : "MP4: index not readable (the server may not send parts of files)"); return NULL; }
-    TsSink sk = { NULL, NULL, NULL };
+    TsSink sk = { count_video, NULL, NULL };
     char err[96];
     Mp4Demux *m = mp4_create(moov, ml, &sk, err, sizeof err);
     free(moov);
@@ -343,7 +368,7 @@ static int read_local(ProbeCtx *c, Demux *d, uint8_t *buf, unsigned long long t0
     uint32_t total = 0;
     size_t n;
     while (!c->cancel && (n = fread(buf, 1, CHUNK, f)) > 0) {
-        { TsSink sk = { NULL, NULL, NULL }; dmx_feed(d, &sk, buf, n, total == 0); }
+        { TsSink sk = { count_video, NULL, NULL }; dmx_feed(d, &sk, buf, n, total == 0); }
         total += (uint32_t)n;
         c->res.bytes = total;
         if (total >= PROBE_MAX) break;
@@ -357,7 +382,8 @@ static int probe_main(SceSize args, void *argp)
     (void)args; (void)argp;
     ProbeCtx *c = *(ProbeCtx **)argp;
     ProbeResult *r = &c->res;
-    TsSink sink = { NULL, NULL, NULL };
+    g_pics = g_nonref = 0;
+    TsSink sink = { count_video, NULL, NULL };
     Demux dm = { ts_create(&sink), NULL, NULL }, *d = &dm;
     uint8_t *buf = malloc(CHUNK);
     unsigned long long t0 = sceKernelGetProcessTimeWide();

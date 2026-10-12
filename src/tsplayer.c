@@ -37,6 +37,9 @@
 #define MAX_RECONNECTS 5
 #define ES_CAP       (2 * 1024 * 1024)  /* largest access unit we accept */
 #define LATE_US      1000000            /* more than this late: re-anchor the clock */
+#ifndef STATS_US
+#define STATS_US     5000000ULL         /* stats lines in the log this often */
+#endif
 #ifndef STALL_US
 #define STALL_US     10000000ULL        /* no picture after this long: report why */
 #endif
@@ -109,6 +112,7 @@ typedef struct {
     volatile int state;
     int64_t pts;                        /* picture time from the decoder, -1 = none */
     uint32_t seq;                       /* output order */
+    uint64_t ready_us;                  /* when the decoder gave it (timing line) */
 } Slot;
 
 typedef struct {
@@ -152,11 +156,13 @@ typedef struct {
     int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder, no_two;
     int connect_fails, multi_out, oom_fixed, status_retries;
     int no_out, reopen_pending, reopens;  /* decoder that takes units but gives no pictures: restart it */
+    int dry_restarts, good_since;       /* restarts that did not bring steady pictures back (each waits longer) */
     int es_full_fails;                  /* HD decoder: "ES buffer full" even after a picture was taken out */
     int force_internal, f_errs, f_errs2;   /* the public decoder refuses the stream (0x8062000F): use the HD one */
     int oom_hd, oom_errs;               /* public decoder out of picture memory (720p, 4 refs + B): HD one with more */
     int unit_again, full_waits;         /* HD decoder full: the same unit is given again (decode_au -> DEC_AGAIN) */
     int aparam_new, aparam_bad, aparam_logs;   /* audio frames whose format differs from the open decoder */
+    int aac_main;                       /* AAC Main profile frames given to the decoder as AAC-LC */
     int cur_interlaced;                 /* the unit being decoded belongs to an interlaced stream */
     volatile int fields;                /* 1: pictures come as two half-height fields one above the other */
     int field_votes, frame_votes, field_checks;
@@ -196,6 +202,10 @@ typedef struct {
     uint32_t hreads, hread_bytes, hread_full;   /* sceHttpReadData calls since the last stats line */
     unsigned read_size;                 /* bytes asked per sceHttpReadData: it fills the whole request before returning */
     volatile uint32_t dcalls, dus_sum, dus_max; /* decoder call time since the last stats line */
+    /* timing line (v0.2.3: 1080p at 60 fps decoded at only ~35 pictures/s; where does the time go?) */
+    volatile uint64_t w_slot_us, w_data_us;     /* video thread: waiting for a free picture slot / for data */
+    volatile uint32_t ui_none, ui_more, wait_n; /* UI frames with no picture ready / with more than one due */
+    volatile uint64_t wait_sum_us;              /* time from "decoded" to "on screen", summed over wait_n */
     volatile uint32_t drop_old, drop_behind;    /* why pictures were not shown: older than the one on screen / late */
     /* presentation (UI thread) */
     int shown, clock_on;
@@ -725,6 +735,24 @@ static void wait_ui_release(Tsp *t)
     }
 }
 
+/* The public decoder ran out of picture memory: go to the HD decoder (more pictures) at the next keyframe. */
+static void switch_to_hd_oom(Tsp *t)
+{
+    sceKernelLockMutex(t->lock, 1, NULL);
+    t->ready = 0;
+    sceKernelUnlockMutex(t->lock, 1);
+    wait_ui_release(t);                                     /* the screen may still be drawing a picture */
+    free_plan(t);
+    decoder_core_close(t);
+    t->force_internal = 1;
+    t->oom_hd = 1;
+    t->no_out = 0;
+    t->skip_nonref = 0;
+    t->grow_pending = 0;
+    t->need_key = 1;
+    t->st.errors++;
+}
+
 static int take_free_slot(Tsp *t)
 {
     int s = -1;
@@ -887,6 +915,7 @@ static int decode_au(Tsp *t, int s0, int s1, size_t n, int64_t pts, int pts_retr
         sceKernelLockMutex(t->lock, 1, NULL);
         sl->pts = opts;
         sl->seq = t->out_seq++;
+        sl->ready_us = now_us();
         sl->state = SLOT_READY;
         sceKernelUnlockMutex(t->lock, 1);
         t->st.decoded++;
@@ -1003,10 +1032,12 @@ static void video_packet(Tsp *t, Pkt *p)
     if (!n) { t->st.dropped++; t->need_key = 1; return; }
 
     int s;
+    uint64_t sw0 = now_us();
     while ((s = take_free_slot(t)) < 0) {                /* wait for the UI to show a picture */
         if (stopping(t)) return;
         sceKernelDelayThread(2000);
     }
+    t->w_slot_us += now_us() - sw0;
     int r;
     uint32_t out_before = t->st.decoded;
     for (;;) {
@@ -1021,6 +1052,7 @@ static void video_packet(Tsp *t, Pkt *p)
             while ((s = take_free_slot(t)) < 0 && !stopping(t)) sceKernelDelayThread(2000);
             if (stopping(t)) return;
             if (now_us() - w0 < 3000) sceKernelDelayThread(5000);
+            t->w_slot_us += now_us() - w0;
             r = decode_au(t, s, -1, n, pts, 1);
         }
         if (r >= 0 || t->st.decoded > 0 || !is_mem_error(r) || t->plan + 1 >= NPLANS) break;
@@ -1038,32 +1070,31 @@ static void video_packet(Tsp *t, Pkt *p)
     }
     /* After an out-of-memory error some streams leave the decoder taking units without giving any
      * picture back (the screen freezes until the channel is changed). Notice it and restart it. */
-    if (t->st.decoded != out_before) t->no_out = 0;
     /* Interlaced streams (one unit per field) keep units longer before a picture comes out: a restart there
-     * only waits for the next keyframe and makes it worse (1080i played smoothly once the restarts ran out). */
-    else if (t->st.decoded > 0 && ++t->no_out >= (i->interlaced ? 200 : 40) && !t->reopen_pending && t->reopens < 5) {
+     * only waits for the next keyframe and makes it worse (1080i played smoothly once the restarts ran out).
+     * The HD decoder at 1080p 60 fps was restarted five times in a row, each time with nothing gained and
+     * a keyframe of waiting lost: it gets more units, and each restart that brings nothing back doubles the
+     * wait. Units given while paused do not count (the screen holds the pictures). */
+    int no_out_max = i->interlaced ? 200 : t->internal ? 120 : 40;
+    no_out_max <<= t->dry_restarts > 3 ? 3 : t->dry_restarts;
+    if (t->st.decoded != out_before) {
+        t->no_out = 0;
+        if (++t->good_since >= 300) t->dry_restarts = 0;   /* steady again for a while */
+    }
+    else if (t->paused) { }
+    else if (t->st.decoded > 0 && ++t->no_out >= no_out_max && !t->reopen_pending && t->reopens < 5) {
         /* The public decoder ran out of picture memory and stopped giving pictures (720p channels with 4
          * reference pictures and B-frames: restarting it only froze again a few seconds later). The HD
          * decoder can hold more pictures: switch to it once, at the next keyframe. */
         if (t->oom_errs > 0 && !t->internal && !t->oom_hd && g_hd1080 && !i->interlaced) {
             plog("tsp: decoder out of picture memory (%d times); switching to the HD decoder with more pictures", t->oom_errs);
-            sceKernelLockMutex(t->lock, 1, NULL);
-            t->ready = 0;
-            sceKernelUnlockMutex(t->lock, 1);
-            wait_ui_release(t);                             /* the screen may still be drawing a picture */
-            free_plan(t);
-            decoder_core_close(t);
-            t->force_internal = 1;
-            t->oom_hd = 1;
-            t->no_out = 0;
-            t->skip_nonref = 0;
-            t->grow_pending = 0;
-            t->need_key = 1;
-            t->st.errors++;
+            switch_to_hd_oom(t);
             return;
         }
         plog("tsp: no picture from the decoder for %d units; restarting it at the next keyframe", t->no_out);
         t->reopen_pending = 1;
+        t->dry_restarts++;
+        t->good_since = 0;
         /* the pictures that did not fit; not for the HD decoder, where it only halved the frame rate */
         if (!t->skip_nonref && !t->internal) { t->skip_nonref = 1; t->skip_left = 750; }
     }
@@ -1071,6 +1102,16 @@ static void video_packet(Tsp *t, Pkt *p)
         t->oom_errs++;
         if (t->nref < 16 && (!t->nref_cap || t->nref < t->nref_cap)) t->grow_pending = 1;   /* more pictures at the next keyframe */
         else t->win_oom++;                                   /* only this picture is lost (see below) */
+    }
+    /* Out of memory from the very first unit, keyframes included (720p, level 4.1, 4 refs: every unit
+     * failed until "Decoder produced no picture"; the same channel played once the stream had 1 ref).
+     * Each failure waits for the next keyframe, so do not wait long: switch when the picture memory cannot
+     * grow, or when it grew and still did not fit. Nothing was shown yet, so nothing is lost. */
+    if ((unsigned)r == 0x80620003u && t->st.decoded == 0 && (t->oom_errs >= 2 || !t->grow_pending) && !t->internal && !t->oom_hd && g_hd1080 &&
+        !i->interlaced) {
+        plog("tsp: the decoder is out of picture memory from the start (%d times); switching to the HD decoder", t->oom_errs);
+        switch_to_hd_oom(t);                                 /* counts this unit as an error */
+        return;
     }
     /* A few out-of-memory pictures are just skipped. Only when they are frequent (10 of 100) are all
      * non-reference pictures dropped, and only for about 30 s: that halves the frame rate. */
@@ -1362,6 +1403,17 @@ static void audio_packet(Tsp *t, Pkt *p)
     } else t->aparam_new = 0;
     if (p->len > t->aes_cap) { t->st.audio_errors++; return; }
     memcpy(t->aes, d, p->len);
+    /* The Vita decoder takes AAC-LC (profile 1) only; "AAC Main" (0) was refused with 0x807F0000 for every
+     * frame. Main differs from LC only by prediction, which most encoders never switch on (ffmpeg's
+     * aac_main output is the LC bitstream with another label), so it is given as LC. */
+    int prof = (d[2] >> 6) & 3;
+    if (prof == 0) {
+        t->aes[2] = (uint8_t)((t->aes[2] & 0x3F) | 0x40);
+        if (!t->aac_main++) plog("tsp: AAC Main profile: the Vita decodes AAC-LC only, giving it as LC");
+    } else if (prof == 2) {
+        audio_disable(t, "AAC SSR audio: not supported");
+        return;
+    }
     t->actrl.pEs = t->aes;
     t->actrl.inputEsSize = (SceUInt32)p->len;
     t->actrl.pPcm = t->apcm;
@@ -1369,7 +1421,10 @@ static void audio_packet(Tsp *t, Pkt *p)
     if (r < 0) {
         t->st.audio_errors++;
         if (t->st.audio_errors <= 5) plog("tsp: audio decode error 0x%08X", (unsigned)r);
-        if (t->st.audio_frames == 0 && t->st.audio_errors >= 50) audio_disable(t, "Audio decode failed (0x%08X)", (unsigned)r);
+        if (t->st.audio_frames == 0 && t->st.audio_errors >= 50) {
+            if (t->aac_main) audio_disable(t, "AAC Main audio: the Vita cannot play it (0x%08X)", (unsigned)r);
+            else audio_disable(t, "Audio decode failed (0x%08X)", (unsigned)r);
+        }
         return;
     }
     int samples = (int)(t->actrl.outputPcmSize / (2u * (unsigned)ch));
@@ -1448,7 +1503,7 @@ static void stats_tick(Tsp *t)
 {
     uint64_t now = now_us();
     uint64_t dt = now - t->last_stats;                      /* the reader may block: use the real interval */
-    if (dt < 5000000) return;
+    if (dt < STATS_US) return;
     t->last_stats = now;
     uint32_t ui = t->ui_calls;
     t->ui_calls = 0;
@@ -1494,6 +1549,22 @@ static void stats_tick(Tsp *t)
                  (unsigned)fm.size_cdram >> 20, (unsigned)fm.size_phycont >> 20);
     plog("tsp: rates net %u KB/s, decode %u.%u fps%s, video queue %d (%u KB), audio queue %d (%d ms)%s%s",
          kbs, dfps10 / 10, dfps10 % 10, dc, vq_n, (unsigned)(vq_b / 1024), aq_n, aq_ms, mem, rd);
+    /* Third line: where the video thread spends its time, and how the screen takes the pictures. If the
+     * thread mostly waits for a free slot the screen is the limit; if it mostly sits in the decoder (or
+     * in neither, with a full queue) the decoder is. */
+    {
+        uint64_t ws = t->w_slot_us, wd = t->w_data_us, wsum = t->wait_sum_us;
+        uint32_t wn = t->wait_n, none = t->ui_none, more = t->ui_more;
+        t->w_slot_us = t->w_data_us = t->wait_sum_us = 0;
+        t->wait_n = t->ui_none = t->ui_more = 0;
+        if (dcalls || ws) {                                 /* (no decoder call but waiting for a slot: the screen holds them all) */
+            unsigned pd = (unsigned)((uint64_t)dsum * 100 / dt), psl = (unsigned)(ws * 100 / dt), pda = (unsigned)(wd * 100 / dt);
+            unsigned used = pd + psl + pda;
+            plog("tsp: timing: video thread %u%% in the decoder, %u%% waiting for a free slot, %u%% waiting for data, %u%% other; "
+                 "picture to screen avg %u ms; screen frames with no picture %u, behind %u",
+                 pd, psl, pda, used < 100 ? 100 - used : 0, wn ? (unsigned)(wsum / wn / 1000) : 0, (unsigned)none, (unsigned)more);
+        }
+    }
 
     /* sceHttpReadData returns only when the request is full: small reads keep radio responsive, larger ones
      * (about 30 reads a second) cut the per-call cost on high bit rates. */
@@ -2307,7 +2378,9 @@ static int video_main(SceSize args, void *argp)
         Pkt *p = q_pop(t, &t->vq);
         if (!p) {
             if (t->reader_done) break;
+            uint64_t w0 = now_us();
             sceKernelDelayThread(2000);
+            t->w_data_us += now_us() - w0;
             continue;
         }
         video_packet(t, p);
@@ -2469,7 +2542,7 @@ vita2d_texture *tsp_frame(int *w, int *h)
     for (;;) {
         if (t->paused || t->buffering) break;               /* the picture on screen stays */
         int n = next_ready(t, 0, 0);
-        if (n < 0) break;
+        if (n < 0) { if (t->st.decoded) t->ui_none++; break; }
         int64_t sp = t->slots[n].pts;
         if (sp >= 0 && t->shown_pts >= 0 && sp < t->shown_pts && t->shown_pts - sp < 90000LL) {   /* (a bigger jump back is a new start) */
             t->slots[n].state = SLOT_FREE;                  /* older than what is on screen: never go back */
@@ -2486,6 +2559,7 @@ vita2d_texture *tsp_frame(int *w, int *h)
         }
         int n2 = next_ready(t, 1, t->slots[n].seq);
         if (n2 >= 0 && due_time(t, &t->slots[n2], now) <= now) {   /* behind: skip this one */
+            t->ui_more++;
             t->slots[n].state = SLOT_FREE;
             t->st.dropped++;
             t->drop_behind++;
@@ -2497,6 +2571,8 @@ vita2d_texture *tsp_frame(int *w, int *h)
         }
         if (t->shown >= 0) t->slots[t->shown].state = SLOT_FREE;
         t->slots[n].state = SLOT_SHOWN;
+        t->wait_sum_us += now - t->slots[n].ready_us;
+        t->wait_n++;
         t->shown = n;
         t->shown_pts = sp;
         if (t->vod_first_pts < 0) t->vod_first_pts = sp;
