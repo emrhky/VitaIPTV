@@ -35,6 +35,8 @@ typedef struct {
     volatile int seekable;              /* tsp_start_vod at another time works */
     volatile int paused;
     int fields;                         /* pictures are two fields one above the other: draw the top half */
+    int slots;                          /* decoded pictures held between the decoder and the screen */
+    uint32_t skipped;                   /* pictures left out on purpose (catching up, decoder memory) */
     volatile int buffering;             /* film: waiting for the network (shown as "Buffering...") */
     int buf_pct;                        /* ... how far (0-100) */
     unsigned rebuffers;                 /* how many times */
@@ -56,6 +58,7 @@ void              tsp_pause(int on);
 /* Position of the picture on screen and the length, in ms. Returns 0 if no film is playing. */
 int               tsp_vod_pos(int *pos_ms, int *dur_ms);
 void              tsp_stop(void);                    /* waits for the worker, frees everything */
+void              tsp_vod_cache_clear(void);         /* film closed: forget its index (kept across jumps) */
 /* Picture to draw now (NULL if none yet). *w, *h = visible part of the texture. */
 vita2d_texture   *tsp_frame(int *w, int *h);
 const TspStatus  *tsp_status(void);                  /* NULL if not started */
