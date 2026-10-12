@@ -28,7 +28,7 @@
 #include <strings.h>
 
 /* ---- tunables ---------------------------------------------------------- */
-#define NSLOTS       4                  /* decoded pictures in flight (3 above 720p) */
+#define NSLOTS       8                  /* decoded pictures in flight, at most (see set_plan) */
 #define CHUNK        16384
 #define READ_SIZE    4096               /* first read size; grows with the bit rate up to CHUNK (see stats_tick) */
 #ifndef RECV_TIMEOUT_US
@@ -81,11 +81,12 @@ SceUIntVAddr sceCodecEngineAllocMemoryFromUnmapMemBlock(SceUID uid, SceUInt32 si
 int sceCodecEngineFreeMemoryFromUnmapMemBlock(SceUID uid, SceUIntVAddr addr);
 
 /* options for the next tsp_start (tsp_set_options) */
+int g_slots_cap = NSLOTS;              /* most picture slots (the PC tests compare with the old four) */
 static int g_hd1080 = 1;                /* decode above 720p (the HD decoder; always on since v0.2) */
 static int g_hls_max_h = 720;           /* HLS: tallest variant to choose */
 #define NO_TS        0xFFFFFFFFu
 
-enum { SLOT_FREE = 0, SLOT_READY, SLOT_SHOWN };
+enum { SLOT_FREE = 0, SLOT_READY, SLOT_SHOWN, SLOT_OFF };   /* OFF: the decoder refused its memory */
 
 /* Video parameters copied with every access unit (the demuxer runs on another thread). */
 typedef struct {
@@ -139,6 +140,7 @@ typedef struct {
     Mp4Demux *mp4;                      /* film or episode in an MP4 file */
     /* films and episodes (files that can be paused and searched) */
     int vod, vod_start_ms, vod_norange, vod_last_status;
+    int vc_rec, vc_used, vc_verify;     /* film index cache: filling it / opened from it / size still to compare */
     int vod_stream;                     /* a film sent as a stream (the transcoding server): no ranges, no length */
     int vod_offset_ms;                  /* ... where in the film that stream starts */
     int64_t vod_first_pts;              /* first picture shown (position of a stream counts from it) */
@@ -159,6 +161,8 @@ typedef struct {
     int dry_restarts, good_since;       /* restarts that did not bring steady pictures back (each waits longer) */
     int es_full_fails;                  /* HD decoder: "ES buffer full" even after a picture was taken out */
     int force_internal, f_errs, f_errs2;   /* the public decoder refuses the stream (0x8062000F): use the HD one */
+    int d_errs, d_units;
+    char net_err[96];                   /* the last network failure, for "no picture" (a keyframe was not the problem) */                /* "invalid stream" (0x8062000D) from the public decoder, in a window of units */
     int oom_hd, oom_errs;               /* public decoder out of picture memory (720p, 4 refs + B): HD one with more */
     int unit_again, full_waits;         /* HD decoder full: the same unit is given again (decode_au -> DEC_AGAIN) */
     int aparam_new, aparam_bad, aparam_logs;   /* audio frames whose format differs from the open decoder */
@@ -171,6 +175,14 @@ typedef struct {
     uint32_t out_of_order;              /* pictures that came out of the decoder before an earlier one */
     volatile int audio_delay_us;        /* video runs late: the audio thread pauses this long (set by the UI) */
     int delays_done, late_n;
+    volatile int late_ms;               /* how late the shown pictures are (UI, smoothed) */
+    int64_t late_ema_us;
+    int catchup, jump_pending;          /* video behind: skipping non-reference pictures / to a keyframe */
+    /* behind again within 10 s of catching up: the stream is faster than the decoder, keep skipping */
+    int catchup_sticky;
+    uint64_t catchup_left_at;
+    uint64_t catchup_since, jump_since, jump_after;
+    uint32_t catchup_skips;
     int64_t late_sum_us;
     volatile uint32_t ui_calls;         /* tsp_frame calls (UI frame rate) */
     int64_t shown_pts;
@@ -180,7 +192,6 @@ typedef struct {
     int port_rate, port_ch;
     volatile int is_hls;                /* the address answered with an HLS playlist */
     int skip_nonref;                    /* decoder too small for this stream: drop pictures nothing refers to */
-    uint32_t skipped;
     SceAvcdecCtrl ctrl;
     SceUID fb_uid, es_uid;
     int plan, fb_kind;
@@ -193,7 +204,7 @@ typedef struct {
     uint32_t soft_errs;                 /* units the Internal decoder called invalid but still decoded */
     SceInt32 pic_state;                 /* the int both Internal decode calls share; kept per decoder */
     Slot slots[NSLOTS];
-    int nslots;
+    int nslots, base_slots;             /* in use / the old four (or three), the rest are extra */
     uint32_t out_seq;
     volatile int ready;                 /* slots usable by the UI thread */
     volatile uint32_t frame_us;         /* estimated picture duration */
@@ -432,6 +443,28 @@ static void free_plan(Tsp *t)
     t->es_uid = -1;
 }
 
+static int slot_init(Tsp *t, Slot *s)
+{
+    memset(&s->tex, 0, sizeof s->tex);
+    int r = sceGxmTextureInitLinear(&s->tex.gxm_tex, s->data, TEX_FORMAT, (unsigned)t->dw, (unsigned)t->dh, 0);
+    if (r < 0) { plog("tsp: texture init 0x%08X", (unsigned)r); return r; }
+    vita2d_texture_set_filters(&s->tex, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
+    s->state = SLOT_FREE;
+    return 0;
+}
+
+/* An extra picture only where plenty stays free for everything else (the screen, sound, network). */
+static int mem_room(int kind, uint32_t size)
+{
+    SceKernelFreeMemorySizeInfo fm;
+    memset(&fm, 0, sizeof fm);
+    fm.size = sizeof fm;
+    if (sceKernelGetFreeMemorySize(&fm) < 0) return 0;
+    if (kind == MEM_CDRAM) return (uint64_t)fm.size_cdram >= (uint64_t)size + 6u * 1024 * 1024;
+    if (kind == MEM_PHYCONT) return (uint64_t)fm.size_phycont >= (uint64_t)size + 8u * 1024 * 1024;
+    return 0;
+}
+
 /* Allocates the ES buffer and picture buffers in the memory kinds of plan p. */
 static int set_plan(Tsp *t, int p)
 {
@@ -442,22 +475,47 @@ static int set_plan(Tsp *t, int p)
     if (!t->es) return -1;
     /* 4 pictures in flight; 3 when memory is short. The HD decoder gets 4 too when CDRAM has room: with 3
      * a stream whose pictures come out of order loses about a third of them (seen at 1080p). */
-    int n = ((t->dw * t->dh > 1280 * 736 && !t->internal) || pk == MEM_PHYCONT) ? 3 : NSLOTS;
+    int n = ((t->dw * t->dh > 1280 * 736 && !t->internal) || pk == MEM_PHYCONT) ? 3 : 4;
+    uint32_t psize = (uint32_t)(t->dw * t->dh * 4);
     for (int i = 0; i < n; i++) {
         Slot *s = &t->slots[i];
-        s->data = mem_alloc(pk, (uint32_t)(t->dw * t->dh * 4), &s->uid, 1);
+        s->data = mem_alloc(pk, psize, &s->uid, 1);
         if (!s->data && i == 3 && t->internal) { s->uid = -1; n = 3; break; }   /* no room for a fourth: 3 */
         if (!s->data) { free_plan(t); return -1; }
-        memset(&s->tex, 0, sizeof s->tex);
-        int r = sceGxmTextureInitLinear(&s->tex.gxm_tex, s->data, TEX_FORMAT, (unsigned)t->dw, (unsigned)t->dh, 0);
-        if (r < 0) { plog("tsp: texture init 0x%08X", (unsigned)r); free_plan(t); return r; }
-        vita2d_texture_set_filters(&s->tex, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
-        s->state = SLOT_FREE;
+        if (slot_init(t, s) < 0) { free_plan(t); return -1; }
+    }
+    /* Extra pictures (v0.2.4). With four, the decoder waited for a free one most of the time while the
+     * screen often had nothing new to show (1080p50 decoded at 43 pictures/s), and the HD decoder, whose
+     * pictures come out of order, could not place an earlier picture while later ones filled the slots
+     * (720p through the HD decoder: 3 to 10 pictures/s). Only where memory is left over: the plan's own
+     * kind first, then the other one the GPU can read. */
+    int want = !t->internal ? 6 : t->dw * t->dh > 1280 * 736 ? 6 : 8;
+    if (want > g_slots_cap) want = g_slots_cap;
+    int extra_kind = -1;
+    t->base_slots = n;
+    while (n < want) {
+        int got = 0;
+        for (int pass = 0; pass < 2 && !got; pass++) {
+            int k = pass == 0 ? pk : (pk == MEM_CDRAM ? MEM_PHYCONT : MEM_CDRAM);
+            if (!mem_room(k, psize)) continue;
+            Slot *s = &t->slots[n];
+            s->data = mem_alloc(k, psize, &s->uid, 1);
+            if (!s->data) { s->uid = -1; continue; }
+            if (slot_init(t, s) < 0) { mem_free(s->data, s->uid, 1); s->data = NULL; s->uid = -1; continue; }
+            got = 1;
+            if (k != pk) extra_kind = k;
+        }
+        if (!got) break;
+        n++;
     }
     sceKernelLockMutex(t->lock, 1, NULL);
     t->nslots = n;
+    t->st.slots = n;
     sceKernelUnlockMutex(t->lock, 1);
-    plog("tsp: memory plan %d: ES in %s, %d pictures in %s", p, mem_name(PLANS[p].es), n, mem_name(pk));
+    char ex[48] = "";
+    if (n > t->base_slots) snprintf(ex, sizeof ex, " (%d of them extra%s%s)", n - t->base_slots,
+                                    extra_kind >= 0 ? ", some in " : "", extra_kind >= 0 ? mem_name(extra_kind) : "");
+    plog("tsp: memory plan %d: ES in %s, %d pictures in %s%s", p, mem_name(PLANS[p].es), n, mem_name(pk), ex);
     return 0;
 }
 
@@ -941,6 +999,77 @@ static size_t build_es(Tsp *t, const VInfo *i, const uint8_t *data, size_t len, 
     return n + len;
 }
 
+static int audio_now(Tsp *t, uint64_t now, int64_t *apts);
+
+/* The video falls behind (1080p at 50/60 fps decodes slower than real time; a network gap): the sound
+ * went on and the picture never caught up again. Skip the pictures nothing else needs (non-reference
+ * pictures, about half in most streams) until it is on time; if it is still far behind after a while,
+ * leave out everything up to the first keyframe at or after the sound. Returns 1 to leave this unit out. */
+#define CATCHUP_ON_MS   150
+#define CATCHUP_OFF_MS  60
+#define JUMP_MS         1500
+static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int start_ok)
+{
+    uint64_t now = now_us();
+    int late = t->late_ms;
+    if (t->jump_pending) {
+        int64_t apts;
+        int have = audio_now(t, now, &apts);
+        if (start_ok && (!have || pts < 0 || pts >= apts - 9000)) {   /* a keyframe at the sound (or after) */
+            t->jump_pending = 0;
+            t->late_ema_us = 0;
+            t->late_ms = 0;
+            t->need_params = 1;
+            plog("tsp: caught up by going to the keyframe at the sound");
+            return 0;
+        }
+        if (now - t->jump_since > 10000000ULL) {             /* no such keyframe for 10 s: give up on it */
+            t->jump_pending = 0;
+            return 0;
+        }
+        t->st.dropped++;
+        return 1;
+    }
+    if (!t->catchup) {
+        if (late > CATCHUP_ON_MS && t->st.decoded > 30 && !t->paused) {
+            t->catchup = 1;
+            t->catchup_since = now;
+            if (t->catchup_left_at && now - t->catchup_left_at < 10000000ULL && !t->catchup_sticky) {
+                t->catchup_sticky = 1;
+                plog("tsp: the stream is faster than the decoder: from now on non-reference pictures are left out");
+            } else plog("tsp: video %d ms behind: skipping non-reference pictures to catch up", late);
+        }
+    } else if ((late < CATCHUP_OFF_MS && !t->catchup_sticky) || t->paused) {
+        t->catchup = 0;
+        plog("tsp: video on time again (%u pictures skipped)", t->catchup_skips);
+        t->catchup_skips = 0;
+        /* behind again soon after: the decoder cannot keep up with this stream at all (1080p at 60 fps),
+         * so keep skipping (a steady, lower picture rate instead of falling behind and catching up) */
+        if (!t->paused) t->catchup_left_at = now;
+    } else if (late > JUMP_MS && now - t->catchup_since > 4000000ULL && now >= t->jump_after && t->st.av_sync) {
+        t->jump_pending = 1;                                 /* skipping was not enough */
+        t->jump_since = now;
+        t->jump_after = now + 10000000ULL;
+        t->catchup_since = now;
+        plog("tsp: video still %d ms behind: leaving out everything up to the keyframe at the sound", late);
+        if (!start_ok) { t->st.dropped++; return 1; }
+    }
+    if (t->catchup && au_is_nonref(data, len)) {
+        t->st.skipped++;
+        t->catchup_skips++;
+        return 1;
+    }
+    return 0;
+}
+
+/* Waiting for a free picture slot, counted as it goes (the timing line of each 5 s) */
+static void slot_nap(Tsp *t)
+{
+    uint64_t a = now_us();
+    sceKernelDelayThread(2000);
+    t->w_slot_us += now_us() - a;
+}
+
 /* One H.264 access unit. Runs on the video thread. */
 static void video_packet(Tsp *t, Pkt *p)
 {
@@ -950,6 +1079,7 @@ static void video_packet(Tsp *t, Pkt *p)
     int64_t pts = p->pts;
     int flags = p->flags;
 
+    if (stopping(t)) return;                                /* an error was reported meanwhile: no decoder now */
     if (i->codec == TS_CODEC_HEVC) { set_error_kind(t, TSP_ERRK_FORMAT, "HEVC (H.265) video: the Vita cannot decode it"); return; }
     if (i->codec != TS_CODEC_H264) { set_error_kind(t, TSP_ERRK_FORMAT, "Video is %s: not supported", ts_codec_name((TsCodec)i->codec)); return; }
     if (p->frame_us) t->frame_us = p->frame_us;
@@ -1006,9 +1136,11 @@ static void video_packet(Tsp *t, Pkt *p)
         plog("tsp: decoding non-reference pictures again");
     }
     if (t->skip_nonref && au_is_nonref(data, len)) {        /* keeps the decoder within its picture memory */
-        t->skipped++;
+        t->st.skipped++;
         return;
     }
+    if (catch_up(t, data, len, pts, start_ok)) return;
+    if (++t->d_units >= 250) { t->d_units = 0; t->d_errs = 0; }   /* "invalid" errors count within 250 units */
     if (t->reopen_pending && start_ok) {                    /* stuck decoder: start it again at a keyframe */
         t->reopen_pending = 0;
         t->es_full_fails = 0;
@@ -1032,12 +1164,10 @@ static void video_packet(Tsp *t, Pkt *p)
     if (!n) { t->st.dropped++; t->need_key = 1; return; }
 
     int s;
-    uint64_t sw0 = now_us();
     while ((s = take_free_slot(t)) < 0) {                /* wait for the UI to show a picture */
         if (stopping(t)) return;
-        sceKernelDelayThread(2000);
+        slot_nap(t);
     }
-    t->w_slot_us += now_us() - sw0;
     int r;
     uint32_t out_before = t->st.decoded;
     for (;;) {
@@ -1049,10 +1179,9 @@ static void video_packet(Tsp *t, Pkt *p)
             if (again >= 100) { r = (int)0x8062000Au; break; }
             if (t->full_waits++ < 3) plog("tsp: HD decoder busy, waiting to give the unit again");
             uint64_t w0 = now_us();
-            while ((s = take_free_slot(t)) < 0 && !stopping(t)) sceKernelDelayThread(2000);
+            while ((s = take_free_slot(t)) < 0 && !stopping(t)) slot_nap(t);
             if (stopping(t)) return;
             if (now_us() - w0 < 3000) sceKernelDelayThread(5000);
-            t->w_slot_us += now_us() - w0;
             r = decode_au(t, s, -1, n, pts, 1);
         }
         if (r >= 0 || t->st.decoded > 0 || !is_mem_error(r) || t->plan + 1 >= NPLANS) break;
@@ -1064,6 +1193,17 @@ static void video_packet(Tsp *t, Pkt *p)
         s = 0;
     }
 
+    /* An extra picture slot in memory the decoder does not take: back to the slots of the plan. */
+    if (r < 0 && is_mem_error(r) && s >= t->base_slots && t->nslots > t->base_slots) {
+        plog("tsp: the decoder refuses the extra picture memory (0x%08X); %d slots", (unsigned)r, t->base_slots);
+        sceKernelLockMutex(t->lock, 1, NULL);
+        for (int k = t->base_slots; k < t->nslots; k++) if (k != t->shown) t->slots[k].state = SLOT_OFF;
+        t->nslots = t->base_slots;
+        t->st.slots = t->nslots;
+        sceKernelUnlockMutex(t->lock, 1);
+        t->st.errors++;
+        return;
+    }
     if (r < 0 && t->st.decoded == 0 && is_mem_error(r) && t->plan + 1 >= NPLANS) {
         set_error(t, "No memory layout accepted by the decoder (0x%08X)", (unsigned)r);
         return;
@@ -1154,8 +1294,27 @@ static void video_packet(Tsp *t, Pkt *p)
         if (t->st.errors <= 10) plog("tsp: decode error 0x%08X (AU %u bytes, flags %d)", (unsigned)r, (unsigned)n, flags);
         /* Out of picture memory and no room to grow: skip just this picture rather than
          * freezing until the next keyframe, which on some channels is 10 s away. */
-        int capped = (unsigned)r == 0x80620003u && !t->grow_pending && t->st.decoded > 0;
-        if (!capped) t->need_key = 1;
+        /* The HD decoder runs out the same way when it wants to give two pictures at once (720p after the
+         * switch): also only that picture. */
+        int capped = (unsigned)r == 0x80620003u && ((!t->grow_pending && t->st.decoded > 0) || t->internal);
+        /* "Invalid stream" from the public decoder for single units of a playing channel: waiting for the
+         * next keyframe lost 675 pictures on a channel with 13 s segments. Go on with the next unit (a few
+         * damaged pictures at worst); when it keeps happening, the HD decoder takes the stream. */
+        int soft = (unsigned)r == 0x8062000Du && !t->internal && t->st.decoded > 0;
+        if (!capped && !soft) t->need_key = 1;
+        if (soft && ++t->d_errs >= 4 && g_hd1080 && !i->interlaced && !t->force_internal) {
+            plog("tsp: the decoder calls %d of the last units invalid; switching to the HD decoder", t->d_errs);
+            sceKernelLockMutex(t->lock, 1, NULL);
+            t->ready = 0;
+            sceKernelUnlockMutex(t->lock, 1);
+            wait_ui_release(t);
+            free_plan(t);
+            decoder_core_close(t);
+            t->force_internal = 1;
+            t->need_key = 1;
+            t->d_errs = 0;
+            return;
+        }
         /* The decoder takes the stream but refuses every picture (invalid parameter): it may dislike this
          * reference count. Reopen it with other counts (2, 3, 4) before giving up. */
         if ((unsigned)r == 0x80620002u && t->st.decoded == 0 && t->st.errors >= 2 && t->ladder < 3) {
@@ -1511,7 +1670,7 @@ static void stats_tick(Tsp *t)
     plog("tsp: stats %u KB, decoded %u, shown %u, dropped %u, late %u, damaged %u, errors %u, skipped %u, frame %u us, "
          "video %+d ms vs audio, out of order %u, screen %u fps",
          (unsigned)(t->st.bytes / 1024), t->st.decoded, t->st.shown, t->st.dropped, t->st.late, t->st.damaged,
-         t->st.errors, (unsigned)t->skipped, (unsigned)t->frame_us, -t->st.av_late_ms, (unsigned)t->out_of_order,
+         t->st.errors, (unsigned)t->st.skipped, (unsigned)t->frame_us, -t->st.av_late_ms, (unsigned)t->out_of_order,
          (unsigned)((ui * 1000u + ms / 2) / ms));
 
     /* Second line: rates, queue depth, free memory and how the HTTP reads fill (for tuning READ_SIZE). */
@@ -1559,6 +1718,9 @@ static void stats_tick(Tsp *t)
         t->wait_n = t->ui_none = t->ui_more = 0;
         if (dcalls || ws) {                                 /* (no decoder call but waiting for a slot: the screen holds them all) */
             unsigned pd = (unsigned)((uint64_t)dsum * 100 / dt), psl = (unsigned)(ws * 100 / dt), pda = (unsigned)(wd * 100 / dt);
+            if (pd > 100) pd = 100;
+            if (psl > 100) psl = 100;
+            if (pda > 100) pda = 100;
             unsigned used = pd + psl + pda;
             plog("tsp: timing: video thread %u%% in the decoder, %u%% waiting for a free slot, %u%% waiting for data, %u%% other; "
                  "picture to screen avg %u ms; screen frames with no picture %u, behind %u",
@@ -1598,6 +1760,8 @@ static void explain_no_picture(Tsp *t)
     if (i->program < 0) set_error_kind(t, TSP_ERRK_FORMAT, "No MPEG-TS data (not a TS stream?)");
     else if (i->video_pid < 0) set_error(t, "No video stream (radio channel?)");
     else if (i->scrambled_packets && !i->video_aus) set_error(t, "Channel is encrypted (scrambled)");
+    /* the server stopped answering after a few KB (HTTPS playlist): say that, not "no keyframe" */
+    else if (t->net_err[0] && t->st.bytes < 512 * 1024) set_error_kind(t, TSP_ERRK_NET, "%s", t->net_err);
     else if (!i->video_aus) set_error(t, "No video data received");
     else if (!t->dec_open) set_error_kind(t, TSP_ERRK_FORMAT, "No usable keyframe in %u pictures", i->video_aus);
     else set_error(t, "Decoder produced no picture (%u errors). Switch the Vita fully off and on again, then try a 720p channel", t->st.errors);
@@ -1672,6 +1836,7 @@ static int https_session(Tsp *t, uint32_t *got)
     if (stopping(t) || t->is_hls) return 0;
     if (status >= 400) return http_refused(t, status);
     if (r < 0) {
+        snprintf(t->net_err, sizeof t->net_err, "%s", err);
         if (t->st.bytes || ++t->connect_fails <= 2) return 1;  /* worked before, or first tries: try again */
         set_error_kind(t, TSP_ERRK_NET, "Connection failed (%s)", err);
         return 0;
@@ -1702,6 +1867,7 @@ static int http_session(Tsp *t, uint8_t *buf, uint32_t *got)
     if (n < 0) {
         plog("tsp: connection failed 0x%08X", (unsigned)n);
         if (t->cancel) goto done;                           /* we aborted it ourselves */
+        snprintf(t->net_err, sizeof t->net_err, "Connection failed (0x%08X)", (unsigned)n);
         if (t->st.bytes || ++t->connect_fails <= 2) retry = 1;   /* worked before, or first tries: try again */
         else set_error_kind(t, TSP_ERRK_NET, "Connection failed (0x%08X)", (unsigned)n);
         goto done;
@@ -1841,7 +2007,7 @@ static int hls_get(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf,
         char err[96];
         int r = cio_get(&rq, status, err, sizeof err);
         if (out) out[h.total] = 0;
-        if (r < 0 && r != -2 && !h.total) { plog("tsp: HTTPS %s", err); return r; }
+        if (r < 0 && r != -2 && !h.total) { plog("tsp: HTTPS %s", err); snprintf(t->net_err, sizeof t->net_err, "%s", err); return r; }
         return h.total;
     }
     tpl = sceHttpCreateTemplate(t->hdr_ua[0] ? t->hdr_ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
@@ -2057,6 +2223,105 @@ static int vg_data(void *c, const uint8_t *d, size_t n)
 
 static int vg_stop(void *c) { return stopping(((VgCtx *)c)->t); }
 
+/* ---- film index cache ----
+ * Every jump in a film starts the player again, and it read the film's index again each time: an MP4
+ * index of 7.5 MB took about 25 s per jump on a slow line. While the same film stays open, the parts read
+ * before the film itself starts (header, MP4 index, MKV index, the ends of a TS file) are kept here and
+ * read from memory. One film at a time; cleared when another link starts or the film is closed. */
+#define VC_MAX_BYTES (32u * 1024 * 1024)
+#define VC_MAX_BLKS  48
+typedef struct { uint64_t off; size_t len; uint8_t *data; } VcBlk;
+static struct {
+    char url[sizeof ((Tsp *)0)->url];
+    uint64_t total;
+    VcBlk b[VC_MAX_BLKS];
+    int n;
+    size_t bytes;
+    SceUID lock;
+} g_vc = { .lock = -1 };
+
+static void vc_lock(void)
+{
+    if (g_vc.lock < 0) g_vc.lock = sceKernelCreateMutex("tsp_vcache", 0, 0, NULL);
+    if (g_vc.lock >= 0) sceKernelLockMutex(g_vc.lock, 1, NULL);
+}
+static void vc_unlock(void) { if (g_vc.lock >= 0) sceKernelUnlockMutex(g_vc.lock, 1); }
+
+static void vc_clear_locked(void)
+{
+    for (int i = 0; i < g_vc.n; i++) free(g_vc.b[i].data);
+    g_vc.n = 0;
+    g_vc.bytes = 0;
+    g_vc.total = 0;
+    g_vc.url[0] = 0;
+}
+
+void tsp_vod_cache_clear(void)
+{
+    vc_lock();
+    if (g_vc.n) plog("tsp: film index cache freed (%u KB)", (unsigned)(g_vc.bytes / 1024));
+    vc_clear_locked();
+    vc_unlock();
+}
+
+/* [off, off+len) from the cache if one block holds all of it */
+static int vc_get(Tsp *t, uint64_t off, uint8_t *out, size_t len)
+{
+    int hit = 0;
+    vc_lock();
+    if (!strcmp(g_vc.url, t->url))
+        for (int i = 0; i < g_vc.n && !hit; i++)
+            if (off >= g_vc.b[i].off && off + len <= g_vc.b[i].off + g_vc.b[i].len) {
+                memcpy(out, g_vc.b[i].data + (off - g_vc.b[i].off), len);
+                hit = 1;
+            }
+    vc_unlock();
+    return hit;
+}
+
+static void vc_put(Tsp *t, uint64_t off, const uint8_t *d, size_t len)
+{
+    if (!len || !t->vod_total) return;
+    vc_lock();
+    if (strcmp(g_vc.url, t->url) || g_vc.total != t->vod_total) {   /* another film (or this one changed) */
+        vc_clear_locked();
+        snprintf(g_vc.url, sizeof g_vc.url, "%s", t->url);
+        g_vc.total = t->vod_total;
+    }
+    uint8_t *c = NULL;
+    if (g_vc.n < VC_MAX_BLKS && g_vc.bytes + len <= VC_MAX_BYTES && (c = malloc(len))) {
+        memcpy(c, d, len);
+        g_vc.b[g_vc.n].off = off;
+        g_vc.b[g_vc.n].len = len;
+        g_vc.b[g_vc.n].data = c;
+        g_vc.n++;
+        g_vc.bytes += len;
+    }
+    vc_unlock();
+}
+
+/* At the start of a film: the size of the file if its index is in the cache (0 if not). */
+static uint64_t vc_total_for(const char *url)
+{
+    vc_lock();
+    uint64_t tot = !strcmp(g_vc.url, url) && g_vc.n ? g_vc.total : 0;
+    vc_unlock();
+    return tot;
+}
+
+/* The film is being played from the cached index: the first request for the film itself tells the size
+ * again. A different size means another file behind the same link: forget the cache and say so. */
+static void vc_check_total(Tsp *t, uint64_t tot)
+{
+    if (!t->vc_verify || !tot) return;
+    t->vc_verify = 0;
+    if (tot == t->vod_total) return;
+    plog("tsp: the film's size changed (%llu -> %llu bytes): index cache dropped",
+         (unsigned long long)t->vod_total, (unsigned long long)tot);
+    tsp_vod_cache_clear();
+    set_error_kind(t, TSP_ERRK_NET, "The film changed on the server: open it again");
+}
+
 /* GET of the bytes [off, end) of the file (end 0 = to its end). Returns 0 when the body ended or fn stopped
  * it, VG_NO_RANGE when the server ignores ranges, < 0 on a network error. *status = HTTP status. */
 static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, int *status)
@@ -2072,6 +2337,7 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
         int r = cio_get(&rq, status, err, sizeof err);
         t->vod_last_status = *status;
         if (tot && !t->vod_total) t->vod_total = tot;
+        else vc_check_total(t, tot);
         if (g.refused) return VG_NO_RANGE;
         if (r < 0 && r != -2) plog("tsp: VOD HTTPS error: %s", err);
         return r == -2 ? 0 : r;
@@ -2101,7 +2367,7 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
     t->vod_last_status = *status;
     if (*status >= 400) { ret = 0; goto done; }
     if (*status == 200 && off > 0) { ret = VG_NO_RANGE; goto done; }
-    if (!t->vod_total) {
+    if (!t->vod_total || t->vc_verify) {
         char *hdr = NULL;
         unsigned int hl = 0;
         uint64_t tot = 0;
@@ -2116,7 +2382,9 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
             unsigned long long cl = 0;
             if (sceHttpGetResponseContentLength(req, &cl) >= 0) tot = cl;
         }
-        t->vod_total = tot;
+        if (!t->vod_total) t->vod_total = tot;
+        else vc_check_total(t, tot);
+        if (t->err_set) { ret = 0; goto done; }
     }
     uint64_t want = end ? end - off : 0, got = 0;
     if (*status == 200 && (!want || want > VOD_NORANGE_HEAD)) want = VOD_NORANGE_HEAD;
@@ -2155,12 +2423,14 @@ static int fetch_cb(Tsp *t, void *c, const uint8_t *d, size_t n)
 
 static int vod_status;                                       /* HTTP status of the last failed fetch */
 
+
 /* The bytes [off, off+len) into out. Returns the number read (fewer at the end of the file), -1 on
  * error, -2 when the server does not do ranges. */
 static int vod_fetch(Tsp *t, uint64_t off, uint8_t *out, size_t len)
 {
     if (t->vod_total && off >= t->vod_total) return 0;
     if (t->vod_total && off + len > t->vod_total) len = (size_t)(t->vod_total - off);
+    if (t->vc_used && vc_get(t, off, out, len)) return (int)len;
     for (int tries = 0; tries < 3 && !stopping(t); tries++) {
         FetchCtx f = { out, len, 0 };
         int st = 0;
@@ -2168,6 +2438,7 @@ static int vod_fetch(Tsp *t, uint64_t off, uint8_t *out, size_t len)
         if (stopping(t)) return -1;
         if (r == VG_NO_RANGE) { t->vod_norange = 1; return -2; }
         if (st >= 400) { vod_status = st; return -1; }
+        if (f.n > 0 && t->vc_rec && st == 206) vc_put(t, off, out, f.n);
         if (f.n > 0 || r >= 0) return (int)f.n;
         for (int k = 0; k < 15 && !stopping(t); k++) sceKernelDelayThread(20000);
     }
@@ -2215,6 +2486,14 @@ static void read_vod(Tsp *t, uint8_t *buf)
     VodIo io = { t, NULL, 0, 0 };
     uint8_t head[1024];
     vod_status = 0;
+    uint64_t ctot = vc_total_for(t->url);
+    if (ctot) {                                             /* a jump in the same film: its index is in memory */
+        t->vod_total = ctot;
+        t->vc_used = 1;
+        t->vc_verify = 1;
+        plog("tsp: film index from memory");
+    } else if (!t->vod_stream) tsp_vod_cache_clear();       /* another film: free the old one first */
+    t->vc_rec = 1;
     int n = vio_read(&io, 0, head, sizeof head);
     if (stopping(t)) { free(io.win); return; }
     if (n > 0 && t->vod_last_status == 200) {               /* the whole file came instead of a part */
@@ -2306,6 +2585,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         return;
     }
     free(io.win);
+    t->vc_rec = 0;                                          /* the film itself is not kept */
     t->st.note[0] = 0;
     t->st.note_pct = 0;
     if (stopping(t)) return;
@@ -2473,7 +2753,9 @@ static void late_check(Tsp *t, int64_t late_us)
     t->late_sum_us = 0;
     t->late_n = 0;
     t->st.av_late_ms = (int)(avg / 1000);
-    if (avg < 60000 || t->audio_delay_us || t->delays_done >= 4) return;
+    /* once, at the start: later on a video that stays behind catches up by skipping pictures (catch_up);
+     * pausing the sound again and again (four times 1.5 s) left it 3 s behind for good */
+    if (avg < 60000 || t->audio_delay_us || t->delays_done >= 1 || t->catchup) return;
     int64_t d = avg + 40000;
     if (d > 1500000) d = 1500000;
     t->delays_done++;
@@ -2577,7 +2859,13 @@ vita2d_texture *tsp_frame(int *w, int *h)
         t->shown_pts = sp;
         if (t->vod_first_pts < 0) t->vod_first_pts = sp;
         t->st.shown++;
-        if (t->st.av_sync) late_check(t, (int64_t)now - (int64_t)due);
+        {
+            int64_t late = (int64_t)now - (int64_t)due;
+            if (late < 0) late = 0;
+            t->late_ema_us = (t->late_ema_us * 7 + late) / 8;
+            t->late_ms = (int)(t->late_ema_us / 1000);
+            if (t->st.av_sync) late_check(t, late);
+        }
         break;
     }
     int sh = t->shown;

@@ -250,9 +250,7 @@ void scr_splash(const vita2d_texture *img, const char *status, const char *versi
         ui_text_center(481, 336, UI_TEXT, 2.0f, "Vita IPTV");
         ui_text_center(480, 372, UI_DIM, 1.0f, T("Live TV and radio on your Vita"));
     }
-    if (version) {
-        /* An older splash.png had "v0.1" in the picture: cover that corner first, so only this version shows */
-        if (img) vita2d_draw_rectangle(700, 486, 260, 52, RGBA8(14, 16, 26, 255));
+    if (version) {                                          /* the picture has no version: it is written here */
         ui_text(900 - ui_text_w(0.9f, version), 520, UI_DIM, 0.9f, version);
     }
     if (status && status[0]) {
