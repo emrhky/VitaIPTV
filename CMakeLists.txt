@@ -13,7 +13,7 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "Vita IPTV")
 set(VITA_TITLEID  "VIPTV0001")
-set(VITA_VERSION  "00.20")
+set(VITA_VERSION  "00.22")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O2 -std=gnu99")
 
@@ -24,6 +24,7 @@ add_executable(${PROJECT_NAME}.elf
   src/httpio.c
   src/tsdemux.c
   src/mkvdemux.c
+  src/flvdemux.c
   src/probe.c
   src/tsplayer.c
   src/ui.c
@@ -62,7 +63,7 @@ target_link_libraries(${PROJECT_NAME}.elf
   SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceCodecEngine_stub SceAudiodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
   SceCtrl_stub SceSysmodule_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub
-  ScePgf_stub ScePvf_stub SceAppUtil_stub ScePower_stub
+  ScePgf_stub ScePvf_stub SceAppUtil_stub ScePower_stub SceAVConfig_stub SceRegMgr_stub
   ${EXTRA_STUBS}
 )
 

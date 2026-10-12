@@ -7,7 +7,7 @@ listen to radio from your own M3U playlists or Xtream accounts, decoded by the V
 
 <p align="center"><img src="https://github.com/user-attachments/assets/010c908b-58ff-4be5-982d-5e6c4701ef0c" width="640" alt="Vita IPTV screenshot"></p>
 
-**Version 0.2** - films, series and 1080p (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
+**Version 0.2.2** - films, series, 1080p and FLV streams (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
 
 This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
@@ -20,7 +20,7 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   and playlist files copied to the memory card.
 - **Add playlists inside the app** with the on-screen keyboard. Pasting an Xtream `get.php?username=...&password=...`
   link fills in the server, user and password by itself.
-- **Streams:** MPEG-TS over HTTP, **HLS (.m3u8)** live and on-demand, MKV, MP4.
+- **Streams:** MPEG-TS over HTTP, **HLS (.m3u8)** live and on-demand, **HTTP-FLV**, MKV, MP4.
 - **Films and series (Xtream):** opening an Xtream playlist asks for *Live TV*, *Films* or *Series*. Films and
   episodes (MKV, MP4 and TS files) can be paused and jumped through, and the app remembers where you stopped
   (*Continue from 41:10* the next time).
@@ -55,7 +55,7 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 |---|---|
 | Xtream | Server address (e.g. `http://example.com:8080`), username, password - or paste a full `get.php` link |
 | M3U playlist | The playlist link (`http://` or `https://`, short links work); username/password only if the server asks |
-| Single stream | A direct stream link |
+| Single stream | A direct stream link; Referer and User-Agent only if the stream needs them |
 
 **Triangle** edits, **Select** deletes, **START** opens the menu (Settings, Reload, About, Exit).
 
@@ -70,9 +70,14 @@ My playlist      | m3u    | https://example.com/list.m3u
 Locked playlist  | m3u    | http://example.com/list.m3u      | user | pass
 My provider      | xtream | http://example.com:8080          | user | pass
 One channel      | stream | http://example.com/live/1.ts
+With headers     | stream | https://cdn.example.com/live.flv | https://example.com/page | Mozilla/5.0 ...
 ```
 
 - Video files (`.ts`, `.mp4`, `.mkv`) in the same folder are listed as local sources.
+
+**Streams that need a Referer or User-Agent:** M3U lists can give them with `#EXTVLCOPT:http-referrer=...` and
+`#EXTVLCOPT:http-user-agent=...` lines before the link (as VLC reads them), with `#EXTHTTP:{"Referer":"..."}`, or
+Kodi style as `link|User-Agent=...&Referer=...`. The app sends them with every request of that channel.
 
 ## Controls
 
@@ -81,15 +86,15 @@ One channel      | stream | http://example.com/live/1.ts
 | Playlists | X open, Square add, Triangle edit, Select delete, START menu |
 | Channels | Left stick / D-pad: categories, right stick: channels, X play, L/R page, Square search, O back |
 | Playing (live TV and films) | X or START pause / play, L / R, Left / Right or either stick sideways: hold to move through a film (further and longer = faster), let go to jump there, Up / Down previous / next channel or film, Triangle information, Square 720p / 1080p (HLS) or the transcoding server, Select stream analysis, O back (a film's position is kept) |
-| Radio | Up/Down change station, O back |
+| Radio | Up/Down change station, Square turns the screen off (the sound goes on; any button turns it on), O back |
 
 ## What plays and what does not
 
 | Works | Does not work (without the transcoding server) |
 |---|---|
 | H.264 up to 1920x1080 (see below), AAC, MP2, MP3 | Above 1080p (4K) |
-| MPEG-TS, HLS (MPEG-TS segments), MKV, MP4 | HEVC / H.265 |
-| Films: MKV, MP4, TS files | AVI files |
+| MPEG-TS, HLS (MPEG-TS segments), FLV, MKV, MP4 | HEVC / H.265 |
+| Films: MKV, MP4, TS, FLV files (FLV: from the start, no jumping) | AVI files |
 | http and https | Interlaced broadcasts (576i, 1080i may stutter), AC-3 / E-AC-3 audio |
 | | Encrypted (AES) HLS, HLS with fMP4 segments |
 
@@ -104,7 +109,10 @@ firmware's internal entry points instead (the same hardware; found with the test
 
 **About films:** most films are 1080p and play directly. Many film files use
 HEVC (x265) video or AC-3 / E-AC-3 sound: HEVC does not play, AC-3 plays without sound. Jumping needs a server that
-sends parts of files (HTTP ranges); Xtream servers do.
+sends parts of files (HTTP ranges); Xtream servers do. When the connection is slower than the film needs, the
+film stops with *Buffering...* until a few seconds are loaded (longer each time it happens again), instead of
+freezing; if that happens often, the
+provider sends too slowly for that file (a smaller version of the same film usually plays fine).
 
 If a channel does not open, the screen tells you why, and `ux0:data/VitaIPTV/log.txt` has the details.
 
