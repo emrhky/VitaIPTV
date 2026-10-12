@@ -84,11 +84,30 @@ VSRC = ("-f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=44
 sh(f"ffmpeg -loglevel error -y {VSRC} {T}/film.mp4")
 sh(f"ffmpeg -loglevel error -y {VSRC} {T}/film.mkv")
 sh(f"ffmpeg -loglevel error -y {VSRC} -f mpegts {T}/film.ts")
+sh(f"ffmpeg -loglevel error -y {VSRC} -f flv {T}/film.flv")
+sh(f"ffmpeg -loglevel error -y -i {T}/s720.ts -c copy -f flv {T}/s720.flv")
+# a stream where three AAC frames in the middle claim 7 channels (seen live after a skipped HLS segment)
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5 "
+   f"-c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/glitch.ts")
+g = bytearray(open(f"{T}/glitch.ts", "rb").read())
+hits, seen = 0, 0
+for o in range(0, len(g) - 188 + 1, 188):
+    pid = ((g[o + 1] & 0x1F) << 8) | g[o + 2]
+    if pid != 0x101: continue
+    i = g.find(b"\xff\xf1", o + 4, o + 188)
+    if i < 0 or i + 4 > o + 188: continue
+    seen += 1
+    if seen in (60, 61, 62):
+        g[i + 2] = (g[i + 2] & 0xFE) | 1; g[i + 3] = (g[i + 3] & 0x3F) | (3 << 6); hits += 1   # channel config 7
+assert hits == 3, hits
+open(f"{T}/glitch.ts", "wb").write(g)
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 3 "
+   f"-c:v libx264 -flags +ilme+ildct -top 1 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/i1080.ts")
 M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c -lm -o {T}/test_tsplayer")
+   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c -lm -o {T}/test_tsplayer")
 r = subprocess.run(f"{T}/test_tsplayer {T}/s720.ts {T}/s1080.ts {T}/hevc.ts {T}/midgop.ts {T}/dropped.ts "
-                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts",
+                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts",
                    shell=True, capture_output=True, text=True)
 print(r.stdout); print(r.stderr[-4000:])
 sys.exit(r.returncode)

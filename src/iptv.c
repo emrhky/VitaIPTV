@@ -1,4 +1,5 @@
 #include "iptv.h"
+#include "urlhdr.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -79,7 +80,7 @@ int iptv_is_film_url(const char *url)
 {
     if (strncasecmp(url, "http://", 7) && strncasecmp(url, "https://", 8)) return 0;
     if (strstr(url, "/movie/") || strstr(url, "/series/")) return 1;   /* Xtream links in an M3U list */
-    size_t n = strcspn(url, "?#");
+    size_t n = strcspn(url, "?#|");                         /* (| starts headers: link|User-Agent=...) */
     static const char *const EXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm" };
     for (size_t i = 0; i < sizeof EXT / sizeof EXT[0]; i++) {
         size_t k = strlen(EXT[i]);
@@ -88,10 +89,35 @@ int iptv_is_film_url(const char *url)
     return 0;
 }
 
+/* The value of "key":"value" in a small JSON object (#EXTHTTP). */
+static void json_value(const char *buf, const char *key, char *out, size_t outsz)
+{
+    out[0] = 0;
+    char k[32];
+    snprintf(k, sizeof k, "\"%s\"", key);
+    const char *p = NULL;
+    size_t kl = strlen(k);
+    for (const char *q = buf; *q && !p; q++) if (!strncasecmp(q, k, kl)) p = q;
+    if (!p) return;
+    p = strchr(p + strlen(k), ':');
+    if (!p) return;
+    p++;
+    while (*p == ' ') p++;
+    if (*p != '"') return;
+    p++;
+    size_t o = 0;
+    while (*p && *p != '"' && o + 1 < outsz) {
+        if (*p == '\\' && p[1]) p++;
+        out[o++] = *p++;
+    }
+    out[o] = 0;
+}
+
 int m3u_parse(const char *text, size_t len, ChannelList *out)
 {
     Channel pending;
     int have = 0;
+    char ua[512] = "", ref[512] = "";                       /* #EXTVLCOPT / #EXTHTTP for the next link */
     char grp[IPTV_GROUP_MAX] = "";
     size_t i = 0;
     int added = 0;
@@ -122,6 +148,21 @@ int m3u_parse(const char *text, size_t len, ChannelList *out)
                 if (!get_attr(buf, "group-title", pending.group, sizeof pending.group))
                     copy_trunc(pending.group, sizeof pending.group, grp, strlen(grp));
                 have = 1;
+            } else if (n > 11 && strncasecmp(line, "#EXTVLCOPT:", 11) == 0) {   /* VLC options: the HTTP ones */
+                char buf[600];
+                copy_trunc(buf, sizeof buf, line + 11, n - 11);
+                trim_inplace(buf);
+                if (!strncasecmp(buf, "http-user-agent=", 16)) copy_trunc(ua, sizeof ua, buf + 16, strlen(buf + 16));
+                else if (!strncasecmp(buf, "http-referrer=", 14)) copy_trunc(ref, sizeof ref, buf + 14, strlen(buf + 14));
+                else if (!strncasecmp(buf, "http-referer=", 13)) copy_trunc(ref, sizeof ref, buf + 13, strlen(buf + 13));
+            } else if (n > 9 && strncasecmp(line, "#EXTHTTP:", 9) == 0) {      /* {"User-Agent":"...","Referer":"..."} */
+                char buf[1200], v[512];
+                copy_trunc(buf, sizeof buf, line + 9, n - 9);
+                json_value(buf, "User-Agent", v, sizeof v);
+                if (v[0]) copy_trunc(ua, sizeof ua, v, strlen(v));
+                json_value(buf, "Referer", v, sizeof v);
+                if (!v[0]) json_value(buf, "Referrer", v, sizeof v);
+                if (v[0]) copy_trunc(ref, sizeof ref, v, strlen(v));
             } else if (n > 8 && strncasecmp(line, "#EXTGRP:", 8) == 0) {
                 char buf[IPTV_GROUP_MAX];
                 copy_trunc(buf, sizeof buf, line + 8, n - 8);
@@ -132,11 +173,11 @@ int m3u_parse(const char *text, size_t len, ChannelList *out)
         }
 
         /* A link line. Skip anything that doesn't look like a URL. */
-        if (n >= IPTV_URL_MAX) { have = 0; continue; }
+        if (n >= IPTV_URL_MAX) { have = 0; ua[0] = ref[0] = 0; continue; }
         char url[IPTV_URL_MAX];
         memcpy(url, line, n);
         url[n] = 0;
-        if (!strstr(url, "://")) { have = 0; continue; }
+        if (!strstr(url, "://")) { have = 0; ua[0] = ref[0] = 0; continue; }
 
         Channel c;
         memset(&c, 0, sizeof c);
@@ -144,6 +185,9 @@ int m3u_parse(const char *text, size_t len, ChannelList *out)
         else copy_trunc(c.name, sizeof c.name, url, strlen(url));
         if (!c.name[0]) copy_trunc(c.name, sizeof c.name, url, strlen(url));
         memcpy(c.url, url, n + 1);
+        if ((ua[0] || ref[0]) && !strchr(url, '|'))          /* the headers ride along with the link */
+            url_join_headers(url, ref, ua, c.url, sizeof c.url);
+        ua[0] = ref[0] = 0;
         if (iptv_is_film_url(c.url)) c.kind = CH_FILM;      /* films in M3U lists: pause, jumps, resume */
 
         if (list_push(out, &c) != 0) break;
@@ -654,7 +698,7 @@ int xtream_parse_episodes(const char *json, size_t len, const Source *s, Channel
 /* sources.txt:  Name | type | arg1 | arg2 | arg3
  *   m3u    : Name | m3u    | http://host/list.m3u [| user | pass]
  *   xtream : Name | xtream | http://host:port | user | pass
- *   stream : Name | stream | http://host/live/1.ts
+ *   stream : Name | stream | http://host/live/1.ts [| referer | user agent]   (headers some streams need)
  *   file   : Name | file   | ux0:data/VitaIPTV/my.m3u
  */
 int sources_parse(const char *text, Source *out, int max)
@@ -861,13 +905,14 @@ int sources_format(const Source *src, int n, char *out, size_t outsz)
 {
     size_t o = 0;
     int w = snprintf(out, outsz, "# Vita IPTV sources (written by the app; you can also edit it by hand)\n"
-                                 "# Name | type | address [| username | password]   types: m3u, xtream, stream, file\n");
+                                 "# Name | type | address [| username | password]   types: m3u, xtream, stream, file\n"
+                                 "# (stream: address [| referer | user agent], for streams that need them)\n");
     if (w < 0 || (size_t)w >= outsz) return -1;
     o = (size_t)w;
     for (int i = 0; i < n; i++) {
         const Source *s = &src[i];
         if (s->auto_added) continue;
-        if (s->type == SRC_XTREAM || (s->type == SRC_M3U_URL && s->user[0]))
+        if (s->type == SRC_XTREAM || ((s->type == SRC_M3U_URL || s->type == SRC_STREAM) && (s->user[0] || s->pass[0])))
             w = snprintf(out + o, outsz - o, "%s | %s | %s | %s | %s\n", s->name, type_word(s->type), s->url, s->user, s->pass);
         else
             w = snprintf(out + o, outsz - o, "%s | %s | %s\n", s->name, type_word(s->type), s->url);
@@ -904,7 +949,7 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "lang")) { st->lang = atoi(v); if (st->lang < 0 || st->lang > 2) st->lang = 0; }
             else if (!strcmp(k, "hide_adult")) st->hide_adult = atoi(v) != 0;
             else if (!strcmp(k, "hide_1080p")) st->hide_1080p = atoi(v) != 0;
-            else if (!strcmp(k, "hd_1080p")) st->hd1080 = atoi(v) != 0;
+            /* hd_1080p= (before v0.2.2): 1080p is always on now, the line is ignored */
         }
         p += n;
         if (*p == '\n') p++;
@@ -913,8 +958,8 @@ void settings_parse(const char *text, Settings *st)
 
 int settings_format(const Settings *st, char *out, size_t outsz)
 {
-    int w = snprintf(out, outsz, "# Vita IPTV settings\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_1080p=%d\nhd_1080p=%d\n",
-                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_1080p, st->hd1080);
+    int w = snprintf(out, outsz, "# Vita IPTV settings\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_1080p=%d\n",
+                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_1080p);
     return (w < 0 || (size_t)w >= outsz) ? -1 : w;
 }
 

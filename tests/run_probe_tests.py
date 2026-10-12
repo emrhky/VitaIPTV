@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stream analysis (src/probe.c) over a fake HTTP server: TS, HLS, MP4, MKV. Needs gcc, ffmpeg."""
+"""Stream analysis (src/probe.c) over a fake HTTP server: TS, HLS, MP4, MKV, FLV. Needs gcc, ffmpeg."""
 import os, subprocess, sys, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 T = tempfile.mkdtemp(prefix="probe_")
@@ -13,10 +13,11 @@ open(f"{T}/master.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=600000
                                     "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nmedia.m3u8\n")
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='640x360', t=6)} {T}/film.mp4")
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='640x360', t=6)} {T}/film.mkv")
+sh(f"ffmpeg -loglevel error -y -i {T}/s.ts -c copy -f flv {T}/live.flv")
 open(f"{T}/page.ts", "w").write("<html><body>blocked</body></html>")
 M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -Wno-missing-field-initializers -pthread -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_probe_net.c {ROOT}/src/probe.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/hls.c "
+   f"{ROOT}/tests/test_probe_net.c {ROOT}/src/probe.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/hls.c "
    f"{ROOT}/src/vod.c {ROOT}/src/curlio.c {M}/mock_rt.c -lm -o {T}/test_probe_net")
 r = subprocess.run(f"{T}/test_probe_net {T}", shell=True, capture_output=True, text=True, timeout=300)
 print(r.stdout); print(r.stderr[-4000:])

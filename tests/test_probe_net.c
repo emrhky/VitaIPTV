@@ -37,7 +37,7 @@ int main(int argc, char **argv)
     const char *dir = argv[1];
     static char p[16][512];
     const char *names[] = { "s.ts", "master.m3u8", "media.m3u8", "seg000.ts", "seg001.ts", "seg002.ts", "seg003.ts", "seg004.ts",
-                            "film.mp4", "film.mkv", "page.ts" };
+                            "film.mp4", "film.mkv", "page.ts", "live.flv" };
     int n = (int)(sizeof names / sizeof names[0]);
     mock_http_reset();
     for (int i = 0; i < n; i++) { snprintf(p[i], 512, "%s/%s", dir, names[i]); mock_http_map[i][0] = names[i]; mock_http_map[i][1] = p[i]; }
@@ -47,6 +47,7 @@ int main(int argc, char **argv)
     probe_cancel();
     r = run("http://host/hls/master.m3u8");
     assert(r->state == PROBE_DONE && has(r, "HLS: 2 variants, analysing 1280x720") && has(r, "H.264") && has(r, "AAC"));
+    assert(has(r, "Speed: network") && has(r, "(enough)"));
     probe_cancel();
     r = run("http://host/hls/media.m3u8");                       /* a media playlist directly */
     assert(r->state == PROBE_DONE && has(r, "1280x720"));
@@ -56,6 +57,9 @@ int main(int argc, char **argv)
     probe_cancel();
     r = run("http://host/movie/u/p/film.mkv");
     assert(r->state == PROBE_DONE && has(r, "640x360"));
+    probe_cancel();
+    r = run("http://host/live/live.flv");                       /* HTTP-FLV */
+    assert(r->state == PROBE_DONE && has(r, "1280x720") && has(r, "YES") && has(r, "AAC"));
     probe_cancel();
     r = run("http://host/page.ts");
     assert(r->state == PROBE_FAILED && strstr(r->error, "web page"));

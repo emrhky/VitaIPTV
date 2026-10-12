@@ -2,6 +2,8 @@
 #include "tsplayer.h"
 #include "tsdemux.h"
 #include "mkvdemux.h"
+#include "flvdemux.h"
+#include "urlhdr.h"
 #include "mpadec.h"
 #include "hls.h"
 #include "curlio.h"
@@ -11,6 +13,7 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
 #include <psp2/net/http.h>
+#include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
 #include <psp2/videodec.h>
 #include <psp2/gxm.h>
@@ -110,6 +113,7 @@ typedef struct {
 
 typedef struct {
     char url[512];
+    char hdr_ua[512], hdr_ref[512];     /* from link|User-Agent=...&Referer=... (M3U #EXTVLCOPT): "" = default */
     volatile int cancel;
     SceUID thread, vthread, athread, lock, qlock;
     volatile int reader_done;
@@ -127,6 +131,7 @@ typedef struct {
     uint64_t aclock_us;
     TsDemux *dmx;
     MkvDemux *mkv;                      /* used instead of dmx when the stream is Matroska */
+    FlvDemux *flv;                      /* ... or FLV (HTTP-FLV live streams, .flv files) */
     Mp4Demux *mp4;                      /* film or episode in an MP4 file */
     /* films and episodes (files that can be paused and searched) */
     int vod, vod_start_ms, vod_norange, vod_last_status;
@@ -137,14 +142,24 @@ typedef struct {
     int64_t vod_base;                   /* timestamp of the file's start (TS files) */
     uint8_t *rbuf;                      /* the reader's buffer (CHUNK bytes) */
     volatile int paused;
+    volatile int buffering;             /* film: the network fell behind, waiting for data (like a pause) */
+    uint64_t buf_since;
     int pause_frozen;                   /* audio thread: the clock was stopped for the pause */
     volatile int cur_req;               /* HTTP request in progress, aborted on stop */
+    volatile int err_set;               /* an error was reported (the first one is kept) */
+    volatile unsigned ui_ticks;         /* tsp_frame calls, ready or not */
     /* decoder (worker thread) */
     int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder, no_two;
     int connect_fails, multi_out, oom_fixed, status_retries;
     int no_out, reopen_pending, reopens;  /* decoder that takes units but gives no pictures: restart it */
     int es_full_fails;                  /* HD decoder: "ES buffer full" even after a picture was taken out */
     int force_internal, f_errs, f_errs2;   /* the public decoder refuses the stream (0x8062000F): use the HD one */
+    int oom_hd, oom_errs;               /* public decoder out of picture memory (720p, 4 refs + B): HD one with more */
+    int unit_again, full_waits;         /* HD decoder full: the same unit is given again (decode_au -> DEC_AGAIN) */
+    int aparam_new, aparam_bad, aparam_logs;   /* audio frames whose format differs from the open decoder */
+    int cur_interlaced;                 /* the unit being decoded belongs to an interlaced stream */
+    volatile int fields;                /* 1: pictures come as two half-height fields one above the other */
+    int field_votes, frame_votes, field_checks;
     int win_calls, win_oom, skip_left;  /* out-of-memory rate decides whether non-reference pictures are dropped */
     int64_t last_out_pts;
     uint32_t out_of_order;              /* pictures that came out of the decoder before an earlier one */
@@ -197,6 +212,13 @@ static uint64_t now_us(void) { return (uint64_t)sceKernelGetProcessTimeWide(); }
 
 static void vset_error(Tsp *t, int kind, const char *fmt, va_list ap)
 {
+    /* the first error wins: two threads failing together must not mix their messages */
+    if (!__sync_bool_compare_and_swap(&t->err_set, 0, 1)) {
+        char m[100];
+        vsnprintf(m, sizeof m, fmt, ap);
+        plog("tsp: (later error: %s)", m);
+        return;
+    }
     vsnprintf(t->st.msg, sizeof t->st.msg, fmt, ap);
     t->st.err_kind = kind;
     __sync_synchronize();
@@ -221,8 +243,37 @@ static void set_error_kind(Tsp *t, int kind, const char *fmt, ...)
     va_end(ap);
 }
 
-static int stopping(Tsp *t) { return t->cancel || t->st.state == TSP_ERROR; }
-static const TsInfo *dmx_info(Tsp *t) { return t->mp4 ? mp4_info(t->mp4) : t->mkv ? mkv_info(t->mkv) : ts_info(t->dmx); }
+static int stopping(Tsp *t) { return t->cancel || t->err_set || t->st.state == TSP_ERROR; }
+
+/* The request tsp_stop may abort. Set and cleared under qlock, and tsp_stop aborts under it too, so it can
+ * never abort a request id that the reader has already deleted (and that may belong to a new one). */
+static void set_cur_req(Tsp *t, int req)
+{
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    t->cur_req = req;
+    sceKernelUnlockMutex(t->qlock, 1);
+}
+
+/* After standby the Wi-Fi takes a few seconds to come back; connection attempts meanwhile all fail and
+ * used to use up the reconnects (the channel then ended with an error). When the network is down, wait
+ * for it (up to 2 minutes) instead. Returns 1 if it waited. */
+static int wait_for_network(Tsp *t)
+{
+    int state = SCE_NETCTL_STATE_CONNECTED;
+    if (sceNetCtlInetGetState(&state) < 0 || state == SCE_NETCTL_STATE_CONNECTED) return 0;
+    plog("tsp: the network is down (state %d), waiting for it", state);
+    uint64_t t0 = now_us();
+    while (!stopping(t) && now_us() - t0 < 120000000ULL) {
+        snprintf(t->st.note, sizeof t->st.note, "%s", "Waiting for the network...");
+        sceKernelDelayThread(250000);
+        if (sceNetCtlInetGetState(&state) >= 0 && state == SCE_NETCTL_STATE_CONNECTED) break;
+    }
+    t->st.note[0] = 0;
+    plog("tsp: network %s after %u ms", state == SCE_NETCTL_STATE_CONNECTED ? "back" : "still down", (unsigned)((now_us() - t0) / 1000));
+    if (state == SCE_NETCTL_STATE_CONNECTED) sceKernelDelayThread(1000000);   /* let it settle (DNS, DHCP) */
+    return 1;
+}
+static const TsInfo *dmx_info(Tsp *t) { return t->mp4 ? mp4_info(t->mp4) : t->mkv ? mkv_info(t->mkv) : t->flv ? flv_info(t->flv) : ts_info(t->dmx); }
 static void dmx_feed(Tsp *t, const uint8_t *b, size_t n);
 static void thread_finished(Tsp *t);
 
@@ -244,7 +295,7 @@ static int q_push(Tsp *t, Queue *q, Pkt *p)
         }
         sceKernelUnlockMutex(t->qlock, 1);
         if (stopping(t)) { free(p); return -1; }
-        sceKernelDelayThread(3000);
+        sceKernelDelayThread(10000);                        /* queue full: 30 s are buffered, no hurry */
     }
 }
 
@@ -619,6 +670,7 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
         /* 4 pictures, or what the stream asks for when that is more and fits the level (1920x720 with 5 refs:
          * with 4 nearly every picture failed "out of memory") */
         int n = refs > 4 ? refs : 4;
+        if (t->oom_hd) n = refs + 3;                        /* the public decoder ran out with refs + 1 */
         if (n > hd_ref_cap(t)) n = hd_ref_cap(t);
         t->nref_cap = n;
         r = decoder_core_open_internal(t, n);
@@ -662,6 +714,17 @@ static int decoder_grow(Tsp *t)
     return r;
 }
 
+/* After ready = 0 the UI gets no new picture; the one it took last may still be drawn by the GPU until
+ * the frame after next has started (each frame first waits for the previous one to finish). */
+static void wait_ui_release(Tsp *t)
+{
+    unsigned c0 = t->ui_ticks;
+    for (int k = 0; k < 50 && !t->cancel; k++) {           /* at most 0.5 s (the UI may be in a menu) */
+        if (t->ui_ticks - c0 >= 2) return;
+        sceKernelDelayThread(10000);
+    }
+}
+
 static int take_free_slot(Tsp *t)
 {
     int s = -1;
@@ -694,6 +757,10 @@ static int decode_internal(Tsp *t, SceAvcdecAu *au, SceAvcdecArrayPicture *arr)
         if (rg < 0) return rg;
         ra = sceAvcdecDecodeAuInternal(&t->ctrl, au, &t->pic_state);
         if (t->multi_out++ < 3) plog("tsp: HD decoder buffer full, unit given again -> 0x%08X", (unsigned)ra);
+        /* Still full (the hardware is busy, e.g. a burst after buffering or a pause): not an error. The
+         * picture taken out is kept and the same unit is offered again once there is room. Before v0.2.2
+         * this counted as an error and everything up to the next keyframe was dropped (frozen picture). */
+        if ((unsigned)ra == 0x8062000Au) { t->unit_again = 1; return rg; }
         return ra < 0 && (unsigned)ra != 0x8062000Du ? ra : 0;
     }
     if ((unsigned)ra == 0x8062000Du) {
@@ -702,6 +769,51 @@ static int decode_internal(Tsp *t, SceAvcdecAu *au, SceAvcdecArrayPicture *arr)
         return ra;
     }
     return sceAvcdecDecodeGetPictureWithWorkPictureInternal(&t->ctrl, arr, &work, &t->pic_state);
+}
+
+#define DEC_AGAIN 1                     /* decode_au: the decoder had no room, give the same unit again */
+
+/* Average difference (0-255) between rows a and b of an RGBA picture, over every 8th pixel. */
+static int row_diff(const uint8_t *pic, int pitch, int w, int a, int b)
+{
+    const uint8_t *ra = pic + (size_t)a * (size_t)pitch * 4, *rb = pic + (size_t)b * (size_t)pitch * 4;
+    uint32_t sum = 0, n = 0;
+    for (int x = 8; x < w - 8; x += 8, n++) {
+        const uint8_t *p = ra + x * 4, *q = rb + x * 4;
+        sum += (uint32_t)abs(p[0] - q[0]) + (uint32_t)abs(p[1] - q[1]) + (uint32_t)abs(p[2] - q[2]);
+    }
+    return n ? (int)(sum / (n * 3)) : 0;
+}
+
+/* Interlaced streams coded as separate fields (1080i broadcasts): the HD decoder hands the two fields
+ * out one above the other, so the picture showed twice, squashed (seen on the device). Compare rows
+ * half a picture apart: in such a picture they are neighbouring lines and nearly equal; in a normal
+ * picture they are far apart. Decided after a few pictures with enough detail; then only the top field
+ * is shown, stretched (it has 540 lines, the screen 544). */
+static void field_check(Tsp *t, const uint8_t *pic)
+{
+    if (t->fields || t->field_checks >= 120 || t->vh < 288) return;
+    t->field_checks++;
+    int half = t->dh / 2, pitch = t->dw, w = t->vw;
+    int d_half = 0, d_alt = 0, d_far = 0, d_next = 0;
+    for (int k = 0; k < 8; k++) {
+        int y = 16 + k * (half - 40) / 8;
+        d_half += row_diff(pic, pitch, w, y, y + half);
+        d_alt += row_diff(pic, pitch, w, y, y + t->vh / 2);
+        d_next += row_diff(pic, pitch, w, y, y + 1);
+        d_far += row_diff(pic, pitch, w, y, y + half / 2);
+    }
+    int d = d_half < d_alt ? d_half : d_alt;
+    if (d_far < 8 * 8) return;                              /* too little detail to tell */
+    if (d * 2 < d_far && d <= d_next * 3 + 8 * 4) t->field_votes++;
+    else t->frame_votes++;
+    if (t->field_votes >= 4 && t->field_votes > t->frame_votes * 3) {
+        t->fields = 1;
+        t->st.fields = 1;
+        plog("tsp: the decoder gives the two fields one above the other: showing the top field (rows %d / %d / %d / %d)",
+             d, d_next / 8, d_far / 8, t->frame_votes);
+    }
+    if (t->frame_votes >= 12 && !t->field_votes) t->field_checks = 120;   /* normal pictures: stop looking */
 }
 
 /* Decodes one unit into slot s0, and s1 too when the decoder hands out two pictures at once
@@ -769,14 +881,18 @@ static int decode_au(Tsp *t, int s0, int s1, size_t n, int64_t pts, int pts_retr
         if (opts >= 0 && t->last_out_pts >= 0 && opts < t->last_out_pts && t->last_out_pts - opts < 90000LL * 10) t->out_of_order++;
         if (opts >= 0) t->last_out_pts = opts;
         Slot *sl = &t->slots[slot[k]];
+        if (t->cur_interlaced) field_check(t, (const uint8_t *)sl->data);
+        if (t->st.decoded == 0 && t->cur_interlaced)
+            plog("tsp: interlaced picture: pic struct %u/%u, ct type %u", p->info.picStruct[0], p->info.picStruct[1], p->info.ctType);
         sceKernelLockMutex(t->lock, 1, NULL);
         sl->pts = opts;
         sl->seq = t->out_seq++;
         sl->state = SLOT_READY;
         sceKernelUnlockMutex(t->lock, 1);
         t->st.decoded++;
-        t->st.state = TSP_PLAYING;
+        if (!t->err_set) t->st.state = TSP_PLAYING;
     }
+    if (t->unit_again) { t->unit_again = 0; return DEC_AGAIN; }
     return 0;
 }
 
@@ -812,7 +928,7 @@ static void video_packet(Tsp *t, Pkt *p)
     int start_ok = flags & (TS_FLAG_KEYFRAME | TS_FLAG_INTRA);   /* IDR, recovery point or plain I picture */
     if (!t->dec_open) {
         if (!start_ok || i->width == 0 || i->sps_len == 0 || i->pps_len == 0) {
-            t->st.state = TSP_WAIT_KEY;
+            if (!t->err_set) t->st.state = TSP_WAIT_KEY;
             t->st.dropped++;
             return;
         }
@@ -829,6 +945,13 @@ static void video_packet(Tsp *t, Pkt *p)
             return;
         }
         int r = decoder_open(t, i->width, i->height, i->refs, i->level);
+        if (r < 0 && t->oom_hd && t->force_internal) {     /* the HD decoder did not start: back to the public one */
+            plog("tsp: HD decoder could not start (0x%08X); back to the normal decoder", (unsigned)r);
+            free_plan(t);
+            decoder_core_close(t);
+            t->force_internal = 0;
+            r = decoder_open(t, i->width, i->height, i->refs, i->level);
+        }
         if (r < 0) {
             if (t->internal) set_error_kind(t, TSP_ERRK_FORMAT, "1080p decoder could not start (0x%08X), see log.txt", (unsigned)r);
             else set_error(t, "Decoder init failed (0x%08X), see log.txt", (unsigned)r);
@@ -873,6 +996,7 @@ static void video_packet(Tsp *t, Pkt *p)
         if (decoder_grow(t) < 0) return;
     }
 
+    t->cur_interlaced = i->interlaced;
     int with_params = t->need_params && !au_has_sps(data, len);   /* first picture: SPS/PPS first */
     t->need_params = 0;
     size_t n = build_es(t, i, data, len, with_params);
@@ -880,7 +1004,7 @@ static void video_packet(Tsp *t, Pkt *p)
 
     int s;
     while ((s = take_free_slot(t)) < 0) {                /* wait for the UI to show a picture */
-        if (t->cancel) return;
+        if (stopping(t)) return;
         sceKernelDelayThread(2000);
     }
     int r;
@@ -888,6 +1012,17 @@ static void video_packet(Tsp *t, Pkt *p)
     for (;;) {
         /* One output picture per call: the real decoder answers 0x80620002 to every call that offers two. */
         r = decode_au(t, s, -1, n, pts, 1);
+        /* HD decoder full: wait for room (a free slot when a picture came out, else a few ms) and give the
+         * same unit again, for at most about half a second */
+        for (int again = 0; r == DEC_AGAIN; again++) {
+            if (again >= 100) { r = (int)0x8062000Au; break; }
+            if (t->full_waits++ < 3) plog("tsp: HD decoder busy, waiting to give the unit again");
+            uint64_t w0 = now_us();
+            while ((s = take_free_slot(t)) < 0 && !stopping(t)) sceKernelDelayThread(2000);
+            if (stopping(t)) return;
+            if (now_us() - w0 < 3000) sceKernelDelayThread(5000);
+            r = decode_au(t, s, -1, n, pts, 1);
+        }
         if (r >= 0 || t->st.decoded > 0 || !is_mem_error(r) || t->plan + 1 >= NPLANS) break;
         plog("tsp: decode 0x%08X with memory plan %d, trying the next one", (unsigned)r, t->plan);
         int np = t->plan + 1;
@@ -907,12 +1042,33 @@ static void video_packet(Tsp *t, Pkt *p)
     /* Interlaced streams (one unit per field) keep units longer before a picture comes out: a restart there
      * only waits for the next keyframe and makes it worse (1080i played smoothly once the restarts ran out). */
     else if (t->st.decoded > 0 && ++t->no_out >= (i->interlaced ? 200 : 40) && !t->reopen_pending && t->reopens < 5) {
+        /* The public decoder ran out of picture memory and stopped giving pictures (720p channels with 4
+         * reference pictures and B-frames: restarting it only froze again a few seconds later). The HD
+         * decoder can hold more pictures: switch to it once, at the next keyframe. */
+        if (t->oom_errs > 0 && !t->internal && !t->oom_hd && g_hd1080 && !i->interlaced) {
+            plog("tsp: decoder out of picture memory (%d times); switching to the HD decoder with more pictures", t->oom_errs);
+            sceKernelLockMutex(t->lock, 1, NULL);
+            t->ready = 0;
+            sceKernelUnlockMutex(t->lock, 1);
+            wait_ui_release(t);                             /* the screen may still be drawing a picture */
+            free_plan(t);
+            decoder_core_close(t);
+            t->force_internal = 1;
+            t->oom_hd = 1;
+            t->no_out = 0;
+            t->skip_nonref = 0;
+            t->grow_pending = 0;
+            t->need_key = 1;
+            t->st.errors++;
+            return;
+        }
         plog("tsp: no picture from the decoder for %d units; restarting it at the next keyframe", t->no_out);
         t->reopen_pending = 1;
         /* the pictures that did not fit; not for the HD decoder, where it only halved the frame rate */
         if (!t->skip_nonref && !t->internal) { t->skip_nonref = 1; t->skip_left = 750; }
     }
     if ((unsigned)r == 0x80620003u) {                        /* OUT_OF_MEMORY */
+        t->oom_errs++;
         if (t->nref < 16 && (!t->nref_cap || t->nref < t->nref_cap)) t->grow_pending = 1;   /* more pictures at the next keyframe */
         else t->win_oom++;                                   /* only this picture is lost (see below) */
     }
@@ -1183,12 +1339,27 @@ static void audio_packet(Tsp *t, Pkt *p)
     if (sfi >= 13) return;
     int rate = ADTS_RATES[sfi];
     if (!t->adec || rate != t->arate || ch != t->ach) {
+        int ok = ch >= 1 && ch <= 2 && out_rate_ok(rate);
+        if (t->adec && t->st.audio_frames > 0) {
+            /* The sound is playing: a frame that says otherwise is usually damaged (a skipped HLS segment left
+             * one saying "7 channels" and the sound was switched off for good). Skip such frames; reopen
+             * only when the new format lasts (8 frames in a row) and can be played. */
+            if (!ok || ++t->aparam_new < 8) {
+                t->st.audio_errors++;
+                if (t->aparam_logs++ < 3) plog("tsp: audio frame says %d Hz %d ch (playing %d Hz %d ch): skipped", rate, ch, t->arate, t->ach);
+                return;
+            }
+            plog("tsp: audio format changed to %d Hz %d ch", rate, ch);
+        } else if (!ok && ++t->aparam_bad < 30) {           /* not started yet: be sure before giving up */
+            return;
+        }
+        t->aparam_new = 0;
         audio_close(t);
         if (ch < 1 || ch > 2) { audio_disable(t, "Audio has %d channels: not supported", ch); return; }
         if (!out_rate_ok(rate)) { audio_disable(t, "Audio rate %d Hz: not supported", rate); return; }
         int r = audio_open(t, rate, ch);
         if (r < 0) { audio_disable(t, "Audio decoder failed (0x%08X)", (unsigned)r); return; }
-    }
+    } else t->aparam_new = 0;
     if (p->len > t->aes_cap) { t->st.audio_errors++; return; }
     memcpy(t->aes, d, p->len);
     t->actrl.pEs = t->aes;
@@ -1236,7 +1407,7 @@ static int audio_main(SceSize args, void *argp)
     Tsp *t = *(Tsp **)argp;
     for (;;) {
         if (t->cancel || t->st.state == TSP_ERROR) break;
-        if (t->paused) {                                    /* the clock stands still while paused */
+        if (t->paused || t->buffering) {                    /* the clock stands still while paused */
             sceKernelLockMutex(t->qlock, 1, NULL);
             uint64_t now = now_us();
             if (t->aclock_valid) {
@@ -1421,6 +1592,7 @@ static int https_session(Tsp *t, uint32_t *got)
 {
     HsCtx h = { t, 0 };
     CioRequest rq = { t->url, NULL, NULL, 10, (int)(RECV_TIMEOUT_US / 1000000), hs_data, hs_stop, &h };
+    rq.ua = t->hdr_ua; rq.referer = t->hdr_ref;
     int status = 0;
     char err[96];
     int r = cio_get(&rq, &status, err, sizeof err);
@@ -1441,7 +1613,7 @@ static int http_session(Tsp *t, uint8_t *buf, uint32_t *got)
     int tpl = -1, conn = -1, req = -1, status = 0, n, retry = 0;
     *got = 0;
     if (cio_available() && !strncasecmp(t->url, "https:", 6)) return https_session(t, got);
-    tpl = sceHttpCreateTemplate(NET_UA, SCE_HTTP_VERSION_1_1, 1);
+    tpl = sceHttpCreateTemplate(t->hdr_ua[0] ? t->hdr_ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { set_error(t, "HTTP init failed"); goto done; }
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);
@@ -1452,7 +1624,8 @@ static int http_session(Tsp *t, uint8_t *buf, uint32_t *got)
     if (conn < 0) { set_error(t, "Bad address"); goto done; }
     req = sceHttpCreateRequestWithURL(conn, SCE_HTTP_METHOD_GET, t->url, 0);
     if (req < 0) { set_error(t, "Request failed"); goto done; }
-    t->cur_req = req;
+    if (t->hdr_ref[0]) sceHttpAddRequestHeader(req, "Referer", t->hdr_ref, SCE_HTTP_HEADER_ADD);
+    set_cur_req(t, req);                                   /* under qlock: tsp_stop sees it, or we see cancel */
     if (t->cancel) goto done;
     n = sceHttpSendRequest(req, NULL, 0);
     if (n < 0) {
@@ -1481,7 +1654,7 @@ static int http_session(Tsp *t, uint8_t *buf, uint32_t *got)
         check_stall(t);
     }
 done:
-    t->cur_req = -1;
+    set_cur_req(t, -1);                                    /* before the request is deleted: no abort of a gone id */
     if (req >= 0) sceHttpDeleteRequest(req);
     if (conn >= 0) sceHttpDeleteConnection(conn);
     if (tpl >= 0) sceHttpDeleteTemplate(tpl);
@@ -1500,10 +1673,11 @@ static void read_http(Tsp *t, uint8_t *buf)
         if (t->is_hls && !stopping(t)) { read_hls(t, buf); return; }
         if (!retry) return;
         if (t->vod && got > 0) {                            /* a file without ranges: it cannot go on mid-way */
-            if (t->mkv) mkv_flush(t->mkv); else ts_flush(t->dmx);
+            if (t->mkv) mkv_flush(t->mkv); else if (t->flv) flv_flush(t->flv); else ts_flush(t->dmx);
             return;
         }
         fails = got > 64 * 1024 ? 0 : fails + 1;            /* a session that delivered data resets the count */
+        if (wait_for_network(t)) fails = 0;                 /* back from standby: the attempts so far do not count */
         if (fails > MAX_RECONNECTS) {
             set_error_kind(t, TSP_ERRK_NET, "Stream stopped (connection lost %d times)", fails);
             return;
@@ -1515,15 +1689,21 @@ static void read_http(Tsp *t, uint8_t *buf)
     }
 }
 
-/* The first bytes tell the container: Matroska (EBML) or MPEG-TS. */
+/* The first bytes tell the container: Matroska (EBML), FLV or MPEG-TS. */
 static void dmx_feed(Tsp *t, const uint8_t *b, size_t n)
 {
-    if (!t->mkv && t->st.bytes == n && mkv_probe(b, n)) {
+    if (!t->mkv && !t->flv && t->st.bytes == n) {
         TsSink sink = { on_video, on_audio, t };
-        t->mkv = mkv_create(&sink);
-        plog("tsp: Matroska (MKV) stream");
+        if (mkv_probe(b, n)) {
+            t->mkv = mkv_create(&sink);
+            plog("tsp: Matroska (MKV) stream");
+        } else if (flv_probe(b, n)) {
+            t->flv = flv_create(&sink);
+            plog("tsp: FLV stream");
+        }
     }
     if (t->mkv) mkv_feed(t->mkv, b, n);
+    else if (t->flv) flv_feed(t->flv, b, n);
     else ts_feed(t->dmx, b, n);
 }
 
@@ -1544,7 +1724,7 @@ static void read_local(Tsp *t, uint8_t *buf)
 /* The last of the video/audio threads to finish marks the stream as ended. */
 static void thread_finished(Tsp *t)
 {
-    if (__sync_sub_and_fetch(&t->running, 1) == 0 && !t->cancel && t->st.state != TSP_ERROR)
+    if (__sync_sub_and_fetch(&t->running, 1) == 0 && !t->cancel && !t->err_set && t->st.state != TSP_ERROR)
         t->st.state = TSP_ENDED;
 }
 
@@ -1586,13 +1766,14 @@ static int hls_get(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf,
     if (cio_available() && !strncasecmp(url, "https:", 6)) {
         HgCtx h = { t, out, cap, 0 };
         CioRequest rq = { url, NULL, NULL, 10, 15, hg_data, hg_stop, &h };
+        rq.ua = t->hdr_ua; rq.referer = t->hdr_ref;
         char err[96];
         int r = cio_get(&rq, status, err, sizeof err);
         if (out) out[h.total] = 0;
         if (r < 0 && r != -2 && !h.total) { plog("tsp: HTTPS %s", err); return r; }
         return h.total;
     }
-    tpl = sceHttpCreateTemplate(NET_UA, SCE_HTTP_VERSION_1_1, 1);
+    tpl = sceHttpCreateTemplate(t->hdr_ua[0] ? t->hdr_ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) return tpl;
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);
@@ -1603,7 +1784,8 @@ static int hls_get(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf,
     if (conn < 0) { total = conn; goto done; }
     req = sceHttpCreateRequestWithURL(conn, SCE_HTTP_METHOD_GET, url, 0);
     if (req < 0) { total = req; goto done; }
-    t->cur_req = req;
+    if (t->hdr_ref[0]) sceHttpAddRequestHeader(req, "Referer", t->hdr_ref, SCE_HTTP_HEADER_ADD);
+    set_cur_req(t, req);                                   /* under qlock: tsp_stop sees it, or we see cancel */
     if (stopping(t)) goto done;
     n = sceHttpSendRequest(req, NULL, 0);
     if (n < 0) { total = n; goto done; }
@@ -1630,7 +1812,7 @@ static int hls_get(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf,
     }
     if (out && total >= 0) out[total] = 0;
 done:
-    t->cur_req = -1;
+    set_cur_req(t, -1);                                    /* before the request is deleted: no abort of a gone id */
     if (req >= 0) sceHttpDeleteRequest(req);
     if (conn >= 0) sceHttpDeleteConnection(conn);
     if (tpl >= 0) sceHttpDeleteTemplate(tpl);
@@ -1737,6 +1919,7 @@ static void read_hls(Tsp *t, uint8_t *buf)
             hls_resolve(url, g->uri, g->uri_len, seg_url, sizeof seg_url);
             if (g->discontinuity && fed) plog("tsp: HLS discontinuity at #%lld", (long long)g->seq);
             int status = 0, r = hls_get(t, seg_url, NULL, 0, buf, &status);
+            if (r < 0 && !stopping(t) && wait_for_network(t)) { last_new = now_us(); r = hls_get(t, seg_url, NULL, 0, buf, &status); }
             if ((r < 0 || status >= 400) && !stopping(t)) {      /* once more, then skip it */
                 hls_wait(t, 300);
                 r = hls_get(t, seg_url, NULL, 0, buf, &status);
@@ -1771,6 +1954,8 @@ static void read_hls(Tsp *t, uint8_t *buf)
         if (wait > 5000) wait = 5000;
         hls_wait(t, wait);
         if (stopping(t)) goto out;
+        if (wait_for_network(t)) last_new = now_us();       /* back from standby: not a stopped stream */
+        if (stopping(t)) goto out;
         if (hls_fetch_text(t, url, text, "playlist update", 0) < 0) goto out;
     }
 out:
@@ -1783,14 +1968,20 @@ out:
 typedef int (*VodData)(Tsp *t, void *ctx, const uint8_t *d, size_t n);
 #define VG_NO_RANGE (-3000)                                  /* the server sent the whole file instead of a part */
 
-typedef struct { Tsp *t; VodData fn; void *ctx; int *status; uint64_t off; int refused; } VgCtx;
+/* A server without ranges answers 200 with the whole file: at offset 0 only the first bytes are kept (enough
+ * to recognise the file) instead of filling the 256 KB window that would be thrown away. */
+#define VOD_NORANGE_HEAD (16 * 1024)
+typedef struct { Tsp *t; VodData fn; void *ctx; int *status; uint64_t off; int refused; size_t got; } VgCtx;
 
 static int vg_data(void *c, const uint8_t *d, size_t n)
 {
     VgCtx *g = c;
     if (stopping(g->t)) return 1;
     if (*g->status == 200 && g->off > 0) { g->refused = 1; return 1; }
-    return g->fn(g->t, g->ctx, d, n);
+    int r = g->fn(g->t, g->ctx, d, n);
+    g->got += n;
+    if (*g->status == 200 && g->got >= VOD_NORANGE_HEAD) return 1;
+    return r;
 }
 
 static int vg_stop(void *c) { return stopping(((VgCtx *)c)->t); }
@@ -1805,6 +1996,7 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
         uint64_t tot = 0;
         CioRequest rq = { t->url, NULL, NULL, 10, (int)(RECV_TIMEOUT_US / 1000000), vg_data, vg_stop, &g,
                           1, off, end ? end - 1 : 0, &tot };
+        rq.ua = t->hdr_ua; rq.referer = t->hdr_ref;
         char err[96];
         int r = cio_get(&rq, status, err, sizeof err);
         t->vod_last_status = *status;
@@ -1814,7 +2006,7 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
         return r == -2 ? 0 : r;
     }
     int tpl = -1, conn = -1, req = -1, n, ret = -1;
-    tpl = sceHttpCreateTemplate(NET_UA, SCE_HTTP_VERSION_1_1, 1);
+    tpl = sceHttpCreateTemplate(t->hdr_ua[0] ? t->hdr_ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) goto done;
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);
@@ -1825,11 +2017,12 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
     if (conn < 0) { ret = conn; goto done; }
     req = sceHttpCreateRequestWithURL(conn, SCE_HTTP_METHOD_GET, t->url, 0);
     if (req < 0) { ret = req; goto done; }
+    if (t->hdr_ref[0]) sceHttpAddRequestHeader(req, "Referer", t->hdr_ref, SCE_HTTP_HEADER_ADD);
     char range[64];
     if (end) snprintf(range, sizeof range, "bytes=%llu-%llu", (unsigned long long)off, (unsigned long long)(end - 1));
     else snprintf(range, sizeof range, "bytes=%llu-", (unsigned long long)off);
     sceHttpAddRequestHeader(req, "Range", range, SCE_HTTP_HEADER_ADD);
-    t->cur_req = req;
+    set_cur_req(t, req);                                   /* under qlock: tsp_stop sees it, or we see cancel */
     if (stopping(t)) goto done;
     n = sceHttpSendRequest(req, NULL, 0);
     if (n < 0) { ret = n; plog("tsp: VOD connection failed 0x%08X", (unsigned)n); goto done; }
@@ -1855,6 +2048,7 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
         t->vod_total = tot;
     }
     uint64_t want = end ? end - off : 0, got = 0;
+    if (*status == 200 && (!want || want > VOD_NORANGE_HEAD)) want = VOD_NORANGE_HEAD;
     ret = 0;
     while (!stopping(t)) {
         unsigned ask = cur_read_size(t);
@@ -1868,7 +2062,7 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
         if (fn(t, ctx, t->rbuf, (size_t)n)) break;
     }
 done:
-    t->cur_req = -1;
+    set_cur_req(t, -1);                                    /* before the request is deleted: no abort of a gone id */
     if (req >= 0) sceHttpDeleteRequest(req);
     if (conn >= 0) sceHttpDeleteConnection(conn);
     if (tpl >= 0) sceHttpDeleteTemplate(tpl);
@@ -1879,11 +2073,12 @@ typedef struct { uint8_t *out; size_t cap, n; } FetchCtx;
 
 static int fetch_cb(Tsp *t, void *c, const uint8_t *d, size_t n)
 {
-    (void)t;
     FetchCtx *f = c;
     size_t k = f->cap - f->n < n ? f->cap - f->n : n;
     memcpy(f->out + f->n, d, k);
     f->n += k;
+    /* a big read (an MP4 index of several MB takes half a minute on a slow line): show how far it is */
+    if (f->cap >= 1024 * 1024) t->st.note_pct = (int)((uint64_t)f->n * 100 / f->cap);
     return f->n >= f->cap;
 }
 
@@ -1936,6 +2131,7 @@ static int vod_feed_cb(Tsp *t, void *c, const uint8_t *d, size_t n)
     t->st.bytes += (uint32_t)n;
     if (t->mp4) mp4_feed(t->mp4, *pos, d, n);
     else if (t->mkv) mkv_feed(t->mkv, d, n);
+    else if (t->flv) flv_feed(t->flv, d, n);
     else ts_feed(t->dmx, d, n);
     *pos += n;
     stats_tick(t);
@@ -1992,8 +2188,8 @@ static void read_vod(Tsp *t, uint8_t *buf)
         TsSink sink = { on_video, on_audio, t };
         t->mkv = mkv_create(&sink);
         if (t->mkv) mkv_feed(t->mkv, L.head, L.head_len);
-        plog("tsp: Matroska: %d s, index %s, start at %d s (byte %llu)", (int)(L.duration_ms / 1000), L.cues_pos ? "yes" : "no",
-             (int)(at / 1000), (unsigned long long)off);
+        plog("tsp: Matroska: %d s, index %s, start at %d s (byte %llu)%s%s", (int)(L.duration_ms / 1000), L.cues_pos ? "yes" : "no",
+             (int)(at / 1000), (unsigned long long)off, start > 0 ? ", found by: " : "", start > 0 ? vod_seek_note : "");
         mkv_layout_free(&L);
         if (!t->mkv) { free(io.win); set_error(t, "Out of memory"); return; }
     } else if (kind == VOD_MP4) {
@@ -2016,6 +2212,13 @@ static void read_vod(Tsp *t, uint8_t *buf)
         off = mp4_seek(t->mp4, start, &at);
         plog("tsp: MP4: %d s, %u samples, index %u KB, start at %d s (byte %llu)", t->st.dur_ms / 1000, mp4_samples(t->mp4),
              (unsigned)(ml / 1024), (int)(at / 1000), (unsigned long long)off);
+    } else if (kind == VOD_FLV) {                           /* no index to jump with: from the start, pause only */
+        TsSink sink = { on_video, on_audio, t };
+        if (!(t->flv = flv_create(&sink))) { free(io.win); set_error(t, "Out of memory"); return; }
+        t->vod_base = 0;
+        if (io.win && io.woff == 0) t->st.dur_ms = (int)flv_meta_duration_ms(io.win, io.wlen);
+        else t->st.dur_ms = (int)flv_meta_duration_ms(head, (size_t)n);
+        plog("tsp: FLV file: %d s, played from the start (no jumping in FLV files)", t->st.dur_ms / 1000);
     } else if (kind == VOD_TS) {
         TsLayout L;
         snprintf(t->st.note, sizeof t->st.note, "%s", "Finding the length of the film...");
@@ -2027,14 +2230,15 @@ static void read_vod(Tsp *t, uint8_t *buf)
         plog("tsp: TS file: %d s, start at %d s (byte %llu)", t->st.dur_ms / 1000, (int)(at / 1000), (unsigned long long)off);
     } else {
         free(io.win);
-        if (kind == VOD_AVI) set_error_kind(t, TSP_ERRK_FORMAT, "AVI file: not supported (MKV, MP4 and TS are)");
+        if (kind == VOD_AVI) set_error_kind(t, TSP_ERRK_FORMAT, "AVI file: not supported (MKV, MP4, TS and FLV are)");
         else set_error_kind(t, TSP_ERRK_FORMAT, "Unknown file type");
         return;
     }
     free(io.win);
     t->st.note[0] = 0;
+    t->st.note_pct = 0;
     if (stopping(t)) return;
-    t->st.seekable = t->st.dur_ms > 0;
+    t->st.seekable = t->st.dur_ms > 0 && !t->flv;
     t->vod_start_ms = (int)at;                              /* what the position shows until the first picture */
 
     /* the film itself, from off to the end; a lost connection goes on where it stopped */
@@ -2054,6 +2258,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         if (t->vod_total && pos >= t->vod_total) break;
         if (r == 0 && !t->vod_total && pos > before) break;   /* size unknown: the body ended */
         fails = pos - before > 64 * 1024 ? 0 : fails + 1;
+        if (wait_for_network(t)) fails = 0;
         if (fails > MAX_RECONNECTS) { set_error_kind(t, TSP_ERRK_NET, "Connection lost (%d times)", fails); break; }
         t->st.reconnects++;
         plog("tsp: VOD reconnecting at byte %llu (%u)", (unsigned long long)pos, t->st.reconnects);
@@ -2061,6 +2266,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
     }
     if (!stopping(t)) {
         if (t->mkv) mkv_flush(t->mkv);
+        else if (t->flv) flv_flush(t->flv);
         else if (!t->mp4) ts_flush(t->dmx);
         plog("tsp: VOD file read to the end (%llu MB)", (unsigned long long)(pos >> 20));
     }
@@ -2201,15 +2407,67 @@ static void late_check(Tsp *t, int64_t late_us)
     t->audio_delay_us = (int)d;
 }
 
+/* Films: when the network brings less than the film needs, the queues run dry and pictures came late
+ * and were dropped (the picture froze while the sound went on). Pause both instead, until a few seconds
+ * are buffered, like other players do. Called by the UI every frame. */
+#define BUF_ENTER_AQ_MS 400
+#define BUF_LEAVE_MS    5000                /* first wait; it doubles each time it happens again (up to 30 s) */
+#define BUF_LEAVE_MAX   30000
+static void buffer_check(Tsp *t, uint64_t now)
+{
+    if (!t->vod || t->paused || t->st.audio_only || t->st.decoded == 0 || t->reader_done || stopping(t)) {
+        if (t->buffering) { t->buffering = 0; t->st.buffering = 0; t->clock_on = 0; }
+        return;
+    }
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    int vq = t->vq.count, aq_ms = 0;
+    if (t->aq.head && t->aq.tail && t->aq.head->pts >= 0 && t->aq.tail->pts >= t->aq.head->pts)
+        aq_ms = (int)((t->aq.tail->pts - t->aq.head->pts) / 90);
+    int full = t->vq.count >= t->vq.max_count - 16 || t->vq.bytes >= t->vq.max_bytes / 10 * 9 ||
+               t->aq.count >= t->aq.max_count - 16 || t->aq.bytes >= t->aq.max_bytes / 10 * 9;   /* cannot take more */
+    sceKernelUnlockMutex(t->qlock, 1);
+    /* a connection that falls behind once usually does again: wait longer each time (fewer, longer stops) */
+    int sh = t->st.rebuffers > 2 ? 3 : (int)t->st.rebuffers;
+    int leave_ms = BUF_LEAVE_MS << sh;
+    if (leave_ms > BUF_LEAVE_MAX) leave_ms = BUF_LEAVE_MAX;
+    int fps_n = t->frame_us ? (int)((int64_t)leave_ms * 1000 / (int)t->frame_us) : leave_ms / 40;   /* pictures in that time */
+    if (!t->buffering) {
+        if (vq == 0 && aq_ms < BUF_ENTER_AQ_MS) {
+            t->buffering = 1;
+            t->buf_since = now;
+            t->st.buffering = 1;
+            t->st.buf_pct = 0;
+            plog("tsp: buffering (the network is slower than the film: %d pictures, %d ms of sound left)", vq, aq_ms);
+        }
+        return;
+    }
+    int pct_a = aq_ms * 100 / leave_ms, pct_v = fps_n > 0 ? vq * 100 / fps_n : 0;
+    int pct = pct_a > pct_v ? pct_a : pct_v;
+    if (full) pct = 100;
+    t->st.buf_pct = pct > 100 ? 100 : pct;
+    if (pct >= 100 || now - t->buf_since > (uint64_t)(leave_ms + 25000) * 1000ULL) {   /* enough, or waited too long */
+        plog("tsp: buffered %d ms of sound, %d pictures in %u ms (goal %d ms%s)", aq_ms, vq, (unsigned)((now - t->buf_since) / 1000),
+             leave_ms, full ? ", queues full" : "");
+        sceKernelLockMutex(t->lock, 1, NULL);
+        t->buffering = 0;
+        t->st.buffering = 0;
+        t->clock_on = 0;                                    /* the video clock starts again from the next picture */
+        sceKernelUnlockMutex(t->lock, 1);
+        t->st.rebuffers++;
+    }
+}
+
 vita2d_texture *tsp_frame(int *w, int *h)
 {
     Tsp *t = g_tsp;
+    if (t) t->ui_ticks++;
     if (!t || !t->ready) return NULL;
     uint64_t now = now_us();
+    buffer_check(t, now);
     t->ui_calls++;
     sceKernelLockMutex(t->lock, 1, NULL);
     for (;;) {
-        if (t->paused) break;                               /* the picture on screen stays */
+        if (t->paused || t->buffering) break;               /* the picture on screen stays */
         int n = next_ready(t, 0, 0);
         if (n < 0) break;
         int64_t sp = t->slots[n].pts;
@@ -2290,6 +2548,8 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     Tsp *t = calloc(1, sizeof *t);
     if (!t) return -1;
     snprintf(t->url, sizeof t->url, "%s", url);
+    if (url_split_headers(t->url, t->url, sizeof t->url, t->hdr_ua, sizeof t->hdr_ua, t->hdr_ref, sizeof t->hdr_ref))
+        plog("tsp: link headers:%s%s%s%s", t->hdr_ua[0] ? " User-Agent " : "", t->hdr_ua, t->hdr_ref[0] ? " Referer " : "", t->hdr_ref);
     t->vod = vod;
     t->vod_start_ms = start_ms > 0 ? start_ms : 0;
     t->vod_first_pts = -1;
@@ -2380,7 +2640,9 @@ int tsp_vod_pos(int *pos_ms, int *dur_ms)
         *pos_ms = t->vod_offset_ms + (d < 0 ? 0 : (int)(d / 90));
         return 1;
     }
-    int64_t d = p - t->vod_base;
+    int64_t base = t->vod_base;
+    if (t->flv && flv_info(t->flv)->first_video_pts > 0) base = flv_info(t->flv)->first_video_pts;   /* an FLV need not start at 0 */
+    int64_t d = p - base;
     if (d < -90000LL * 3600) d += 1LL << 33;                /* the TS clock wrapped */
     *pos_ms = d < 0 ? 0 : (int)(d / 90);
     return 1;
@@ -2391,9 +2653,12 @@ void tsp_stop(void)
     Tsp *t = g_tsp;
     if (!t) return;
     g_tsp = NULL;
-    t->cancel = 1;
-    int req = t->cur_req;
-    if (req >= 0) { int r = sceHttpAbortRequest(req); plog("tsp: abort HTTP request -> 0x%08X", (unsigned)r); }  /* unblock the reader */
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    t->cancel = 1;                                          /* the reader sees cancel, or we see its request */
+    int req = t->cur_req, ra = 0;
+    if (req >= 0) ra = sceHttpAbortRequest(req);            /* unblock the reader */
+    sceKernelUnlockMutex(t->qlock, 1);
+    if (req >= 0) plog("tsp: abort HTTP request -> 0x%08X", (unsigned)ra);
     SceUID ths[3] = { t->thread, t->vthread, t->athread };
     for (int k = 0; k < 3; k++) {
         if (ths[k] < 0) continue;
@@ -2410,6 +2675,7 @@ void tsp_stop(void)
     decoder_core_close(t);
     ts_destroy(t->dmx);
     mkv_destroy(t->mkv);
+    flv_destroy(t->flv);
     mp4_destroy(t->mp4);
     q_clear(&t->vq);
     q_clear(&t->aq);

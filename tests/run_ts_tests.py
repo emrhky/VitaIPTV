@@ -19,7 +19,7 @@ def check(cond, msg):
         fails.append(msg); print("  FAIL:", msg)
 
 san = "-O1 -g -fsanitize=address,undefined -Wall -Wextra"
-sh(f"gcc {san} -I{ROOT}/src {ROOT}/tests/tsinfo.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c -o {TMP}/tsinfo")
+sh(f"gcc {san} -I{ROOT}/src {ROOT}/tests/tsinfo.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c -o {TMP}/tsinfo")
 sh(f"gcc {san} -I{ROOT}/src {ROOT}/tests/fuzz_ts.c {ROOT}/src/tsdemux.c -o {TMP}/fuzz_ts")
 
 def tsinfo(path, *args):

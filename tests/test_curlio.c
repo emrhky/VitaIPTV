@@ -1,3 +1,4 @@
+#include <time.h>
 /* curlio against a local HTTPS server (tests/run_curlio_test.py starts it). usage: test_curlio port file */
 #include "curlio.h"
 #include <assert.h>
@@ -72,6 +73,38 @@ int main(int argc, char **argv)
     r = cio_get(&rq, &status, err, sizeof err);
     printf("tls 1.2: r=%d status=%d bytes=%zu err='%s'\n", r, status, a.n, err);
     assert(r == 0 && status == 200 && a.n == want.n && a.sum == want.sum);
+    {   /* User-Agent and Referer from the channel (M3U #EXTVLCOPT) */
+        snprintf(url, sizeof url, "https://127.0.0.1:%d/hdr", port);
+        memset(&a, 0, sizeof a);
+        CioRequest rh = { url, NULL, NULL, 5, 5, on_data, NULL, &a, 0, 0, 0, NULL, NULL, NULL };
+        r = cio_get(&rh, &status, err, sizeof err);
+        printf("headers missing: status %d\n", status);
+        assert(status == 403);
+        rh.ua = "Mozilla/5.0 (Test; Vita) Chrome/150.0";
+        rh.referer = "https://site.example/page";
+        r = cio_get(&rh, &status, err, sizeof err);
+        printf("headers sent: r=%d status %d\n", r, status);
+        assert(r == 0 && status == 200);
+    }
+    /* a server that never answers the connection (packets dropped): the connect time limit ends it */
+    {
+        struct timespec t0, t1;
+        CioRequest rb = { "https://10.255.255.1:81/x", NULL, NULL, 2, 5, on_data, NULL, &a, 0, 0, 0, NULL };
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        r = cio_get(&rb, &status, err, sizeof err);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double s = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+        printf("connect timeout: r=%d after %.1f s err='%s'\n", r, s, err);
+        assert(r < -1000 && s > 1.5 && s < 4.0);
+        a.polls = 0; a.stop_after = -1;                          /* O while connecting: stops at the next tick */
+        CioRequest rc = { "https://10.255.255.1:81/x", NULL, NULL, 30, 5, on_data, stop_now, &a, 0, 0, 0, NULL };
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        r = cio_get(&rc, &status, err, sizeof err);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        s = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+        printf("stop while connecting: r=%d after %.1f s\n", r, s);
+        assert(r == -2 && s < 5.0);
+    }
     puts("all curlio tests passed");
     return 0;
 }

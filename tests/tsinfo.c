@@ -4,6 +4,7 @@
  * -o prefix: write prefix.video (Annex-B) and prefix.audio (ADTS) */
 #include "tsdemux.h"
 #include "mkvdemux.h"
+#include "flvdemux.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,20 +55,21 @@ int main(int argc, char **argv)
     uint8_t head[4] = { 0 };
     size_t hn = fread(head, 1, 4, f);
     fseek(f, 0, SEEK_SET);
-    int mkv = mkv_probe(head, hn);
-    TsDemux *d = mkv ? NULL : ts_create(&sink);
+    int mkv = mkv_probe(head, hn), flv = !mkv && hn >= 4 && !memcmp(head, "FLV\1", 4);
+    TsDemux *d = mkv || flv ? NULL : ts_create(&sink);
     MkvDemux *m = mkv ? mkv_create(&sink) : NULL;
-    cur_info = m ? mkv_info(m) : ts_info(d);
+    FlvDemux *fl = flv ? flv_create(&sink) : NULL;
+    cur_info = m ? mkv_info(m) : fl ? flv_info(fl) : ts_info(d);
     srand(1234);
     for (;;) {
         size_t want = chunk < 0 ? 65536 : chunk > 0 ? (size_t)chunk : (size_t)(1 + rand() % 3000);
         size_t n = fread(buf, 1, want, f);
         if (n == 0) break;
-        if (m) mkv_feed(m, buf, n); else ts_feed(d, buf, n);
+        if (m) mkv_feed(m, buf, n); else if (fl) flv_feed(fl, buf, n); else ts_feed(d, buf, n);
     }
-    if (m) mkv_flush(m); else ts_flush(d);
-    const TsInfo *i = m ? mkv_info(m) : ts_info(d);
-    printf("container=%s\n", m ? "mkv" : "ts");
+    if (m) mkv_flush(m); else if (fl) flv_flush(fl); else ts_flush(d);
+    const TsInfo *i = m ? mkv_info(m) : fl ? flv_info(fl) : ts_info(d);
+    printf("container=%s\n", m ? "mkv" : fl ? "flv" : "ts");
     printf("program=%d\n", i->program);
     for (int k = 0; k < i->nstreams; k++)
         printf("stream=pid:%d,type:0x%02x,codec:%s\n", i->streams[k].pid, i->streams[k].stream_type, ts_codec_name(i->streams[k].codec));
@@ -85,7 +87,7 @@ int main(int argc, char **argv)
     printf("sink_video_calls=%llu\nsink_audio_calls=%llu\nsink_video_bytes=%llu\nsink_audio_bytes=%llu\n",
            (unsigned long long)vcalls, (unsigned long long)acalls, (unsigned long long)vbytes, (unsigned long long)abytes);
     (void)bad_pts_order;
-    if (m) mkv_destroy(m); else ts_destroy(d);
+    if (m) mkv_destroy(m); else if (fl) flv_destroy(fl); else ts_destroy(d);
     if (fv) fclose(fv);
     if (fa) fclose(fa);
     free(buf);
