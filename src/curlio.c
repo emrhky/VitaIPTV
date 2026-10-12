@@ -90,25 +90,31 @@ static int bio_recv_timeout(void *ctx, unsigned char *buf, size_t len, uint32_t 
  * system's own timeout (tens of seconds) and O could not stop it. Non-blocking connect + poll in ticks so
  * stop() is honoured; the socket is made blocking again afterwards (the rest of the code expects that).
  * Returns 0 connected, -2 stopped, -1 failed. */
-static int connect_wait(int fd, const struct sockaddr *addr, socklen_t alen, const CioRequest *rq)
+static int connect_wait(int fd, const struct sockaddr *addr, socklen_t alen, const CioRequest *rq, int *why)
 {
     int fl = fcntl(fd, F_GETFL, 0);
-    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0)
-        return connect(fd, addr, alen) == 0 ? 0 : -1;            /* no non-blocking mode: as before */
+    *why = 0;
+    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0) {     /* no non-blocking mode: as before */
+        if (connect(fd, addr, alen) == 0) return 0;
+        *why = errno;
+        return -1;
+    }
     int ret = -1;
     if (connect(fd, addr, alen) == 0) ret = 0;
-    else if (errno == EINPROGRESS || errno == EALREADY || errno == EWOULDBLOCK) {
+    else if (errno != EINPROGRESS && errno != EALREADY && errno != EWOULDBLOCK) *why = errno;
+    else {
         int limit_ms = (rq && rq->connect_timeout_s > 0 ? rq->connect_timeout_s : 15) * 1000;
         for (int waited = 0; waited < limit_ms; waited += TICK_MS) {
             if (rq && stopped(rq)) { ret = -2; break; }
             struct pollfd p = { fd, POLLOUT, 0 };
             int r = poll(&p, 1, TICK_MS);
-            if (r < 0) break;
-            if (r == 0) continue;
+            if (r < 0) { *why = 1000 + errno; break; }
+            if (r == 0) { if (waited + TICK_MS >= limit_ms) *why = -1; continue; }   /* -1: no answer in time */
             int e = 0;
             socklen_t el = sizeof e;
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el) < 0) e = (p.revents & (POLLERR | POLLHUP)) ? -1 : 0;
+            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el) < 0) e = (p.revents & (POLLERR | POLLHUP)) ? -2 : 0;
             ret = e ? -1 : 0;
+            *why = e;
             break;
         }
     }
@@ -125,7 +131,7 @@ static int tcp_connect(const char *host, int port, const CioRequest *rq, char *e
     hints.ai_socktype = SOCK_STREAM;
     snprintf(ps, sizeof ps, "%d", port);
     if (getaddrinfo(host, ps, &hints, &res) != 0 || !res) { snprintf(err, errsz, "Could not resolve %s", host); return -1001; }
-    int fd = -1, st = 0;
+    int fd = -1, st = 0, why = 0;
     for (struct addrinfo *a = res; a; a = a->ai_next) {
         fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
         if (fd < 0) continue;
@@ -134,7 +140,7 @@ static int tcp_connect(const char *host, int port, const CioRequest *rq, char *e
          * Vita's own HTTP reached 800 KB/s). */
         int rcv = 1024 * 1024;
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
-        st = connect_wait(fd, a->ai_addr, a->ai_addrlen, rq);
+        st = connect_wait(fd, a->ai_addr, a->ai_addrlen, rq, &why);
         if (st == 0) break;
         close(fd);
         fd = -1;
@@ -142,7 +148,12 @@ static int tcp_connect(const char *host, int port, const CioRequest *rq, char *e
     }
     freeaddrinfo(res);
     if (st == -2) { snprintf(err, errsz, "Stopped"); return -2; }
-    if (fd < 0) { snprintf(err, errsz, "Could not connect to the server"); return -1002; }
+    if (fd < 0) {
+        if (why == -1) snprintf(err, errsz, "Could not connect to the server (no answer)");
+        else if (why) snprintf(err, errsz, "Could not connect to the server (%d)", why);
+        else snprintf(err, errsz, "Could not connect to the server");
+        return -1002;
+    }
     return fd;
 }
 
@@ -428,13 +439,24 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
         if (!eoh) {
             conn_close(&c);
             if (r == -2) { ret = -2; break; }
-            snprintf(err, errsz, r == -1006 ? "The server did not answer" : "Bad answer from the server");
+            if (r == -1006) snprintf(err, errsz, "The server did not answer");
+            else if (hl == 0) snprintf(err, errsz, "The server closed the connection without an answer (%d)", r);
+            else snprintf(err, errsz, "Bad answer from the server (%u bytes)", (unsigned)hl);
             ret = r == -1006 ? -1006 : -1008;
             break;
         }
         *eoh = 0;
         int code = 0;
-        if (sscanf((char *)hb, "HTTP/%*d.%*d %d", &code) != 1) { conn_close(&c); snprintf(err, errsz, "Bad answer from the server"); ret = -1008; break; }
+        if (sscanf((char *)hb, "HTTP/%*d.%*d %d", &code) != 1) {
+            char head[24];
+            size_t k = 0;
+            for (; k < sizeof head - 1 && hb[k]; k++) head[k] = hb[k] >= 32 && hb[k] < 127 ? (char)hb[k] : '.';
+            head[k] = 0;
+            conn_close(&c);
+            snprintf(err, errsz, "Bad answer from the server: %s", head);
+            ret = -1008;
+            break;
+        }
         *status = code;
         if ((code == 301 || code == 302 || code == 303 || code == 307 || code == 308) && header((char *)hb, "Location", val, sizeof val)) {
             char next[HLS_URL_MAX];
