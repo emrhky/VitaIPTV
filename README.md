@@ -7,12 +7,12 @@ listen to radio from your own M3U playlists or Xtream accounts, decoded by the V
 
 <p align="center"><img src="https://github.com/user-attachments/assets/010c908b-58ff-4be5-982d-5e6c4701ef0c" width="640" alt="Vita IPTV screenshot"></p>
 
-**Version 0.2.2** - films, series, 1080p and FLV streams (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
+**Version 0.2.3** - films, series, 1080p and FLV streams (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
 
 This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
 > Vita IPTV is only a player. It does not include, sell or point to any channels or playlists.
-> Use it with playlists and services you are allowed to watch.
+> Use it with playlists and services you are allowed to watch; you are responsible for what you play with it.
 
 ## Features
 
@@ -106,6 +106,8 @@ reference pictures may play with dropped frames or not at all, while the same ch
 **About 1080p:** the public decoder API stops at 720p. Above 720p the app sets the decoder up through the
 firmware's internal entry points instead (the same hardware; found with the test app in `tools/decprobe`).
 1080p needs about twice the data of 720p: if a 1080p channel stutters on a slow connection, use its 720p version.
+1080p at 50/60 fps is currently decoded at only about 35 pictures per second, so such channels may play in slow
+motion or skip; their 720p version plays smoothly.
 
 **About films:** most films are 1080p and play directly. Many film files use
 HEVC (x265) video or AC-3 / E-AC-3 sound: HEVC does not play, AC-3 plays without sound. Jumping needs a server that
@@ -141,8 +143,12 @@ e.g. `python3 tests/run_player_tests.py`.
 
 ## License
 
-Vita IPTV is released under the [MIT License](LICENSE). Bundled third-party code keeps its own license:
-mbedTLS (Apache-2.0) and minimp3 (CC0), see Credits.
+Vita IPTV is released under the [MIT License](LICENSE), provided as is, without any warranty. Bundled third-party
+code keeps its own license (mbedTLS: Apache-2.0, minimp3: CC0, vita2d and its libraries); the notices are in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which is also inside the VPK.
+
+"PlayStation" and "PS Vita" are trademarks of Sony Interactive Entertainment. This is an independent homebrew
+project, not affiliated with or endorsed by Sony.
 
 ## Credits
 
