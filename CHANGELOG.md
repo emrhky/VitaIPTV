@@ -20,9 +20,6 @@
 - New round LiveArea bubble; the start screen no longer shows an old version number under the new one.
 - Smaller fixes: the old 1080p setting is gone from settings.txt; safer stopping of network requests;
   FLV films that do not start at 0 show the right position.
-
-## 0.2.1
-
 - **FLV:** HTTP-FLV live streams and .flv films (H.264 with AAC or MP3); stream analysis reads them too.
 - **Films no longer freeze on a slow connection:** the film waits with *Buffering...* until a few seconds are
   loaded, instead of dropping pictures while the sound goes on.
