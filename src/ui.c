@@ -312,31 +312,50 @@ void ui_fill_triangle(float x0, float y0, float x1, float y1, float x2, float y2
     }
 }
 
+/* The app logo: the same shaded sphere as the LiveArea bubble (icon0), lit from the upper left, with a
+ * gloss on the top and the white TV sign. Drawn from circles, so it scales to any size. */
 void ui_logo(int cx, int cy, int size)
 {
-    int x0 = cx - size / 2, y0 = cy - size / 2;
-    float r = size * 0.22f;
-    for (int y = 0; y < size; y++) {                        /* rounded square, blue -> violet */
-        float t = (float)y / (float)size;
-        unsigned c = RGBA8((int)(59 + t * (123 - 59)), (int)(108 + t * (77 - 108)), 255, 255);
-        float inset = 0;
-        if (y < r) inset = r - sqrtf(r * r - (r - y) * (r - y));
-        else if (y > size - r) inset = r - sqrtf(r * r - (y - (size - r)) * (y - (size - r)));
-        vita2d_draw_rectangle(x0 + inset, y0 + y, size - 2 * inset, 1, c);
+    float R = size * 0.5f;
+    int steps = size / 3;
+    if (steps < 10) steps = 10;
+    if (steps > 48) steps = 48;
+    for (int k = 0; k <= steps; k++) {                      /* from the dark rim to the lit spot */
+        float t = (float)k / (float)steps;
+        float rr = R * (1.0f - 0.62f * t);
+        float ox = -R * 0.36f * t, oy = -R * 0.48f * t;     /* stays inside the previous circle */
+        int r0, g0, b0;
+        if (t < 0.5f) { float u = t * 2; r0 = (int)(70 + u * (96 - 70)); g0 = (int)(40 + u * (104 - 40)); b0 = (int)(176 + u * (238 - 176)); }
+        else { float u = (t - 0.5f) * 2; r0 = (int)(96 + u * (128 - 96)); g0 = (int)(104 + u * (162 - 104)); b0 = (int)(238 + u * (255 - 238)); }
+        vita2d_draw_fill_circle(cx + ox, cy + oy, rr, RGBA8(r0, g0, b0, 255));
+    }
+    for (int layer = 0; layer < 3; layer++) {               /* soft gloss: three nested ellipses */
+        float ex = R * (0.68f - layer * 0.12f), ey = R * (0.44f - layer * 0.08f), ecy = cy - R * 0.45f;
+        for (int y = (int)(ecy - ey); y <= (int)(ecy + ey); y++) {
+            float dy = ((float)y + 0.5f - ecy) / ey;
+            if (dy < -1.0f || dy > 1.0f) continue;
+            float hw = ex * sqrtf(1.0f - dy * dy);
+            vita2d_draw_rectangle(cx - hw, y, 2 * hw, 1, RGBA8(255, 255, 255, 18));
+        }
     }
     unsigned w = RGBA8(255, 255, 255, 255);
-    float s = size / 100.0f;
-    float tx = x0 + 18 * s, ty = y0 + 34 * s, tw = 64 * s, th = 44 * s, lw = 5 * s;   /* the TV */
+    float s = size / 100.0f * 0.78f;                        /* the sign, a little smaller than the old square logo */
+#define AT_X(v) (cx + ((v) - 50) * s)
+#define AT_Y(v) (cy + ((v) - 50) * s)
+    float tx = AT_X(18), ty = AT_Y(34), tw = 64 * s, th = 44 * s, lw = 5 * s;   /* the TV */
+    if (lw < 1.5f) lw = 1.5f;
     vita2d_draw_rectangle(tx, ty, tw, lw, w);
     vita2d_draw_rectangle(tx, ty + th - lw, tw, lw, w);
     vita2d_draw_rectangle(tx, ty, lw, th, w);
     vita2d_draw_rectangle(tx + tw - lw, ty, lw, th, w);
     for (int k = -1; k <= 1; k++) {                         /* antennas */
-        vita2d_draw_line(cx + k * 0.6f, ty, x0 + 36 * s + k * 0.6f, y0 + 18 * s, w);
-        vita2d_draw_line(cx + k * 0.6f, ty, x0 + 64 * s + k * 0.6f, y0 + 18 * s, w);
+        vita2d_draw_line(cx + k * 0.6f, ty, AT_X(36) + k * 0.6f, AT_Y(18), w);
+        vita2d_draw_line(cx + k * 0.6f, ty, AT_X(64) + k * 0.6f, AT_Y(18), w);
     }
-    vita2d_draw_fill_circle(x0 + 36 * s, y0 + 18 * s, 3.5f * s, w);
-    vita2d_draw_fill_circle(x0 + 64 * s, y0 + 18 * s, 3.5f * s, w);
+    vita2d_draw_fill_circle(AT_X(36), AT_Y(18), 3.5f * s, w);
+    vita2d_draw_fill_circle(AT_X(64), AT_Y(18), 3.5f * s, w);
     ui_fill_triangle(cx - 8 * s, ty + 11 * s, cx - 8 * s, ty + th - 11 * s, cx + 12 * s, ty + th / 2, w);   /* play */
     vita2d_draw_rectangle(cx - 14 * s, ty + th + 4 * s, 28 * s, 4 * s, RGBA8(255, 255, 255, 200));            /* stand */
+#undef AT_X
+#undef AT_Y
 }

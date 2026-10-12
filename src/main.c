@@ -49,7 +49,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define SETTINGS_FILE DATA_DIR "/settings.txt"
 #define RESUME_FILE   DATA_DIR "/resume.txt"
 #define MAX_RESUME    200
-#define APP_VERSION   "v0.2.2"
+#define APP_VERSION   "v0.2.3"
 #define MAX_SOURCES   64
 #define MAX_GROUPS    1024
 #define MAX_DOWNLOAD  (24 * 1024 * 1024)

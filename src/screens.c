@@ -158,7 +158,7 @@ void scr_lines(const char *title, const char *subtitle, const char *const *lines
         else if (!strncmp(lines[i], "Playable by hardware: NO", 24)) col = UI_ERR;
         else if (!strncmp(lines[i], "Playable by hardware: MAYBE", 27)) col = UI_WARN;
         ui_text_fit(40, y, col, 1.0f, lines[i], 880);
-        y += 30;
+        y += n > 11 ? 27 : 30;                              /* many lines: closer, to stay in the panel */
     }
     ui_footer(hints, nhints, NULL, 0);
 }
