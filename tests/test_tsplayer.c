@@ -30,7 +30,7 @@ static int64_t pts_shift;                                   /* the decoder label
 void mock_http_reset(void);
 
 /* ---- fake hardware decoder: needs SPS/PPS first, reorders pictures by 2 like B-frames ---- */
-static int refuse_refs, reject_two, oom_every = 5, decode_order;
+static int refuse_refs, reject_two, oom_every = 5, decode_order, oom_all;
 static int lib_open, dec_open, sps_seen, reject_pts, npend, need_refs, created_refs, decode_calls, creates, lib_max_refs;
 static int lib_l31, wedge_mode, wedged, need_two, two_calls, gave_two;
 static int int_lib, unmaps_open;                           /* Internal decoder (see below) */
@@ -84,6 +84,7 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
     if (n < 4 || b[0] || b[1] || !(b[2] == 1 || (b[2] == 0 && b[3] == 1))) return (int)0x8062000D;
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
     if (wedged) { arr->numOfOutput = 0; return 0; }        /* stuck after an error, like on the device */
+    if (oom_all) return (int)0x80620003;                     /* out of memory for every unit, keyframes too */
     if (need_refs && created_refs < need_refs) {             /* the same pictures fail every time they are tried */
         int has = !(au->pts.upper == 0xFFFFFFFFu && au->pts.lower == 0xFFFFFFFFu);
         int64_t t = has ? (int64_t)(((uint64_t)au->pts.upper << 32) | au->pts.lower) : ++decode_calls * 3000;
@@ -214,6 +215,7 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
 }
 
 /* ---- fake audio decoder and output (output blocks in real time like the hardware) ---- */
+static int mock_refuse_lc;
 static int alib_open, adec_open, ports_open, port_len, port_rate, port_ch;
 static uint64_t pcm_frames_out;
 SceInt32 sceAudiodecInitLibrary(SceUInt32 type, SceAudiodecInitParam *p)
@@ -232,6 +234,8 @@ SceInt32 sceAudiodecDecode(SceAudiodecCtrl *c)
     const uint8_t *e = c->pEs;
     if (((uintptr_t)c->pEs & 0xFF) || ((uintptr_t)c->pPcm & 0xFF)) return (int)0x807F0008;   /* 256-byte alignment */
     if (e[0] != 0xFF || (e[1] & 0xF6) != 0xF0) return (int)0x807F0002;
+    if ((e[2] >> 6) != 1) return (int)0x807F0000;           /* AAC-LC only, as on the Vita */
+    if (mock_refuse_lc && c->pInfo->aac.samplingRate == 24000) return (int)0x807F0000;
     unsigned ch = ((e[2] & 1) << 2) | (e[3] >> 6);
     if (ch != c->pInfo->aac.ch) return (int)0x807F0002;
     c->inputEsSize = ((e[3] & 3) << 11) | (e[4] << 3) | (e[5] >> 5);
@@ -402,7 +406,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r = play(argv[1], 10);
@@ -511,6 +515,16 @@ int main(int argc, char **argv)
         r = play(argv[23], 10);
         show("aac glitch", &r);
         assert(r.st.state == TSP_ENDED && !r.st.audio_msg[0] && r.st.audio_frames > 200 && r.synced);
+    }
+    if (argc > 24) {                                         /* "AAC Main" 24 kHz (refused by the Vita decoder): played as LC */
+        r = play(argv[24], 10);
+        show("aac main", &r);
+        assert(r.st.state == TSP_ENDED && !r.st.audio_msg[0] && r.st.audio_rate == 24000 && r.st.audio_frames > 100 && r.synced);
+        mock_refuse_lc = 1;                                  /* a decoder that refuses it even as LC: a clear message */
+        r = play(argv[24], 10);
+        show("aac main bad", &r);
+        assert(r.st.state == TSP_ENDED && r.changes >= 100 && strstr(r.st.audio_msg, "AAC Main"));
+        mock_refuse_lc = 0;
     }
     r = play(argv[15], 10);                                 /* MP2 audio (TV channels): decoded in software, in sync */
     show("mp2 audio", &r);
@@ -667,6 +681,16 @@ int main(int argc, char **argv)
     printf("               decoders created %d, HD decoders %d\n", creates, int_creates);
     assert(creates == 1 && int_creates == 1 && r.changes >= 30 && r.nonmono == 0 && r.st.state != TSP_ERROR);
     wedge_mode = 0; need_refs = 0; lib_max_refs = 0;
+    tsp_set_options(0, 720);
+
+    /* out of memory from the first unit (720p L4.1, 4 refs, seen on the device): the HD decoder takes over */
+    tsp_set_options(1, 720);
+    oom_all = 1; creates = 0; int_creates = 0;
+    r = play(argv[1], 10);
+    show("oom from start", &r);
+    printf("               decoders created %d, HD decoders %d\n", creates, int_creates);
+    assert(int_creates == 1 && r.st.decoded >= 25 && r.st.state != TSP_ERROR && r.nonmono == 0);
+    oom_all = 0;
     tsp_set_options(0, 720);
 
     /* pictures come out in decode order (B-frames before their reference): shown in time order */

@@ -14,6 +14,8 @@ open(f"{T}/master.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=600000
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='640x360', t=6)} {T}/film.mp4")
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='640x360', t=6)} {T}/film.mkv")
 sh(f"ffmpeg -loglevel error -y -i {T}/s.ts -c copy -f flv {T}/live.flv")
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=50 -f lavfi -i sine=frequency=440:sample_rate=24000 -t 3 "
+   f"-c:v libx264 -preset ultrafast -bf 2 -x264-params b-pyramid=0 -g 50 -pix_fmt yuv420p -c:a aac -profile:a aac_main -ac 2 -f mpegts {T}/fast1080.ts")
 open(f"{T}/page.ts", "w").write("<html><body>blocked</body></html>")
 M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -Wno-missing-field-initializers -pthread -I{ROOT}/src -I{M} "

@@ -37,7 +37,7 @@ int main(int argc, char **argv)
     const char *dir = argv[1];
     static char p[16][512];
     const char *names[] = { "s.ts", "master.m3u8", "media.m3u8", "seg000.ts", "seg001.ts", "seg002.ts", "seg003.ts", "seg004.ts",
-                            "film.mp4", "film.mkv", "page.ts", "live.flv" };
+                            "film.mp4", "film.mkv", "page.ts", "live.flv", "fast1080.ts" };
     int n = (int)(sizeof names / sizeof names[0]);
     mock_http_reset();
     for (int i = 0; i < n; i++) { snprintf(p[i], 512, "%s/%s", dir, names[i]); mock_http_map[i][0] = names[i]; mock_http_map[i][1] = p[i]; }
@@ -60,6 +60,14 @@ int main(int argc, char **argv)
     probe_cancel();
     r = run("http://host/live/live.flv");                       /* HTTP-FLV */
     assert(r->state == PROBE_DONE && has(r, "1280x720") && has(r, "YES") && has(r, "AAC"));
+    probe_cancel();
+    r = run("http://host/live/fast1080.ts");                  /* 1080p 50 fps, B-pictures, "AAC Main" 24 kHz */
+    for (int i = 0; i < r->nlines; i++) printf("   | %s\n", r->lines[i]);
+    assert(r->state == PROBE_DONE && has(r, "MAYBE: 1080p at 50/60 fps") && has(r, "AAC Main 24000 Hz") && has(r, "tried as LC)"));
+    assert(has(r, "Non-reference pictures:") && !has(r, "Non-reference pictures: 0 of"));
+    probe_cancel();
+    r = run("http://host/live/s.ts");                           /* 720p 25 fps: no warning */
+    assert(has(r, "Non-reference pictures:") && has(r, "YES: H.264 8-bit up to 720p"));
     probe_cancel();
     r = run("http://host/page.ts");
     assert(r->state == PROBE_FAILED && strstr(r->error, "web page"));
