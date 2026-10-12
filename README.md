@@ -7,7 +7,7 @@ listen to radio from your own M3U playlists or Xtream accounts, decoded by the V
 
 <p align="center"><img src="https://github.com/user-attachments/assets/010c908b-58ff-4be5-982d-5e6c4701ef0c" width="640" alt="Vita IPTV screenshot"></p>
 
-**Version 0.2.3** - films, series, 1080p and FLV streams (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
+**Version 0.2.4** - films, series, 1080p and FLV streams (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
 
 This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
@@ -106,12 +106,14 @@ reference pictures may play with dropped frames or not at all, while the same ch
 **About 1080p:** the public decoder API stops at 720p. Above 720p the app sets the decoder up through the
 firmware's internal entry points instead (the same hardware; found with the test app in `tools/decprobe`).
 1080p needs about twice the data of 720p: if a 1080p channel stutters on a slow connection, use its 720p version.
-1080p at 50/60 fps is currently decoded at only about 35 pictures per second, so such channels may play in slow
-motion or skip; their 720p version plays smoothly.
+1080p at 50/60 fps can be faster than the Vita decodes: the player then leaves out the pictures no other picture
+needs (often every other one), so the channel plays in real time and in sync with the sound at a lower frame rate;
+its 720p version plays all pictures.
 
 **About films:** most films are 1080p and play directly. Many film files use
 HEVC (x265) video or AC-3 / E-AC-3 sound: HEVC does not play, AC-3 plays without sound. Jumping needs a server that
-sends parts of files (HTTP ranges); Xtream servers do. When the connection is slower than the film needs, the
+sends parts of files (HTTP ranges); Xtream servers do. The film's index is read once and kept while the film is
+open, so jumps start quickly. When the connection is slower than the film needs, the
 film stops with *Buffering...* until a few seconds are loaded (longer each time it happens again), instead of
 freezing; if that happens often, the
 provider sends too slowly for that file (a smaller version of the same film usually plays fine).
