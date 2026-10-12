@@ -749,6 +749,8 @@ int sources_parse(const char *text, Source *out, int max)
             copy_trunc(src.pass, sizeof src.pass, f[4], strlen(f[4]));
         } else if (!strcasecmp(f[1], "stream")) {
             src.type = SRC_STREAM;
+            if (nf >= 4) copy_trunc(src.user, sizeof src.user, f[3], strlen(f[3]));   /* Referer */
+            if (nf >= 5) copy_trunc(src.pass, sizeof src.pass, f[4], strlen(f[4]));   /* User-Agent */
         } else if (!strcasecmp(f[1], "file")) {
             src.type = SRC_M3U_FILE;
         } else {
