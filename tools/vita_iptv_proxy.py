@@ -33,15 +33,34 @@ ACTIVE = {}
 ACTIVE_LOCK = threading.Lock()
 
 
+def split_headers(url):
+    """link|User-Agent=...&Referer=... (from #EXTVLCOPT lines in M3U lists) -> link, user agent, referer"""
+    from urllib.parse import unquote
+    if "|" not in url:
+        return url, "", ""
+    link, _, tail = url.partition("|")
+    ua = ref = ""
+    for part in tail.split("&"):
+        k, _, v = part.partition("=")
+        if k.lower() == "user-agent":
+            ua = unquote(v)
+        elif k.lower() in ("referer", "referrer"):
+            ref = unquote(v)
+    return link, ua, ref
+
+
 def ffmpeg_command(url, start=0):
     a = ARGS
+    url, link_ua, link_ref = split_headers(url)
     cmd = [a.ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-fflags", "+genpts"]
     if start > 0:
         cmd += ["-ss", str(start)]                                    # a film from the middle
     if url.startswith(("http://", "https://")):
         cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
-        if a.user_agent:
-            cmd += ["-user_agent", a.user_agent]
+        if link_ua or a.user_agent:
+            cmd += ["-user_agent", link_ua or a.user_agent]
+        if link_ref:
+            cmd += ["-referer", link_ref]
     cmd += ["-i", url,
             "-map", "0:v:0?", "-map", "0:a:0?",                     # first video and audio, either may be missing
             "-c:v", "libx264", "-preset", a.preset, "-tune", "zerolatency",
