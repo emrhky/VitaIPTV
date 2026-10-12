@@ -334,6 +334,19 @@ int main(void)
         assert(url_split_headers(j, u, sizeof u, ua, sizeof ua, ref, sizeof ref) && !strcmp(ref, "http://r/?x=1&y=2") && !strcmp(ua, "UA 1") && !strcmp(u, "http://a/b"));
         channel_list_free(&hl);
     }
+    {   /* sources.txt: a single stream with Referer and User-Agent; written back the same way */
+        Source sv[2];
+        const char *txt = "Flv | stream | https://cdn.example.org/play/live_a.flv | https://site.example/a | Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/150.0 Safari/537.36\n"
+                          "Plain | stream | http://h/live/1.ts\n";
+        assert(sources_parse(txt, sv, 2) == 2);
+        assert(sv[0].type == SRC_STREAM && !strcmp(sv[0].user, "https://site.example/a"));
+        assert(!strcmp(sv[0].pass, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/150.0 Safari/537.36"));
+        assert(!sv[1].user[0] && !sv[1].pass[0]);
+        char outs[2048];
+        assert(sources_format(sv, 2, outs, sizeof outs) > 0);
+        Source sw[2];
+        assert(sources_parse(outs, sw, 2) == 2 && !strcmp(sw[0].user, sv[0].user) && !strcmp(sw[0].pass, sv[0].pass) && !sw[1].user[0]);
+    }
     puts("all host tests passed");
     return 0;
 }
