@@ -30,7 +30,7 @@ static int64_t pts_shift;                                   /* the decoder label
 void mock_http_reset(void);
 
 /* ---- fake hardware decoder: needs SPS/PPS first, reorders pictures by 2 like B-frames ---- */
-static int refuse_refs, reject_two, oom_every = 5, decode_order, oom_all;
+static int refuse_refs, reject_two, oom_every = 5, decode_order, oom_all, dec_sleep_us = 1500, d_every, d_calls;
 static int lib_open, dec_open, sps_seen, reject_pts, npend, need_refs, created_refs, decode_calls, creates, lib_max_refs;
 static int lib_l31, wedge_mode, wedged, need_two, two_calls, gave_two;
 static int int_lib, unmaps_open;                           /* Internal decoder (see below) */
@@ -80,11 +80,12 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
     (void)d;
     const uint8_t *b = au->es.pBuf;
     size_t n = au->es.size;
-    usleep(1500);                                           /* hardware takes a moment */
+    usleep((useconds_t)dec_sleep_us);                       /* hardware takes a moment */
     if (n < 4 || b[0] || b[1] || !(b[2] == 1 || (b[2] == 0 && b[3] == 1))) return (int)0x8062000D;
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
     if (wedged) { arr->numOfOutput = 0; return 0; }        /* stuck after an error, like on the device */
     if (oom_all) return (int)0x80620003;                     /* out of memory for every unit, keyframes too */
+    if (d_every && sps_seen && !has_nal(b, n, 5) && ++d_calls % d_every == 0) return (int)0x8062000D;   /* "invalid stream" now and then */
     if (need_refs && created_refs < need_refs) {             /* the same pictures fail every time they are tried */
         int has = !(au->pts.upper == 0xFFFFFFFFu && au->pts.lower == 0xFFFFFFFFu);
         int64_t t = has ? (int64_t)(((uint64_t)au->pts.upper << 32) | au->pts.lower) : ++decode_calls * 3000;
@@ -139,7 +140,7 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
 
 /* ---- fake Internal decoder (above 720p): pictures come out two units after they go in ---- */
 typedef struct { SceAvcdecBuf memBuf; SceUID memBufUid; SceUIntVAddr vaContext; SceUInt32 contextSize; } MockVdCtrl;
-static int int_cfg, int_mode, int_creates, int_units, int_soft_every, int_full_every, int_full_left, int_full_hits;
+static int int_cfg, int_mode, int_creates, int_units, int_soft_every, int_full_every, int_full_left, int_full_hits, int_delay = 2;
 static int paint_mode;                   /* 1: a normal picture (a gradient top to bottom), 2: two fields one above the other */
 int sceVideodecSetConfigInternal(SceVideodecType c, SceInt32 cfg) { (void)c; int_cfg = cfg; return 0; }
 int sceAvcdecSetDecodeMode(SceVideodecType c, SceInt32 m) { (void)c; int_mode = m; return 0; }
@@ -184,7 +185,7 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
     SceAvcdecPicture *p = arr->pPicture[0];
     if (!p || p->size != sizeof *p || !p->frame.pPicture[0] || p->frame.framePitch < lib_w || p->frame.frameHeight < lib_h) return (int)0x80620002;
     arr->numOfOutput = 0;
-    if (npend < 3) return 0;                                /* two units of delay, as on the device */
+    if (npend < int_delay + 1) return 0;                    /* two units of delay, as on the device */
     int64_t o;
     if (decode_order) {                                     /* the order they went in (B-pictures late), as seen on the device */
         o = pend[0];
@@ -309,8 +310,10 @@ static void show(const char *name, const Run *r)
 extern int mock_http_no_ranges, mock_http_range_requests;
 typedef struct { Run r; int first_pos, last_pos, dur, pos_during_pause_a, pos_during_pause_b, froze; } VRun;
 
+static int keep_cache;                                       /* 0: every film opens as if for the first time */
 static VRun play_vod_url(const char *url, const char *file, int start_ms, double max_s, double pause_at, double pause_len)
 {
+    if (!keep_cache) tsp_vod_cache_clear();                  /* the app does this when a film is closed */
     VRun v; memset(&v, 0, sizeof v);
     Run *r = &v.r; r->first_pts = r->last_pts = -1;
     v.first_pos = -1;
@@ -406,10 +409,14 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27);
     setvbuf(stdout, NULL, _IONBF, 0);
 
-    Run r = play(argv[1], 10);
+    Run r;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "films")) goto films;   /* quicker runs while working on one part */
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slots")) goto slots;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slow")) goto slow;
+    r = play(argv[1], 10);
     show("720p30", &r);
     assert(r.st.state == TSP_ENDED && r.st.errors == 0);
     assert(r.st.audio_rate == 48000 && r.st.audio_ch == 2 && r.st.audio_frames > 200 && r.synced);
@@ -515,6 +522,21 @@ int main(int argc, char **argv)
         r = play(argv[23], 10);
         show("aac glitch", &r);
         assert(r.st.state == TSP_ENDED && !r.st.audio_msg[0] && r.st.audio_frames > 200 && r.synced);
+    }
+slow:
+    if (argc > 26) {
+        /* 60 fps with a decoder that manages only ~35 pictures/s (1080p60 on the device): the picture
+         * catches up by skipping non-reference pictures instead of falling behind the sound for good */
+        dec_sleep_us = 28000;
+        r = play(argv[25], 14);
+        show("slow decoder", &r);
+        printf("               skipped %u, late at the end %d ms\n", (unsigned)r.st.skipped, r.st.av_late_ms);
+        assert(r.st.state == TSP_ENDED && r.synced && r.st.skipped > 50 && r.play_time > 6.5 && r.play_time < 9.0);
+        assert(r.av_bad * 3 <= r.avn);                      /* mostly in time with the sound */
+        r = play(argv[26], 14);                             /* the same without sound it can play: real time, not slow motion */
+        show("slow, no sound", &r);
+        assert(r.st.state == TSP_ENDED && r.st.skipped > 50 && r.play_time > 6.5 && r.play_time < 9.0);
+        dec_sleep_us = 1500;
     }
     if (argc > 24) {                                         /* "AAC Main" 24 kHz (refused by the Vita decoder): played as LC */
         r = play(argv[24], 10);
@@ -683,6 +705,21 @@ int main(int argc, char **argv)
     wedge_mode = 0; need_refs = 0; lib_max_refs = 0;
     tsp_set_options(0, 720);
 
+slots:
+    /* "invalid stream" for single units: no wait for the next keyframe; when frequent, the HD decoder */
+    tsp_set_options(1, 720);
+    d_every = 40; d_calls = 0; int_creates = 0;
+    r = play(argv[1], 10);
+    show("0x8062000D few", &r);
+    assert(r.st.state == TSP_ENDED && r.st.errors >= 2 && r.st.decoded >= 135 && int_creates == 0 && r.nonmono == 0);
+    d_every = 6; d_calls = 0; int_creates = 0;
+    r = play(argv[1], 10);
+    show("0x8062000D many", &r);
+    printf("               HD decoders %d\n", int_creates);
+    assert(r.st.state == TSP_ENDED && int_creates == 1 && r.st.decoded >= 60 && r.nonmono == 0);
+    d_every = 0;
+    tsp_set_options(0, 720);
+
     /* out of memory from the first unit (720p L4.1, 4 refs, seen on the device): the HD decoder takes over */
     tsp_set_options(1, 720);
     oom_all = 1; creates = 0; int_creates = 0;
@@ -691,6 +728,25 @@ int main(int argc, char **argv)
     printf("               decoders created %d, HD decoders %d\n", creates, int_creates);
     assert(int_creates == 1 && r.st.decoded >= 25 && r.st.state != TSP_ERROR && r.nonmono == 0);
     oom_all = 0;
+
+    /* the HD decoder with more pictures (720p after "out of memory") gives them late and in decode order:
+     * with four slots the later pictures filled them and the earlier ones had no room (3-10 pictures/s on
+     * the device); with the extra slots it plays */
+    {
+        extern int g_slots_cap;
+        int caps[2] = { 4, 8 }; Run rr[2];
+        for (int c = 0; c < 2; c++) {
+            g_slots_cap = caps[c];
+            oom_all = 1; decode_order = 1; int_delay = 5;
+            rr[c] = play(argv[1], 10);
+            oom_all = 0; decode_order = 0; int_delay = 2;
+            char nm[32]; snprintf(nm, sizeof nm, "hd late %d slots", caps[c]);
+            show(nm, &rr[c]);
+        }
+        g_slots_cap = 8;
+        assert(rr[1].st.slots == 8 && rr[1].st.state != TSP_ERROR && rr[1].nonmono == 0);
+        assert(rr[1].changes >= rr[0].changes && rr[1].st.dropped <= rr[0].st.dropped);
+    }
     tsp_set_options(0, 720);
 
     /* pictures come out in decode order (B-frames before their reference): shown in time order */
@@ -799,6 +855,7 @@ int main(int argc, char **argv)
     need_refs = 0;
 
     /* films: MP4 (index at the end), MKV and TS files, from the start and from the middle, paused */
+films:
     if (argc > 19) {
         const char *mp4 = argv[17], *mkv = argv[18], *tsf = argv[19];
         VRun v = play_vod(mp4, 0, 20, 0, 0);
@@ -869,6 +926,37 @@ int main(int argc, char **argv)
             tsp_stop();
             mock_http_reset();
             mock_http_file = NULL;
+        }
+        {   /* jumps in the same film read its index from memory: one request each (the film itself) */
+            const char *names[3] = { "mp4", "mkv", "ts" }, *files[3] = { mp4, mkv, tsf };
+            for (int f = 0; f < 3; f++) {
+                char url[96];
+                snprintf(url, sizeof url, "http://example.invalid/movie/u/p/7.%s", names[f]);
+                keep_cache = 0;
+                mock_http_range_requests = 0;
+                v = play_vod_url(url, files[f], 4000, 3, 0, 0);           /* first open (reads the index) */
+                int first = mock_http_range_requests;
+                keep_cache = 1;
+                int jumps[4] = { 7000, 2000, 9000, 5000 }, worst = 0;
+                for (int j = 0; j < 4; j++) {
+                    mock_http_range_requests = 0;
+                    v = play_vod_url(url, files[f], jumps[j], 2.5, 0, 0);
+                    if (mock_http_range_requests > worst) worst = mock_http_range_requests;
+                    assert(v.r.changes >= 20 && v.r.st.state != TSP_ERROR && abs(v.first_pos - jumps[j]) <= 2100);
+                }
+                printf("index cache %s: first open %d requests, jumps at most %d\n", names[f], first, worst);
+                assert(worst < first && (f == 2 || worst <= 2));      /* TS: finding the time still reads a little */
+            }
+            /* another file behind the same link: the cached index is not trusted */
+            mock_http_range_requests = 0;
+            v = play_vod_url("http://example.invalid/movie/u/p/7.mp4", mp4, 3000, 3, 0, 0);
+            v = play_vod_url("http://example.invalid/movie/u/p/7.mp4", mkv, 3000, 4, 0, 0);
+            vshow("file changed", &v);
+            assert(v.r.st.state == TSP_ERROR && strstr(v.r.st.msg, "changed"));
+            v = play_vod_url("http://example.invalid/movie/u/p/7.mp4", mkv, 3000, 4, 0, 0);   /* opened again: fine */
+            assert(v.r.st.state != TSP_ERROR && v.r.changes >= 20);
+            keep_cache = 0;
+            tsp_vod_cache_clear();
         }
         mock_http_no_ranges = 1;                            /* a server without ranges: from the start, no seeking */
         v = play_vod(mkv, 0, 20, 0, 0);
