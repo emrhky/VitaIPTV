@@ -114,6 +114,12 @@ static const Pair FIXED[] = {
     { "%d%%   (network %u KB/s, the film needs %u KB/s)", "%d%%   (bağlantı %u KB/s, filmin ihtiyacı %u KB/s)" },
     { "Audio %s %s %s   A/V %+d ms", "Ses %s %s %s   A/V %+d ms" }, { "Audio %s %s %s", "Ses %s %s %s" },
     { "Audio: waiting", "Ses: bekleniyor" },
+    /* the info table (Triangle) */
+    { "Video", "Görüntü" }, { "Frame rate", "Kare hızı" }, { "Shown", "Gösterilen" }, { "Dropped", "Atlanan" },
+    { "Audio", "Ses" }, { "Waits", "Beklemeler" }, { "Damaged / errors", "Hasarlı / hata" }, { "Network", "Bağlantı" },
+    { "Needed", "İhtiyaç" }, { "Received", "Alınan" }, { "Not decoded", "Çözülmeyen" }, { "off", "kapalı" },
+    { "waiting", "bekleniyor" },
+    { "The Vita cannot decode this 1080p at %d fps: switched to 720p", "Vita bu 1080p yayını %d fps hızında çözemiyor: 720p'ye geçildi" },
     { "Referer (if needed)", "Referer (gerekirse)" }, { "User-Agent (if needed)", "User-Agent (gerekirse)" },
     { "Referer (e.g. https://site/page)", "Referer (örn. https://site/sayfa)" }, { "User-Agent", "User-Agent" },
     { "Waiting for the network...", "Ağ bekleniyor..." },

@@ -106,6 +106,33 @@ static int time_line(const ScrPlayer *p, int y)
     return y;
 }
 
+/* One row of the player's info table: cells "label\vvalue" separated by tabs, in four fixed columns. The
+ * label starts at the column, the value ends at the column's right edge, so changing numbers stay put. */
+static void stat_row(int y, const char *row)
+{
+    static const int x0[4] = { 18, 268, 498, 728 }, x1[4] = { 250, 480, 710, 942 };
+    const char *c = row;
+    for (int k = 0; k < 4 && c && *c; k++) {
+        const char *tab = strchr(c, '\t');
+        size_t n = tab ? (size_t)(tab - c) : strlen(c);
+        char cell[128];
+        if (n >= sizeof cell) n = sizeof cell - 1;
+        memcpy(cell, c, n);
+        cell[n] = 0;
+        char *v = strchr(cell, '\v');
+        if (v) *v++ = 0;
+        int lw = ui_text_w(0.9f, cell);
+        ui_text(x0[k], y, UI_DIM, 0.9f, cell);
+        if (v && *v) {
+            int room = x1[k] - x0[k] - lw - 10;             /* never over the label */
+            int vw = ui_text_w(0.9f, v);
+            if (vw <= room) ui_text(x1[k] - vw, y, UI_TEXT, 0.9f, v);
+            else ui_text_fit(x0[k] + lw + 10, y, UI_TEXT, 0.9f, v, room);
+        }
+        c = tab ? tab + 1 : NULL;
+    }
+}
+
 void scr_player(const ScrPlayer *p)
 {
     if (p->backdrop) scr_backdrop();
@@ -125,8 +152,19 @@ void scr_player(const ScrPlayer *p)
     if (p->info && p->info[0]) ui_text(940 - iw, 30, UI_DIM, 0.9f, p->info);
     int y = UI_FOOTER_Y;
     if (p->film) y = time_line(p, y);
-    if (p->stats2 && p->stats2[0]) { y -= 26; vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE); ui_text_fit(18, y + 19, UI_DIM, 0.9f, p->stats2, 924); }
-    if (p->stats1 && p->stats1[0]) { y -= 26; vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE); ui_text_fit(18, y + 19, UI_DIM, 0.9f, p->stats1, 924); }
+    if (p->stats_table) {
+        const char *rows[3] = { p->stats3, p->stats2, p->stats1 };   /* drawn from the bottom up */
+        for (int r = 0; r < 3; r++) {
+            if (!rows[r] || !rows[r][0]) continue;
+            y -= 26;
+            vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE);
+            stat_row(y + 19, rows[r]);
+        }
+        if (p->stats_note && p->stats_note[0]) { y -= 26; vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE); ui_text_fit(18, y + 19, UI_DIM, 0.9f, p->stats_note, 924); }
+    } else {
+        if (p->stats2 && p->stats2[0]) { y -= 26; vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE); ui_text_fit(18, y + 19, UI_DIM, 0.9f, p->stats2, 924); }
+        if (p->stats1 && p->stats1[0]) { y -= 26; vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE); ui_text_fit(18, y + 19, UI_DIM, 0.9f, p->stats1, 924); }
+    }
     ui_footer(p->hints, p->nhints, NULL, 0);
 }
 

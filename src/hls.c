@@ -139,7 +139,7 @@ int hls_pick_variant(const HlsVariant *v, int n, int max_h)
 {
     int best = -1, unsized = -1, unsized_small = -1, fallback = -1;
     /* No size given: the highest bit rate below this is most likely the best that still fits. */
-    long cap = max_h > 720 ? 6000000L : 2600000L;
+    long cap = max_h > 720 ? 6000000L : max_h > 480 ? 2600000L : 1300000L;
     for (int i = 0; i < n; i++) {
         if (v[i].hevc || v[i].audio_only) continue;
         int fits = variant_fits(&v[i], max_h);
