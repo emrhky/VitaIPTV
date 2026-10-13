@@ -152,10 +152,11 @@ static void use_avcc(MkvDemux *d, const Track *t)
         int l = (p[pos] << 8) | p[pos + 1];
         pos += 2;
         if (pos + l > n) return;
-        if (i == 0 && l <= (int)sizeof d->info.sps) {
+        if (i == 0 && l > 0 && l <= (int)sizeof d->info.sps) {
+            TsInfo tmp = d->info;                           /* a SPS it cannot read leaves the info as it was (as in FLV) */
+            if (ts_parse_sps(p + pos, (size_t)l, &tmp) == 0) d->info = tmp;
             memcpy(d->info.sps, p + pos, (size_t)l);
             d->info.sps_len = l;
-            ts_parse_sps(p + pos, (size_t)l, &d->info);
         }
         pos += l;
     }
