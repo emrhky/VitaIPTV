@@ -268,7 +268,7 @@ int sceAudioOutSetVolume(int port, int ch, int *vol) { (void)port; (void)ch; (vo
 /* ---- helpers ---- */
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 
-typedef struct { TspStatus st; int changes, nonmono, w, h, avn, av_bad, av_max, synced, av_last, avn2, av_bad2; double first_show, last_show, play_time, slow_at, wait_max, wait_t0; int64_t first_pts, last_pts; } Run;
+typedef struct { TspStatus st; int changes, nonmono, w, h, avn, av_bad, av_max, synced, av_last, avn2, av_bad2; double first_show, last_show, play_time, slow_at, wait_max, wait_t0, end_at; int64_t first_pts, last_pts; } Run;
 
 static Run play(const char *path, double max_s)
 {
@@ -301,7 +301,7 @@ static Run play(const char *path, double max_s)
         if (s->buffering && !r.wait_t0) r.wait_t0 = now_s();
         if (!s->buffering && r.wait_t0) { if (now_s() - r.wait_t0 > r.wait_max) r.wait_max = now_s() - r.wait_t0; r.wait_t0 = 0; }
         if (s->state == TSP_ERROR) break;
-        if (s->state == TSP_ENDED) { if (!end_seen) end_seen = now_s(); else if (now_s() - end_seen > 0.6) break; }
+        if (s->state == TSP_ENDED) { if (!end_seen) { end_seen = now_s(); r.end_at = end_seen - t0; } else if (now_s() - end_seen > 0.6) break; }
         usleep(16000);                                       /* UI at ~60 Hz */
     }
     r.st = *tsp_status();
@@ -428,7 +428,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r;
@@ -439,6 +439,7 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls_slow")) goto hls_slow;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "standby")) goto standby;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "late")) goto late;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "limit")) goto limit;
     r = play(argv[1], 10);
     show("720p30", &r);
     assert(r.st.state == TSP_ENDED && r.st.errors == 0);
@@ -847,14 +848,49 @@ live:
         mock_http_file = NULL;
     }
 
+limit:
+    if (argc > 31) {
+        /* Decoders at their limit, as on the device with 0.2.7 (local files): the picture froze for good,
+         * 720p60 showed 6 of 882 decoded pictures. Pictures came out of order and a little late; the screen
+         * dropped one each frame ("behind") and then waited for three to be ready, again and again. */
+        tsp_set_options(1, 720);
+        decode_order = 1; dec_sleep_us = 17000;              /* public decoder: ~57 pictures/s, not reordered */
+        r = play(argv[25], 12);
+        decode_order = 0; dec_sleep_us = 1500;
+        show("720p60 at limit", &r);
+        printf("               shown %u of %u decoded, last %d ms from the sound\n", r.st.shown, r.st.decoded, r.av_last);
+        assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown * 10 >= r.st.decoded * 7 && abs(r.av_last) < 200);
+
+        /* 1080p60 with B-pictures from the HD decoder at about 36 pictures/s (measured on the device): the
+         * pictures nothing refers to are left out from the start, the rest plays in time with the sound */
+        tsp_set_options(1, 1080);
+        decode_order = 1; int_delay = 5; int_out_us = 27000;
+        r = play(argv[31], 14);
+        decode_order = 0; int_delay = 2; int_out_us = 0;
+        show("1080p60 HD", &r);
+        printf("               shown %u, decoded %u, not decoded %u, last %d ms from the sound\n", r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.av_last);
+        assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 150 && r.st.shown * 10 >= r.st.decoded * 7 && abs(r.av_last) < 200);
+        /* a file from the memory card (1080p25, HD decoder in decode order): plays to the end without the sound
+         * waiting for pictures that will not come (0.2.7: 10 s of silence and a still picture at the end) */
+        tsp_set_options(1, 720);
+        decode_order = 1; int_delay = 5;
+        r = play(argv[2], 12);
+        decode_order = 0; int_delay = 2;
+        show("local to end", &r);
+        printf("               ended after %.1f s, sound waited %u time(s)\n", r.end_at, r.st.holds);
+        assert(r.st.state == TSP_ENDED && r.st.holds == 0 && r.end_at > 0 && r.end_at < 7.5 && r.st.shown >= 115);
+        tsp_set_options(0, 720);
+    }
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "limit")) return 0;
+
 late:
     if (argc > 30) {
         /* As on the device (0.2.6, HLS 1080p, 10 s segments): the sound comes seconds ahead of the picture in
          * the stream, and the HD decoder takes a burst of units in at once and gives the pictures out only a
          * little faster than real time, in decode order. Our queue stays empty, so nothing looked late on our
          * side; 0.2.6 showed the picture 3-4 s behind the sound and only one picture in three (the B-pictures
-         * came after a late P-picture and were dropped as "older"). Now the sound waits for the picture, the
-         * pictures are put in order whatever their lateness, and the two stay together. */
+         * came after a late P-picture and were dropped as "older"). 0.2.8: the sound starts with the first
+         * picture once a second of video has come, so the decoder's delay never puts the picture behind. */
         static char nm4[4][32], pth4[4][512];
         const char *f4[] = { "t.m3u8", "t0.ts", "t1.ts", "t2.ts" };
         long total4 = 0;
@@ -865,14 +901,14 @@ late:
         }
         mock_http_rate = total4 / 30 * 115 / 100;            /* the line a little faster than the stream */
         tsp_set_options(1, 1080);
-        decode_order = 1; int_delay = 5; int_cap = 150; int_out_us = 30000;
+        decode_order = 1; int_delay = 5; int_cap = 150; int_out_us = 25000;
         r = play("http://example.invalid/hls4/t.m3u8", 34);
         decode_order = 0; int_delay = 2; int_cap = 8; int_out_us = 0;
         show("late video HD", &r);
         printf("               sound waited %u time(s), buffering %u, skipped %u, in time in the 2nd half %d of %d, last %d ms\n",
                r.st.holds, r.st.rebuffers, (unsigned)r.st.skipped, r.avn2 - r.av_bad2, r.avn2, r.av_last);
-        assert(r.st.holds >= 1 && r.st.skipped == 0 && r.nonmono == 0 && r.st.shown >= 400);
-        assert(r.st.shown * 4 >= r.st.decoded * 3);          /* 0.2.6: 269 of 599 */
+        assert(r.st.skipped == 0 && r.nonmono == 0 && r.st.shown >= 600);
+        assert(r.st.shown * 10 >= r.st.decoded * 9);         /* 0.2.6: 269 of 599 */
         assert(r.av_bad2 * 10 <= r.avn2 && abs(r.av_last) < 150);   /* 0.2.6: none in time, 3.8 s behind */
         mock_http_rate = 0;
         mock_http_reset();
