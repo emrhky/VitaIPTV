@@ -37,6 +37,10 @@ typedef struct {
     int fields;                         /* pictures are two fields one above the other: draw the top half */
     int slots;                          /* decoded pictures held between the decoder and the screen */
     uint32_t skipped;                   /* pictures left out on purpose (catching up, decoder memory) */
+    volatile int slow_network;          /* live: the line cannot carry this picture size (the UI may pick a smaller one) */
+    int hls_h, hls_lower;               /* HLS: height of the variant playing, a smaller one exists */
+    unsigned net_kbs, need_kbs, seg_kbs;  /* network (last 5 s), what the stream needs, the last HLS segment's speed */
+    int fps10;                          /* pictures per second x10 */
     volatile int buffering;             /* film: waiting for the network (shown as "Buffering...") */
     int buf_pct;                        /* ... how far (0-100) */
     unsigned rebuffers;                 /* how many times */
