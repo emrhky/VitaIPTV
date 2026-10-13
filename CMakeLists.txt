@@ -13,7 +13,11 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "Vita IPTV")
 set(VITA_TITLEID  "VIPTV0001")
-set(VITA_VERSION  "00.28")
+# the version, in one place: the VPK's "00.29" and the app's "v0.2.9" (shown in About and in the log) both come from here
+set(APP_VER_MAJOR 0)
+set(APP_VER_MINOR 2)
+set(APP_VER_PATCH 9)
+set(VITA_VERSION  "0${APP_VER_MAJOR}.${APP_VER_MINOR}${APP_VER_PATCH}")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O2 -std=gnu99")
 
@@ -35,6 +39,7 @@ add_executable(${PROJECT_NAME}.elf
   src/curlio.c
   src/vod.c
 )
+target_compile_definitions(${PROJECT_NAME}.elf PRIVATE "APP_VERSION=\"v${APP_VER_MAJOR}.${APP_VER_MINOR}.${APP_VER_PATCH}\"")
 
 # https:// with the app's own TLS: mbedTLS 3.6 (third_party/mbedtls, Apache-2.0) and a small HTTP client
 # (src/curlio.c). The Vita's own TLS fails on most sites today; the SDK's libcurl does not link with its
