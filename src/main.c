@@ -50,7 +50,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define RESUME_FILE   DATA_DIR "/resume.txt"
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v0.2.9"
+#define APP_VERSION   "v0.2.10"
 #endif
 #define MAX_SOURCES   64
 #define MAX_GROUPS    1024
