@@ -218,6 +218,9 @@ typedef struct {
     uint64_t cpu_t0, cpu_prev[4], idle_prev[4];
     int sysinfo_logged;
     volatile uint64_t w_busy_us;        /* video thread: HD decoder busy, waiting to give the unit again */
+    uint32_t hd_fed, hd_out;            /* HD decoder: units it took in / pictures it gave out (since it was opened) */
+    uint32_t hd_resyncs;                /* ... times the count was put right (units that give no picture) */
+    uint32_t units_in;                  /* video units that reached the video thread */
     int64_t late_sum_us;
     volatile uint32_t ui_calls;         /* tsp_frame calls (UI frame rate) */
     int64_t shown_pts;
@@ -664,6 +667,7 @@ static int decoder_core_open_internal(Tsp *t, int nref)
     }
     if (r < 0) return r;
     t->dec_open = 1;
+    t->hd_fed = t->hd_out = 0;
     t->nref = nref;
     return 0;
 }
@@ -735,6 +739,7 @@ static int decoder_core_open(Tsp *t, int nref, int nmin)
     }
     if (r < 0) return r;
     t->dec_open = 1;
+    t->hd_fed = t->hd_out = 0;
     t->nref = nref;
     return 0;
 }
@@ -1024,6 +1029,7 @@ static void take_picture(Tsp *t, SceAvcdecPicture *p, int si)
         sl->state = SLOT_READY;
         sceKernelUnlockMutex(t->lock, 1);
         t->st.decoded++;
+        t->hd_out++;
         if (!t->err_set) t->st.state = TSP_PLAYING;
     }
 }
@@ -1032,38 +1038,111 @@ static void take_picture(Tsp *t, SceAvcdecPicture *p, int si)
  * the next ones came out later and later, and the screen waited with later pictures in every slot while
  * the earlier one was still in the decoder (720p through the HD decoder: 4-10 pictures/s, pictures shown
  * 0.5-2 s after decoding). Take out what is ready while there is a free slot. */
+static void slot_nap(Tsp *t);
+
+/* HD decoder: take one ready picture out into slot si. Returns 1 if one came, 0 if none is ready, -1 if the
+ * decoder cannot be called this way. */
+static int hd_get_one(Tsp *t, int si)
+{
+    SceAvcdecPicture pic, *pp[1] = { &pic }, wp, *wpp[1] = { &wp };
+    SceAvcdecArrayPicture arr, work;
+    memset(&pic, 0, sizeof pic);
+    pic.size = sizeof pic;
+    pic.frame.pixelType = SCE_AVCDEC_PIXELFORMAT_RGBA8888;
+    pic.frame.framePitch = (uint32_t)t->dw;
+    pic.frame.frameWidth = (uint32_t)t->dw;
+    pic.frame.frameHeight = (uint32_t)t->dh;
+    pic.frame.opt.rgba.alpha = 0xFF;
+    pic.frame.pPicture[0] = t->slots[si].data;
+    memset(&arr, 0, sizeof arr);
+    arr.numOfElm = 1;
+    arr.pPicture = pp;
+    memset(&wp, 0, sizeof wp);
+    memset(&work, 0, sizeof work);
+    work.pPicture = wpp;
+    int r = sceAvcdecDecodeGetPictureWithWorkPictureInternal(&t->ctrl, &arr, &work, &t->pic_state);
+    if (r < 0) return -1;
+    if (arr.numOfOutput == 0) return 0;
+    take_picture(t, &pic, si);
+    return 1;
+}
+
 static void drain_internal(Tsp *t)
 {
     if (!t->internal || t->no_drain) return;
     for (int k = 0; k < 4; k++) {
         int si = take_free_slot(t);
         if (si < 0) return;
-        SceAvcdecPicture pic, *pp[1] = { &pic }, wp, *wpp[1] = { &wp };
-        SceAvcdecArrayPicture arr, work;
-        memset(&pic, 0, sizeof pic);
-        pic.size = sizeof pic;
-        pic.frame.pixelType = SCE_AVCDEC_PIXELFORMAT_RGBA8888;
-        pic.frame.framePitch = (uint32_t)t->dw;
-        pic.frame.frameWidth = (uint32_t)t->dw;
-        pic.frame.frameHeight = (uint32_t)t->dh;
-        pic.frame.opt.rgba.alpha = 0xFF;
-        pic.frame.pPicture[0] = t->slots[si].data;
-        memset(&arr, 0, sizeof arr);
-        arr.numOfElm = 1;
-        arr.pPicture = pp;
-        memset(&wp, 0, sizeof wp);
-        memset(&work, 0, sizeof work);
-        work.pPicture = wpp;
-        int r = sceAvcdecDecodeGetPictureWithWorkPictureInternal(&t->ctrl, &arr, &work, &t->pic_state);
-        if (r < 0) {                                         /* not callable this way: stop trying */
-            plog("tsp: HD decoder: taking out a second picture -> 0x%08X; not done again", (unsigned)r);
+        int g = hd_get_one(t, si);
+        if (g < 0) {                                         /* not callable this way: stop trying */
+            plog("tsp: HD decoder: taking out a second picture failed; not done again");
             t->no_drain = 1;
             return;
         }
-        if (arr.numOfOutput == 0) return;
-        take_picture(t, &pic, si);
+        if (g == 0) return;
         t->drained++;
     }
+}
+
+/* The HD decoder takes units in far ahead of the pictures it gives out: about 110 at 1080p30 from the memory
+ * card, 200 at 1080p50 (measured on the device from 0.2.8's log). Those were never taken out at the end, so
+ * the last 3-4 s of a file froze while the sound went on; while playing they were seconds of video nobody
+ * could see in our queue. Keep at most HD_AHEAD units inside: take a picture out first (waiting for a slot
+ * the screen frees, as for any picture). */
+#define HD_AHEAD 12
+static void hd_keep_close(Tsp *t)
+{
+    if (!t->internal || t->no_drain || t->cur_interlaced) return;   /* (fields: two units may make one picture) */
+    int empty = 0;
+    while ((int32_t)(t->hd_fed - t->hd_out) >= HD_AHEAD && !stopping(t)) {
+        int si = take_free_slot(t);
+        if (si < 0) { slot_nap(t); continue; }
+        int g = hd_get_one(t, si);
+        if (g < 0) { t->no_drain = 1; plog("tsp: HD decoder: taking out a picture failed; not kept close"); return; }
+        if (g > 0) { t->drained++; empty = 0; continue; }
+        if (++empty > 60) {                                  /* ~0.1 s with nothing ready: units that give no picture */
+            if (t->hd_resyncs++ < 3) plog("tsp: HD decoder holds %d units but gives no picture; counting again", (int)(t->hd_fed - t->hd_out));
+            t->hd_fed = t->hd_out + HD_AHEAD / 2;
+            return;
+        }
+        uint64_t b0 = now_us();
+        sceKernelDelayThread(1500);
+        t->w_busy_us += now_us() - b0;
+    }
+}
+
+/* End of the stream: take out what is still in the decoder (0.2.8 and before left up to 4 s of a file in
+ * it). The HD decoder gives its last pictures when it gets empty units (as it does when its buffer is full). */
+static void decoder_flush(Tsp *t)
+{
+    if (!t->dec_open || stopping(t)) return;
+    int got = 0, empty = 0;
+    uint64_t t0 = now_us();
+    while (!stopping(t) && empty < 8 && now_us() - t0 < 3000000ULL) {
+        int si = take_free_slot(t);
+        if (si < 0) { slot_nap(t); continue; }
+        if (t->internal) {
+            int g = t->no_drain ? 0 : hd_get_one(t, si);
+            if (g < 0) break;
+            if (g > 0) { got++; empty = 0; continue; }
+            SceAvcdecAu au;                                  /* nothing ready: an empty unit pushes the rest out */
+            memset(&au, 0, sizeof au);
+            au.dts.upper = au.dts.lower = NO_TS;
+            au.pts.upper = au.pts.lower = NO_TS;
+            int ra = sceAvcdecDecodeAuInternal(&t->ctrl, &au, &t->pic_state);
+            if (ra < 0 && (unsigned)ra != 0x8062000Du && (unsigned)ra != 0x8062000Au) { if (!got) plog("tsp: HD decoder end: empty unit -> 0x%08X", (unsigned)ra); break; }
+            g = t->no_drain ? 0 : hd_get_one(t, si);
+            if (g > 0) { got++; empty = 0; continue; }
+            empty++;
+            sceKernelDelayThread(2000);
+        } else {
+            uint32_t before = t->st.decoded;                 /* public decoder: an empty unit, at most a few times */
+            int r = decode_au(t, si, -1, 0, -1, 0);
+            if (r < 0 || t->st.decoded == before) break;
+            got++;
+        }
+    }
+    plog("tsp: end of the stream: %d more picture%s taken out of the decoder", got, got == 1 ? "" : "s");
 }
 
 /* Copies the access unit (optionally behind SPS/PPS) into the ES buffer. Returns its size, 0 if too big. */
@@ -1204,6 +1283,8 @@ static void video_packet(Tsp *t, Pkt *p)
     if (p->frame_us) t->frame_us = p->frame_us;
 
     int start_ok = flags & (TS_FLAG_KEYFRAME | TS_FLAG_INTRA);   /* IDR, recovery point or plain I picture */
+    if (t->units_in++ == 0)                                 /* (where a start stopped, if it ever does: one crash in 0.2.7) */
+        plog("tsp: first video unit: %u bytes, %dx%d, %s", (unsigned)len, i->width, i->height, start_ok ? "keyframe" : "no keyframe yet");
     if (!t->dec_open) {
         if (!start_ok || i->width == 0 || i->sps_len == 0 || i->pps_len == 0) {
             if (!t->err_set) t->st.state = TSP_WAIT_KEY;
@@ -1295,6 +1376,7 @@ static void video_packet(Tsp *t, Pkt *p)
     size_t n = build_es(t, i, data, len, with_params);
     if (!n) { t->st.dropped++; t->need_key = 1; return; }
 
+    hd_keep_close(t);
     int s;
     while ((s = take_free_slot(t)) < 0) {                /* wait for the UI to show a picture */
         if (stopping(t)) return;
@@ -1313,6 +1395,13 @@ static void video_packet(Tsp *t, Pkt *p)
             uint64_t w0 = now_us();
             while ((s = take_free_slot(t)) < 0 && !stopping(t)) slot_nap(t);
             if (stopping(t)) return;
+            /* a picture that is ready makes room in the decoder (a big keyframe of 300-430 KB stayed "full" for
+             * half a second on the device, then the decoder was restarted); then a slot again for the unit */
+            if (t->internal && !t->no_drain && hd_get_one(t, s) > 0) {
+                t->drained++;
+                while ((s = take_free_slot(t)) < 0 && !stopping(t)) slot_nap(t);
+                if (stopping(t)) return;
+            }
             /* 0.2.7: 1.5 ms instead of 5 ms (at 1080p50 a picture has 20 ms; 5 ms naps lost a quarter of it) */
             if (now_us() - w0 < 1000) { uint64_t b0 = now_us(); sceKernelDelayThread(1500); t->w_busy_us += now_us() - b0; }
             r = decode_au(t, s, -1, n, pts, 1);
@@ -1326,6 +1415,7 @@ static void video_packet(Tsp *t, Pkt *p)
         s = 0;
     }
 
+    if (r >= 0) t->hd_fed++;
     if (t->internal && (r >= 0 || (unsigned)r == 0x80620003u)) drain_internal(t);
     /* An extra picture slot in memory the decoder does not take: back to the slots of the plan. */
     if (r < 0 && is_mem_error(r) && s >= t->base_slots && t->nslots > t->base_slots) {
@@ -2166,6 +2256,7 @@ static void read_http(Tsp *t, uint8_t *buf)
 /* The first bytes tell the container: Matroska (EBML), FLV or MPEG-TS. */
 static void dmx_feed(Tsp *t, const uint8_t *b, size_t n)
 {
+    if (t->net_err[0] && n) t->net_err[0] = 0;              /* data comes: an earlier failure is not the story any more */
     if (!t->mkv && !t->flv && t->st.bytes == n) {
         TsSink sink = { on_video, on_audio, t };
         if (mkv_probe(b, n)) {
@@ -2934,7 +3025,7 @@ static int video_main(SceSize args, void *argp)
         if (t->reader_done) stats_tick(t);
         Pkt *p = q_pop(t, &t->vq);
         if (!p) {
-            if (t->reader_done) break;
+            if (t->reader_done) { decoder_flush(t); break; }
             uint64_t w0 = now_us();
             sceKernelDelayThread(2000);
             t->w_data_us += now_us() - w0;
@@ -3062,7 +3153,7 @@ static void hold_check(Tsp *t, int64_t sp, uint64_t now)
     if (t->ahold) {
         uint64_t held = now - t->ahold_since;
         int stalled = !t->last_show_us || now - t->last_show_us > 1000000ULL;   /* no new picture for a second */
-        if (!ok || behind <= 20 || behind > 15000 || held > HOLD_MAX_US || t->paused || stalled || ending || t->reopen_pending) {
+        if (!ok || behind <= 20 || behind > 8000 || held > HOLD_MAX_US || t->paused || stalled || ending || t->reopen_pending) {
             t->ahold = 0;
             t->clock_on = 0;
             t->late_ema_us = 0;
@@ -3080,7 +3171,7 @@ static void hold_check(Tsp *t, int64_t sp, uint64_t now)
      * or a burst that the HD decoder took in at once and gives out slowly: the case seen on the device). */
     int queued_ms = (int)((int64_t)t->vq.count * (t->frame_us ? (int)t->frame_us : 40000) / 1000);
     if (!ok || !flowing || ending || t->reopen_pending || t->need_key ||
-        behind <= HOLD_ENTER_MS || behind > 15000 || queued_ms >= 1000 || t->catchup || t->buffering ||
+        behind <= HOLD_ENTER_MS || behind > 8000 || queued_ms >= 1000 || t->catchup || t->buffering ||
         t->audio_delay_us || now < t->grace_until) {
         t->behind_n = 0;
         return;
@@ -3388,6 +3479,7 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     t->vq.max_bytes = VQ_BYTES;
     t->aq.max_count = AQ_PKTS;
     t->aq.max_bytes = AQ_BYTES;
+    if (g_vc.lock < 0) g_vc.lock = sceKernelCreateMutex("tsp_vcache", 0, 0, NULL);   /* before any reader thread uses it */
     t->lock = sceKernelCreateMutex("tsp_lock", 0, 0, NULL);
     t->qlock = sceKernelCreateMutex("tsp_qlock", 0, 0, NULL);
     TsSink sink = { on_video, on_audio, t };

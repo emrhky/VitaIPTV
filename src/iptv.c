@@ -113,6 +113,8 @@ static void json_value(const char *buf, const char *key, char *out, size_t outsz
     out[o] = 0;
 }
 
+int iptv_headers_dropped;
+
 int m3u_parse(const char *text, size_t len, ChannelList *out)
 {
     Channel pending;
@@ -186,7 +188,7 @@ int m3u_parse(const char *text, size_t len, ChannelList *out)
         if (!c.name[0]) copy_trunc(c.name, sizeof c.name, url, strlen(url));
         memcpy(c.url, url, n + 1);
         if ((ua[0] || ref[0]) && !strchr(url, '|'))          /* the headers ride along with the link */
-            url_join_headers(url, ref, ua, c.url, sizeof c.url);
+            if (url_join_headers(url, ref, ua, c.url, sizeof c.url) < 0) iptv_headers_dropped++;   /* too long: played without them */
         ua[0] = ref[0] = 0;
         if (iptv_is_film_url(c.url)) c.kind = CH_FILM;      /* films in M3U lists: pause, jumps, resume */
 

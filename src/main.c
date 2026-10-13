@@ -49,7 +49,9 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define SETTINGS_FILE DATA_DIR "/settings.txt"
 #define RESUME_FILE   DATA_DIR "/resume.txt"
 #define MAX_RESUME    200
-#define APP_VERSION   "v0.2.8"
+#ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
+#define APP_VERSION   "v0.2.9"
+#endif
 #define MAX_SOURCES   64
 #define MAX_GROUPS    1024
 #define MAX_DOWNLOAD  (24 * 1024 * 1024)
@@ -618,7 +620,9 @@ static int load_list(const Source *s, ChannelList *out, char *err, size_t errsz,
         out->items = malloc(sizeof c);
         if (out->items) { out->items[0] = c; out->count = out->cap = 1; }
     } else {
+        iptv_headers_dropped = 0;
         m3u_parse(m.buf, m.len, out);
+        if (iptv_headers_dropped) plog("list: %d links too long for their User-Agent/Referer (they play without them)", iptv_headers_dropped);
     }
     free(m.buf);
     if (out->count == 0) { snprintf(err, errsz, "No channels found in %s", s->name); return -1; }
@@ -967,6 +971,7 @@ static void activate_item(int vi)
 static void draw_video_texture(vita2d_texture *t, int w, int h, int fields)
 {
     float sx = 960.0f / w, sy = 544.0f / h, s = sx < sy ? sx : sy;
+    vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 255));   /* black around the picture (the menus' colour showed; OLED) */
     if (fields) {                                    /* two fields one above the other: the top one, stretched */
         vita2d_draw_texture_part_scale(t, (960.0f - w * s) / 2, (544.0f - h * s) / 2, 0, 0, w, h / 2, s, s * 2);
         return;
@@ -1009,6 +1014,11 @@ static void draw_tsp_screen(int osd)
         return;
     }
     if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields); got_frame = 1; }
+    {                                                    /* (where a start stopped, if it ever does: one crash in 0.2.7) */
+        static int last_state = -1;
+        int sv = st ? st->state : -1;
+        if (sv != last_state) { plog("player: state %d -> %d", last_state, sv); last_state = sv; }
+    }
 
     ScrPlayer sp;
     char info[48] = "";
@@ -1894,7 +1904,8 @@ int main(void)
                         if (chans.items) {
                             memset(chans.items, 0, sizeof(Channel));
                             snprintf(chans.items[0].name, IPTV_NAME_MAX, "%s", s->name);
-                            url_join_headers(s->url, s->user, s->pass, chans.items[0].url, IPTV_URL_MAX);   /* Referer / User-Agent */
+                            if (url_join_headers(s->url, s->user, s->pass, chans.items[0].url, IPTV_URL_MAX) < 0)   /* Referer / User-Agent */
+                                plog("list: the link is too long for its User-Agent/Referer (it plays without them)");
                             if (iptv_is_film_url(s->url)) chans.items[0].kind = CH_FILM;
                             chans.count = chans.cap = 1;
                             free(vis);

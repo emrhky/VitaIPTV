@@ -57,6 +57,7 @@ void channel_list_free(ChannelList *l);
 int  iptv_is_film_url(const char *url);
 /* Parses M3U/M3U8 text (extended or plain list of links). Returns channel count. */
 int  m3u_parse(const char *text, size_t len, ChannelList *out);
+extern int iptv_headers_dropped;     /* links whose User-Agent/Referer did not fit (they play without them) */
 
 /* True if the text is an HLS media/master playlist (a single stream, not a channel list). */
 int  m3u_is_hls(const char *text);
