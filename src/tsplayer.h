@@ -41,6 +41,8 @@ typedef struct {
     int hls_h, hls_lower;               /* HLS: height of the variant playing, a smaller one exists */
     unsigned net_kbs, need_kbs, seg_kbs;  /* network (last 5 s), what the stream needs, the last HLS segment's speed */
     int fps10;                          /* pictures per second x10 */
+    volatile int decoder_slow;          /* 1080p: the decoder cannot keep up with the stream's picture rate */
+    unsigned holds;                     /* live: times the sound waited for a picture that came late */
     volatile int buffering;             /* film: waiting for the network (shown as "Buffering...") */
     int buf_pct;                        /* ... how far (0-100) */
     unsigned rebuffers;                 /* how many times */

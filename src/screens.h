@@ -65,6 +65,9 @@ typedef struct {
     int backdrop;                       /* no picture yet: draw the waiting background */
     /* films: time line (pos/dur in ms; seek_ms >= 0 = a jump being chosen) and the pause sign */
     int film, pos_ms, dur_ms, seek_ms, paused;
+    const char *stats3;                 /* third line (table mode) */
+    int stats_table;                    /* stats1-3 are rows of cells "label\vvalue" separated by tabs, in fixed columns */
+    const char *stats_note;             /* table mode: a plain line above the table (may be NULL) */
 } ScrPlayer;
 void scr_player(const ScrPlayer *p);
 

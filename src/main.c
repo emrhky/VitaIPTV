@@ -49,7 +49,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define SETTINGS_FILE DATA_DIR "/settings.txt"
 #define RESUME_FILE   DATA_DIR "/resume.txt"
 #define MAX_RESUME    200
-#define APP_VERSION   "v0.2.6"
+#define APP_VERSION   "v0.2.7"
 #define MAX_SOURCES   64
 #define MAX_GROUPS    1024
 #define MAX_DOWNLOAD  (24 * 1024 * 1024)
@@ -1009,7 +1009,7 @@ static void draw_tsp_screen(int osd)
     if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields); got_frame = 1; }
 
     ScrPlayer sp;
-    char info[48] = "", s1[200] = "", s2[200] = "";
+    char info[48] = "";
     memset(&sp, 0, sizeof sp);
     sp.backdrop = !tx;
     sp.name = c->name;
@@ -1097,29 +1097,55 @@ static void draw_tsp_screen(int osd)
         if (st->audio_msg[0] && !show_info && st->state == TSP_PLAYING && osd)
             sp.stats1 = settings.proxy[0] ? T("No sound: press Square to play through the server") : T_msg(st->audio_msg);
         if (show_info) {
-            int av;
-            char kr[24];
-            fmt_rate(kr, sizeof kr, st->audio_rate);
-            char fr[16] = "";                    /* the stream's picture rate: 25, 50 or 60 */
-            if (st->fps10 > 0) snprintf(fr, sizeof fr, " %d fps", (st->fps10 + 5) / 10);
-            snprintf(s1, sizeof s1, T("Video %dx%d%s   shown %u   dropped %u   late %u   damaged %u   errors %u   %u KB"),
-                     st->width, st->height, fr, st->shown, st->dropped, st->late, st->damaged, st->errors, (unsigned)(st->bytes / 1024));
-            if (st->audio_msg[0]) snprintf(s2, sizeof s2, "%s", T_msg(st->audio_msg));
-            else if (!st->audio_frames) snprintf(s2, sizeof s2, "%s", T("Audio: waiting"));
-            else {
-                char codec[8];                  /* AAC, or MP1/MP2/MP3 decoded in software */
-                if (st->audio_mpeg) snprintf(codec, sizeof codec, "MP%d", st->audio_mpeg);
-                else snprintf(codec, sizeof codec, "AAC");
-                if (tsp_av_offset(&av)) snprintf(s2, sizeof s2, T("Audio %s %s %s   A/V %+d ms"), codec, kr, st->audio_ch == 1 ? "mono" : "stereo", av);
-                else snprintf(s2, sizeof s2, T("Audio %s %s %s"), codec, kr, st->audio_ch == 1 ? "mono" : "stereo");
+            /* Three rows of fixed columns (label left, value right-aligned at the column's end), new values
+             * twice a second: 0.2.6 wrote one long line that moved left and right with every number and
+             * could not be read. Cells are "label\vvalue" separated by tabs (screens.c draws them). */
+            static char rows[3][200];
+            static unsigned rows_ms, fps_ms;
+            static uint32_t fps_shown;
+            static int shown_fps10 = -1;
+            unsigned nm = now_ms();
+            if (nm - fps_ms >= 1000 || st->shown < fps_shown) {       /* pictures shown in the last second */
+                if (fps_ms && st->shown >= fps_shown && nm - fps_ms < 3000)
+                    shown_fps10 = (int)((uint64_t)(st->shown - fps_shown) * 10000 / (nm - fps_ms));
+                else shown_fps10 = -1;
+                fps_ms = nm;
+                fps_shown = st->shown;
             }
-            {                                    /* the line against what the stream needs */
-                size_t k = strlen(s2);
-                if (st->need_kbs && st->net_kbs) snprintf(s2 + k, sizeof s2 - k, T("   network %u KB/s, the stream needs %u KB/s"), st->net_kbs, st->need_kbs);
-                else if (st->net_kbs) snprintf(s2 + k, sizeof s2 - k, T("   network %u KB/s"), st->net_kbs);
+            if (nm - rows_ms >= 500 || !rows[0][0]) {
+                rows_ms = nm;
+                char fr[32], kr[24], au[64], avs[24], net[24], need[24], got[24];
+                int sfps = st->fps10 > 0 ? (st->fps10 + 5) / 10 : 0;
+                if (shown_fps10 >= 0 && sfps) snprintf(fr, sizeof fr, "%d / %d fps", (shown_fps10 + 5) / 10, sfps);
+                else if (sfps) snprintf(fr, sizeof fr, "-- / %d fps", sfps);
+                else snprintf(fr, sizeof fr, "--");
+                snprintf(rows[0], sizeof rows[0], "%s\v%dx%d\t%s\v%s\t%s\v%u\t%s\v%u", T("Video"), st->width, st->height,
+                         T("Frame rate"), fr, T("Shown"), st->shown, T("Dropped"), st->dropped);
+                fmt_rate(kr, sizeof kr, st->audio_rate);
+                int av;
+                if (st->audio_msg[0]) snprintf(au, sizeof au, "%s", T("off"));
+                else if (!st->audio_frames) snprintf(au, sizeof au, "%s", T("waiting"));
+                else if (st->audio_mpeg) snprintf(au, sizeof au, "MP%d %s %s", st->audio_mpeg, kr, st->audio_ch == 1 ? "mono" : "stereo");
+                else snprintf(au, sizeof au, "AAC %s %s", kr, st->audio_ch == 1 ? "mono" : "stereo");
+                if (!st->audio_msg[0] && st->audio_frames && tsp_av_offset(&av)) {
+                    av = av >= 0 ? (av + 5) / 10 * 10 : -((-av + 5) / 10 * 10);   /* to 10 ms: the last digit only flickered */
+                    snprintf(avs, sizeof avs, "%+d ms", av);
+                } else snprintf(avs, sizeof avs, "--");
+                snprintf(rows[1], sizeof rows[1], "%s\v%s\t%s\v%s\t%s\v%u\t%s\v%u / %u", T("Audio"), au, "A/V", avs,
+                         T("Waits"), st->rebuffers + st->holds, T("Damaged / errors"), st->damaged, st->errors);
+                if (st->net_kbs) snprintf(net, sizeof net, "%u KB/s", st->net_kbs); else snprintf(net, sizeof net, "--");
+                if (st->need_kbs) snprintf(need, sizeof need, "%u KB/s", st->need_kbs); else snprintf(need, sizeof need, "--");
+                if (st->bytes >= 10u * 1024 * 1024) snprintf(got, sizeof got, "%u MB", (unsigned)(st->bytes >> 20));
+                else snprintf(got, sizeof got, "%u KB", (unsigned)(st->bytes >> 10));
+                snprintf(rows[2], sizeof rows[2], "%s\v%s\t%s\v%s\t%s\v%s\t%s\v%u", T("Network"), net, T("Needed"), need,
+                         T("Received"), got, T("Not decoded"), (unsigned)st->skipped);
             }
-            sp.stats1 = s1;
-            sp.stats2 = s2;
+            if (nm < film_note_until) sp.stats_note = film_note;  /* a note stays readable above the table */
+            else if (st->audio_msg[0]) sp.stats_note = T_msg(st->audio_msg);   /* why there is no sound */
+            sp.stats1 = rows[0];
+            sp.stats2 = rows[1];
+            sp.stats3 = rows[2];
+            sp.stats_table = 1;
             sp.osd = 1;
         }
     }
@@ -2110,6 +2136,16 @@ int main(void)
                         film_note_until = now_ms() + 4000;
                         osd_until_us = now_ms() + 4000;
                     }
+                }
+                /* 1080p at 50/60 pictures a second that the decoder cannot keep up with: 720p plays them all */
+                if (!film && !via_proxy && fs && fs->decoder_slow && hd_mode && !fs->slow_network) {
+                    hd_mode = 0;
+                    plog("player: the decoder cannot keep up with this 1080p (%d fps): HLS 720p", (fs->fps10 + 5) / 10);
+                    snprintf(film_note, sizeof film_note, T("The Vita cannot decode this 1080p at %d fps: switched to 720p"), (fs->fps10 + 5) / 10);
+                    film_note_until = now_ms() + 6000;
+                    osd_until_us = now_ms() + 6000;
+                    play_channel_ex(play_vis, 0);
+                    fs = tsp_status();
                 }
                 /* live TV that keeps waiting for data: the line is too slow for this picture size, so take the
                  * next smaller one the channel offers (the button goes back) */
