@@ -89,6 +89,16 @@ int main(int argc, char **argv)
                      "Video 1280x720   shown 1624   dropped 6   late 0   damaged 0   errors 0   16864 KB",
                      "Audio AAC 48000 Hz 2 ch   A/V +12 ms", NULL, NULL, 0, 0, 0 };
     preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pl); shot("5_player_osd");
+    {   /* the info table (Triangle) as main.c fills it */
+        static char r0[200], r1[200], r2[200];
+        snprintf(r0, sizeof r0, "%s\v1920x1080\t%s\v43 / 50 fps\t%s\v12345\t%s\v678", T("Video"), T("Frame rate"), T("Shown"), T("Dropped"));
+        snprintf(r1, sizeof r1, "%s\vAAC 48 kHz stereo\tA/V\v-20 ms\t%s\v2\t%s\v0 / 0", T("Audio"), T("Waits"), T("Damaged / errors"));
+        snprintf(r2, sizeof r2, "%s\v312 KB/s\t%s\v340 KB/s\t%s\v48 MB\t%s\v0", T("Network"), T("Needed"), T("Received"), T("Not decoded"));
+        ScrPlayer pt = pl;
+        pt.stats1 = r0; pt.stats2 = r1; pt.stats3 = r2; pt.stats_table = 1;
+        pt.stats_note = T("The Vita cannot decode this 1080p at %d fps: switched to 720p");
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pt); shot("5d_info_table");
+    }
 
     ScrPlayer pc = { "Kanal D HD", "Ulusal", NULL, 1, hp, 4, NULL, NULL, "Connecting...", "Waiting for the stream", UI_TEXT, 1, 300, 1 };
     preview_clear(0); scr_player(&pc); shot("6_connecting");

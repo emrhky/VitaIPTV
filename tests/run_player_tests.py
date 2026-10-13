@@ -2,8 +2,10 @@
 """Integration test for src/tsplayer.c with a fake decoder (needs gcc, ffmpeg)."""
 import os, random, subprocess, sys, tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-T = tempfile.mkdtemp(prefix="tsp_")
+T = os.environ.get("TSP_DIR") or tempfile.mkdtemp(prefix="tsp_")   # TSP_DIR: reuse the test files of an earlier run
+os.makedirs(T, exist_ok=True)
 def sh(c):
+    if os.environ.get("TSP_DIR") and c.startswith("ffmpeg") and os.path.exists(c.split()[-1]): return None
     r = subprocess.run(c, shell=True, capture_output=True, text=True)
     if r.returncode: print(r.stdout, r.stderr[-3000:]); sys.exit(1)
     return r
@@ -116,6 +118,19 @@ def shift_audio_n(src, dst, seconds, dur):
     keyed.sort(key=lambda e: (e[0], e[1]))
     open(dst, "wb").write(b"".join(x for _, _, x in keyed))
 shift_audio_n(f"{T}/a12.ts", f"{T}/aahead.ts", -3, 12)
+# HLS 1080p as on the device: 10 s segments, the sound 8 s ahead of the picture in the stream, 30 s
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 30 "
+   f"-c:v libx264 -preset ultrafast -bf 2 -g 50 -b:v 2000k -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/a30hd.ts")
+shift_audio_n(f"{T}/a30hd.ts", f"{T}/a30ahead.ts", -8, 30)
+os.makedirs(f"{T}/hls4", exist_ok=True)
+ah4 = open(f"{T}/a30ahead.ts", "rb").read()
+npk4 = len(ah4) // 188
+pl4 = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:10\n#EXT-X-MEDIA-SEQUENCE:0\n"
+for i in range(3):
+    a, b = npk4 * i // 3, npk4 * (i + 1) // 3
+    open(f"{T}/hls4/t{i}.ts", "wb").write(ah4[a * 188:b * 188])
+    pl4 += f"#EXTINF:10.0,\nt{i}.ts\n"
+open(f"{T}/hls4/t.m3u8", "w").write(pl4 + "#EXT-X-ENDLIST\n")
 # the same as HLS: 2 s segments cut out of that file (the sound stays 3 s ahead inside them)
 os.makedirs(f"{T}/hls2", exist_ok=True)
 ah = open(f"{T}/aahead.ts", "rb").read()
@@ -126,6 +141,16 @@ for i in range(6):
     open(f"{T}/hls2/s{i}.ts", "wb").write(ah[a * 188:b * 188])
     pl += f"#EXTINF:2.0,\ns{i}.ts\n"
 open(f"{T}/hls2/slow.m3u8", "w").write(pl + "#EXT-X-ENDLIST\n")
+# HLS with a 1080p variant whose segments stop answering after one (404) and a 720p variant that plays
+os.makedirs(f"{T}/hls3", exist_ok=True)
+for i in range(6):
+    open(f"{T}/hls3/s{i}.ts", "wb").write(open(f"{T}/hls2/s{i}.ts", "rb").read())
+    if i == 3: open(f"{T}/hls3/h{i}.ts", "wb").write(open(f"{T}/hls2/s{i}.ts", "rb").read())   # live starts at #3
+open(f"{T}/hls3/master.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2200000,RESOLUTION=1920x1080\nhd.m3u8\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=1050000,RESOLUTION=1280x720\nsd.m3u8\n")
+for name, pre in (("hd", "h"), ("sd", "s")):
+    open(f"{T}/hls3/{name}.m3u8", "w").write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n" +
+        "".join(f"#EXTINF:2.0,\n{pre}{i}.ts\n" for i in range(6)))
 for name, ac in (("fast60", "-c:a aac -ac 2"), ("fast60_ac3", "-c:a ac3")):
     sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=60 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 8 "
        f"-c:v libx264 -preset ultrafast -bf 2 -x264-params b-pyramid=0 -g 60 -pix_fmt yuv420p {ac} -f mpegts {T}/{name}.ts")
@@ -133,7 +158,7 @@ M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL -I{ROOT}/src -I{M} "
    f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c -lm -o {T}/test_tsplayer")
 r = subprocess.run(f"{T}/test_tsplayer {T}/s720.ts {T}/s1080.ts {T}/hevc.ts {T}/midgop.ts {T}/dropped.ts "
-                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2",
+                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4",
                    shell=True, capture_output=True, text=True)
 print(r.stdout); print(r.stderr[-4000:])
 sys.exit(r.returncode)

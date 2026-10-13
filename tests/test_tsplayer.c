@@ -35,7 +35,9 @@ static int lib_open, dec_open, sps_seen, reject_pts, npend, need_refs, created_r
 static int lib_l31, wedge_mode, wedged, need_two, two_calls, gave_two;
 static int int_lib, unmaps_open;                           /* Internal decoder (see below) */
 static int64_t refused_pts = -2;
-static int64_t pend[8];
+static int64_t pend[256];
+static int int_cap = 8, int_out_us;          /* HD decoder: units it takes in before "full", least time between pictures */
+static double int_last_out;
 static uint32_t lib_w, lib_h;
 /* which memory the fake hardware accepts: bit 0 PHYCONT, bit 1 CDRAM, bit 2 MAIN_NC */
 static int fb_ok = 7, es_ok = 7, out_ok = 7;
@@ -169,7 +171,7 @@ int sceAvcdecDecodeAuInternal(SceAvcdecCtrl *d, SceAvcdecAu *au, SceInt32 *st)
     usleep(1500);
     if (n < 4 || b[0] || b[1] || !(b[2] == 1 || (b[2] == 0 && b[3] == 1))) return (int)0x8062000D;
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
-    if (npend >= 8) return (int)0x8062000A;                 /* ES buffer full */
+    if (npend >= int_cap) return (int)0x8062000A;           /* ES buffer full */
     static int full_at = -1;
     if (int_full_every && !int_full_left && (int_units + 1) % int_full_every == 0 && full_at != int_units) { int_full_left = 4; full_at = int_units; }
     if (int_full_left) { int_full_left--; int_full_hits++; if (int_full_left) return (int)0x8062000A; }   /* busy for a while */
@@ -187,6 +189,12 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
     arr->numOfOutput = 0;
     if (npend > int_max_pend) int_max_pend = npend;
     if (npend < int_delay + 1) return 0;                    /* two units of delay, as on the device */
+    if (int_out_us) {                                       /* a decoder only a little faster than the stream */
+        struct timespec q; clock_gettime(CLOCK_MONOTONIC, &q);
+        double nw = q.tv_sec + q.tv_nsec / 1e9;
+        if (nw - int_last_out < int_out_us / 1e6) return 0;
+        int_last_out = nw;
+    }
     if (int_hold_every && ++int_gets % int_hold_every == 0) return 0;   /* has one ready but keeps it this time */
     int64_t o;
     if (decode_order) {                                     /* the order they went in (B-pictures late), as seen on the device */
@@ -260,7 +268,7 @@ int sceAudioOutSetVolume(int port, int ch, int *vol) { (void)port; (void)ch; (vo
 /* ---- helpers ---- */
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 
-typedef struct { TspStatus st; int changes, nonmono, w, h, avn, av_bad, av_max, synced, av_last; double first_show, last_show, play_time; int64_t first_pts, last_pts; } Run;
+typedef struct { TspStatus st; int changes, nonmono, w, h, avn, av_bad, av_max, synced, av_last, avn2, av_bad2; double first_show, last_show, play_time, slow_at, wait_max, wait_t0; int64_t first_pts, last_pts; } Run;
 
 static Run play(const char *path, double max_s)
 {
@@ -284,10 +292,14 @@ static Run play(const char *path, double max_s)
                 r.avn++;
                 if (a > 60) r.av_bad++;
                 if (a > r.av_max) r.av_max = a;
+                if (now_s() - t0 > max_s / 2) { r.avn2++; if (a > 60) r.av_bad2++; }   /* the second half only */
             }
             if (tsp_status()->av_sync) r.synced = 1;
         }
         const TspStatus *s = tsp_status();
+        if (s->slow_network && !r.slow_at) r.slow_at = now_s() - t0;
+        if (s->buffering && !r.wait_t0) r.wait_t0 = now_s();
+        if (!s->buffering && r.wait_t0) { if (now_s() - r.wait_t0 > r.wait_max) r.wait_max = now_s() - r.wait_t0; r.wait_t0 = 0; }
         if (s->state == TSP_ERROR) break;
         if (s->state == TSP_ENDED) { if (!end_seen) end_seen = now_s(); else if (now_s() - end_seen > 0.6) break; }
         usleep(16000);                                       /* UI at ~60 Hz */
@@ -353,6 +365,9 @@ static VRun play_vod_url(const char *url, const char *file, int start_ms, double
             tsp_pause(0); pausing = 0;
         }
         const TspStatus *s = tsp_status();
+        if (s->slow_network && !r->slow_at) r->slow_at = now_s() - t0;
+        if (s->buffering && !r->wait_t0) r->wait_t0 = now_s();
+        if (!s->buffering && r->wait_t0) { if (now_s() - r->wait_t0 > r->wait_max) r->wait_max = now_s() - r->wait_t0; r->wait_t0 = 0; }
         if (s->state == TSP_ERROR) break;
         if (s->state == TSP_ENDED) { if (!end_seen) end_seen = now_s(); else if (now_s() - end_seen > 0.6) break; }
         usleep(16000);
@@ -413,7 +428,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r;
@@ -422,6 +437,8 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slow")) goto slow;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "live")) goto live;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls_slow")) goto hls_slow;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "standby")) goto standby;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "late")) goto late;
     r = play(argv[1], 10);
     show("720p30", &r);
     assert(r.st.state == TSP_ENDED && r.st.errors == 0);
@@ -545,6 +562,7 @@ slow:
         assert(r.st.state == TSP_ENDED && r.st.skipped > 20 && r.play_time > 6.5 && r.play_time < 11.0);   /* 13.5 s: slow motion */
         dec_sleep_us = 1500;
     }
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slow")) return 0;
     if (argc > 24) {                                         /* "AAC Main" 24 kHz (refused by the Vita decoder): played as LC */
         r = play(argv[24], 10);
         show("aac main", &r);
@@ -615,6 +633,7 @@ slow:
         assert(r.st.decoded >= 60 && !strcmp(mock_http_ua, "Mozilla/5.0 (Test)") && !strcmp(mock_http_referer, "https://site.example/a"));
         mock_http_reset();
     }
+standby:
     {   /* standby: the network goes away for 8 s (reconnects fail meanwhile), then comes back */
         extern int mock_net_state;
         mock_http_reset();
@@ -827,6 +846,56 @@ live:
         mock_http_reset();
         mock_http_file = NULL;
     }
+
+late:
+    if (argc > 30) {
+        /* As on the device (0.2.6, HLS 1080p, 10 s segments): the sound comes seconds ahead of the picture in
+         * the stream, and the HD decoder takes a burst of units in at once and gives the pictures out only a
+         * little faster than real time, in decode order. Our queue stays empty, so nothing looked late on our
+         * side; 0.2.6 showed the picture 3-4 s behind the sound and only one picture in three (the B-pictures
+         * came after a late P-picture and were dropped as "older"). Now the sound waits for the picture, the
+         * pictures are put in order whatever their lateness, and the two stay together. */
+        static char nm4[4][32], pth4[4][512];
+        const char *f4[] = { "t.m3u8", "t0.ts", "t1.ts", "t2.ts" };
+        long total4 = 0;
+        for (int i = 0; i < 4; i++) {
+            snprintf(nm4[i], 32, "%s", f4[i]); snprintf(pth4[i], 512, "%s/%s", argv[30], f4[i]);
+            struct stat q; assert(stat(pth4[i], &q) == 0); if (i) total4 += q.st_size;
+            mock_http_map[i][0] = nm4[i]; mock_http_map[i][1] = pth4[i];
+        }
+        mock_http_rate = total4 / 30 * 115 / 100;            /* the line a little faster than the stream */
+        tsp_set_options(1, 1080);
+        decode_order = 1; int_delay = 5; int_cap = 150; int_out_us = 30000;
+        r = play("http://example.invalid/hls4/t.m3u8", 34);
+        decode_order = 0; int_delay = 2; int_cap = 8; int_out_us = 0;
+        show("late video HD", &r);
+        printf("               sound waited %u time(s), buffering %u, skipped %u, in time in the 2nd half %d of %d, last %d ms\n",
+               r.st.holds, r.st.rebuffers, (unsigned)r.st.skipped, r.avn2 - r.av_bad2, r.avn2, r.av_last);
+        assert(r.st.holds >= 1 && r.st.skipped == 0 && r.nonmono == 0 && r.st.shown >= 400);
+        assert(r.st.shown * 4 >= r.st.decoded * 3);          /* 0.2.6: 269 of 599 */
+        assert(r.av_bad2 * 10 <= r.avn2 && abs(r.av_last) < 150);   /* 0.2.6: none in time, 3.8 s behind */
+        mock_http_rate = 0;
+        mock_http_reset();
+        tsp_set_options(0, 720);
+
+        /* HLS 1080p whose segments stop answering after one (HTTP 404/400 seen on the device; 720p played): 0.2.6
+         * waited 22-33 s each time and asked for 720p only after about 80 s. Now two failed segments in a row say so. */
+        static char nm[16][32], pth[16][512];
+        const char *files[] = { "master.m3u8", "hd.m3u8", "sd.m3u8", "h3.ts", "s0.ts", "s1.ts", "s2.ts", "s3.ts", "s4.ts", "s5.ts", "s5.ts" };
+        for (int i = 0; i < 11; i++) {
+            snprintf(nm[i], 32, "%s", files[i]);
+            snprintf(pth[i], 512, "%s/%s", argv[29], files[i]);
+            mock_http_map[i][0] = nm[i]; mock_http_map[i][1] = pth[i];
+        }
+        tsp_set_options(1, 1080);
+        r = play("http://example.invalid/hls3/master.m3u8", 14);
+        tsp_set_options(0, 720);
+        show("hls 1080p 404", &r);
+        printf("               slow network after %.1f s (the UI then takes 720p), longest wait %.1f s, state %d\n", r.slow_at, r.wait_max, r.st.state);
+        assert(r.st.slow_network && r.slow_at > 0 && r.slow_at < 8.0 && r.st.hls_h == 1080 && r.st.hls_lower && r.st.decoded > 0);
+        mock_http_reset();
+    }
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "late")) return 0;
 
 hls_slow:
     if (argc > 28) {

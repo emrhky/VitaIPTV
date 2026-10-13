@@ -32,6 +32,28 @@ int sceKernelWaitThreadEnd(SceUID t, int *stat, SceUInt *timeout)
 { (void)stat;(void)timeout; MT *m = &th[t - 0x40010000]; if (m->started) { pthread_join(m->th, NULL); m->started = 0; } return 0; }
 int sceKernelDeleteThread(SceUID t) { MT *m = &th[t - 0x40010000]; free(m->arg); m->used = 0; return 0; }
 int sceKernelDelayThread(SceUInt us) { usleep(us); return 0; }
+/* CPU line: thread run time from the PC's thread clocks, core idle time from /proc/stat */
+#include <time.h>
+#include <stdio.h>
+static pthread_t ui_th;
+static int ui_th_set;
+SceUID sceKernelGetThreadId(void) { ui_th = pthread_self(); ui_th_set = 1; return 0x4001FFFF; }
+int sceKernelGetThreadInfo(SceUID t, SceKernelThreadInfo *info)
+{ pthread_t p; clockid_t c; struct timespec ts;
+  if (t == 0x4001FFFF) { if (!ui_th_set) return -1; p = ui_th; }
+  else { if (t <= 0x40010000 || t >= 0x40010100) return -1; MT *m = &th[t - 0x40010000]; if (!m->started) return -1; p = m->th; }
+  if (pthread_getcpuclockid(p, &c) || clock_gettime(c, &ts)) return -1;
+  info->runClocks = (unsigned long long)ts.tv_sec * 1000000ull + (unsigned long long)ts.tv_nsec / 1000; return 0; }
+int sceKernelGetSystemInfo(SceKernelSystemInfo *info)
+{ FILE *f = fopen("/proc/stat", "r"); if (!f) return -1;
+  char line[256]; int k = 0; info->activeCpuMask = 0;
+  long hz = sysconf(_SC_CLK_TCK);
+  while (k < 4 && fgets(line, sizeof line, f)) {
+      int cpu; unsigned long long us, ni, sy, idle;
+      if (sscanf(line, "cpu%d %llu %llu %llu %llu", &cpu, &us, &ni, &sy, &idle) == 5) {
+          info->cpuInfo[k].idleClock = idle * 1000000ull / (unsigned long long)hz; info->activeCpuMask |= 1u << k; k++; }
+  }
+  fclose(f); return 0; }
 SceUID sceKernelCreateMutex(const char *n, SceUInt a, int c, void *o)
 { (void)n;(void)a;(void)c;(void)o; for (int i = 1; i < 256; i++) if (!mx_used[i]) { mx_used[i] = 1; pthread_mutex_init(&mx[i], NULL); return i; }
   return -1; }
