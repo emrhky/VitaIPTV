@@ -49,7 +49,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define SETTINGS_FILE DATA_DIR "/settings.txt"
 #define RESUME_FILE   DATA_DIR "/resume.txt"
 #define MAX_RESUME    200
-#define APP_VERSION   "v0.2.4"
+#define APP_VERSION   "v0.2.6"
 #define MAX_SOURCES   64
 #define MAX_GROUPS    1024
 #define MAX_DOWNLOAD  (24 * 1024 * 1024)
@@ -793,6 +793,7 @@ static char film_note[200];          /* a short message over the film (e.g. jump
 static unsigned film_note_until;            /* the end of the film was handled (its resume point dropped) */
 static int resume_ask, resume_vi, resume_pos, resume_sel;   /* "Continue from 12:34?" box on the channel screen */
 static int hd_mode;                  /* Square in the player: HLS channel switched to its 1080p variant (resets on channel change) */
+static int low_mode;                 /* the line was too slow even for 720p: a variant of at most 480 lines (resets too) */
 
 static int is_mp4_url(const char *u)
 {
@@ -813,7 +814,7 @@ static void play_channel_ex(int vi, int use_proxy)
     player_stop();
     probe_cancel();
     tsp_stop();
-    tsp_set_options(1, hd_mode ? 1080 : 720);               /* 1080p is always on since v0.2 */
+    tsp_set_options(1, hd_mode ? 1080 : low_mode ? 480 : 720);   /* 1080p is always on since v0.2 */
     via_proxy = 0;
     char purl[IPTV_URL_MAX * 3 + 64];
     int film = chans.items[vis[vi]].kind == CH_FILM;
@@ -849,6 +850,7 @@ static void play_channel(int vi)
     auto_proxy_tried = 0;
     film_dur_ms = 0;
     hd_mode = 0;                                             /* every channel opens in 720p */
+    low_mode = 0;
     play_channel_ex(vi, 0);
 }
 
@@ -1017,11 +1019,11 @@ static void draw_tsp_screen(int osd)
     const UiHint *base = settings.proxy[0] ? HINTS_VIDEO_SRV : HINTS_VIDEO;
     int nh = settings.proxy[0] ? NH(HINTS_VIDEO_SRV) : NH(HINTS_VIDEO);
     memcpy(hints, base, sizeof(UiHint) * (size_t)nh);
-    if (st && (st->hls_hd || hd_mode) && !via_proxy) {        /* Square: 1080p / 720p instead of the server */
+    if (st && (st->hls_hd || hd_mode || low_mode) && !via_proxy) {   /* Square: 1080p / 720p instead of the server */
         int k = 0;
         while (k < nh && hints[k].btn != UI_BTN_SQUARE) k++;
         if (k == nh) { memmove(&hints[2], &hints[1], sizeof(UiHint) * (size_t)(nh - 1)); k = 1; nh++; }
-        hints[k] = (UiHint){ UI_BTN_SQUARE, hd_mode ? "720p" : "1080p" };
+        hints[k] = (UiHint){ UI_BTN_SQUARE, hd_mode || low_mode ? "720p" : "1080p" };
     }
     if (film_playing()) {                                    /* films: pause, jumps, time line */
         memcpy(hints, HINTS_FILM, sizeof HINTS_FILM);
@@ -1038,9 +1040,11 @@ static void draw_tsp_screen(int osd)
         if (st->paused || seek_target >= 0) osd = 1;
     }
     if (now_ms() < film_note_until) { sp.stats1 = film_note; osd = 1; }   /* a short note (live TV too) */
-    static char buf_line[16];
+    static char buf_line[96];
     if (st && st->buffering && !st->paused) {                /* film: waiting for the network */
-        snprintf(buf_line, sizeof buf_line, "%d%%", st->buf_pct);
+        if (film_playing() && st->need_kbs && st->net_kbs && st->net_kbs < st->need_kbs * 9 / 10)   /* say why */
+            snprintf(buf_line, sizeof buf_line, T("%d%%   (network %u KB/s, the film needs %u KB/s)"), st->buf_pct, st->net_kbs, st->need_kbs);
+        else snprintf(buf_line, sizeof buf_line, "%d%%", st->buf_pct);
         sp.center_title = T("Buffering...");
         sp.center_line = buf_line;
         sp.center_col = UI_TEXT;
@@ -1096,8 +1100,10 @@ static void draw_tsp_screen(int osd)
             int av;
             char kr[24];
             fmt_rate(kr, sizeof kr, st->audio_rate);
-            snprintf(s1, sizeof s1, T("Video %dx%d   shown %u   dropped %u   late %u   damaged %u   errors %u   %u KB"),
-                     st->width, st->height, st->shown, st->dropped, st->late, st->damaged, st->errors, (unsigned)(st->bytes / 1024));
+            char fr[16] = "";                    /* the stream's picture rate: 25, 50 or 60 */
+            if (st->fps10 > 0) snprintf(fr, sizeof fr, " %d fps", (st->fps10 + 5) / 10);
+            snprintf(s1, sizeof s1, T("Video %dx%d%s   shown %u   dropped %u   late %u   damaged %u   errors %u   %u KB"),
+                     st->width, st->height, fr, st->shown, st->dropped, st->late, st->damaged, st->errors, (unsigned)(st->bytes / 1024));
             if (st->audio_msg[0]) snprintf(s2, sizeof s2, "%s", T_msg(st->audio_msg));
             else if (!st->audio_frames) snprintf(s2, sizeof s2, "%s", T("Audio: waiting"));
             else {
@@ -1106,6 +1112,11 @@ static void draw_tsp_screen(int osd)
                 else snprintf(codec, sizeof codec, "AAC");
                 if (tsp_av_offset(&av)) snprintf(s2, sizeof s2, T("Audio %s %s %s   A/V %+d ms"), codec, kr, st->audio_ch == 1 ? "mono" : "stereo", av);
                 else snprintf(s2, sizeof s2, T("Audio %s %s %s"), codec, kr, st->audio_ch == 1 ? "mono" : "stereo");
+            }
+            {                                    /* the line against what the stream needs */
+                size_t k = strlen(s2);
+                if (st->need_kbs && st->net_kbs) snprintf(s2 + k, sizeof s2 - k, T("   network %u KB/s, the stream needs %u KB/s"), st->net_kbs, st->need_kbs);
+                else if (st->net_kbs) snprintf(s2 + k, sizeof s2 - k, T("   network %u KB/s"), st->net_kbs);
             }
             sp.stats1 = s1;
             sp.stats2 = s2;
@@ -1747,6 +1758,7 @@ int main(void)
     splash_frame(T("Loading playlists..."));
     sceIoMkdir(DATA_DIR, 0777);
     player_log_reset();
+    plog("version %s", APP_VERSION);
     {   /* a video plugin (reAvPlayer) patches the system decoder and breaks normal 720p playback */
         FILE *cf = fopen("ur0:tai/config.txt", "rb");
         if (cf) {
@@ -2084,7 +2096,11 @@ int main(void)
                         film_note_until = now_ms() + 5000;
                     }
                 } else if (p & SCE_CTRL_SQUARE) {
-                    if (fs && !via_proxy && (fs->hls_hd || hd_mode)) {   /* HLS with a 1080p variant: 720p <-> 1080p */
+                    if (fs && !via_proxy && low_mode) {         /* stepped down on a slow line: back to 720p */
+                        low_mode = 0;
+                        plog("player: HLS 720p");
+                        play_channel_ex(play_vis, 0);
+                    } else if (fs && !via_proxy && (fs->hls_hd || hd_mode)) {   /* HLS with a 1080p variant: 720p <-> 1080p */
                         hd_mode = !hd_mode;
                         plog("player: HLS %s", hd_mode ? "1080p" : "720p");
                         play_channel_ex(play_vis, 0);
@@ -2094,6 +2110,18 @@ int main(void)
                         film_note_until = now_ms() + 4000;
                         osd_until_us = now_ms() + 4000;
                     }
+                }
+                /* live TV that keeps waiting for data: the line is too slow for this picture size, so take the
+                 * next smaller one the channel offers (the button goes back) */
+                if (!film && !via_proxy && fs && fs->slow_network && (hd_mode || (!low_mode && fs->hls_lower))) {
+                    int was = fs->hls_h > 0 ? fs->hls_h : hd_mode ? 1080 : 720;
+                    if (hd_mode) hd_mode = 0; else low_mode = 1;
+                    plog("player: the line is too slow for %dp: HLS %s", was, low_mode ? "480p or less" : "720p");
+                    snprintf(film_note, sizeof film_note, T("The connection is too slow for %dp: switched to a smaller picture"), was);
+                    film_note_until = now_ms() + 6000;
+                    osd_until_us = now_ms() + 6000;
+                    play_channel_ex(play_vis, 0);
+                    fs = tsp_status();
                 }
                 if (film) {
                     if (now_ms() - last_pos_save > 60000) { save_film_position(); last_pos_save = now_ms(); }
