@@ -38,6 +38,7 @@ static int64_t refused_pts = -2;
 static int64_t pend[256];
 static int int_cap = 8, int_out_us;          /* HD decoder: units it takes in before "full", least time between pictures */
 static double int_last_out;
+static int int_flush;                    /* an empty unit came: hand out what is inside */
 static uint32_t lib_w, lib_h;
 /* which memory the fake hardware accepts: bit 0 PHYCONT, bit 1 CDRAM, bit 2 MAIN_NC */
 static int fb_ok = 7, es_ok = 7, out_ok = 7;
@@ -83,7 +84,9 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
     const uint8_t *b = au->es.pBuf;
     size_t n = au->es.size;
     usleep((useconds_t)dec_sleep_us);                       /* hardware takes a moment */
+    if (n == 0) { int_flush = 1; return 0; }              /* an empty unit: what is inside comes out (as on the device) */
     if (n < 4 || b[0] || b[1] || !(b[2] == 1 || (b[2] == 0 && b[3] == 1))) return (int)0x8062000D;
+    int_flush = 0;
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
     if (wedged) { arr->numOfOutput = 0; return 0; }        /* stuck after an error, like on the device */
     if (oom_all) return (int)0x80620003;                     /* out of memory for every unit, keyframes too */
@@ -169,7 +172,9 @@ int sceAvcdecDecodeAuInternal(SceAvcdecCtrl *d, SceAvcdecAu *au, SceInt32 *st)
     const uint8_t *b = au->es.pBuf;
     size_t n = au->es.size;
     usleep(1500);
+    if (n == 0) { int_flush = 1; return 0; }              /* an empty unit: what is inside comes out (as on the device) */
     if (n < 4 || b[0] || b[1] || !(b[2] == 1 || (b[2] == 0 && b[3] == 1))) return (int)0x8062000D;
+    int_flush = 0;
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
     if (npend >= int_cap) return (int)0x8062000A;           /* ES buffer full */
     static int full_at = -1;
@@ -188,7 +193,7 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
     if (!p || p->size != sizeof *p || !p->frame.pPicture[0] || p->frame.framePitch < lib_w || p->frame.frameHeight < lib_h) return (int)0x80620002;
     arr->numOfOutput = 0;
     if (npend > int_max_pend) int_max_pend = npend;
-    if (npend < int_delay + 1) return 0;                    /* two units of delay, as on the device */
+    if (npend < int_delay + 1 && !(int_flush && npend > 0)) return 0;   /* two units of delay, as on the device */
     if (int_out_us) {                                       /* a decoder only a little faster than the stream */
         struct timespec q; clock_gettime(CLOCK_MONOTONIC, &q);
         double nw = q.tv_sec + q.tv_nsec / 1e9;
@@ -879,6 +884,15 @@ limit:
         show("local to end", &r);
         printf("               ended after %.1f s, sound waited %u time(s)\n", r.end_at, r.st.holds);
         assert(r.st.state == TSP_ENDED && r.st.holds == 0 && r.end_at > 0 && r.end_at < 7.5 && r.st.shown >= 115);
+        /* The HD decoder on the device takes in units far ahead of the pictures it gives out (about 110 at
+         * 1080p30 from the memory card) and they were never taken out at the end: the last 3-4 s of every
+         * file froze with the sound going on. Here it takes up to 150 and is a little faster than the stream. */
+        decode_order = 1; int_delay = 5; int_cap = 150; int_out_us = 20000;
+        r = play(argv[2], 12);
+        decode_order = 0; int_delay = 2; int_cap = 8; int_out_us = 0;
+        show("local, HD ahead", &r);
+        printf("               decoded %u pictures (0.2.8: 56), last shown %.1f s after the first\n", r.st.decoded, r.play_time);
+        assert(r.st.state == TSP_ENDED && r.st.decoded >= 121 && r.st.shown >= 118 && r.play_time > 4.7);   /* 0.2.8: 56, 2.3 s */
         tsp_set_options(0, 720);
     }
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "limit")) return 0;
