@@ -183,7 +183,8 @@ typedef struct {
     int delays_done, late_n;
     volatile int late_ms;               /* how late the shown pictures are (UI, smoothed) */
     int64_t late_ema_us;
-    int catchup;                        /* the decoder is slower than the stream: non-reference pictures left out */
+    int catchup;                        /* the decoder is slower than the stream: non-reference pictures left out (1 = every second, 2 = all) */
+    int cu_alt;                         /* catchup 1: which of them */
     int jump_pending;                   /* ... and still far behind: everything up to the keyframe at the sound */
     uint64_t jump_after;
     uint64_t cu_t0;                     /* catch_up's measurement window */
@@ -207,6 +208,11 @@ typedef struct {
     int seg_fail_row;                   /* HLS: segments failed one after the other */
     int big_queues;                     /* film on a slow line: queues for about a minute */
     int waits_done;                     /* waits that reached their goal (each next goal is twice as long) */
+    uint64_t last_show_us;              /* when the last picture went on screen (UI thread) */
+    volatile int video_done;            /* the video thread has finished (end of the stream) */
+    int pre_skip, pre_skip_decided, pre_units;   /* 1080p above 30 fps: pictures nothing refers to are left out from the start */
+    volatile int av_started;            /* audio thread: the first picture is there (or there is none to wait for) */
+    volatile int64_t first_pic_pts;     /* time of the first decoded picture (-1 = none yet) */
     /* CPU load line (each stats line): run time of the threads and idle time of the cores */
     SceUID ui_thid;
     uint64_t cpu_t0, cpu_prev[4], idle_prev[4];
@@ -999,6 +1005,7 @@ static void take_picture(Tsp *t, SceAvcdecPicture *p, int si)
         if (t->st.decoded == 0)
             plog("tsp: decoding works with frame memory %s, ES %s, pictures %s",
                  mem_name(t->fb_kind), mem_name(PLANS[t->plan].es), mem_name(PLANS[t->plan].pic));
+        if (t->st.decoded == 0) t->first_pic_pts = opts;
         if (t->st.decoded == 0)
             plog("tsp: first picture %ux%u (crop L%u R%u T%u B%u), pts %lld",
                  (unsigned)p->frame.horizontalSize, (unsigned)p->frame.verticalSize,
@@ -1137,10 +1144,18 @@ static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int st
         /* how much stream time the decoder got through in that time (no frame rate guess needed) */
         double covered = t->cu_pts0 >= 0 && t->cu_pts1 > t->cu_pts0 ? (double)(t->cu_pts1 - t->cu_pts0) / 90000.0 : secs;
         if (covered > 60.0) covered = secs;                  /* a timestamp jump */
-        if (!t->catchup && t->cu_minq >= 1000 && covered < secs * 0.85) {
-            t->catchup = 1;
+        /* Two steps (0.2.8): a decoder just below the stream's rate (720p60 on the device: 51-61 pictures/s)
+         * leaves out every second picture nothing refers to; one well below it, or still behind after that,
+         * leaves out all of them. 0.2.6/0.2.7 did nothing above 85%, and the screen then dropped decoded
+         * pictures by the hundred, which never helps: the next one does not come any sooner. */
+        int want = covered < secs * 0.85 ? 2 : covered < secs * 0.96 ? 1 : 0;
+        if (t->catchup == 1 && want >= 1) want = 2;         /* half was not enough */
+        if (t->cu_minq >= 1000 && want > t->catchup) {
+            int was = t->catchup;
+            t->catchup = want;
             plog("tsp: the decoder is slower than the stream (%.1f s of video in %.1f s, %d ms of video always waiting): "
-                 "non-reference pictures are left out", covered, secs, t->cu_minq);
+                 "%s", covered, secs, t->cu_minq, want == 1 ? "every second picture nothing refers to is left out" :
+                 was ? "now all pictures nothing refers to are left out" : "all pictures nothing refers to are left out");
             if (t->vh >= 1000 && !t->st.decoder_slow) {     /* 1080p: a smaller variant would play all pictures */
                 t->st.decoder_slow = 1;
                 plog("tsp: 1080p at this picture rate is too much for the decoder (%.0f%% of real time)", covered * 100.0 / secs);
@@ -1156,7 +1171,7 @@ static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int st
         t->cu_pts0 = t->cu_pts1 = -1;
         t->cu_slot0 = t->slot_wait_total;
     }
-    if (t->catchup && au_is_nonref(data, len)) {
+    if ((t->catchup || t->pre_skip) && au_is_nonref(data, len) && (t->catchup != 1 || t->pre_skip || (t->cu_alt ^= 1))) {
         t->st.skipped++;
         t->catchup_skips++;
         return 1;
@@ -1242,6 +1257,19 @@ static void video_packet(Tsp *t, Pkt *p)
     if (t->skip_nonref && au_is_nonref(data, len)) {        /* keeps the decoder within its picture memory */
         t->st.skipped++;
         return;
+    }
+    /* 1080p above 30 pictures a second is more than the Vita decoder manages (Sony's own player stops at
+     * H.264 level 4.1, i.e. 1080p30; measured: 28-43 pictures/s at 1080p). Leave out the pictures nothing
+     * refers to from the start, for a steady picture in time with the sound, instead of measuring for 3 s
+     * while falling behind. (Streams without such pictures play with dropped pictures.) */
+    if (!t->pre_skip_decided && t->dec_open && ++t->pre_units >= 15) {   /* (the rate is measured from the first ones) */
+        t->pre_skip_decided = 1;
+        if (i->height >= 1000 && t->frame_us && t->frame_us < 30000) {
+            t->pre_skip = 1;
+            t->st.decoder_slow = 1;
+            plog("tsp: 1080p at %u fps: more than the Vita decoder manages (1080p up to about 30); pictures nothing "
+                 "refers to are left out", (unsigned)((1000000u + t->frame_us / 2) / t->frame_us));
+        }
     }
     if (catch_up(t, data, len, pts, start_ok)) return;
     if (++t->d_units >= 250) { t->d_units = 0; t->d_errs = 0; }   /* "invalid" errors count within 250 units */
@@ -1722,6 +1750,40 @@ static void audio_mpeg(Tsp *t, Pkt *p)
     mpa_feed(t->mpa, p->data, p->len, p->pts, mpa_frame, t);
 }
 
+/* The sound starts with the first picture (0.2.8). It used to start as soon as its decoder was ready, about
+ * a second before the HD decoder gave the first picture, so every start began with the picture behind
+ * (dropped pictures, a wait). Sound from before the first picture is left out. Without a picture after 4 s
+ * (radio, a stream whose video does not decode) the sound starts anyway. Returns 1 once started. */
+static int audio_start_check(Tsp *t)
+{
+    uint64_t now = now_us();
+    int waited_out = now - t->start_us > 4000000ULL;
+    /* and a second of video beyond the first picture has come: a live stream arrives at its own pace and
+     * the HD decoder gives pictures a few units late; with no margin every picture was late from the start */
+    int margin = t->st.decoded > 0 && t->first_pic_pts >= 0 && t->vq_have_pts &&
+                 t->vq_newest_pts - t->first_pic_pts >= 90000LL && t->vq_newest_pts - t->first_pic_pts < 90000LL * 60;
+    if (!(margin || t->st.audio_only || t->reader_done || t->st.state == TSP_ERROR || waited_out)) return 0;
+    int left = 0;
+    int64_t fp = t->first_pic_pts;
+    if (t->st.decoded > 0 && fp >= 0) {
+        sceKernelLockMutex(t->qlock, 1, NULL);
+        while (t->aq.head && t->aq.head->pts >= 0 && t->aq.head->pts < fp - 4500 && fp - t->aq.head->pts < 90000LL * 10) {
+            Pkt *p = t->aq.head;
+            t->aq.head = p->next;
+            if (!t->aq.head) t->aq.tail = NULL;
+            t->aq.count--;
+            t->aq.bytes -= p->len;
+            free(p);
+            left++;
+        }
+        sceKernelUnlockMutex(t->qlock, 1);
+    }
+    t->av_started = 1;
+    if (t->st.decoded > 0) plog("tsp: the sound starts with the first picture (%d earlier sound frames left out)", left);
+    else if (waited_out && !t->st.audio_only) plog("tsp: no picture after 4 s: the sound starts");
+    return 1;
+}
+
 static int audio_main(SceSize args, void *argp)
 {
     (void)args;
@@ -1740,6 +1802,7 @@ static int audio_main(SceSize args, void *argp)
             continue;
         }
         t->pause_frozen = 0;
+        if (!t->av_started && !audio_start_check(t)) { sceKernelDelayThread(5000); continue; }
         Pkt *p = q_pop(t, &t->aq);
         if (!p) {
             if (t->reader_done) break;
@@ -1799,8 +1862,10 @@ static void cpu_line(Tsp *t, uint64_t now)
         if (sr >= 0) {
             size_t c = 0;
             unsigned sum = 0, n = 0;
+            unsigned mask = si.activeCpuMask;
+            if (mask >= 0x10000) mask >>= 16;               /* the Vita gives it as 0x10000 << core (0.2.7 printed nothing) */
             for (int k = 0; k < 4; k++) {
-                if (si.activeCpuMask && !(si.activeCpuMask & (1u << k))) continue;
+                if (mask && !(mask & (1u << k))) continue;
                 uint64_t id = si.cpuInfo[k].idleClock, d = id >= t->idle_prev[k] ? id - t->idle_prev[k] : 0;
                 unsigned busy = d >= dt ? 0 : (unsigned)(100 - d * 100 / dt);
                 sum += busy;
@@ -2126,6 +2191,10 @@ static void read_local(Tsp *t, uint8_t *buf)
         dmx_feed(t, buf, n);
         stats_tick(t);
         check_stall(t);
+        /* a file is there at once: read ahead at a calm pace once a few seconds are queued (0.2.7 read it at
+         * full speed, 70% of a core while the decoder started) */
+        int q_ms = (int)((int64_t)t->vq.count * (t->frame_us ? (int)t->frame_us : 40000) / 1000);
+        if (t->st.decoded > 0 && q_ms > 3000) sceKernelDelayThread(4000);
     }
     fclose(f);
 }
@@ -2874,6 +2943,7 @@ static int video_main(SceSize args, void *argp)
         video_packet(t, p);
         free(p);
     }
+    t->video_done = 1;
     if (!t->cancel && t->st.state != TSP_ERROR && t->st.decoded == 0 && !t->st.audio_only) explain_no_picture(t);
     thread_finished(t);
     plog("tsp: video end: decoded %u, shown %u, dropped %u, late %u, damaged %u, errors %u%s",
@@ -2978,22 +3048,29 @@ static void late_check(Tsp *t, int64_t late_us)
  * the sound again. Not when the decoder itself is too slow (catch_up handles that: waiting would only
  * repeat), and at most twice a minute. Called by the UI thread after a picture is shown (t->lock held). */
 #define HOLD_ENTER_MS   500
-#define HOLD_MAX_US     10000000ULL
+#define HOLD_MAX_US     5000000ULL
 static void hold_check(Tsp *t, int64_t sp, uint64_t now)
 {
     int64_t apts;
     int ok = !t->vod && sp >= 0 && !t->st.audio_only && !t->audio_off && audio_now(t, now, &apts);
     int64_t behind = ok ? (apts - sp) / 90 : 0;               /* ms */
+    /* 0.2.8: only while pictures really come. On the device the sound waited 10 s after the last picture
+     * of a file (the end looked frozen), and during a decoder restart; then the picture jumped seconds
+     * ahead and stood still until the sound caught up. */
+    int flowing = t->last_show_us && now - t->last_show_us < 300000ULL;
+    int ending = t->video_done || (t->reader_done && t->vq.count == 0);
     if (t->ahold) {
         uint64_t held = now - t->ahold_since;
-        if (!ok || behind <= 20 || behind > 15000 || held > HOLD_MAX_US || t->paused) {
+        int stalled = !t->last_show_us || now - t->last_show_us > 1000000ULL;   /* no new picture for a second */
+        if (!ok || behind <= 20 || behind > 15000 || held > HOLD_MAX_US || t->paused || stalled || ending || t->reopen_pending) {
             t->ahold = 0;
             t->clock_on = 0;
             t->late_ema_us = 0;
             t->late_ms = 0;
             t->grace_until = now + 2000000ULL;
             plog("tsp: %s after %u ms (the picture was %lld ms behind, now %lld ms)",
-                 ok && behind <= 20 ? "the picture reached the sound: the sound goes on" : "the sound goes on",
+                 ok && behind <= 20 ? "the picture reached the sound: the sound goes on" :
+                 stalled || ending ? "no pictures come: the sound goes on" : "the sound goes on",
                  (unsigned)(held / 1000), (long long)t->ahold_from_ms, (long long)behind);
         }
         return;
@@ -3002,7 +3079,8 @@ static void hold_check(Tsp *t, int64_t sp, uint64_t now)
      * leaves pictures out then; waiting would only repeat). Little means the pictures came late (the network,
      * or a burst that the HD decoder took in at once and gives out slowly: the case seen on the device). */
     int queued_ms = (int)((int64_t)t->vq.count * (t->frame_us ? (int)t->frame_us : 40000) / 1000);
-    if (!ok || behind <= HOLD_ENTER_MS || behind > 15000 || queued_ms >= 1000 || t->catchup || t->buffering ||
+    if (!ok || !flowing || ending || t->reopen_pending || t->need_key ||
+        behind <= HOLD_ENTER_MS || behind > 15000 || queued_ms >= 1000 || t->catchup || t->buffering ||
         t->audio_delay_us || now < t->grace_until) {
         t->behind_n = 0;
         return;
@@ -3087,7 +3165,7 @@ static void buffer_check(Tsp *t, uint64_t now)
     int sh = t->waits_done > 2 ? 3 : t->waits_done;
     int leave_ms = (t->vod ? BUF_LEAVE_MS : LIVE_LEAVE_MS) << sh;
     if (leave_ms > (t->vod ? BUF_LEAVE_MAX : LIVE_LEAVE_MAX)) leave_ms = t->vod ? BUF_LEAVE_MAX : LIVE_LEAVE_MAX;
-    if (film_slow) leave_ms = t->big_queues && t->vq.max_bytes == VQ_BYTES_BIG ? BUF_LEAVE_MAX : 15000;
+    if (film_slow) leave_ms = 15000;                        /* (0.2.7: 30 s, which became 50-55 s waits on the device) */
     int ahead_ms = 0, have_ahead = 0;                       /* live: video that has arrived, beyond the sound */
     if (!t->vod && t->vq_have_pts) {
         int64_t apts;
@@ -3169,6 +3247,7 @@ vita2d_texture *tsp_frame(int *w, int *h)
     buffer_check(t, now);
     t->ui_calls++;
     sceKernelLockMutex(t->lock, 1, NULL);
+    int dropped_now = 0;                                    /* a picture was dropped as late in this frame */
     for (;;) {
         if (t->paused || t->buffering) break;               /* the picture on screen stays */
         int n = next_ready(t, 0, 0);
@@ -3188,7 +3267,10 @@ vita2d_texture *tsp_frame(int *w, int *h)
          * that came after it were older, so they were all dropped (on the device two of three pictures, in
          * exactly the cases where the video was behind). Now the wait does not depend on lateness; it ends
          * when the picture has been ready for 150 ms (the decoder may have nothing more for now). */
-        if (t->out_of_order >= 3 && now - t->slots[n].ready_us < 150000) {
+        /* 0.2.7 waited here also right after dropping a late picture: with a decoder at its limit (720p60,
+         * 1080p50/60) every screen frame dropped one and then waited for three to be ready, so no picture was
+         * shown at all (6 of 882 on the device). After a drop the next one goes on screen at once. */
+        if (!dropped_now && t->out_of_order >= 3 && (int64_t)(now - t->slots[n].ready_us) < 150000) {
             int ready = 0;
             for (int k = 0; k < t->nslots; k++) if (t->slots[k].state == SLOT_READY) ready++;
             if (ready < (t->nslots > 3 ? 3 : 2)) break;     /* all but the free one the decoder works on */
@@ -3197,11 +3279,17 @@ vita2d_texture *tsp_frame(int *w, int *h)
         /* behind: skip this one. Not while the sound waits for the picture: then every picture is shown, one
          * per screen frame, so the video runs faster than real time towards the sound (skipping there threw
          * away nearly all of them when the decoder gave them at about the stream's own pace) */
-        if (!t->ahold && n2 >= 0 && due_time(t, &t->slots[n2], now) <= now) {
+        /* (0.2.8: only when the next one is late too by two picture times: a decoder just below the stream's
+         * rate - 720p60 on the device - made every picture "behind" and lost more than half of them; a little
+         * lateness is shown, and when it grows, pictures are dropped) */
+        uint64_t slack = t->frame_us ? 2ULL * t->frame_us : 80000ULL;
+        if (slack > 80000) slack = 80000;
+        if (!t->ahold && n2 >= 0 && due_time(t, &t->slots[n2], now) + slack <= now) {
             t->ui_more++;
             t->slots[n].state = SLOT_FREE;
             t->st.dropped++;
             t->drop_behind++;
+            dropped_now = 1;
             continue;
         }
         if (t->slots[n].pts < 0 || t->base_pts < 0) {         /* cadence mode: schedule from the last shown picture */
@@ -3210,8 +3298,11 @@ vita2d_texture *tsp_frame(int *w, int *h)
         }
         if (t->shown >= 0) t->slots[t->shown].state = SLOT_FREE;
         t->slots[n].state = SLOT_SHOWN;
-        t->wait_sum_us += now - t->slots[n].ready_us;
-        t->wait_n++;
+        if (now > t->slots[n].ready_us) {                   /* (the decoder may have given it after "now" was read) */
+            t->wait_sum_us += now - t->slots[n].ready_us;
+            t->wait_n++;
+        }
+        t->last_show_us = now;
         t->shown = n;
         t->shown_pts = sp;
         if (t->vod_first_pts < 0) t->vod_first_pts = sp;
@@ -3275,6 +3366,8 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     t->vod = vod;
     t->vod_start_ms = start_ms > 0 ? start_ms : 0;
     t->vod_first_pts = -1;
+    t->first_pic_pts = -1;
+    t->start_us = now_us();                                 /* (the audio thread may look before the reader starts) */
     if (stream_offset_ms >= 0) {                            /* a film through the transcoding server */
         t->vod_stream = 1;
         t->vod_offset_ms = stream_offset_ms;

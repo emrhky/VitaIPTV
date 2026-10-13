@@ -119,6 +119,8 @@ static const Pair FIXED[] = {
     { "Audio", "Ses" }, { "Waits", "Beklemeler" }, { "Damaged / errors", "Hasarlı / hata" }, { "Network", "Bağlantı" },
     { "Needed", "İhtiyaç" }, { "Received", "Alınan" }, { "Not decoded", "Çözülmeyen" }, { "off", "kapalı" },
     { "waiting", "bekleniyor" },
+    { "1080p at %d fps: the Vita decodes 1080p up to about 30 fps, some pictures are left out",
+      "1080p %d fps: Vita 1080p'yi en fazla yaklaşık 30 fps çözebilir, bazı kareler atlanıyor" },
     { "The Vita cannot decode this 1080p at %d fps: switched to 720p", "Vita bu 1080p yayını %d fps hızında çözemiyor: 720p'ye geçildi" },
     { "Referer (if needed)", "Referer (gerekirse)" }, { "User-Agent (if needed)", "User-Agent (gerekirse)" },
     { "Referer (e.g. https://site/page)", "Referer (örn. https://site/sayfa)" }, { "User-Agent", "User-Agent" },
