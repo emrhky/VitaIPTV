@@ -19,6 +19,8 @@ Endpoints
     GET /                                        short status page
 """
 import argparse
+import collections
+import re
 import shutil
 import socket
 import subprocess
@@ -49,6 +51,13 @@ def split_headers(url):
     return link, ua, ref
 
 
+def safe(url):
+    """The address for the console without account details (Xtream /live/user/pass/..., user:pass@, ?password=)."""
+    url = re.sub(r"//[^/@]+@", "//***@", url)
+    url = re.sub(r"/(live|movie|series)/[^/]+/[^/]+/", r"/\1/***/***/", url)
+    return re.sub(r"(?i)((?:username|password)=)[^&|]*", r"\1***", url)
+
+
 def ffmpeg_command(url, start=0):
     a = ARGS
     url, link_ua, link_ref = split_headers(url)
@@ -56,7 +65,8 @@ def ffmpeg_command(url, start=0):
     if start > 0:
         cmd += ["-ss", str(start)]                                    # a film from the middle
     if url.startswith(("http://", "https://")):
-        cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5"]
+        cmd += ["-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+                "-rw_timeout", "15000000"]                         # a source that stops answering: give up after 15 s
         if link_ua or a.user_agent:
             cmd += ["-user_agent", link_ua or a.user_agent]
         if link_ref:
@@ -79,7 +89,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         if ARGS.verbose:
-            sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
+            from urllib.parse import unquote
+            sys.stderr.write("%s - %s\n" % (self.address_string(), safe(unquote(fmt % args))))
 
     def _text(self, code, body):
         data = body.encode("utf-8")
@@ -114,18 +125,30 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as e:
             return self._text(500, "cannot start ffmpeg: %s" % e)
 
+        # ffmpeg's messages are read all the time (kept: the last 50 lines). Before, they were read only when it
+        # failed at the start: a stream that kept printing errors filled the pipe (64 KB, on Windows much less),
+        # ffmpeg stopped and the picture on the Vita froze.
+        errs = collections.deque(maxlen=50)
+
+        def drain():
+            for line in proc.stderr:
+                errs.append(line.decode("utf-8", "replace").rstrip())
+        drainer = threading.Thread(target=drain, daemon=True)
+        drainer.start()
+
         # the first bytes tell whether ffmpeg could open the source at all
         first = proc.stdout.read(188 * 64)
         if not first:
-            err = proc.stderr.read().decode("utf-8", "replace").strip()[-300:]
             proc.wait()
-            sys.stderr.write("cannot convert %s: %s\n" % (url, err))
+            drainer.join(2)                                             # its last words
+            err = " / ".join(errs)[-300:]
+            sys.stderr.write("cannot convert %s: %s\n" % (safe(url), err))
             return self._text(502, "conversion failed: " + (err or "no data"))
 
         key = id(self)
         with ACTIVE_LOCK:
             ACTIVE[key] = url
-        sys.stderr.write("[%s] start  %s\n" % (time.strftime("%H:%M:%S"), url))
+        sys.stderr.write("[%s] start  %s\n" % (time.strftime("%H:%M:%S"), safe(url)))
         self.send_response(200)
         self.send_header("Content-Type", "video/mp2t")
         self.send_header("Cache-Control", "no-cache")
@@ -145,7 +168,7 @@ class Handler(BaseHTTPRequestHandler):
             proc.wait()
             with ACTIVE_LOCK:
                 ACTIVE.pop(key, None)
-            sys.stderr.write("[%s] stop   %s (%d KB)\n" % (time.strftime("%H:%M:%S"), url, sent // 1024))
+            sys.stderr.write("[%s] stop   %s (%d KB)\n" % (time.strftime("%H:%M:%S"), safe(url), sent // 1024))
 
 
 def local_ips():
