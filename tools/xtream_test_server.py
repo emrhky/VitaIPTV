@@ -17,17 +17,27 @@ Folder layout (names are free, only "Series" and "Live" are special):
 Run:   python3 tools/xtream_test_server.py videos
 Then add an Xtream playlist on the Vita with the address, username and password it prints.
 Needs Python 3.7+ only. Files are sent with HTTP ranges, like a real server, so jumping works.
+
+Options for measuring the Vita (decoder, network, TLS):
+  --pace     send live channels at their own bit rate, like a real broadcast (default: as fast as
+             the network takes them)
+  --https    serve over HTTPS with a self-signed certificate made with openssl (the app does not
+             check certificates), to compare the CPU cost of TLS against plain HTTP on the same file
 """
 import argparse
 import json
 import os
 import re
 import socket
+import ssl
+import subprocess
 import sys
+import tempfile
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, unquote, urlparse
 
-VIDEO = (".mkv", ".mp4", ".m4v", ".mov", ".avi", ".ts", ".webm")
+VIDEO = (".mkv", ".mp4", ".m4v", ".mov", ".avi", ".ts", ".webm", ".flv")
 ARGS = None
 DB = None
 
@@ -126,7 +136,7 @@ class Handler(BaseHTTPRequestHandler):
             path = DB["files"].get((m.group(1), int(m.group(4))))
             if not path:
                 return self._text(404, "no such file")
-            return self.send_file(path)
+            return self.send_file(path, paced=ARGS.pace and m.group(1) == "live")
         return self._text(404, "unknown path")
 
     def api(self, q):
@@ -161,7 +171,7 @@ class Handler(BaseHTTPRequestHandler):
         if not self._creds_ok(q.get("username", ""), q.get("password", "")):
             return self._text(403, "wrong username or password")
         host = self.headers.get("Host", "localhost:%d" % ARGS.port)
-        base = "http://%s" % host
+        base = "%s://%s" % ("https" if ARGS.https else "http", host)
         lines = ["#EXTM3U"]
         for c in DB["live"]:
             lines += ['#EXTINF:-1 group-title="Test",%s' % c["name"],
@@ -172,8 +182,9 @@ class Handler(BaseHTTPRequestHandler):
                       "%s/movie/%s/%s/%d.%s" % (base, ARGS.username, ARGS.password, f["stream_id"], f["container_extension"])]
         return self._text(200, "\n".join(lines) + "\n", "audio/x-mpegurl")
 
-    def send_file(self, path):
+    def send_file(self, path, paced=False):
         size = os.path.getsize(path)
+        rate = ts_rate(path) if paced else 0
         rng = self.headers.get("Range")
         a, b = 0, size - 1
         if rng and rng.startswith("bytes="):
@@ -198,17 +209,67 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(b - a + 1))
         self.end_headers()
         left = b - a + 1
+        sent, t0 = 0, time.monotonic()
         try:
             with open(path, "rb") as f:
                 f.seek(a)
                 while left > 0:
-                    d = f.read(min(262144, left))
+                    d = f.read(min(65536 if rate else 262144, left))
                     if not d:
                         break
                     self.wfile.write(d)
                     left -= len(d)
+                    sent += len(d)
+                    if rate:                                    # 2 s ahead at most, like a live server
+                        ahead = sent / rate - (time.monotonic() - t0) - 2.0
+                        if ahead > 0:
+                            time.sleep(ahead)
         except (BrokenPipeError, ConnectionResetError, socket.timeout):
             pass                                                # the Vita jumped or left
+
+
+def ts_rate(path):
+    """Bytes per second of an MPEG-TS file, from the first and last video timestamps (0 if unknown)."""
+    size = os.path.getsize(path)
+
+    def pts_in(data):
+        out = []
+        for o in range(0, len(data) - 188 + 1, 188):
+            p = data[o:o + 188]
+            if p[0] != 0x47 or not p[1] & 0x40:
+                continue
+            k = 4
+            if p[3] & 0x20:
+                k += 1 + p[4]
+            if k + 14 > 188 or p[k:k + 3] != b"\0\0\1" or not 0xE0 <= p[k + 3] <= 0xEF or not p[k + 7] & 0x80:
+                continue
+            q = p[k + 9:k + 14]
+            out.append(((q[0] >> 1) & 7) << 30 | q[1] << 22 | (q[2] >> 1) << 15 | q[3] << 7 | q[4] >> 1)
+        return out
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4 << 20)
+            f.seek(max(0, size - (4 << 20)) // 188 * 188)
+            tail = f.read()
+    except OSError:
+        return 0
+    a, b = pts_in(head), pts_in(tail)
+    if not a or not b:
+        return 0
+    dur = (max(b) - min(a)) / 90000.0
+    return size / dur if dur > 1 else 0
+
+
+def make_cert():
+    """A self-signed certificate for --https (openssl must be installed)."""
+    d = tempfile.mkdtemp(prefix="xtream_tls_")
+    cert, key = os.path.join(d, "cert.pem"), os.path.join(d, "key.pem")
+    try:
+        subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", key, "-out", cert,
+                        "-days", "30", "-subj", "/CN=vita-iptv-test"], check=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError) as e:
+        sys.exit("--https needs openssl (or give --cert and --key): %s" % e)
+    return cert, key
 
 
 def lan_ip():
@@ -230,6 +291,10 @@ def main():
     p.add_argument("--username", default="test")
     p.add_argument("--password", default="test")
     p.add_argument("--verbose", action="store_true", help="log every request")
+    p.add_argument("--pace", action="store_true", help="send live channels at their own bit rate (like a broadcast)")
+    p.add_argument("--https", action="store_true", help="HTTPS with a self-signed certificate (needs openssl)")
+    p.add_argument("--cert", help="certificate file for --https (default: made with openssl)")
+    p.add_argument("--key", help="key file for --https")
     ARGS = p.parse_args()
     if not os.path.isdir(ARGS.folder):
         sys.exit("No such folder: %s" % ARGS.folder)
@@ -237,8 +302,18 @@ def main():
     print("Found %d films in %d categories, %d series, %d live channels."
           % (len(DB["films"]), len(DB["film_cats"]), len(DB["shows"]), len(DB["live"])))
     srv = ThreadingHTTPServer(("0.0.0.0", ARGS.port), Handler)
+    if ARGS.https:
+        cert, key = (ARGS.cert, ARGS.key) if ARGS.cert and ARGS.key else make_cert()
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ctx.load_cert_chain(cert, key)
+        srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    if ARGS.pace:
+        for (kind, sid), path in sorted(DB["files"].items()):
+            if kind == "live":
+                r = ts_rate(path)
+                print("  live %d: %s, %s" % (sid, os.path.basename(path), "%d KB/s" % (r / 1024) if r else "rate unknown: sent unpaced"))
     print("On the Vita: Square (Add) > Xtream")
-    print("  Server:   http://%s:%d" % (lan_ip(), ARGS.port))
+    print("  Server:   %s://%s:%d" % ("https" if ARGS.https else "http", lan_ip(), ARGS.port))
     print("  Username: %s" % ARGS.username)
     print("  Password: %s" % ARGS.password)
     print("Press Ctrl+C to stop.")
