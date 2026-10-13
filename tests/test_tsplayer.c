@@ -39,6 +39,7 @@ static int64_t pend[256];
 static int int_cap = 8, int_out_us;          /* HD decoder: units it takes in before "full", least time between pictures */
 static double int_last_out;
 static int int_flush;                    /* an empty unit came: hand out what is inside */
+static int int_empty_err, int_eos;       /* an empty unit is refused (as on the device); end-of-stream units seen */
 static uint32_t lib_w, lib_h;
 /* which memory the fake hardware accepts: bit 0 PHYCONT, bit 1 CDRAM, bit 2 MAIN_NC */
 static int fb_ok = 7, es_ok = 7, out_ok = 7;
@@ -172,8 +173,9 @@ int sceAvcdecDecodeAuInternal(SceAvcdecCtrl *d, SceAvcdecAu *au, SceInt32 *st)
     const uint8_t *b = au->es.pBuf;
     size_t n = au->es.size;
     usleep(1500);
-    if (n == 0) { int_flush = 1; return 0; }              /* an empty unit: what is inside comes out (as on the device) */
+    if (n == 0) { if (int_empty_err) return (int)0x80620009; int_flush = 1; return 0; }   /* an empty unit (the device: 0x80620009) */
     if (n < 4 || b[0] || b[1] || !(b[2] == 1 || (b[2] == 0 && b[3] == 1))) return (int)0x8062000D;
+    if ((has_nal(b, n, 10) || has_nal(b, n, 11)) && !has_nal(b, n, 1) && !has_nal(b, n, 5)) { int_flush = 1; int_eos++; return 0; }   /* end of sequence/stream */
     int_flush = 0;
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
     if (npend >= int_cap) return (int)0x8062000A;           /* ES buffer full */
@@ -875,6 +877,15 @@ limit:
         show("1080p60 HD", &r);
         printf("               shown %u, decoded %u, not decoded %u, last %d ms from the sound\n", r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.av_last);
         assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 150 && r.st.shown * 10 >= r.st.decoded * 7 && abs(r.av_last) < 200);
+        /* the same 1080p60 with a decoder that has time to spare (a low bit rate 1080p50 channel on the device:
+         * 25 fps shown with the decoder 75% idle): after 5 s all pictures are decoded */
+        tsp_set_options(1, 1080);
+        decode_order = 1; int_delay = 5;
+        r = play(argv[31], 14);
+        decode_order = 0; int_delay = 2;
+        show("1080p60 spare", &r);
+        printf("               shown %u, decoded %u, not decoded %u, last %d ms from the sound\n", r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.av_last);
+        assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.decoded >= 230 && abs(r.av_last) < 200);
         /* a file from the memory card (1080p25, HD decoder in decode order): plays to the end without the sound
          * waiting for pictures that will not come (0.2.7: 10 s of silence and a still picture at the end) */
         tsp_set_options(1, 720);
@@ -893,6 +904,14 @@ limit:
         show("local, HD ahead", &r);
         printf("               decoded %u pictures (0.2.8: 56), last shown %.1f s after the first\n", r.st.decoded, r.play_time);
         assert(r.st.state == TSP_ENDED && r.st.decoded >= 121 && r.st.shown >= 118 && r.play_time > 4.7);   /* 0.2.8: 56, 2.3 s */
+        /* the same with an empty unit refused, as the device did (0x80620009): the end-of-stream unit takes the
+         * last pictures out instead (0.2.9 on the device: 0 more taken out) */
+        decode_order = 1; int_delay = 5; int_cap = 150; int_out_us = 20000; int_empty_err = 1; int_eos = 0;
+        r = play(argv[2], 12);
+        decode_order = 0; int_delay = 2; int_cap = 8; int_out_us = 0; int_empty_err = 0;
+        show("local, HD end unit", &r);
+        printf("               decoded %u pictures, end units %d\n", r.st.decoded, int_eos);
+        assert(r.st.state == TSP_ENDED && int_eos >= 1 && r.st.decoded >= 121 && r.st.shown >= 118);
         tsp_set_options(0, 720);
     }
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "limit")) return 0;
