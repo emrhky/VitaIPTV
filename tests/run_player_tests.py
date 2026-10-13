@@ -105,6 +105,27 @@ sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=25 -f la
    f"-c:v libx264 -flags +ilme+ildct -top 1 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/i1080.ts")
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=24000 -t 5 "
    f"-c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -profile:a aac_main -ac 2 -f mpegts {T}/aacmain.ts")
+# a live stream whose sound is 3 s ahead of the picture in the file (seen on the device), 12 s
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 12 "
+   f"-c:v libx264 -preset ultrafast -bf 2 -g 50 -b:v 1500k -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/a12.ts")
+def shift_audio_n(src, dst, seconds, dur):
+    d = open(src, "rb").read()
+    p = [d[o:o + 188] for o in range(0, len(d) - 187, 188)]
+    per_s = len(p) / float(dur)
+    keyed = [((max(3, k + seconds * per_s) if ((x[1] & 0x1F) << 8 | x[2]) == 257 else k), k, x) for k, x in enumerate(p)]
+    keyed.sort(key=lambda e: (e[0], e[1]))
+    open(dst, "wb").write(b"".join(x for _, _, x in keyed))
+shift_audio_n(f"{T}/a12.ts", f"{T}/aahead.ts", -3, 12)
+# the same as HLS: 2 s segments cut out of that file (the sound stays 3 s ahead inside them)
+os.makedirs(f"{T}/hls2", exist_ok=True)
+ah = open(f"{T}/aahead.ts", "rb").read()
+npk = len(ah) // 188
+pl = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n"
+for i in range(6):
+    a, b = npk * i // 6, npk * (i + 1) // 6
+    open(f"{T}/hls2/s{i}.ts", "wb").write(ah[a * 188:b * 188])
+    pl += f"#EXTINF:2.0,\ns{i}.ts\n"
+open(f"{T}/hls2/slow.m3u8", "w").write(pl + "#EXT-X-ENDLIST\n")
 for name, ac in (("fast60", "-c:a aac -ac 2"), ("fast60_ac3", "-c:a ac3")):
     sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=60 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 8 "
        f"-c:v libx264 -preset ultrafast -bf 2 -x264-params b-pyramid=0 -g 60 -pix_fmt yuv420p {ac} -f mpegts {T}/{name}.ts")
@@ -112,7 +133,7 @@ M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL -I{ROOT}/src -I{M} "
    f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c -lm -o {T}/test_tsplayer")
 r = subprocess.run(f"{T}/test_tsplayer {T}/s720.ts {T}/s1080.ts {T}/hevc.ts {T}/midgop.ts {T}/dropped.ts "
-                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts",
+                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2",
                    shell=True, capture_output=True, text=True)
 print(r.stdout); print(r.stderr[-4000:])
 sys.exit(r.returncode)
