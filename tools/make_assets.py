@@ -5,8 +5,20 @@ import os
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-BOLD = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
-REG = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
+def find_font(name):
+    """DejaVu where the system keeps it (Debian/Ubuntu, Fedora, Arch, macOS, Windows); else Pillow's own search."""
+    dirs = ["/usr/share/fonts/truetype/dejavu", "/usr/share/fonts/dejavu", "/usr/share/fonts/TTF",
+            "/usr/share/fonts/dejavu-sans-fonts", "/Library/Fonts", os.path.expanduser("~/Library/Fonts"),
+            os.path.join(os.environ.get("WINDIR", "C:\\Windows"), "Fonts")]
+    for d in dirs:
+        p = os.path.join(d, name)
+        if os.path.exists(p):
+            return p
+    return name                                  # ImageFont.truetype() also looks it up by name
+
+
+BOLD = find_font("DejaVuSans-Bold.ttf")
+REG = find_font("DejaVuSans.ttf")
 TOP, BOTTOM = (59, 108, 255), (123, 77, 255)
 NAVY = (14, 16, 24)
 
