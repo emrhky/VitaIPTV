@@ -49,7 +49,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define SETTINGS_FILE DATA_DIR "/settings.txt"
 #define RESUME_FILE   DATA_DIR "/resume.txt"
 #define MAX_RESUME    200
-#define APP_VERSION   "v0.2.7"
+#define APP_VERSION   "v0.2.8"
 #define MAX_SOURCES   64
 #define MAX_GROUPS    1024
 #define MAX_DOWNLOAD  (24 * 1024 * 1024)
@@ -793,6 +793,7 @@ static char film_note[200];          /* a short message over the film (e.g. jump
 static unsigned film_note_until;            /* the end of the film was handled (its resume point dropped) */
 static int resume_ask, resume_vi, resume_pos, resume_sel;   /* "Continue from 12:34?" box on the channel screen */
 static int hd_mode;                  /* Square in the player: HLS channel switched to its 1080p variant (resets on channel change) */
+static int decoder_note_done;         /* the "1080p above 30 fps" note was shown for this channel */
 static int low_mode;                 /* the line was too slow even for 720p: a variant of at most 480 lines (resets too) */
 
 static int is_mp4_url(const char *u)
@@ -807,6 +808,7 @@ static void play_channel_ex(int vi, int use_proxy)
 {
     play_vis = vi;
     got_frame = 0;
+    decoder_note_done = 0;
     play_started_us = now_ms();
     osd_until_us = play_started_us + 5000;
     play_err[0] = 0;
@@ -2138,6 +2140,14 @@ int main(void)
                     }
                 }
                 /* 1080p at 50/60 pictures a second that the decoder cannot keep up with: 720p plays them all */
+                /* a 1080p stream above 30 fps with no smaller size to go to: say why pictures are left out (once) */
+                if (fs && fs->decoder_slow && !hd_mode && !decoder_note_done && fs->fps10 > 0) {
+                    decoder_note_done = 1;
+                    snprintf(film_note, sizeof film_note, T("1080p at %d fps: the Vita decodes 1080p up to about 30 fps, some pictures are left out"),
+                             (fs->fps10 + 5) / 10);
+                    film_note_until = now_ms() + 6000;
+                    osd_until_us = now_ms() + 6000;
+                }
                 if (!film && !via_proxy && fs && fs->decoder_slow && hd_mode && !fs->slow_network) {
                     hd_mode = 0;
                     plog("player: the decoder cannot keep up with this 1080p (%d fps): HLS 720p", (fs->fps10 + 5) / 10);
