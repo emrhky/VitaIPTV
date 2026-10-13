@@ -13,11 +13,18 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "Vita IPTV")
 set(VITA_TITLEID  "VIPTV0001")
-# the version, in one place: the VPK's "00.29" and the app's "v0.2.9" (shown in About and in the log) both come from here
+# the version, in one place: the VPK's "00.29" and the app's "v0.2.10" (shown in About and in the log) both come from here
 set(APP_VER_MAJOR 0)
 set(APP_VER_MINOR 2)
-set(APP_VER_PATCH 9)
-set(VITA_VERSION  "0${APP_VER_MAJOR}.${APP_VER_MINOR}${APP_VER_PATCH}")
+set(APP_VER_PATCH 10)
+# The VPK takes "XX.YY" (two digits each side): minor and patch share the two digits, so a patch above 9
+# is written as 9 (0.2.10 -> "00.29"; 0.3.0 -> "00.30" is still higher).
+if(APP_VER_PATCH GREATER 9)
+  set(VITA_VER_PATCH 9)
+else()
+  set(VITA_VER_PATCH ${APP_VER_PATCH})
+endif()
+set(VITA_VERSION  "0${APP_VER_MAJOR}.${APP_VER_MINOR}${VITA_VER_PATCH}")
 
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O2 -std=gnu99")
 
