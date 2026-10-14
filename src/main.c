@@ -930,7 +930,7 @@ static const UiHint HINTS_VIDEO[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_UPDOWN
                                       { UI_BTN_SELECT, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
 static const UiHint HINTS_VIDEO_SRV[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_SQUARE, "Server" },
                                           { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_SELECT, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
-static const UiHint HINTS_RADIO[] = { { UI_BTN_UPDOWN, "Station" }, { UI_BTN_SQUARE, "Screen off" }, { UI_BTN_TRIANGLE, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
+static const UiHint HINTS_RADIO[] = { { UI_BTN_UPDOWN, "Station" }, { UI_BTN_TRIANGLE, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
 static const UiHint HINTS_FILM[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_LR, "Seek" }, { UI_BTN_UPDOWN, "Next" },
                                      { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_SQUARE, "720p" }, { UI_BTN_CIRCLE, "Back" } };
 static const UiHint HINTS_PROBE[] = { { UI_BTN_CROSS, "Again" }, { UI_BTN_SELECT, "Play" }, { UI_BTN_CIRCLE, "Back" } };
@@ -1783,17 +1783,20 @@ static unsigned read_pressed(void)
 static void brightness_stick(void)
 {
     int ry = stick_ry;
-    if (abs(ry) < 80 || abs(ry) < 2 * abs(stick_rx) || screen_off) return;
+    static int unavailable;                                  /* the system brightness cannot be read: off for good */
+    if (unavailable || abs(ry) < 80 || abs(ry) < 2 * abs(stick_rx) || screen_off) return;
     unsigned now = now_ms();
     if (now - bright_last < 100) return;
     bright_last = now;
     if (bright_cur < 0) {
         int b = -1;
-        if (sceRegMgrGetKeyInt("/CONFIG/DISPLAY", "brightness", &b) < 0 || b <= 0) {
-            snprintf(film_note, sizeof film_note, "%s", T("The brightness cannot be changed here"));
-            film_note_until = now + 2000;
-            bright_last = now + 2000;
-            plog("screen: brightness not readable");
+        int rr = sceRegMgrGetKeyInt("/CONFIG/DISPLAY", "brightness", &b);
+        if (rr < 0 || b <= 0) {
+            /* (0.3.0 on the device: never readable, so it could not be put back; not offered, see the log) */
+            unavailable = 1;
+            int mx = 0, rm = sceAVConfigGetDisplayMaxBrightness(&mx);
+            plog("screen: brightness not readable (0x%08X, value %d; max 0x%08X, %d): the right stick does nothing",
+                 (unsigned)rr, b, (unsigned)rm, mx);
             return;
         }
         int mx = 0;
