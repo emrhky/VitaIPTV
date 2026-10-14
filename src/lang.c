@@ -100,7 +100,6 @@ static const Pair FIXED[] = {
     { "Hide 1080p channels", "1080p kanalları gizle" },
     { "Preferred resolution", "Tercih edilen çözünürlük" }, { "Automatic", "Otomatik" }, { "Lowest", "Düşük" },
     { "Resolution", "Çözünürlük" }, { "Brightness %d%%", "Parlaklık %%%d" },
-    { "The brightness cannot be changed here", "Parlaklık burada değiştirilemiyor" },
     { "Tip: a transcoding server on your PC can play this channel (START > Settings, see README)",
       "İpucu: bilgisayarınızdaki dönüştürme sunucusu bu kanalı oynatabilir (START > Ayarlar, README)" },
     { "Tip: put reAvPlayer.suprx in ux0:data/VitaIPTV/ for 1080p, or use the transcoding server",
