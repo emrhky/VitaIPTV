@@ -263,7 +263,13 @@ int main(void)
             const char *no[] = { "TRT 1 HD", "Kanal 10800", "Discovery", "HD Sinema", "4Kids" };
             for (unsigned k = 0; k < sizeof yes / sizeof yes[0]; k++) { snprintf(hc.name, sizeof hc.name, "%s", yes[k]); assert(iptv_is_hd1080(&hc)); }
             for (unsigned k = 0; k < sizeof no / sizeof no[0]; k++) { snprintf(hc.name, sizeof hc.name, "%s", no[k]); assert(!iptv_is_hd1080(&hc)); }
-            Settings sh; settings_parse("hide_1080p=1\n", &sh); assert(sh.hide_1080p == 1);
+            Settings sh; settings_parse("hide_1080p=1\n", &sh); assert(sh.hide_1080p == 1 && sh.res_pref == 0);
+            {   /* 0.3.0: preferred picture size */
+                Settings sr; settings_parse("resolution=540\n", &sr); assert(sr.res_pref == 540);
+                char srf[256]; settings_format(&sr, srf, sizeof srf); Settings sr2; settings_parse(srf, &sr2); assert(sr2.res_pref == 540);
+                settings_parse("resolution=-1\n", &sr); assert(sr.res_pref == -1);
+                settings_parse("resolution=999\n", &sr); assert(sr.res_pref == 0);
+            }
             char shf[256]; settings_format(&sh, shf, sizeof shf); Settings sj; settings_parse(shf, &sj); assert(sj.hide_1080p == 1);
             Settings sx; settings_parse("hd_1080p=1\nhide_adult=1\n", &sx); assert(sx.hide_adult == 1);   /* an old line is ignored */
             char sxf[256]; settings_format(&sx, sxf, sizeof sxf); assert(!strstr(sxf, "hd_1080p"));

@@ -38,6 +38,21 @@ int main(void)
     assert(k == 1 && !strcmp(v[k].uri, "http://a.tv/ch/mid/index.m3u8"));      /* best 720p, H.264 */
     assert(hls_pick_variant(v, n, 1080) == 0);                                   /* 1080p mode: the 1080p one */
     assert(hls_has_variant_above(v, n, 720, 1080) && !hls_has_variant_above(v, n, 1080, 1080));
+    /* 0.3.0: what the player wants */
+    assert(hls_pick_wanted(v, n, 0, 0) == 1);                                    /* automatic, no 540p: the 720p one */
+    assert(hls_pick_wanted(v, n, -1, 0) == 3);                                   /* the smallest: 480p */
+    assert(hls_pick_wanted(v, n, 540, 0) == 3 && hls_pick_wanted(v, n, 1080, 0) == 0);   /* up to 540: 480p */
+    assert(hls_pick_wanted(v, n, 720, 1400000) == 2);                            /* from the list: that bit rate */
+    assert(hls_pick_wanted(v, n, 720, 6000000) == 1);                            /* HEVC one: not playable, the best 720p */
+    assert(hls_pick_wanted(v, n, 0, 123) == 1);                                  /* gone from the list: automatic */
+    const char *m540 = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080\na.m3u8\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nb.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1600000,RESOLUTION=960x540\nc.m3u8\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nd.m3u8\n";
+    {
+        HlsVariant w[8];
+        int nw = hls_parse_master(m540, "http://x/y.m3u8", w, 8);
+        assert(nw == 4 && hls_pick_wanted(w, nw, 0, 0) == 2 && hls_pick_wanted(w, nw, 720, 0) == 1 && hls_pick_wanted(w, nw, -1, 0) == 3);
+    }
     HlsVariant only1080[1] = { v[0] };
     assert(hls_pick_variant(only1080, 1, 720) == 0);                             /* nothing smaller: still try */
     const char *nosize = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=3000000\na.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1200000\nb.m3u8\n";

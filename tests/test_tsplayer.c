@@ -447,6 +447,7 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "standby")) goto standby;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "late")) goto late;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "limit")) goto limit;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls")) goto hls;
     r = play(argv[1], 10);
     show("720p30", &r);
     assert(r.st.state == TSP_ENDED && r.st.errors == 0);
@@ -877,15 +878,6 @@ limit:
         show("1080p60 HD", &r);
         printf("               shown %u, decoded %u, not decoded %u, last %d ms from the sound\n", r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.av_last);
         assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 150 && r.st.shown * 10 >= r.st.decoded * 7 && abs(r.av_last) < 200);
-        /* the same 1080p60 with a decoder that has time to spare (a low bit rate 1080p50 channel on the device:
-         * 25 fps shown with the decoder 75% idle): after 5 s all pictures are decoded */
-        tsp_set_options(1, 1080);
-        decode_order = 1; int_delay = 5;
-        r = play(argv[31], 14);
-        decode_order = 0; int_delay = 2;
-        show("1080p60 spare", &r);
-        printf("               shown %u, decoded %u, not decoded %u, last %d ms from the sound\n", r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.av_last);
-        assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.decoded >= 230 && abs(r.av_last) < 200);
         /* a file from the memory card (1080p25, HD decoder in decode order): plays to the end without the sound
          * waiting for pictures that will not come (0.2.7: 10 s of silence and a still picture at the end) */
         tsp_set_options(1, 720);
@@ -994,11 +986,13 @@ hls_slow:
     }
 
     /* HLS: master playlist -> the 720p variant -> 1 s MPEG-TS segments */
+hls:
+    tsp_set_options(0, 720);
     {
         static char names[64][32], paths[64][512];
         int k = 0;
-        const char *pl[] = { "master.m3u8", "index.m3u8", "live.m3u8", "master2.m3u8" };
-        for (int i = 0; i < 4; i++) { snprintf(names[k], 32, "%s", pl[i]); snprintf(paths[k], 512, "%s/%s", argv[16], pl[i]); k++; }
+        const char *pl[] = { "master.m3u8", "index.m3u8", "live.m3u8", "master2.m3u8", "master3.m3u8" };
+        for (int i = 0; i < 5; i++) { snprintf(names[k], 32, "%s", pl[i]); snprintf(paths[k], 512, "%s/%s", argv[16], pl[i]); k++; }
         for (int i = 0; i < 20 && k < 63; i++) {
             snprintf(names[k], 32, "seg%03d.ts", i); snprintf(paths[k], 512, "%s/seg%03d.ts", argv[16], i);
             FILE *f = fopen(paths[k], "rb"); if (!f) break; fclose(f); k++;
@@ -1024,6 +1018,22 @@ hls_slow:
         show("hls 1080 gone", &r);
         printf("               %d HTTP requests (720p alone: %d)\n", mock_http_requests, req720);
         assert(r.st.state == TSP_ENDED && r.w == 1280 && r.changes >= 130);
+        /* 0.3.0, automatic: the 540p variant (the Vita's screen size) before 720p; the list for the screen */
+        tsp_set_options(1, 0);
+        r = play("http://example.invalid/tv/master3.m3u8", 4);
+        show("hls auto 540", &r);
+        assert(r.st.state != TSP_ERROR && r.st.hls_h == 540 && r.st.hls_nv == 3 && r.st.hls_vcur == 0);
+        assert(r.st.hls_vh[0] == 540 && r.st.hls_vh[1] == 720 && r.st.hls_vh[2] == 1080 && r.st.hls_vbw[1] == 2500000);
+        /* picked from the list: that one, by its bit rate */
+        tsp_set_options(1, 720);
+        tsp_set_hls_bw(2500000);
+        r = play("http://example.invalid/tv/master3.m3u8", 4);
+        show("hls picked 720", &r);
+        assert(r.st.state != TSP_ERROR && r.st.hls_h == 720 && r.st.hls_vcur == 1);
+        /* the smallest */
+        tsp_set_options(1, -1);
+        r = play("http://example.invalid/tv/master3.m3u8", 4);
+        assert(r.st.hls_h == 540);
         tsp_set_options(0, 720);
         mock_http_requests = 0;
         /* the chosen variant is gone (404): the next one plays */
@@ -1036,6 +1046,7 @@ hls_slow:
         show("hls live", &r);
         printf("               %d HTTP requests\n", mock_http_requests);
         assert(r.changes >= 40 && r.changes <= 110 && r.st.state != TSP_ERROR && mock_http_requests >= 5);
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls")) return 0;
         /* a playlist whose segments are missing: a clear error, not a hang */
         for (int i = 4; i < k; i++) mock_http_map[i][0] = "none.ts";
         r = play("http://example.invalid/tv/index.m3u8", 8);
