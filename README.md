@@ -7,7 +7,7 @@ listen to radio from your own M3U playlists or Xtream accounts, decoded by the V
 
 <p align="center"><img src="https://github.com/user-attachments/assets/010c908b-58ff-4be5-982d-5e6c4701ef0c" width="640" alt="Vita IPTV screenshot"></p>
 
-**Version 0.2.2** - films, series, 1080p and FLV streams (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
+**Version 0.3.0** - picture size choice, smoother live TV, films, series, 1080p and FLV streams (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
 
 This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
@@ -28,16 +28,19 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   (tinyurl and the like) and https/HLS channels work. The Vita's own TLS is too old for most sites today.
 - **Video:** H.264 up to 1920x1080 through the hardware decoder (details below), audio/video sync to the
   sound, automatic recovery from decoder errors.
-- **1080p:** 1080p channels and films play through the same hardware decoder. HLS channels with several
-  qualities open in 720p; **Square** switches to their 1080p version.
-- **Stream analysis:** **Select** while watching shows the resolution, codecs, frame rate and download speed of the
-  stream (TS, HLS, MP4, MKV, http and https) and whether the Vita can play it.
+- **1080p:** 1080p channels and films play through the same hardware decoder.
+- **Picture size (HLS channels with several qualities):** they open at about 540p (the Vita's own screen size) if
+  the channel offers it, else at 720p, or at the size chosen in the settings. **Select** lists the channel's
+  sizes (and the stream analysis at the end); **Square** goes to the next size up, from the biggest to the smallest.
+- **Stream analysis:** shows the resolution, codecs, frame rate and download speed of the stream (TS, HLS, MP4, MKV,
+  http and https) and whether the Vita can play it (**Select**, or the last entry of its menu on HLS channels).
 - **Audio:** AAC (hardware), MP2 / MP3 (software). Many TV channels use MP2.
 - **Radio:** audio-only streams get a radio screen.
 - **Two-pane channel browser:** categories on the left, channels on the right. Left stick scrolls categories,
   right stick scrolls channels. Search across all channels (case- and accent-insensitive).
 - **Settings:** language (English / Turkish, follows the console by default), hide adult channels,
-  hide 1080p / FHD / 4K channels, optional transcoding server.
+  hide 1080p / FHD / 4K channels, preferred resolution (automatic, 1080p, 720p, 540p, 480p, lowest), optional
+  transcoding server.
 - **Optional transcoding server** (`tools/vita_iptv_proxy.py`, needs Python 3 and ffmpeg on a PC):
   plays what the Vita cannot - HEVC, interlaced video, AC-3 - by converting it to 720p H.264 + AAC.
 
@@ -85,8 +88,8 @@ Kodi style as `link|User-Agent=...&Referer=...`. The app sends them with every r
 |---|---|
 | Playlists | X open, Square add, Triangle edit, Select delete, START menu |
 | Channels | Left stick / D-pad: categories, right stick: channels, X play, L/R page, Square search, O back |
-| Playing (live TV and films) | X or START pause / play, L / R, Left / Right or either stick sideways: hold to move through a film (further and longer = faster), let go to jump there, Up / Down previous / next channel or film, Triangle information, Square 720p / 1080p (HLS) or the transcoding server, Select stream analysis, O back (a film's position is kept) |
-| Radio | Up/Down change station, Square turns the screen off (the sound goes on; any button turns it on), O back |
+| Playing (live TV and films) | X or START pause / play, L / R, Left / Right or either stick sideways: hold to move through a film (further and longer = faster), let go to jump there, Up / Down previous / next channel or film, Triangle information, Square next picture size (HLS) or the transcoding server, Select picture sizes / stream analysis, O back (a film's position is kept) |
+| Radio | Up / Down change station, O back |
 
 ## What plays and what does not
 
@@ -105,10 +108,19 @@ reference pictures may play with dropped frames or not at all, while the same ch
 
 **About 1080p:** the public decoder API stops at 720p. Above 720p the app sets the decoder up through the
 firmware's internal entry points instead (the same hardware; found with the test app in `tools/decprobe`).
-1080p needs about twice the data of 720p: if a 1080p channel stutters on a slow connection, use its 720p version.
-1080p at 50/60 fps can be faster than the Vita decodes: the player then leaves out the pictures no other picture
-needs (often every other one), so the channel plays in real time and in sync with the sound at a lower frame rate;
-its 720p version plays all pictures.
+1080p needs about twice the data of 720p. When the connection cannot keep up, live TV waits with *Buffering...*
+instead of freezing; when the stream's segments come slower than they play, the player switches to the channel's
+next smaller picture size by itself (not when a size was chosen with Select / Square or in the settings, except
+1080p). A film the connection cannot carry waits longer at once and
+shows the connection speed against what the film needs.
+The Vita decoder manages 1080p up to about 30 pictures a second. 1080p at 50/60 fps plays with the pictures no
+other picture needs left out (in time with the sound, at a lower frame rate); an HLS channel goes to its 720p
+variant instead. The same happens when the decoder is measured to be slower than any other stream.
+When the picture falls behind the sound on live TV (a stream that sends the sound seconds ahead, a burst the
+decoder takes in at once), the sound waits until the picture has caught up.
+Triangle while watching shows three rows in fixed columns: picture size, shown / stream frame rate (e.g.
+43 / 50 fps), pictures shown and dropped; sound, A/V offset, waits, damaged pictures; connection speed, what the
+stream needs, data received, pictures not decoded.
 
 **About films:** most films are 1080p and play directly. Many film files use
 HEVC (x265) video or AC-3 / E-AC-3 sound: HEVC does not play, AC-3 plays without sound. Jumping needs a server that
@@ -130,6 +142,8 @@ account: files at the top are films, sub-folders are film categories, `Series/<n
 `Live/*.ts` live channels. Run it on a PC in the same network and add the address, username and password it prints
 as an Xtream playlist. Film links (`.mkv`, `.mp4`, `.mov` ...) in M3U lists and single stream links also play as
 films (pause, jumps, resume), so a freely licensed film such as the Blender Foundation's open movies works too.
+`--pace` sends live channels at their own bit rate like a broadcast, `--https` serves over HTTPS with a
+self-signed certificate (needs `openssl`), for comparing the same file over HTTP and HTTPS.
 
 ## Building
 
