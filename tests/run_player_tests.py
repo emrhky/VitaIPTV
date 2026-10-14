@@ -79,6 +79,10 @@ open(f"{T}/hls/master.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=60
     "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS=\"avc1.640020,mp4a.40.2\"\nindex.m3u8?token=1\n")
 open(f"{T}/hls/master2.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nmissing720.m3u8\n"
     "#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=854x480\nindex.m3u8\n")
+# 0.3.0: a 540p variant is chosen first (automatic); one picked from the list by its bit rate
+open(f"{T}/hls/master3.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080\nhd/big.m3u8\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nindex.m3u8?v=720\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=1600000,RESOLUTION=960x540\nindex.m3u8?v=540\n")
 live = open(f"{T}/hls/index.m3u8").read().replace("#EXT-X-ENDLIST", "").replace("#EXT-X-PLAYLIST-TYPE:VOD\n", "")
 open(f"{T}/hls/live.m3u8", "w").write(live)
 VSRC = ("-f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 12 "
