@@ -12,6 +12,8 @@
 typedef enum { TSP_IDLE = 0, TSP_CONNECTING, TSP_WAIT_KEY, TSP_PLAYING, TSP_ENDED, TSP_ERROR } TspState;
 typedef enum { TSP_ERRK_NONE = 0, TSP_ERRK_FORMAT, TSP_ERRK_NET, TSP_ERRK_OTHER } TspErrKind;
 
+#define TSP_MAX_VARIANTS 8
+
 typedef struct {
     volatile int state;                 /* TspState */
     char msg[100];                      /* error text when state == TSP_ERROR */
@@ -48,11 +50,18 @@ typedef struct {
     unsigned rebuffers;                 /* how many times */
     int note_pct;                       /* how far the note's work is (0 = not shown) */
     char note[64];                      /* what a film is waiting for (reading its index...), "" = nothing */
+    /* HLS: the variants the Vita can play (up to 1080p), smallest first, and the one playing (-1 = none) */
+    int hls_nv, hls_vcur;
+    int hls_vw[TSP_MAX_VARIANTS], hls_vh[TSP_MAX_VARIANTS];   /* height 0 = not given */
+    long hls_vbw[TSP_MAX_VARIANTS];     /* bit rate, bit/s (tsp_set_hls_bw picks one exactly) */
 } TspStatus;
 
-/* For the next tsp_start: hd1080 = decode above 720p; hls_max_h = 720 or 1080, the
- * tallest HLS variant to choose (1080 only counts with hd1080). */
-void              tsp_set_options(int hd1080, int hls_max_h);
+/* For the next tsp_start: hd1080 = decode above 720p; hls_want = the HLS variant to choose: 0 automatic (about
+ * 540 lines if there is one, else 720p), -1 the smallest, else the best up to that many lines (1080, 720, 540,
+ * 480...; above 720 only with hd1080). Clears the bit rate below. */
+void              tsp_set_options(int hd1080, int hls_want);
+/* For the next tsp_start, after tsp_set_options: the HLS variant with exactly this bit rate (from hls_vbw[]). */
+void              tsp_set_hls_bw(long bw);
 int               tsp_start(const char *url);       /* 0 = started */
 /* A film or episode (a file on a server that sends parts of it): starts at start_ms (the keyframe at or
  * before it). MKV, MP4 and TS files. */
