@@ -953,6 +953,10 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "lang")) { st->lang = atoi(v); if (st->lang < 0 || st->lang > 2) st->lang = 0; }
             else if (!strcmp(k, "hide_adult")) st->hide_adult = atoi(v) != 0;
             else if (!strcmp(k, "hide_1080p")) st->hide_1080p = atoi(v) != 0;
+            else if (!strcmp(k, "resolution")) {
+                int r = atoi(v);
+                st->res_pref = r == 1080 || r == 720 || r == 540 || r == 480 || r == -1 ? r : 0;
+            }
             /* hd_1080p= (before v0.2.2): 1080p is always on now, the line is ignored */
         }
         p += n;
@@ -962,8 +966,8 @@ void settings_parse(const char *text, Settings *st)
 
 int settings_format(const Settings *st, char *out, size_t outsz)
 {
-    int w = snprintf(out, outsz, "# Vita IPTV settings\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_1080p=%d\n",
-                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_1080p);
+    int w = snprintf(out, outsz, "# Vita IPTV settings\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_1080p=%d\nresolution=%d\n",
+                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_1080p, st->res_pref);
     return (w < 0 || (size_t)w >= outsz) ? -1 : w;
 }
 

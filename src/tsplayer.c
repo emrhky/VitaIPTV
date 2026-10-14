@@ -88,7 +88,8 @@ int sceCodecEngineFreeMemoryFromUnmapMemBlock(SceUID uid, SceUIntVAddr addr);
 /* options for the next tsp_start (tsp_set_options) */
 int g_slots_cap = NSLOTS;              /* most picture slots (the PC tests compare with the old four) */
 static int g_hd1080 = 1;                /* decode above 720p (the HD decoder; always on since v0.2) */
-static int g_hls_max_h = 720;           /* HLS: tallest variant to choose */
+static int g_hls_want = 720;            /* HLS: the variant to choose (see tsp_set_options) */
+static long g_hls_bw;                   /* ... with exactly this bit rate (0 = any) */
 #define NO_TS        0xFFFFFFFFu
 
 enum { SLOT_FREE = 0, SLOT_READY, SLOT_SHOWN, SLOT_OFF };   /* OFF: the decoder refused its memory */
@@ -224,9 +225,6 @@ typedef struct {
     volatile uint64_t first_unit_us, first_audio_us;   /* when the first video unit / audio packet came */
     uint64_t first_show_us;             /* when the first picture went on screen */
     uint32_t pub_fed, pub_nopic, pub_nopic_nonref;     /* public decoder: units given, of them without a picture */
-    int pre_skip_tried;                 /* 1080p: all pictures were tried once because the decoder had time to spare */
-    uint64_t pre_skip_at;               /* when pre_skip was last turned on or off */
-    uint32_t pre_skip_drop0;            /* pictures dropped when all were tried */
     int hd60, hd60_pending;             /* 720p above 30 fps through the HD decoder (0.2.10 experiment) */
     int64_t late_sum_us;
     volatile uint32_t ui_calls;         /* tsp_frame calls (UI frame rate) */
@@ -1272,11 +1270,6 @@ static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int st
             plog("tsp: the decoder is slower than the stream (%.1f s of video in %.1f s, %d ms of video always waiting): "
                  "%s", covered, secs, t->cu_minq, want == 1 ? "every second picture nothing refers to is left out" :
                  was ? "now all pictures nothing refers to are left out" : "all pictures nothing refers to are left out");
-            if (t->pre_skip_tried && !t->pre_skip) {        /* all pictures were tried (time to spare): not enough */
-                t->pre_skip = 1;
-                t->pre_skip_at = now;
-                plog("tsp: the decoder falls behind with all pictures: pictures nothing refers to are left out again");
-            }
             if (t->vh >= 1000 && !t->st.decoder_slow) {     /* 1080p: a smaller variant would play all pictures */
                 t->st.decoder_slow = 1;
                 plog("tsp: 1080p at this picture rate is too much for the decoder (%.0f%% of real time)", covered * 100.0 / secs);
@@ -1291,15 +1284,6 @@ static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int st
         t->cu_minq = queued_ms;
         t->cu_pts0 = t->cu_pts1 = -1;
         t->cu_slot0 = t->slot_wait_total;
-    }
-    /* all pictures tried (time to spare) and the screen drops them as late, or the picture falls behind the
-     * sound: the decoder cannot do them all after all; do not wait for the 3 s measure above */
-    if (t->pre_skip_tried && !t->pre_skip && now - t->pre_skip_at > 500000ULL &&
-        (t->st.dropped - t->pre_skip_drop0 >= 8 || t->st.av_late_ms > 120)) {
-        t->pre_skip = 1;
-        t->pre_skip_at = now;
-        plog("tsp: the decoder falls behind with all pictures (%u dropped as late, %d ms behind): pictures nothing refers "
-             "to are left out again", (unsigned)(t->st.dropped - t->pre_skip_drop0), t->st.av_late_ms);
     }
     if ((t->catchup || t->pre_skip) && au_is_nonref(data, len) && (t->catchup != 1 || t->pre_skip || (t->cu_alt ^= 1))) {
         t->st.skipped++;
@@ -1317,6 +1301,23 @@ static void slot_nap(Tsp *t)
     uint64_t d = now_us() - a;
     t->w_slot_us += d;
     t->slot_wait_total += d;
+}
+
+/* The picture time from the units waiting behind this one (the stream's rate is not known at its first
+ * keyframe): the smallest gap between their timestamps and this one, in us; 0 if none can tell. */
+static uint32_t peek_frame_us(Tsp *t, int64_t pts)
+{
+    if (pts < 0) return 0;
+    int64_t best = 0;
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    const Pkt *q = t->vq.head;
+    for (int k = 0; q && k < 8; q = q->next, k++) {
+        if (q->pts < 0) continue;
+        int64_t d = q->pts > pts ? q->pts - pts : pts - q->pts;
+        if (d > 0 && d <= 9000 && (!best || d < best)) best = d;   /* (up to 0.1 s: 10 fps or more) */
+    }
+    sceKernelUnlockMutex(t->qlock, 1);
+    return best ? (uint32_t)(best * 1000000 / 90000) : 0;
 }
 
 /* One H.264 access unit. Runs on the video thread. */
@@ -1362,11 +1363,23 @@ static void video_packet(Tsp *t, Pkt *p)
         }
         /* 720p above 30 pictures a second: the public decoder lost about 15% of the units at 720p60 on the
          * device (no picture for them; the same file decodes whole on a PC). Try the HD decoder. */
-        if (mbs <= MBS_720P && g_hd1080 && !i->interlaced && !t->force_internal && !t->hd60 && t->frame_us && t->frame_us < 30000) {
+        /* (0.2.10 knew the rate only after 15 units and changed the decoder then, seen as a restart at the
+         * start; the units already waiting tell it now) */
+        uint32_t fu = 0;                                    /* (the demuxer's first picture time can be 2-3 pictures with B-pictures) */
+        if (mbs <= MBS_720P && g_hd1080 && !i->interlaced && !t->force_internal && !t->hd60) {
+            uint64_t w0 = now_us();                         /* the next units are on their way: up to 0.3 s for them */
+            fu = peek_frame_us(t, pts);
+            while (!fu && !stopping(t) && !t->reader_done && now_us() - w0 < 300000ULL) {
+                sceKernelDelayThread(10000);
+                fu = peek_frame_us(t, pts);
+            }
+            if (!fu) fu = t->frame_us;
+        }
+        if (mbs <= MBS_720P && g_hd1080 && !i->interlaced && !t->force_internal && !t->hd60 && fu && fu < 30000) {
             t->hd60 = 1;
             t->force_internal = 1;
             t->oom_hd = 1;                                  /* (back to the public decoder if it does not start) */
-            plog("tsp: %dp at %u fps: the HD decoder", i->height, (unsigned)((1000000u + t->frame_us / 2) / t->frame_us));
+            plog("tsp: %dp at %u fps: the HD decoder", i->height, (unsigned)((1000000u + fu / 2) / fu));
         }
         int r = decoder_open(t, i->width, i->height, i->refs, i->level);
         if (r < 0 && t->oom_hd && t->force_internal) {     /* the HD decoder did not start: back to the public one */
@@ -1416,7 +1429,6 @@ static void video_packet(Tsp *t, Pkt *p)
         }
         if (i->height >= 1000 && t->frame_us && t->frame_us < 30000) {
             t->pre_skip = 1;
-            t->pre_skip_at = now_us();
             t->st.decoder_slow = 1;
             plog("tsp: 1080p at %u fps: more than the Vita decoder manages (1080p up to about 30); pictures nothing "
                  "refers to are left out", (unsigned)((1000000u + t->frame_us / 2) / t->frame_us));
@@ -2132,23 +2144,6 @@ static void stats_tick(Tsp *t)
                  "%u%% HD decoder busy, %u%% other; picture to screen avg %u ms; screen frames with no picture %u, behind %u",
                  pd, psl, pda, pb, used < 100 ? 100 - used : 0, wn ? (unsigned)(wsum / wn / 1000) : 0, (unsigned)none, (unsigned)more);
             if (dr) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
-            /* 1080p above 30 fps with the pictures nothing refers to left out, and the video thread mostly waits
-             * for a free slot: the decoder has time to spare (a low bit rate 1080p50 showed 25 fps with the
-             * decoder 75% idle; streams the decoder could not keep up with: 0-25% waiting, 45-69% busy). Try all pictures; if the decoder then falls behind, leave them out again. */
-            if (t->pre_skip && !t->pre_skip_tried && psl > 50 && pb < 20 && pd < 40 && now - t->pre_skip_at >= STATS_US * 4 / 5) {
-                t->pre_skip = 0;
-                t->pre_skip_tried = 1;
-                t->pre_skip_at = now;
-                t->pre_skip_drop0 = t->st.dropped;
-                plog("tsp: the decoder has time to spare (%u%% waiting for a slot): all pictures are decoded", psl);
-            }
-        }
-        if (t->pre_skip_tried && !t->pre_skip && now - t->pre_skip_at >= STATS_US && t->st.fps10 > 0 && vq_n > 0 &&
-            dfps10 * 100 < (unsigned)t->st.fps10 * 92) {
-            t->pre_skip = 1;                                /* (for good: no more tries on this stream) */
-            t->pre_skip_at = now;
-            plog("tsp: the decoder falls behind with all pictures (%u.%u of %d.%d fps): pictures nothing refers to are "
-                 "left out again", dfps10 / 10, dfps10 % 10, t->st.fps10 / 10, t->st.fps10 % 10);
         }
     }
     cpu_line(t, now);
@@ -2535,6 +2530,8 @@ static int seg_is_mp4(const char *uri, int len)
     return (e >= 4 && !strncasecmp(uri + e - 4, ".mp4", 4)) || (e >= 4 && !strncasecmp(uri + e - 4, ".m4s", 4));
 }
 
+static void hls_list_variants(Tsp *t, const HlsVariant *v, int n, int k);
+
 /* HLS: playlists are read with sceHttp; the MPEG-TS segments go into the demuxer one after the other.
  * Live playlists start three segments from the end and are read again while playing. */
 static void read_hls(Tsp *t, uint8_t *buf)
@@ -2550,9 +2547,9 @@ static void read_hls(Tsp *t, uint8_t *buf)
         HlsVariant *v = malloc(sizeof *v * 32);
         if (!v) { set_error(t, "Out of memory"); goto out; }
         int n = hls_parse_master(text, url, v, 32);
-        int max_h = g_hd1080 ? g_hls_max_h : 720;
+        int want = !g_hd1080 && g_hls_want > 720 ? 720 : g_hls_want;
         t->st.hls_hd = g_hd1080 && hls_has_variant_above(v, n, 720, 1080);   /* the player offers R: 1080p */
-        int k = hls_pick_variant(v, n, max_h);
+        int k = hls_pick_wanted(v, n, want, g_hls_bw);
         if (k >= 0) {                                       /* is there a smaller one to go to on a slow line? */
             t->st.hls_h = v[k].height;
             for (int i = 0; i < n; i++)
@@ -2569,10 +2566,12 @@ static void read_hls(Tsp *t, uint8_t *buf)
             got = hls_fetch_text(t, url, text, "variant playlist", tries < 2);
             if (got >= 0) break;
             v[k].hevc = 1;                                  /* not usable: pick another */
-            k = hls_pick_variant(v, n, max_h);
+            k = hls_pick_wanted(v, n, want, 0);
             if (k >= 0 && v[k].hevc) k = -1;
             if (k >= 0) plog("tsp: HLS trying variant %d instead", k);
         }
+        if (k >= 0 && got >= 0) t->st.hls_h = v[k].height;
+        hls_list_variants(t, v, n, got >= 0 ? k : -1);      /* (the ones that did not answer are left out) */
         free(v);
         if (got < 0) {
             if (!stopping(t) && t->st.state != TSP_ERROR) set_error_kind(t, TSP_ERRK_NET, "No HLS variant answers");
@@ -3524,10 +3523,37 @@ vita2d_texture *tsp_frame(int *w, int *h)
 
 const TspStatus *tsp_status(void) { return g_tsp ? &g_tsp->st : NULL; }
 
-void tsp_set_options(int hd1080, int hls_max_h)
+void tsp_set_options(int hd1080, int hls_want)
 {
     g_hd1080 = hd1080;
-    g_hls_max_h = hls_max_h > 720 ? 1080 : hls_max_h > 0 && hls_max_h <= 480 ? 480 : 720;
+    g_hls_want = hls_want > 720 ? 1080 : hls_want;
+    g_hls_bw = 0;
+}
+
+void tsp_set_hls_bw(long bw) { g_hls_bw = bw > 0 ? bw : 0; }
+
+/* The variants the screen can offer (playable, up to 1080p), smallest first; the chosen one marked. */
+static void hls_list_variants(Tsp *t, const HlsVariant *v, int n, int k)
+{
+    int idx[32], m = 0;
+    for (int i = 0; i < n && m < 32; i++)
+        if (!v[i].hevc && !v[i].audio_only && v[i].height <= 1080 && (g_hd1080 || v[i].height <= 720)) idx[m++] = i;
+    for (int a = 1; a < m; a++)                              /* by height, then bit rate (no size: first) */
+        for (int b = a; b > 0; b--) {
+            const HlsVariant *x = &v[idx[b - 1]], *y = &v[idx[b]];
+            if (x->height < y->height || (x->height == y->height && x->bandwidth <= y->bandwidth)) break;
+            int tmp = idx[b]; idx[b] = idx[b - 1]; idx[b - 1] = tmp;
+        }
+    int first = m > TSP_MAX_VARIANTS ? m - TSP_MAX_VARIANTS : 0;   /* too many: the biggest ones */
+    t->st.hls_nv = 0;
+    t->st.hls_vcur = -1;
+    for (int i = first; i < m; i++) {
+        int j = t->st.hls_nv++;
+        t->st.hls_vw[j] = v[idx[i]].width;
+        t->st.hls_vh[j] = v[idx[i]].height;
+        t->st.hls_vbw[j] = v[idx[i]].bandwidth;
+        if (idx[i] == k) t->st.hls_vcur = j;
+    }
 }
 
 int tsp_av_offset(int *ms)

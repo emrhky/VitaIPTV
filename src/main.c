@@ -50,7 +50,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define RESUME_FILE   DATA_DIR "/resume.txt"
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v0.2.10"
+#define APP_VERSION   "v0.3.0"
 #endif
 #define MAX_SOURCES   64
 #define MAX_GROUPS    1024
@@ -796,9 +796,59 @@ static int film_dur_ms;              /* the film's length, kept while it plays t
 static char film_note[200];          /* a short message over the film (e.g. jumping is not possible) */
 static unsigned film_note_until;            /* the end of the film was handled (its resume point dropped) */
 static int resume_ask, resume_vi, resume_pos, resume_sel;   /* "Continue from 12:34?" box on the channel screen */
-static int hd_mode;                  /* Square in the player: HLS channel switched to its 1080p variant (resets on channel change) */
 static int decoder_note_done;         /* the "1080p above 30 fps" note was shown for this channel */
-static int low_mode;                 /* the line was too slow even for 720p: a variant of at most 480 lines (resets too) */
+/* HLS picture size for this channel (resets on channel change): 0 = the setting (automatic: about 540p, else
+ * 720p); else the best variant up to res_want lines (-1 the smallest), or exactly the one with res_bw */
+static int res_want;
+static long res_bw;
+static int res_manual;               /* chosen with Select / Square (not by stepping down on a slow line) */
+static int res_menu, res_menu_sel;   /* Select in the player: the picture size menu */
+
+static int res_effective(void) { return res_want ? res_want : settings.res_pref; }
+/* the user fixed the size (here or in the settings): no stepping down, except from 1080p */
+static int res_fixed(void) { return res_manual || settings.res_pref != 0; }
+
+/* the name of variant i of the playing HLS channel ("720p", or its bit rate without a size) */
+static const char *res_name(const TspStatus *st, int i, char *buf, size_t cap)
+{
+    if (st->hls_vh[i] > 0) snprintf(buf, cap, "%dp", st->hls_vh[i]);
+    else snprintf(buf, cap, "%ld.%ld Mbit/s", st->hls_vbw[i] / 1000000, st->hls_vbw[i] / 100000 % 10);
+    return buf;
+}
+
+/* Square: the next size up, after the biggest the smallest. Variants of the same height count once (the
+ * highest bit rate); ones without a size each count. Returns the variant, -1 if there is no other. */
+static int res_square_next(const TspStatus *st)
+{
+    int steps[TSP_MAX_VARIANTS], ns = 0, pos = -1, cur = st->hls_vcur;
+    for (int i = 0; i < st->hls_nv; i++) {
+        int h = st->hls_vh[i];
+        if (h > 0 && i + 1 < st->hls_nv && st->hls_vh[i + 1] == h) continue;   /* not the last of its height */
+        if (cur >= 0 && (i == cur || (h > 0 && h == st->hls_vh[cur]))) pos = ns;
+        steps[ns++] = i;
+    }
+    if (ns < 2) return -1;
+    return steps[(pos + 1) % ns];
+}
+
+/* a slow line: the next smaller variant (-1 if none) */
+static int res_step_down(const TspStatus *st)
+{
+    int cur = st->hls_vcur;
+    if (cur <= 0) return -1;
+    int h = st->hls_vh[cur];
+    for (int j = cur - 1; j >= 0; j--)
+        if (h <= 0 || st->hls_vh[j] < h) return j;
+    return -1;
+}
+
+/* a variant from the list for this channel (restarts it) */
+static void res_choose(const TspStatus *st, int i, int manual)
+{
+    res_want = st->hls_vh[i] > 0 ? st->hls_vh[i] : 1080;
+    res_bw = st->hls_vbw[i];
+    res_manual = manual;
+}
 
 static int is_mp4_url(const char *u)
 {
@@ -820,7 +870,8 @@ static void play_channel_ex(int vi, int use_proxy)
     player_stop();
     probe_cancel();
     tsp_stop();
-    tsp_set_options(1, hd_mode ? 1080 : low_mode ? 480 : 720);   /* 1080p is always on since v0.2 */
+    tsp_set_options(1, res_effective());                     /* 1080p is always on since v0.2 */
+    tsp_set_hls_bw(res_bw);
     via_proxy = 0;
     char purl[IPTV_URL_MAX * 3 + 64];
     int film = chans.items[vis[vi]].kind == CH_FILM;
@@ -855,8 +906,10 @@ static void play_channel(int vi)
 {
     auto_proxy_tried = 0;
     film_dur_ms = 0;
-    hd_mode = 0;                                             /* every channel opens in 720p */
-    low_mode = 0;
+    res_want = 0;                                            /* every channel opens at the size in the settings */
+    res_bw = 0;
+    res_manual = 0;
+    res_menu = 0;
     play_channel_ex(vi, 0);
 }
 
@@ -1031,12 +1084,16 @@ static void draw_tsp_screen(int osd)
     const UiHint *base = settings.proxy[0] ? HINTS_VIDEO_SRV : HINTS_VIDEO;
     int nh = settings.proxy[0] ? NH(HINTS_VIDEO_SRV) : NH(HINTS_VIDEO);
     memcpy(hints, base, sizeof(UiHint) * (size_t)nh);
-    if (st && (st->hls_hd || hd_mode || low_mode) && !via_proxy) {   /* Square: 1080p / 720p instead of the server */
+    static char sq_label[24];
+    int sq_next = st && !via_proxy ? res_square_next(st) : -1;
+    if (sq_next >= 0) {                                      /* Square: the next picture size instead of the server */
         int k = 0;
         while (k < nh && hints[k].btn != UI_BTN_SQUARE) k++;
         if (k == nh) { memmove(&hints[2], &hints[1], sizeof(UiHint) * (size_t)(nh - 1)); k = 1; nh++; }
-        hints[k] = (UiHint){ UI_BTN_SQUARE, hd_mode || low_mode ? "720p" : "1080p" };
+        hints[k] = (UiHint){ UI_BTN_SQUARE, res_name(st, sq_next, sq_label, sizeof sq_label) };
     }
+    if (st && st->hls_nv > 0 && !via_proxy)                  /* Select: the size menu (analysis at its end) */
+        for (int k = 0; k < nh; k++) if (hints[k].btn == UI_BTN_SELECT) hints[k].label = "Resolution";
     if (film_playing()) {                                    /* films: pause, jumps, time line */
         memcpy(hints, HINTS_FILM, sizeof HINTS_FILM);
         nh = NH(HINTS_FILM);
@@ -1386,7 +1443,10 @@ enum { FORM_NONE, FORM_SOURCE, FORM_SETTINGS };
 static int form_kind, form_sel, edit_index;              /* edit_index -1 = new source */
 static int f_type;                                        /* 0 Xtream, 1 M3U, 2 single stream */
 static char f_name[IPTV_NAME_MAX], f_url[IPTV_URL_MAX], f_user[IPTV_CRED_MAX], f_pass[IPTV_CRED_MAX], f_proxy[IPTV_URL_MAX];
-static int f_auto, f_lang, f_adult, f_hd;
+static int f_auto, f_lang, f_adult, f_hd, f_res;
+static const int RES_VALUES[] = { 0, 1080, 720, 540, 480, -1 };
+static const char *const RES_NAMES[] = { "Automatic", "1080p", "720p", "540p", "480p", "Lowest" };
+#define RES_N 6
 static const char *const LANG_NAMES[3] = { "Automatic (system)", "English", "Türkçe" };
 static const char *const TYPE_NAMES[3] = { "Xtream (server + username + password)", "M3U playlist (link)", "Single stream (link)" };
 
@@ -1416,6 +1476,8 @@ static void open_settings_form(void)
     f_lang = settings.lang;
     f_adult = settings.hide_adult;
     f_hd = settings.hide_1080p;
+    f_res = 0;
+    for (int i = 0; i < RES_N; i++) if (RES_VALUES[i] == settings.res_pref) f_res = i;
 }
 
 /* fields 3 / 4 mean username / password, or Referer / User-Agent for a single stream: clear them when that changes */
@@ -1432,7 +1494,7 @@ static int source_field_enabled(int i)
 }
 
 #define SRC_FIELDS 7
-#define SET_FIELDS 8
+#define SET_FIELDS 9
 
 static int field_enabled(int i)
 {
@@ -1536,13 +1598,15 @@ static void form_activate(void)
         case 2: f_lang = (f_lang + 1) % 3; break;
         case 3: f_adult = !f_adult; break;
         case 4: f_hd = !f_hd; break;
-        case 5: test_server(); break;
-        case 6:
+        case 5: f_res = (f_res + 1) % RES_N; break;
+        case 6: test_server(); break;
+        case 7:
             snprintf(settings.proxy, sizeof settings.proxy, "%s", f_proxy);
             settings.auto_proxy = f_auto;
             settings.lang = f_lang;
             settings.hide_adult = f_adult;
             settings.hide_1080p = f_hd;
+            settings.res_pref = RES_VALUES[f_res];
             save_settings();
             apply_language();
             form_kind = FORM_NONE;
@@ -1579,9 +1643,10 @@ static void draw_form(void)
         f[2] = (ScrField){ T("Language"), T(LANG_NAMES[f_lang]), SCR_F_CHOICE, 1 };
         f[3] = (ScrField){ T("Hide adult channels"), T(f_adult ? "On" : "Off"), SCR_F_TOGGLE, 1 };
         f[4] = (ScrField){ T("Hide 1080p channels"), T(f_hd ? "On" : "Off"), SCR_F_TOGGLE, 1 };
-        f[5] = (ScrField){ T("Test server"), NULL, SCR_F_BUTTON, 1 };
-        f[6] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
-        f[7] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
+        f[5] = (ScrField){ T("Preferred resolution"), T(RES_NAMES[f_res]), SCR_F_CHOICE, 1 };
+        f[6] = (ScrField){ T("Test server"), NULL, SCR_F_BUTTON, 1 };
+        f[7] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
+        f[8] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
         scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), f, SET_FIELDS, form_sel, H, NH(H), status, status_err);
     }
 }
@@ -1600,13 +1665,16 @@ static int radio_playing(void)
 /* Radio: Square turns the screen off (its light, not the system: the Wi-Fi and the sound go on; putting the
  * Vita to sleep stopped both). Any button turns it on again at the brightness it had. */
 static int screen_off, screen_brightness = -1;
+static int bright_orig = -1, bright_cur = -1, bright_max;   /* the right stick's brightness (see brightness_stick) */
+static unsigned bright_last;
 
 static void screen_off_set(int off)
 {
     if (off == screen_off) return;
     if (off) {
         int b = -1;
-        if (sceRegMgrGetKeyInt("/CONFIG/DISPLAY", "brightness", &b) < 0 || b <= 0) b = -1;
+        if (bright_cur > 0) b = bright_cur;                  /* changed with the right stick: back to that */
+        else if (sceRegMgrGetKeyInt("/CONFIG/DISPLAY", "brightness", &b) < 0 || b <= 0) b = -1;
         if (b < 0) {                                         /* cannot put it back afterwards: do not turn it off */
             snprintf(film_note, sizeof film_note, "%s", T("The screen cannot be turned off here"));
             film_note_until = now_ms() + 3000;
@@ -1679,6 +1747,7 @@ static int hold;
  * On the channel screen the left stick scrolls categories and the right stick channels. */
 static int lstick_ud, rstick_ud;
 static int stick_x;                 /* sideways push of the stick pushed furthest, -127..127 (films: scrubbing) */
+static int stick_rx, stick_ry;      /* the right stick, -128..127 (up is negative) */
 
 static int stick_dir(int v, int *hold_count)      /* v is 0..255, 128 is centre */
 {
@@ -1702,8 +1771,57 @@ static unsigned read_pressed(void)
     lstick_ud = stick_dir(pad.ly, &lhold);
     rstick_ud = stick_dir(pad.ry, &rhold);
     int lx = (int)pad.lx - 128, rx = (int)pad.rx - 128;
+    stick_rx = rx;
+    stick_ry = (int)pad.ry - 128;
+    if (abs(stick_ry) > abs(rx)) rx = 0;                     /* the right stick up / down is the brightness */
     stick_x = abs(rx) > abs(lx) ? rx : lx;
     return pressed;
+}
+
+/* Right stick up / down in the player: the screen's brightness, 5% each 0.1 s, at least 10%. It goes back
+ * to what it was when the app ends. Only a clear up / down push (sideways moves through a film). */
+static void brightness_stick(void)
+{
+    int ry = stick_ry;
+    if (abs(ry) < 80 || abs(ry) < 2 * abs(stick_rx) || screen_off) return;
+    unsigned now = now_ms();
+    if (now - bright_last < 100) return;
+    bright_last = now;
+    if (bright_cur < 0) {
+        int b = -1;
+        if (sceRegMgrGetKeyInt("/CONFIG/DISPLAY", "brightness", &b) < 0 || b <= 0) {
+            snprintf(film_note, sizeof film_note, "%s", T("The brightness cannot be changed here"));
+            film_note_until = now + 2000;
+            bright_last = now + 2000;
+            plog("screen: brightness not readable");
+            return;
+        }
+        int mx = 0;
+        if (sceAVConfigGetDisplayMaxBrightness(&mx) < 0 || mx <= 0) mx = 65536;
+        bright_max = b > mx ? b : mx;
+        bright_orig = bright_cur = b;
+        plog("screen: brightness %d of %d", b, bright_max);
+    }
+    int step = bright_max / 20, lo = bright_max / 10;
+    int nb = bright_cur + (ry < 0 ? step : -step);
+    if (nb > bright_max) nb = bright_max;
+    if (nb < lo) nb = lo;
+    if (nb != bright_cur) {
+        int r = sceAVConfigSetDisplayBrightness(nb);
+        if (r < 0) { plog("screen: brightness %d -> 0x%08X", nb, (unsigned)r); return; }
+        bright_cur = nb;
+    }
+    snprintf(film_note, sizeof film_note, T("Brightness %d%%"), (int)(((long long)bright_cur * 100 + bright_max / 2) / bright_max));
+    film_note_until = now + 1500;
+    osd_until_us = now + 1500;
+}
+
+static void brightness_restore(void)
+{
+    if (bright_orig <= 0 || bright_cur == bright_orig) return;
+    int r = sceAVConfigSetDisplayBrightness(bright_orig);
+    plog("screen: brightness back to %d -> 0x%08X", bright_orig, (unsigned)r);
+    bright_cur = bright_orig;
 }
 
 static void move_sel(unsigned p, int count)
@@ -1842,6 +1960,8 @@ int main(void)
             if (form_kind == FORM_SETTINGS && form_sel == 1 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_auto = !f_auto;
             if (form_kind == FORM_SETTINGS && form_sel == 3 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_adult = !f_adult;
             if (form_kind == FORM_SETTINGS && form_sel == 4 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_hd = !f_hd;
+            if (form_kind == FORM_SETTINGS && form_sel == 5 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
+                f_res = (f_res + ((p & SCE_CTRL_LEFT) ? RES_N - 1 : 1)) % RES_N;
             if (form_kind == FORM_SETTINGS && form_sel == 2 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
                 f_lang = (f_lang + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3;
             if (p & SCE_CTRL_CROSS) form_activate();
@@ -2032,7 +2152,53 @@ int main(void)
             if (p) osd_until_us = now_ms() + 4000;            /* any button shows the bars again */
             int film = film_playing();
             unsigned held = prev_btn;
-            if (p & SCE_CTRL_CIRCLE) {
+            const TspStatus *ms = play_mode == 2 ? tsp_status() : NULL;
+            if (res_menu && (!ms || ms->hls_nv <= 0)) res_menu = 0;
+            if (res_menu) {                                  /* Select: picture sizes, newest first; analysis at the end */
+                static char names[TSP_MAX_VARIANTS + 2][64];
+                const char *items[TSP_MAX_VARIANTS + 2];
+                int n = 0, nv = ms->hls_nv;
+                if (settings.res_pref) snprintf(names[n], sizeof names[n], "%s%s: %s", res_want ? "" : "> ", T("Settings"),
+                                                 RES_VALUES[1] == settings.res_pref ? "1080p" : settings.res_pref == 720 ? "720p" :
+                                                 settings.res_pref == 540 ? "540p" : settings.res_pref == 480 ? "480p" : T("Lowest"));
+                else snprintf(names[n], sizeof names[n], "%s%s", res_want ? "" : "> ", T("Automatic"));
+                items[n] = names[n]; n++;
+                for (int i = nv - 1; i >= 0; i--, n++) {
+                    char nm[24];
+                    res_name(ms, i, nm, sizeof nm);
+                    int cur = res_want && i == ms->hls_vcur;
+                    if (ms->hls_vh[i] > 0)
+                        snprintf(names[n], sizeof names[n], "%s%s   %dx%d, %ld.%ld Mbit/s", cur ? "> " : "", nm, ms->hls_vw[i], ms->hls_vh[i],
+                                 ms->hls_vbw[i] / 1000000, ms->hls_vbw[i] / 100000 % 10);
+                    else snprintf(names[n], sizeof names[n], "%s%s", cur ? "> " : "", nm);
+                    items[n] = names[n];
+                }
+                snprintf(names[n], sizeof names[n], "%s", T("Stream analysis"));
+                items[n] = names[n]; n++;
+                if (p & SCE_CTRL_DOWN) res_menu_sel = (res_menu_sel + 1) % n;
+                if (p & SCE_CTRL_UP) res_menu_sel = (res_menu_sel + n - 1) % n;
+                if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) res_menu = 0;
+                else if (p & SCE_CTRL_CROSS) {
+                    res_menu = 0;
+                    if (res_menu_sel == n - 1) start_probe();
+                    else if (res_menu_sel == 0) {
+                        res_want = 0; res_bw = 0; res_manual = 0;
+                        plog("player: HLS automatic size (menu)");
+                        play_channel_ex(play_vis, 0);
+                    } else {
+                        int i = nv - res_menu_sel;
+                        char nm[24];
+                        plog("player: HLS %s (menu)", res_name(ms, i, nm, sizeof nm));
+                        res_choose(ms, i, 1);
+                        play_channel_ex(play_vis, 0);
+                    }
+                }
+                if (play_mode == 1) draw_probe_screen();
+                else {
+                    draw_tsp_screen(1);
+                    if (res_menu) scr_menu(T("Resolution"), items, n, res_menu_sel);
+                }
+            } else if (p & SCE_CTRL_CIRCLE) {
                 if (film) save_film_position();
                 seek_target = -1;
                 film_scrub = 0;
@@ -2050,6 +2216,7 @@ int main(void)
                 draw_probe_screen();
             } else {
                 const TspStatus *fs = play_mode == 2 ? tsp_status() : NULL;
+                brightness_stick();
                 int pos = 0, dur = 0;
                 if (film) { tsp_vod_pos(&pos, &dur); dur = film_length(); }
                 int can_jump = film && fs && (fs->seekable || via_proxy);   /* through the server: it starts again there */
@@ -2111,9 +2278,14 @@ int main(void)
                 }
                 if ((p & (SCE_CTRL_CROSS | SCE_CTRL_START)) && fs) tsp_pause(!fs->paused);
                 if (p & SCE_CTRL_TRIANGLE) show_info = !show_info;
-                if (p & SCE_CTRL_SELECT) {                           /* stream analysis */
-                    if (film) { save_film_position(); probe_return_ms = pos; }
-                    start_probe();
+                if (p & SCE_CTRL_SELECT) {
+                    if (fs && fs->hls_nv > 0 && !via_proxy && !film) {   /* HLS: the picture size menu */
+                        res_menu = 1;
+                        res_menu_sel = 0;
+                    } else {                                     /* stream analysis */
+                        if (film) { save_film_position(); probe_return_ms = pos; }
+                        start_probe();
+                    }
                 }
                 if ((p & SCE_CTRL_SQUARE) && radio_playing()) {   /* radio: screen off, sound and Wi-Fi go on */
                     screen_off_set(1);
@@ -2135,14 +2307,16 @@ int main(void)
                         film_note_until = now_ms() + 5000;
                     }
                 } else if (p & SCE_CTRL_SQUARE) {
-                    if (fs && !via_proxy && low_mode) {         /* stepped down on a slow line: back to 720p */
-                        low_mode = 0;
-                        plog("player: HLS 720p");
+                    int nx = fs && !via_proxy ? res_square_next(fs) : -1;
+                    if (nx >= 0) {                               /* HLS: the next size up, after the biggest the smallest */
+                        char nm[24];
+                        res_name(fs, nx, nm, sizeof nm);
+                        plog("player: HLS %s (Square)", nm);
+                        res_choose(fs, nx, 1);
+                        snprintf(film_note, sizeof film_note, "%s", nm);
+                        film_note_until = now_ms() + 3000;
                         play_channel_ex(play_vis, 0);
-                    } else if (fs && !via_proxy && (fs->hls_hd || hd_mode)) {   /* HLS with a 1080p variant: 720p <-> 1080p */
-                        hd_mode = !hd_mode;
-                        plog("player: HLS %s", hd_mode ? "1080p" : "720p");
-                        play_channel_ex(play_vis, 0);
+                        fs = tsp_status();
                     } else if (settings.proxy[0]) { auto_proxy_tried = 1; play_channel_ex(play_vis, !via_proxy); }
                     else {
                         snprintf(film_note, sizeof film_note, "%s", T("This channel has one picture size. Another needs the transcoding server (START > Settings)"));
@@ -2152,15 +2326,17 @@ int main(void)
                 }
                 /* 1080p at 50/60 pictures a second that the decoder cannot keep up with: 720p plays them all */
                 /* a 1080p stream above 30 fps with no smaller size to go to: say why pictures are left out (once) */
-                if (fs && fs->decoder_slow && !hd_mode && !decoder_note_done && fs->fps10 > 0) {
+                int hd_lower = fs && fs->hls_vcur > 0 && fs->hls_vh[fs->hls_vcur] >= 1000 && fs->hls_vh[0] > 0 && fs->hls_vh[0] <= 720;
+                if (fs && fs->decoder_slow && !hd_lower && !decoder_note_done && fs->fps10 > 0) {
                     decoder_note_done = 1;
                     snprintf(film_note, sizeof film_note, T("1080p at %d fps: the Vita decodes 1080p up to about 30 fps, some pictures are left out"),
                              (fs->fps10 + 5) / 10);
                     film_note_until = now_ms() + 6000;
                     osd_until_us = now_ms() + 6000;
                 }
-                if (!film && !via_proxy && fs && fs->decoder_slow && hd_mode && !fs->slow_network) {
-                    hd_mode = 0;
+                if (!film && !via_proxy && fs && fs->decoder_slow && hd_lower && !fs->slow_network) {
+                    res_want = 720;                              /* (also when 1080p was chosen: the decoder cannot) */
+                    res_bw = 0;
                     plog("player: the decoder cannot keep up with this 1080p (%d fps): HLS 720p", (fs->fps10 + 5) / 10);
                     snprintf(film_note, sizeof film_note, T("The Vita cannot decode this 1080p at %d fps: switched to 720p"), (fs->fps10 + 5) / 10);
                     film_note_until = now_ms() + 6000;
@@ -2170,10 +2346,13 @@ int main(void)
                 }
                 /* live TV that keeps waiting for data: the line is too slow for this picture size, so take the
                  * next smaller one the channel offers (the button goes back) */
-                if (!film && !via_proxy && fs && fs->slow_network && (hd_mode || (!low_mode && fs->hls_lower))) {
-                    int was = fs->hls_h > 0 ? fs->hls_h : hd_mode ? 1080 : 720;
-                    if (hd_mode) hd_mode = 0; else low_mode = 1;
-                    plog("player: the line is too slow for %dp: HLS %s", was, low_mode ? "480p or less" : "720p");
+                int down = fs && fs->slow_network ? res_step_down(fs) : -1;
+                if (!film && !via_proxy && down >= 0 && (!res_fixed() || fs->hls_h >= 1000)) {
+                    int was = fs->hls_h > 0 ? fs->hls_h : 720;
+                    char nm[24];
+                    res_name(fs, down, nm, sizeof nm);
+                    res_choose(fs, down, 0);                     /* (a chosen 1080p is no longer the choice) */
+                    plog("player: the line is too slow for %dp: HLS %s", was, nm);
                     snprintf(film_note, sizeof film_note, T("The connection is too slow for %dp: switched to a smaller picture"), was);
                     film_note_until = now_ms() + 6000;
                     osd_until_us = now_ms() + 6000;
@@ -2214,6 +2393,7 @@ int main(void)
     sceNetCtlTerm();
     sceNetTerm();
     screen_off_set(0);
+    brightness_restore();
     sceKernelExitProcess(0);
     return 0;
 }

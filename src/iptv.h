@@ -48,6 +48,7 @@ typedef struct {
     int lang;                   /* 0 = like the console, 1 = English, 2 = Turkish */
     int hide_adult;             /* leave adult channels out of the lists */
     int hide_1080p;             /* leave channels labelled 1080p/FHD/UHD/4K out (the Vita plays up to 720p) */
+    int res_pref;               /* HLS picture size: 0 automatic (about 540p, else 720p), 1080/720/540/480, -1 the smallest */
 } Settings;
 
 void channel_list_init(ChannelList *l);

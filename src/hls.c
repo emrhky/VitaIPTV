@@ -162,6 +162,32 @@ int hls_pick_variant(const HlsVariant *v, int n, int max_h)
     return n > 0 ? 0 : -1;
 }
 
+int hls_pick_wanted(const HlsVariant *v, int n, int want_h, long want_bw)
+{
+    if (want_bw > 0)
+        for (int i = 0; i < n; i++)
+            if (!v[i].hevc && !v[i].audio_only && v[i].bandwidth == want_bw && (v[i].height <= 1080)) return i;
+    if (want_h == 0) {                                      /* the screen's own size first: sharp, light to decode */
+        int best = -1;
+        for (int i = 0; i < n; i++) {
+            if (v[i].hevc || v[i].audio_only || v[i].height < 500 || v[i].height > 600 || v[i].width > 1280) continue;
+            if (best < 0 || v[i].bandwidth > v[best].bandwidth) best = i;
+        }
+        return best >= 0 ? best : hls_pick_variant(v, n, 720);
+    }
+    if (want_h < 0) {                                       /* the smallest one */
+        int best = -1;
+        for (int i = 0; i < n; i++) {
+            if (v[i].hevc || v[i].audio_only) continue;
+            if (best < 0) { best = i; continue; }
+            int hi = v[i].height > 0 ? v[i].height : 100000, hb = v[best].height > 0 ? v[best].height : 100000;
+            if (hi < hb || (hi == hb && v[i].bandwidth < v[best].bandwidth)) best = i;
+        }
+        return best >= 0 ? best : hls_pick_variant(v, n, 720);
+    }
+    return hls_pick_variant(v, n, want_h);
+}
+
 int hls_has_variant_above(const HlsVariant *v, int n, int h_low, int max_h)
 {
     for (int i = 0; i < n; i++) {

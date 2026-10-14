@@ -41,6 +41,11 @@ int  hls_parse_master(const char *text, const char *base_url, HlsVariant *v, int
 /* The variant to play: the best one up to max_h lines (720 or 1080) that the Vita can decode; -1 if none.
  * Without a size the highest bit rate under a cap is taken (2.6 Mbit/s for 720, 6 Mbit/s for 1080). */
 int  hls_pick_variant(const HlsVariant *v, int n, int max_h);
+/* The variant the player wants (0.3.0):
+ *   want_bw > 0: the playable variant with exactly this bit rate (picked from a list), if there is one;
+ *   want_h 0: automatic - about 540 lines (500-600, the Vita's screen) if there is one, else as hls_pick_variant(720);
+ *   want_h -1: the smallest; want_h > 0: as hls_pick_variant(want_h) (the best up to that many lines). */
+int  hls_pick_wanted(const HlsVariant *v, int n, int want_h, long want_bw);
 /* A playable variant taller than h_low lines and at most max_h exists (e.g. 1080p next to 720p). */
 int  hls_has_variant_above(const HlsVariant *v, int n, int h_low, int max_h);
 /* Media playlist (text must stay alive while m is used). 0 = ok. */
