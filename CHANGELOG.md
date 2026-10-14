@@ -2,7 +2,7 @@
 
 ## 0.3.0
 
-The main changes since 0.2.2 (0.2.3 - 0.2.10 were test versions).
+The main changes since 0.2.2
 
 **Picture size**
 - HLS channels that offer several qualities open at about 540p (960x540, the Vita's own screen size: sharp,
