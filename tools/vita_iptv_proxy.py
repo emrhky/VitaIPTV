@@ -11,7 +11,7 @@ Needs Python 3.7+ and ffmpeg (https://ffmpeg.org) in the PATH.
     python3 vita_iptv_proxy.py                 # listens on port 8090
     python3 vita_iptv_proxy.py --port 9000 --height 576 --bitrate 1800k
 
-Then on the Vita: START > Settings > Transcoding server = http://<this PC's IP>:8090
+Then on the Vita: Select > Settings > Transcoding server = http://<this PC's IP>:8090
 
 Endpoints
     GET /play?url=<url-encoded stream address>   the converted stream
@@ -202,7 +202,7 @@ def main():
     srv.daemon_threads = True
     print("Vita IPTV transcoding server is running.")
     for ip in local_ips():
-        print("  On the Vita: START > Settings > Transcoding server = http://%s:%d" % (ip, ARGS.port))
+        print("  On the Vita: Select > Settings > Transcoding server = http://%s:%d" % (ip, ARGS.port))
     print("  Output: H.264 up to %dp, %d fps max, %s, AAC stereo. Ctrl+C to stop." % (ARGS.height, ARGS.max_fps, ARGS.bitrate))
     try:
         srv.serve_forever()
