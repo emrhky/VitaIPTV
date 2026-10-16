@@ -119,17 +119,20 @@ void ui_header(const char *title, const char *subtitle, const char *right)
 
 static void thick_line(float x0, float y0, float x1, float y1, unsigned col)
 {
+    /* about 3 pixels wide (0.4.0: the 2-pixel lines looked thin on the Vita) */
     vita2d_draw_line(x0, y0, x1, y1, col);
     vita2d_draw_line(x0 + 1, y0, x1 + 1, y1, col);
     vita2d_draw_line(x0, y0 + 1, x1, y1 + 1, col);
+    vita2d_draw_line(x0 - 1, y0, x1 - 1, y1, col);
+    vita2d_draw_line(x0, y0 - 1, x1, y1 - 1, col);
 }
 
-#define BR 13                                  /* button radius */
-#define K(v) ((int)((v) * BR / 11.0f + 0.5f))  /* glyph sizes were drawn for radius 11 */
+#define BR 15                                  /* button radius (0.4.0: 13; 30 px like the SELECT pill) */
+#define K(v) ((int)((v) * 1.35f * BR / 11.0f + 0.5f))   /* glyphs were drawn for radius 11; 0.4.0: 35% bigger */
 
 int ui_button(int x, int cy, int btn)
 {
-    const unsigned dark = RGBA8(44, 48, 66, 255);
+    const unsigned dark = RGBA8(64, 70, 96, 255);      /* (0.4.0: lighter, the symbols stand out) */
     int cx = x + BR;
     switch (btn) {
     case UI_BTN_CROSS: {
@@ -142,7 +145,7 @@ int ui_button(int x, int cy, int btn)
     case UI_BTN_CIRCLE: {
         vita2d_draw_fill_circle(cx, cy, BR, dark);
         vita2d_draw_fill_circle(cx, cy, K(7), RGBA8(255, 102, 102, 255));
-        vita2d_draw_fill_circle(cx, cy, K(5), dark);
+        vita2d_draw_fill_circle(cx, cy, K(7) - 3, dark);
         return 2 * BR;
     }
     case UI_BTN_TRIANGLE: {
@@ -156,7 +159,7 @@ int ui_button(int x, int cy, int btn)
     case UI_BTN_SQUARE: {
         vita2d_draw_fill_circle(cx, cy, BR, dark);
         vita2d_draw_rectangle(cx - K(5), cy - K(5), 2 * K(5) + 1, 2 * K(5) + 1, RGBA8(255, 105, 220, 255));
-        vita2d_draw_rectangle(cx - K(3), cy - K(3), 2 * K(3) + 1, 2 * K(3) + 1, dark);
+        vita2d_draw_rectangle(cx - K(5) + 3, cy - K(5) + 3, 2 * K(5) - 5, 2 * K(5) - 5, dark);
         return 2 * BR;
     }
     case UI_BTN_DPAD: case UI_BTN_UPDOWN: {
@@ -164,6 +167,13 @@ int ui_button(int x, int cy, int btn)
         vita2d_draw_fill_circle(cx, cy, BR, dark);
         if (btn == UI_BTN_DPAD) vita2d_draw_rectangle(cx - K(7), cy - K(2), 2 * K(7) + 1, 2 * K(2) + 1, c);
         vita2d_draw_rectangle(cx - K(2), cy - K(7), 2 * K(2) + 1, 2 * K(7) + 1, c);
+        return 2 * BR;
+    }
+    case UI_BTN_LEFTRIGHT: {                           /* d-pad left / right: two small arrows */
+        unsigned c = RGBA8(200, 205, 220, 255);
+        vita2d_draw_fill_circle(cx, cy, BR, dark);
+        ui_fill_triangle(cx - K(7), cy, cx - K(2), cy - K(5), cx - K(2), cy + K(5), c);
+        ui_fill_triangle(cx + K(7), cy, cx + K(2), cy - K(5), cx + K(2), cy + K(5), c);
         return 2 * BR;
     }
     default: {

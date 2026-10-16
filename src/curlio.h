@@ -23,6 +23,8 @@ typedef struct {
     uint64_t range_from, range_to;
     uint64_t *total;                    /* out, may be NULL: the whole file's size when the server tells it */
     const char *ua, *referer;           /* User-Agent / Referer to send (NULL or "" = the app's own / none) */
+    char *final_url;                    /* out, may be NULL: the address that answered, after redirects */
+    size_t final_cap;
 } CioRequest;
 
 int  cio_available(void);

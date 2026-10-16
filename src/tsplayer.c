@@ -6,6 +6,7 @@
 #include "urlhdr.h"
 #include "mpadec.h"
 #include "hls.h"
+#include "spsfix.h"
 #include "curlio.h"
 #include "vod.h"
 #include "httpio.h"                     /* plog() */
@@ -226,6 +227,9 @@ typedef struct {
     uint64_t first_show_us;             /* when the first picture went on screen */
     uint32_t pub_fed, pub_nopic, pub_nopic_nonref;     /* public decoder: units given, of them without a picture */
     int hd60, hd60_pending;             /* 720p above 30 fps through the HD decoder (0.2.10 experiment) */
+    uint8_t sps_src[256], sps_fix[300]; /* the last SPS seen and its fixed form (spsfix.c); fix_len 0 = as it is */
+    size_t sps_src_len, sps_fix_len;
+    int sps_fix_logged;
     int64_t late_sum_us;
     volatile uint32_t ui_calls;         /* tsp_frame calls (UI frame rate) */
     int64_t shown_pts;
@@ -785,7 +789,9 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
         /* 4 pictures, or what the stream asks for when that is more and fits the level (1920x720 with 5 refs:
          * with 4 nearly every picture failed "out of memory") */
         int n = refs > 4 ? refs : 4;
-        if (t->oom_hd) n = refs + 3;                        /* the public decoder ran out with refs + 1 */
+        /* the public decoder ran out with refs + 1: as many as the level allows (720p: 9), since a stream
+         * without bitstream_restriction may hold more pictures than its references */
+        if (t->oom_hd) n = hd_ref_cap(t) > refs + 3 ? hd_ref_cap(t) : refs + 3;
         if (n > hd_ref_cap(t)) n = hd_ref_cap(t);
         t->nref_cap = n;
         r = decoder_core_open_internal(t, n);
@@ -1177,20 +1183,71 @@ static void decoder_flush(Tsp *t)
     plog("tsp: end of the stream: %d more picture%s taken out of the decoder", got, got == 1 ? "" : "s");
 }
 
-/* Copies the access unit (optionally behind SPS/PPS) into the ES buffer. Returns its size, 0 if too big. */
+/* The SPS to give the decoder: with bitstream_restriction added when it has none (spsfix.c; 720p channels
+ * whose SPS lacks it gave "Decoder produced no picture": the decoder waits for 5 pictures and runs out of
+ * memory). The fixed form of the last SPS is kept, so a keyframe's SPS costs a compare. */
+static const uint8_t *sps_for_decoder(Tsp *t, const uint8_t *nal, size_t len, size_t *out_len)
+{
+    *out_len = len;
+    if (len == 0 || len > sizeof t->sps_src) return nal;
+    if (len != t->sps_src_len || memcmp(nal, t->sps_src, len)) {
+        memcpy(t->sps_src, nal, len);
+        t->sps_src_len = len;
+        int reorder = 0;
+        t->sps_fix_len = sps_add_restriction(nal, len, t->sps_fix, sizeof t->sps_fix, &reorder);
+        if (t->sps_fix_len && !t->sps_fix_logged++)
+            plog("tsp: the SPS has no bitstream_restriction: added (%d pictures to reorder) for the decoder", reorder);
+    }
+    if (!t->sps_fix_len) return nal;
+    *out_len = t->sps_fix_len;
+    return t->sps_fix;
+}
+
+/* Copies the access unit (optionally behind SPS/PPS) into the ES buffer, with each SPS as the decoder gets
+ * it (see sps_for_decoder). Returns its size, 0 if too big. */
 static size_t build_es(Tsp *t, const VInfo *i, const uint8_t *data, size_t len, int with_params)
 {
     static const uint8_t sc[4] = { 0, 0, 0, 1 };
-    size_t n = 0;
+    size_t n = 0, sl;
     if (with_params) {
+        const uint8_t *sps = sps_for_decoder(t, i->sps, (size_t)i->sps_len, &sl);
+        if (8 + sl + (size_t)i->pps_len > ES_CAP) return 0;
         memcpy(t->es + n, sc, 4); n += 4;
-        memcpy(t->es + n, i->sps, (size_t)i->sps_len); n += (size_t)i->sps_len;
+        memcpy(t->es + n, sps, sl); n += sl;
         memcpy(t->es + n, sc, 4); n += 4;
         memcpy(t->es + n, i->pps, (size_t)i->pps_len); n += (size_t)i->pps_len;
     }
-    if (n + len > ES_CAP) return 0;
-    memcpy(t->es + n, data, len);
-    return n + len;
+    if (!au_has_sps(data, len)) {
+        if (n + len > ES_CAP) return 0;
+        memcpy(t->es + n, data, len);
+        return n + len;
+    }
+    /* SPS inside the unit (with every keyframe): copy NAL by NAL */
+    size_t p = 0;
+    while (p < len) {
+        size_t s = p;
+        while (s + 3 <= len && !(data[s] == 0 && data[s + 1] == 0 && data[s + 2] == 1)) s++;
+        if (s + 3 > len) {                                  /* the rest */
+            if (n + (len - p) > ES_CAP) return 0;
+            memcpy(t->es + n, data + p, len - p);
+            n += len - p;
+            break;
+        }
+        size_t b = s + 3, e = b;
+        while (e + 3 <= len && !(data[e] == 0 && data[e + 1] == 0 && (data[e + 2] == 1 || (data[e + 2] == 0 && e + 3 < len && data[e + 3] == 1)))) e++;
+        if (e + 3 > len) e = len;
+        if (n + (b - p) > ES_CAP) return 0;
+        memcpy(t->es + n, data + p, b - p);                 /* bytes before it and its start code */
+        n += b - p;
+        const uint8_t *nal = data + b;
+        size_t nl = e - b;
+        if (nl && (nal[0] & 0x1F) == 7) nal = sps_for_decoder(t, nal, nl, &nl);
+        if (n + nl > ES_CAP) return 0;
+        memcpy(t->es + n, nal, nl);
+        n += nl;
+        p = e;
+    }
+    return n;
 }
 
 static int audio_now(Tsp *t, uint64_t now, int64_t *apts);
@@ -2173,6 +2230,16 @@ static void count_http_read(Tsp *t, int n)
 static void explain_no_picture(Tsp *t)
 {
     const TsInfo *i = dmx_info(t);
+    /* an HLS variant that says it has a picture but sends none (Haber61's "480p": sound only, 210 kbit/s):
+     * the UI goes to another variant instead of playing radio or stopping */
+    int vcur = t->st.hls_vcur;
+    if (t->st.hls_nv > 1 && vcur >= 0 && t->st.hls_vh[vcur] > 0 && i->program >= 0 && (i->video_pid < 0 || !i->video_aus) &&
+        !(i->scrambled_packets && !i->video_aus)) {
+        plog("tsp: HLS variant %dp sends no picture", t->st.hls_vh[vcur]);
+        t->st.hls_no_video = 1;
+        set_error(t, "No video data received");
+        return;
+    }
     if (i->video_pid < 0 && i->audio_pid >= 0 && (i->audio_codec == TS_CODEC_AAC || i->audio_codec == TS_CODEC_MPEG_AUDIO) && !t->audio_off) {
         if (!t->st.audio_only) plog("tsp: no video stream, playing audio only");
         t->st.audio_only = 1;
@@ -2191,7 +2258,9 @@ static void explain_no_picture(Tsp *t)
 /* Nothing decoded for a long time: report instead of waiting forever. */
 static void check_stall(Tsp *t)
 {
-    if (!t->st.audio_only && !t->audio_off) {                   /* the PMT already tells: radio channel */
+    int vcur = t->st.hls_vcur;                               /* an HLS variant with a picture size is not radio */
+    int hls_video = t->st.hls_nv > 1 && vcur >= 0 && t->st.hls_vh[vcur] > 0;
+    if (!t->st.audio_only && !t->audio_off && !hls_video) {   /* the PMT already tells: radio channel */
         const TsInfo *i = dmx_info(t);
         if (i->program >= 0 && i->video_pid < 0 && i->audio_pid >= 0 && (i->audio_codec == TS_CODEC_AAC || i->audio_codec == TS_CODEC_MPEG_AUDIO)) {
             t->st.audio_only = 1;
@@ -2438,7 +2507,77 @@ static void hls_speed(Tsp *t, uint64_t net_us, uint32_t bytes, int dur_ms)
     }
 }
 
+/* The path of an address for the log: no server, no query (it may carry a key). */
+static const char *url_path_for_log(const char *url, char *buf, size_t cap)
+{
+    const char *p = strstr(url, "://");
+    p = p ? p + 3 : url;
+    p += strcspn(p, "/");
+    size_t n = strcspn(p, "?#");
+    if (n >= cap) n = cap - 1;
+    memcpy(buf, p, n);
+    buf[n] = 0;
+    return buf;
+}
+
+/* "Location:" of an answer's headers */
+static int http_location(const char *h, size_t hl, char *out, size_t cap)
+{
+    const char *e = h + hl;
+    for (const char *p = h; p < e; ) {
+        const char *le = memchr(p, '\n', (size_t)(e - p));
+        if (!le) le = e;
+        if (le - p > 9 && !strncasecmp(p, "Location:", 9)) {
+            const char *v = p + 9;
+            while (v < le && (*v == ' ' || *v == '\t')) v++;
+            const char *ve = le;
+            while (ve > v && (ve[-1] == '\r' || ve[-1] == ' ')) ve--;
+            size_t n = (size_t)(ve - v);
+            if (!n || n >= cap) return 0;
+            memcpy(out, v, n);
+            out[n] = 0;
+            return 1;
+        }
+        p = le + 1;
+    }
+    return 0;
+}
+
+static int hls_get_once(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf, int *status, char *final, size_t fcap);
+
+/* One GET, following redirects. For playlists (out != NULL) *final (may be NULL) gets the address that
+ * answered: the short names inside a playlist are relative to it, not to the address in the channel list
+ * (Star TV: http://dygvideo.../startv4puhu?m3u8 sends the player to http://dogusdyg-star.../live.m3u8?st=..,
+ * whose variants "live_720p.../index.m3u8" only exist there; 0.3.0 asked the first server: HTTP 404). */
+static int hls_get_ex(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf, int *status, char *final, size_t fcap)
+{
+    char cur[HLS_URL_MAX], next[HLS_URL_MAX];
+    snprintf(cur, sizeof cur, "%s", url);
+    for (int hop = 0; hop < 8; hop++) {
+        next[0] = 0;
+        int r = hls_get_once(t, cur, out, cap, buf, status, next, sizeof next);
+        if (out && next[0] && *status >= 300 && *status < 400) {   /* (segments: sceHttp follows them itself) */
+            char nb[HLS_URL_MAX];
+            hls_resolve(cur, next, -1, nb, sizeof nb);
+            if (hop == 0) { char lp[96]; plog("tsp: HLS %s redirected (HTTP %d)", url_path_for_log(cur, lp, sizeof lp), *status); }
+            snprintf(cur, sizeof cur, "%s", nb);
+            continue;
+        }
+        if (final && fcap) snprintf(final, fcap, "%s", out && next[0] && *status < 300 ? next : cur);
+        return r;
+    }
+    *status = 310;                                          /* too many redirects */
+    return -1;
+}
+
 static int hls_get(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf, int *status)
+{
+    return hls_get_ex(t, url, out, cap, buf, status, NULL, 0);
+}
+
+/* One request. A playlist's redirect is not followed here: *loc gets its Location (with a 3xx status), or,
+ * for the built-in TLS that follows them itself, the final address (with the 2xx status). */
+static int hls_get_once(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf, int *status, char *loc, size_t lcap)
 {
     int tpl = -1, conn = -1, req = -1, n, total = -1;
     *status = 0;
@@ -2446,6 +2585,7 @@ static int hls_get(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf,
         HgCtx h = { t, out, cap, 0 };
         CioRequest rq = { url, NULL, NULL, 10, 15, hg_data, hg_stop, &h };
         rq.ua = t->hdr_ua; rq.referer = t->hdr_ref;
+        if (out && loc) { rq.final_url = loc; rq.final_cap = lcap; }
         char err[96];
         int r = cio_get(&rq, status, err, sizeof err);
         if (out) out[h.total] = 0;
@@ -2457,7 +2597,7 @@ static int hls_get(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf,
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetConnectTimeOut(tpl, 10 * 1000 * 1000);
     sceHttpSetRecvTimeOut(tpl, RECV_TIMEOUT_US);
-    sceHttpSetAutoRedirect(tpl, 1);
+    sceHttpSetAutoRedirect(tpl, out ? 0 : 1);               /* playlists: followed in hls_get_ex (the address counts) */
     net_tls_relax(tpl);
     conn = sceHttpCreateConnectionWithURL(tpl, url, 1);
     if (conn < 0) { total = conn; goto done; }
@@ -2469,6 +2609,11 @@ static int hls_get(Tsp *t, const char *url, char *out, size_t cap, uint8_t *buf,
     n = sceHttpSendRequest(req, NULL, 0);
     if (n < 0) { total = n; goto done; }
     sceHttpGetStatusCode(req, status);
+    if (out && loc && *status >= 300 && *status < 400) {
+        char *hdr = NULL;
+        unsigned int hl = 0;
+        if (sceHttpGetAllResponseHeaders(req, &hdr, &hl) >= 0 && hdr && hl && http_location(hdr, hl, loc, lcap)) { total = 0; goto done; }
+    }
     if (*status >= 400) goto done;
     total = 0;
     while (!stopping(t)) {
@@ -2503,14 +2648,16 @@ static void hls_wait(Tsp *t, int ms)
     for (int k = 0; k < ms / 20 && !stopping(t); k++) sceKernelDelayThread(20000);
 }
 
-static int hls_fetch_text(Tsp *t, const char *url, char *text, const char *what, int quiet)
+/* *base (may be NULL) gets the address that answered: what the playlist's short names are relative to */
+static int hls_fetch_text(Tsp *t, const char *url, char *text, const char *what, int quiet, char *base)
 {
     int status = 0, n = -1;
     for (int attempt = 0; attempt < 3 && !stopping(t); attempt++) {
-        n = hls_get(t, url, text, HLS_TEXT_MAX, NULL, &status);
+        n = hls_get_ex(t, url, text, HLS_TEXT_MAX, NULL, &status, base, base ? HLS_URL_MAX : 0);
         if (n > 0 && status < 400) return n;
         if (stopping(t)) return -1;
-        if (status >= 400) plog("tsp: HLS %s: HTTP %d", what, status);
+        char lp[96];
+        if (status >= 400) plog("tsp: HLS %s: HTTP %d (%s)", what, status, url_path_for_log(base && base[0] ? base : url, lp, sizeof lp));
         else plog("tsp: HLS %s: %s (0x%08X)", what, n < 0 ? "connection failed" : "empty answer", (unsigned)n);
         if (status == 404 || status == 403 || status == 401 || status == 410) break;
         hls_wait(t, 1000);
@@ -2537,16 +2684,16 @@ static void hls_list_variants(Tsp *t, const HlsVariant *v, int n, int k);
 static void read_hls(Tsp *t, uint8_t *buf)
 {
     char *text = malloc(HLS_TEXT_MAX);
-    char url[HLS_URL_MAX], seg_url[HLS_URL_MAX];
+    char url[HLS_URL_MAX], seg_url[HLS_URL_MAX], base[HLS_URL_MAX];
     if (!text) { set_error(t, "Out of memory"); return; }
     snprintf(url, sizeof url, "%s", t->url);
     plog("tsp: HLS stream");
-    if (hls_fetch_text(t, url, text, "playlist", 0) < 0) goto out;
+    if (hls_fetch_text(t, url, text, "playlist", 0, base) < 0) goto out;
     if (!hls_is_playlist(text, strlen(text))) { set_error_kind(t, TSP_ERRK_NET, "The server sent a web page instead of video"); goto out; }
     if (hls_is_master(text)) {
         HlsVariant *v = malloc(sizeof *v * 32);
         if (!v) { set_error(t, "Out of memory"); goto out; }
-        int n = hls_parse_master(text, url, v, 32);
+        int n = hls_parse_master(text, base, v, 32);
         int want = !g_hd1080 && g_hls_want > 720 ? 720 : g_hls_want;
         t->st.hls_hd = g_hd1080 && hls_has_variant_above(v, n, 720, 1080);   /* the player offers R: 1080p */
         int k = hls_pick_wanted(v, n, want, g_hls_bw);
@@ -2563,7 +2710,7 @@ static void read_hls(Tsp *t, uint8_t *buf)
         int got = -1;
         for (int tries = 0; tries < 3 && k >= 0 && !stopping(t); tries++) {
             snprintf(url, sizeof url, "%s", v[k].uri);
-            got = hls_fetch_text(t, url, text, "variant playlist", tries < 2);
+            got = hls_fetch_text(t, url, text, "variant playlist", tries < 2, base);
             if (got >= 0) break;
             v[k].hevc = 1;                                  /* not usable: pick another */
             k = hls_pick_wanted(v, n, want, 0);
@@ -2604,7 +2751,7 @@ static void read_hls(Tsp *t, uint8_t *buf)
         for (int i = 0; i < m.nseg && !stopping(t); i++) {
             HlsSegment *g = &m.seg[i];
             if (g->seq < next) continue;
-            hls_resolve(url, g->uri, g->uri_len, seg_url, sizeof seg_url);
+            hls_resolve(base, g->uri, g->uri_len, seg_url, sizeof seg_url);
             if (g->discontinuity && fed) plog("tsp: HLS discontinuity at #%lld", (long long)g->seq);
             uint64_t g0 = now_us(), gw0 = t->push_wait_us;
             uint32_t gb0 = t->st.bytes;
@@ -2617,7 +2764,8 @@ static void read_hls(Tsp *t, uint8_t *buf)
             }
             if (stopping(t)) break;
             if (r < 0 || status >= 400) {
-                plog("tsp: HLS segment #%lld failed (0x%08X, status %d)", (long long)g->seq, (unsigned)r, status);
+                char lp[96];
+                plog("tsp: HLS segment #%lld failed (0x%08X, status %d, %s)", (long long)g->seq, (unsigned)r, status, url_path_for_log(seg_url, lp, sizeof lp));
                 /* two in a row: this variant does not come through (1080p segments answered HTTP 400 on the
                  * device while 720p played fine): the UI takes a smaller one */
                 if (++t->seg_fail_row >= 2 && !t->st.slow_network) {
@@ -2653,7 +2801,7 @@ static void read_hls(Tsp *t, uint8_t *buf)
         if (stopping(t)) goto out;
         if (wait_for_network(t)) last_new = now_us();       /* back from standby: not a stopped stream */
         if (stopping(t)) goto out;
-        if (hls_fetch_text(t, url, text, "playlist update", 0) < 0) goto out;
+        if (hls_fetch_text(t, url, text, "playlist update", 0, base) < 0) goto out;
     }
 out:
     free(text);
@@ -3537,7 +3685,8 @@ static void hls_list_variants(Tsp *t, const HlsVariant *v, int n, int k)
 {
     int idx[32], m = 0;
     for (int i = 0; i < n && m < 32; i++)
-        if (!v[i].hevc && !v[i].audio_only && v[i].height <= 1080 && (g_hd1080 || v[i].height <= 720)) idx[m++] = i;
+        if (!v[i].hevc && !v[i].audio_only && v[i].height <= 1080 && v[i].width <= 1920 && (g_hd1080 || v[i].height <= 720))
+            idx[m++] = i;                                   /* (wider than 1920: not for the Vita) */
     for (int a = 1; a < m; a++)                              /* by height, then bit rate (no size: first) */
         for (int b = a; b > 0; b--) {
             const HlsVariant *x = &v[idx[b - 1]], *y = &v[idx[b]];

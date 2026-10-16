@@ -74,7 +74,7 @@ void scr_player(const ScrPlayer *p);
 void scr_radio(const char *name, const char *group, const char *audio_info, int level, unsigned t_ms,
                const UiHint *hints, int nhints, const char *note);
 
-enum { SCR_F_TEXT, SCR_F_CHOICE, SCR_F_TOGGLE, SCR_F_BUTTON };
+enum { SCR_F_TEXT, SCR_F_CHOICE, SCR_F_TOGGLE, SCR_F_BUTTON, SCR_F_DANGER };   /* DANGER: a red button */
 typedef struct { const char *label; const char *value; int kind; int enabled; } ScrField;
 void scr_form(const char *title, const char *subtitle, const ScrField *f, int n, int sel,
               const UiHint *hints, int nhints, const char *status, int status_err);

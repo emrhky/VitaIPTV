@@ -50,7 +50,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define RESUME_FILE   DATA_DIR "/resume.txt"
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v0.3.0"
+#define APP_VERSION   "v0.4.0"
 #endif
 #define MAX_SOURCES   64
 #define MAX_GROUPS    1024
@@ -305,9 +305,9 @@ static void build_groups(void)
         int n = iptv_remove_adult(&chans);
         if (n) plog("list: %d adult channels hidden", n);
     }
-    if (settings.hide_1080p) {
-        int n = iptv_remove_hd1080(&chans);
-        if (n) plog("list: %d 1080p/FHD/UHD/4K channels hidden", n);
+    if (settings.hide_4k) {
+        int n = iptv_remove_4k(&chans);
+        if (n) plog("list: %d 4K/UHD channels hidden", n);
     }
     ngroups = 1;
     snprintf(groups[0], sizeof groups[0], "All");
@@ -692,8 +692,23 @@ static void load_run(void)
 static void leave_episodes(void);
 
 /* Starts loading (the channels of s, or films / series of it); the main loop shows the progress (load_poll). */
+/* 0.4.0: no Wi-Fi connection: say so at once (it used to wait for a time-out and give a vague error).
+ * Files on the memory card need none. Returns 1 when offline (and logs it once per change). */
+static int net_offline(const char *url)
+{
+    static int last = -1;
+    if (url && !strncasecmp(url, "ux0:", 4)) return 0;
+    int st = -1;
+    int r = sceNetCtlInetGetState(&st);
+    int off = r >= 0 && st != SCE_NETCTL_STATE_CONNECTED;     /* (cannot be read: try anyway) */
+    if (off != last) { plog("net: %s (state %d, 0x%08X)", off ? "no connection" : "connected", st, (unsigned)r); last = off; }
+    return off;
+}
+#define NO_NET_MSG "No internet connection. Connect to Wi-Fi in Settings > Network."
+
 static void load_begin(const Source *s, int what, const char *arg, int group)
 {
+    if (s->type != SRC_M3U_FILE && net_offline(s->url)) { set_status(1, NO_NET_MSG, NULL); return; }
     if (what != LOAD_EPISODES) {
         /* the old list is not shown while loading: free it first, so the new one has the memory */
         leave_episodes();
@@ -803,6 +818,18 @@ static int res_want;
 static long res_bw;
 static int res_manual;               /* chosen with Select / Square (not by stepping down on a slow line) */
 static int res_menu, res_menu_sel;   /* Select in the player: the picture size menu */
+static long res_novideo[TSP_MAX_VARIANTS];   /* variants of this channel that sent no picture (by bit rate) */
+static int res_nnovideo;
+
+static const int RES_VALUES[] = { 0, 1080, 720, 540, 480, -1 };
+static const char *const RES_NAMES[] = { "Automatic", "1080p", "720p", "540p", "480p", "Lowest" };
+#define RES_N 6
+/* the name of a "Preferred resolution" value ("720p", "Automatic"...), translated */
+static const char *res_pref_name(int v)
+{
+    for (int i = 0; i < RES_N; i++) if (RES_VALUES[i] == v) return T(RES_NAMES[i]);
+    return T(RES_NAMES[0]);
+}
 
 static int res_effective(void) { return res_want ? res_want : settings.res_pref; }
 /* the user fixed the size (here or in the settings): no stepping down, except from 1080p */
@@ -845,9 +872,27 @@ static int res_step_down(const TspStatus *st)
 /* a variant from the list for this channel (restarts it) */
 static void res_choose(const TspStatus *st, int i, int manual)
 {
-    res_want = st->hls_vh[i] > 0 ? st->hls_vh[i] : 1080;
+    res_want = st->hls_vh[i] > 0 ? st->hls_vh[i] : 720;      /* (no size given: the bit rate decides; 720 if it is gone) */
     res_bw = st->hls_vbw[i];
     res_manual = manual;
+}
+
+/* The variant that sent no picture is noted; the next one to try: the nearest bigger one, else the nearest
+ * smaller one, never one that failed already. -1 if none is left. */
+static int res_after_no_video(const TspStatus *st)
+{
+    int cur = st->hls_vcur;
+    if (cur < 0) return -1;
+    if (res_nnovideo < TSP_MAX_VARIANTS) res_novideo[res_nnovideo++] = st->hls_vbw[cur];
+    for (int pass = 0; pass < 2; pass++)
+        for (int k = 1; k < st->hls_nv; k++) {
+            int i = pass == 0 ? cur + k : cur - k;
+            if (i < 0 || i >= st->hls_nv) continue;
+            int bad = 0;
+            for (int j = 0; j < res_nnovideo; j++) if (res_novideo[j] == st->hls_vbw[i]) bad = 1;
+            if (!bad) return i;
+        }
+    return -1;
 }
 
 static int is_mp4_url(const char *u)
@@ -870,6 +915,11 @@ static void play_channel_ex(int vi, int use_proxy)
     player_stop();
     probe_cancel();
     tsp_stop();
+    if (net_offline(url)) {                                  /* nothing started: the message stays on the screen */
+        play_mode = 2;
+        snprintf(play_err, sizeof play_err, "%s", NO_NET_MSG);
+        return;
+    }
     tsp_set_options(1, res_effective());                     /* 1080p is always on since v0.2 */
     tsp_set_hls_bw(res_bw);
     via_proxy = 0;
@@ -910,6 +960,7 @@ static void play_channel(int vi)
     res_bw = 0;
     res_manual = 0;
     res_menu = 0;
+    res_nnovideo = 0;
     play_channel_ex(vi, 0);
 }
 
@@ -926,14 +977,16 @@ static void start_probe(void)
 
 /* ---- player screens ----------------------------------------------------- */
 #define NH(a) ((int)(sizeof a / sizeof a[0]))
+/* 0.4.0: one layout everywhere. X pause, up / down channel, Triangle information, Square the next picture size,
+ * Select the size menu (with the stream analysis), O back; films move with left / right (and the left stick). */
 static const UiHint HINTS_VIDEO[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_TRIANGLE, "Info" },
-                                      { UI_BTN_SELECT, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
+                                      { UI_BTN_SELECT, "Resolution" }, { UI_BTN_CIRCLE, "Back" } };
 static const UiHint HINTS_VIDEO_SRV[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_SQUARE, "Server" },
-                                          { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_SELECT, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
-static const UiHint HINTS_RADIO[] = { { UI_BTN_UPDOWN, "Station" }, { UI_BTN_TRIANGLE, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
-static const UiHint HINTS_FILM[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_LR, "Seek" }, { UI_BTN_UPDOWN, "Next" },
-                                     { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_SQUARE, "720p" }, { UI_BTN_CIRCLE, "Back" } };
-static const UiHint HINTS_PROBE[] = { { UI_BTN_CROSS, "Again" }, { UI_BTN_SELECT, "Play" }, { UI_BTN_CIRCLE, "Back" } };
+                                          { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_SELECT, "Resolution" }, { UI_BTN_CIRCLE, "Back" } };
+static const UiHint HINTS_RADIO[] = { { UI_BTN_UPDOWN, "Station" }, { UI_BTN_SELECT, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
+static const UiHint HINTS_FILM[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_LEFTRIGHT, "Seek" }, { UI_BTN_TRIANGLE, "Info" },
+                                     { UI_BTN_SQUARE, "720p" }, { UI_BTN_SELECT, "Resolution" }, { UI_BTN_CIRCLE, "Back" } };
+static const UiHint HINTS_PROBE[] = { { UI_BTN_CROSS, "Again" }, { UI_BTN_CIRCLE, "Back" } };
 
 static const Channel *cur_channel(void) { return &chans.items[vis[play_vis]]; }
 
@@ -1092,12 +1145,10 @@ static void draw_tsp_screen(int osd)
         if (k == nh) { memmove(&hints[2], &hints[1], sizeof(UiHint) * (size_t)(nh - 1)); k = 1; nh++; }
         hints[k] = (UiHint){ UI_BTN_SQUARE, res_name(st, sq_next, sq_label, sizeof sq_label) };
     }
-    if (st && st->hls_nv > 0 && !via_proxy)                  /* Select: the size menu (analysis at its end) */
-        for (int k = 0; k < nh; k++) if (hints[k].btn == UI_BTN_SELECT) hints[k].label = "Resolution";
     if (film_playing()) {                                    /* films: pause, jumps, time line */
         memcpy(hints, HINTS_FILM, sizeof HINTS_FILM);
         nh = NH(HINTS_FILM);
-        if (via_proxy) hints[4].label = "Original";
+        if (via_proxy) hints[3].label = "Original";
         int pos = 0, dur = 0;
         tsp_vod_pos(&pos, &dur);
         dur = film_length();
@@ -1154,10 +1205,10 @@ static void draw_tsp_screen(int osd)
             sp.center_line = T_msg(st->msg);
             sp.center_col = UI_ERR;
             if (st->err_kind == TSP_ERRK_FORMAT && !settings.proxy[0]) {
-                sp.stats1 = T("Tip: a transcoding server on your PC can play this channel (START > Settings, see README)");
+                sp.stats1 = T("Tip: a transcoding server on your PC can play this channel (channel list: Select > Settings, see README)");
                 sp.osd = 1;
             } else if (via_proxy) {
-                sp.stats1 = T("Played through the transcoding server. Is it running? (START > Settings > Test)");
+                sp.stats1 = T("Played through the transcoding server. Is it running? (channel list: Select > Settings > Test)");
                 sp.osd = 1;
             }
             break;
@@ -1300,7 +1351,7 @@ static void ch_row(int i, ScrRow *r, void *ctx)
 static void draw_sources(void)
 {
     static const UiHint H[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" },
-                                { UI_BTN_SELECT, "Delete" }, { UI_BTN_START, "Menu" } };
+                                { UI_BTN_SELECT, "Menu" } };
     char right[32];
     snprintf(right, sizeof right, T("%d playlists"), nsources);
     ScrList l = { "Vita IPTV", T("Playlists"), right, nsources, sel, &scroll, src_row, NULL,
@@ -1321,16 +1372,17 @@ static void draw_channels(void)
     if (frames_after_load < 4)
         plog("ui: channel screen frame %d (%d groups, %d channels, focus %d)", frames_after_load++, ngroups, nvis, focus);
     static const UiHint HL[] = { { UI_BTN_UPDOWN, "Category" }, { UI_BTN_CROSS, "Channels" }, { UI_BTN_SQUARE, "Search" },
-                                 { UI_BTN_CIRCLE, "Back" } };
+                                 { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Back" } };
     static const UiHint HR[] = { { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_CROSS, "Play" }, { UI_BTN_LR, "Page" },
-                                 { UI_BTN_DPAD, "Categories" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" } };
-    static const UiHint HS[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "New search" }, { UI_BTN_SELECT, "Clear" },
+                                 { UI_BTN_SQUARE, "Search" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Back" } };
+    static const UiHint HS[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "New search" }, { UI_BTN_SELECT, "Menu" },
                                  { UI_BTN_CIRCLE, "Back" } };
-    static const UiHint HLV[] = { { UI_BTN_UPDOWN, "Category" }, { UI_BTN_CROSS, "Open" }, { UI_BTN_CIRCLE, "Back" } };
+    static const UiHint HLV[] = { { UI_BTN_UPDOWN, "Category" }, { UI_BTN_CROSS, "Open" }, { UI_BTN_SELECT, "Menu" },
+                                  { UI_BTN_CIRCLE, "Back" } };
     static const UiHint HRV[] = { { UI_BTN_UPDOWN, "Move" }, { UI_BTN_CROSS, "Play" }, { UI_BTN_LR, "Page" },
-                                  { UI_BTN_DPAD, "Categories" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" } };
+                                  { UI_BTN_SQUARE, "Search" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Back" } };
     static const UiHint HRS[] = { { UI_BTN_UPDOWN, "Move" }, { UI_BTN_CROSS, "Open" }, { UI_BTN_LR, "Page" },
-                                  { UI_BTN_DPAD, "Categories" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" } };
+                                  { UI_BTN_SQUARE, "Search" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Back" } };
     char sub[160], right[48], title[IPTV_NAME_MAX + 32];
     int searching = search_fold[0] != 0, vod = section != SEC_LIVE;
     if (searching) {
@@ -1444,9 +1496,6 @@ static int form_kind, form_sel, edit_index;              /* edit_index -1 = new 
 static int f_type;                                        /* 0 Xtream, 1 M3U, 2 single stream */
 static char f_name[IPTV_NAME_MAX], f_url[IPTV_URL_MAX], f_user[IPTV_CRED_MAX], f_pass[IPTV_CRED_MAX], f_proxy[IPTV_URL_MAX];
 static int f_auto, f_lang, f_adult, f_hd, f_res;
-static const int RES_VALUES[] = { 0, 1080, 720, 540, 480, -1 };
-static const char *const RES_NAMES[] = { "Automatic", "1080p", "720p", "540p", "480p", "Lowest" };
-#define RES_N 6
 static const char *const LANG_NAMES[3] = { "Automatic (system)", "English", "Türkçe" };
 static const char *const TYPE_NAMES[3] = { "Xtream (server + username + password)", "M3U playlist (link)", "Single stream (link)" };
 
@@ -1475,7 +1524,7 @@ static void open_settings_form(void)
     f_auto = settings.auto_proxy;
     f_lang = settings.lang;
     f_adult = settings.hide_adult;
-    f_hd = settings.hide_1080p;
+    f_hd = settings.hide_4k;
     f_res = 0;
     for (int i = 0; i < RES_N; i++) if (RES_VALUES[i] == settings.res_pref) f_res = i;
 }
@@ -1493,8 +1542,12 @@ static int source_field_enabled(int i)
     return 1;
 }
 
-#define SRC_FIELDS 7
+#define SRC_FIELDS 7                                     /* (+1: "Delete playlist" when editing one) */
 #define SET_FIELDS 9
+static int confirm_delete;                               /* the edit form's "Delete playlist?" box */
+static int filters_changed;                              /* settings saved: 1 adult on, 2 adult off, 4 4K on, 8 4K off */
+
+static int src_field_count(void) { return edit_index >= 0 ? SRC_FIELDS + 1 : SRC_FIELDS; }
 
 static int field_enabled(int i)
 {
@@ -1504,7 +1557,7 @@ static int field_enabled(int i)
 
 static void form_move(int dir)
 {
-    int n = form_kind == FORM_SOURCE ? SRC_FIELDS : SET_FIELDS;
+    int n = form_kind == FORM_SOURCE ? src_field_count() : SET_FIELDS;
     for (int k = 0; k < n; k++) {
         form_sel = (form_sel + dir + n) % n;
         if (field_enabled(form_sel)) return;
@@ -1579,6 +1632,35 @@ static void test_server(void)
     free(m.buf);
 }
 
+static void save_settings_form(void)
+{
+    filters_changed = 0;
+    if (settings.hide_adult != f_adult) filters_changed |= f_adult ? 1 : 2;
+    if (settings.hide_4k != f_hd) filters_changed |= f_hd ? 4 : 8;
+    snprintf(settings.proxy, sizeof settings.proxy, "%s", f_proxy);
+    settings.auto_proxy = f_auto;
+    settings.lang = f_lang;
+    settings.hide_adult = f_adult;
+    settings.hide_4k = f_hd;
+    settings.res_pref = RES_VALUES[f_res];
+    save_settings();
+    apply_language();
+    form_kind = FORM_NONE;
+    if (!status_err) set_status(0, "Settings saved", NULL);
+}
+
+/* the edit form's "Delete playlist" (after its Yes) */
+static void delete_source(int i)
+{
+    if (i < 0 || i >= nsources) return;
+    memmove(&sources[i], &sources[i + 1], sizeof(Source) * (size_t)(nsources - i - 1));
+    nsources--;
+    sel = i < nsources ? i : nsources - 1;
+    if (sel < 0) sel = 0;
+    form_kind = FORM_NONE;
+    if (save_sources() == 0) set_status(0, "Deleted", NULL);
+}
+
 static void form_activate(void)
 {
     if (form_kind == FORM_SOURCE) {
@@ -1589,6 +1671,7 @@ static void form_activate(void)
         case 3: ime_open(f_type == 2 ? "Referer (e.g. https://site/page)" : "Username", f_user, 0, IME_FIELD, f_user, sizeof f_user); break;
         case 4: ime_open(f_type == 2 ? "User-Agent" : "Password", f_pass, f_type != 2, IME_FIELD, f_pass, sizeof f_pass); break;
         case 5: save_source_form(); break;
+        case 7: confirm_delete = 1; break;                   /* Delete playlist: asks first */
         default: form_kind = FORM_NONE; status[0] = 0; break;
         }
     } else {
@@ -1600,18 +1683,7 @@ static void form_activate(void)
         case 4: f_hd = !f_hd; break;
         case 5: f_res = (f_res + 1) % RES_N; break;
         case 6: test_server(); break;
-        case 7:
-            snprintf(settings.proxy, sizeof settings.proxy, "%s", f_proxy);
-            settings.auto_proxy = f_auto;
-            settings.lang = f_lang;
-            settings.hide_adult = f_adult;
-            settings.hide_1080p = f_hd;
-            settings.res_pref = RES_VALUES[f_res];
-            save_settings();
-            apply_language();
-            form_kind = FORM_NONE;
-            if (!status_err) set_status(0, "Settings saved", NULL);
-            break;
+        case 7: save_settings_form(); break;
         default: form_kind = FORM_NONE; status[0] = 0; break;
         }
     }
@@ -1619,8 +1691,9 @@ static void form_activate(void)
 
 static void draw_form(void)
 {
-    static const UiHint H[] = { { UI_BTN_UPDOWN, "Move" }, { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_CIRCLE, "Cancel" } };
-    ScrField f[SET_FIELDS > SRC_FIELDS ? SET_FIELDS : SRC_FIELDS];
+    static const UiHint H[] = { { UI_BTN_UPDOWN, "Move" }, { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_START, "Save" },
+                                { UI_BTN_CIRCLE, "Cancel" } };
+    ScrField f[SET_FIELDS > SRC_FIELDS + 1 ? SET_FIELDS : SRC_FIELDS + 1];
     char stars[IPTV_CRED_MAX];
     if (form_kind == FORM_SOURCE) {
         size_t np = strlen(f_pass);
@@ -1635,20 +1708,51 @@ static void draw_form(void)
                            f_type == 2 ? f_pass : stars, SCR_F_TEXT, 1 };
         f[5] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
         f[6] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
+        f[7] = (ScrField){ T("Delete playlist"), NULL, SCR_F_DANGER, 1 };
         scr_form(T(edit_index >= 0 ? "Edit playlist" : "Add playlist"),
-                 f_type == 0 ? T("Tip: a pasted get.php link fills everything") : NULL, f, SRC_FIELDS, form_sel, H, NH(H), status, status_err);
+                 f_type == 0 ? T("Tip: a pasted get.php link fills everything") : NULL, f, src_field_count(), form_sel, H, NH(H), status, status_err);
+        if (confirm_delete && edit_index >= 0 && edit_index < nsources) {
+            char line[160];
+            snprintf(line, sizeof line, T("\"%s\" will be removed from the list."), sources[edit_index].name);
+            scr_confirm(T("Delete this playlist?"), line);
+        }
     } else {
         f[0] = (ScrField){ T("Transcoding server"), f_proxy, SCR_F_TEXT, 1 };
         f[1] = (ScrField){ T("Use automatically"), T(f_auto ? "On" : "Off"), SCR_F_TOGGLE, 1 };
         f[2] = (ScrField){ T("Language"), T(LANG_NAMES[f_lang]), SCR_F_CHOICE, 1 };
         f[3] = (ScrField){ T("Hide adult channels"), T(f_adult ? "On" : "Off"), SCR_F_TOGGLE, 1 };
-        f[4] = (ScrField){ T("Hide 1080p channels"), T(f_hd ? "On" : "Off"), SCR_F_TOGGLE, 1 };
+        f[4] = (ScrField){ T("Hide channels named 4K / UHD"), T(f_hd ? "On" : "Off"), SCR_F_TOGGLE, 1 };
         f[5] = (ScrField){ T("Preferred resolution"), T(RES_NAMES[f_res]), SCR_F_CHOICE, 1 };
         f[6] = (ScrField){ T("Test server"), NULL, SCR_F_BUTTON, 1 };
         f[7] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
         f[8] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
         scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), f, SET_FIELDS, form_sel, H, NH(H), status, status_err);
     }
+}
+
+/* Settings saved over the channel screen with a filter changed: a filter turned on is applied to the list in
+ * place (same category and channel where they are still there); one turned off needs the list again. */
+static void apply_filters_now(void)
+{
+    int how = filters_changed;
+    filters_changed = 0;
+    if (state != ST_CHANNELS || !how || cur_src < 0 || cur_src >= nsources) return;
+    const Source *s = &sources[cur_src];
+    if (section != SEC_LIVE) {                               /* films / series: only the adult categories */
+        if (how & 3) load_begin(s, section == SEC_FILMS ? LOAD_FILM_CATS : LOAD_SERIES_CATS, NULL, 0);
+        return;
+    }
+    if (how & (2 | 8)) { leave_episodes(); load_start(s); return; }
+    char gname[IPTV_GROUP_MAX], cname[IPTV_NAME_MAX] = "";
+    snprintf(gname, sizeof gname, "%s", groups[cur_group]);
+    if (nvis && sel < nvis) snprintf(cname, sizeof cname, "%s", chans.items[vis[sel]].name);
+    int was_focus = focus, before = chans.count;
+    build_groups();
+    for (int k = 1; k < ngroups; k++) if (!strcmp(groups[k], gname)) { cur_group = k; break; }
+    rebuild_visible();
+    for (int i = 0; i < nvis; i++) if (!strcmp(chans.items[vis[i]].name, cname)) { sel = i; break; }
+    if (ngroups > 1) focus = nvis ? was_focus : 0;
+    plog("list: filtered again after the settings: %d -> %d channels", before, chans.count);
 }
 
 /* ---- power: keep the screen on for video and radio; for radio also block standby */
@@ -1665,16 +1769,13 @@ static int radio_playing(void)
 /* Radio: Square turns the screen off (its light, not the system: the Wi-Fi and the sound go on; putting the
  * Vita to sleep stopped both). Any button turns it on again at the brightness it had. */
 static int screen_off, screen_brightness = -1;
-static int bright_orig = -1, bright_cur = -1, bright_max;   /* the right stick's brightness (see brightness_stick) */
-static unsigned bright_last;
 
 static void screen_off_set(int off)
 {
     if (off == screen_off) return;
     if (off) {
         int b = -1;
-        if (bright_cur > 0) b = bright_cur;                  /* changed with the right stick: back to that */
-        else if (sceRegMgrGetKeyInt("/CONFIG/DISPLAY", "brightness", &b) < 0 || b <= 0) b = -1;
+        if (sceRegMgrGetKeyInt("/CONFIG/DISPLAY", "brightness", &b) < 0 || b <= 0) b = -1;
         if (b < 0) {                                         /* cannot put it back afterwards: do not turn it off */
             snprintf(film_note, sizeof film_note, "%s", T("The screen cannot be turned off here"));
             film_note_until = now_ms() + 3000;
@@ -1746,8 +1847,7 @@ static int hold;
 /* Analog sticks as repeating up/down.  lstick_ud / rstick_ud: -1 up, 0 none, +1 down.
  * On the channel screen the left stick scrolls categories and the right stick channels. */
 static int lstick_ud, rstick_ud;
-static int stick_x;                 /* sideways push of the stick pushed furthest, -127..127 (films: scrubbing) */
-static int stick_rx, stick_ry;      /* the right stick, -128..127 (up is negative) */
+static int stick_x;                 /* sideways push of the left stick, -128..127 (films: scrubbing) */
 
 static int stick_dir(int v, int *hold_count)      /* v is 0..255, 128 is centre */
 {
@@ -1770,61 +1870,8 @@ static unsigned read_pressed(void)
     prev_btn = pad.buttons;
     lstick_ud = stick_dir(pad.ly, &lhold);
     rstick_ud = stick_dir(pad.ry, &rhold);
-    int lx = (int)pad.lx - 128, rx = (int)pad.rx - 128;
-    stick_rx = rx;
-    stick_ry = (int)pad.ry - 128;
-    if (abs(stick_ry) > abs(rx)) rx = 0;                     /* the right stick up / down is the brightness */
-    stick_x = abs(rx) > abs(lx) ? rx : lx;
+    stick_x = (int)pad.lx - 128;                             /* 0.4.0: only the left stick moves through a film */
     return pressed;
-}
-
-/* Right stick up / down in the player: the screen's brightness, 5% each 0.1 s, at least 10%. It goes back
- * to what it was when the app ends. Only a clear up / down push (sideways moves through a film). */
-static void brightness_stick(void)
-{
-    int ry = stick_ry;
-    static int unavailable;                                  /* the system brightness cannot be read: off for good */
-    if (unavailable || abs(ry) < 80 || abs(ry) < 2 * abs(stick_rx) || screen_off) return;
-    unsigned now = now_ms();
-    if (now - bright_last < 100) return;
-    bright_last = now;
-    if (bright_cur < 0) {
-        int b = -1;
-        int rr = sceRegMgrGetKeyInt("/CONFIG/DISPLAY", "brightness", &b);
-        if (rr < 0 || b <= 0) {
-            /* (0.3.0 on the device: never readable, so it could not be put back; not offered, see the log) */
-            unavailable = 1;
-            int mx = 0, rm = sceAVConfigGetDisplayMaxBrightness(&mx);
-            plog("screen: brightness not readable (0x%08X, value %d; max 0x%08X, %d): the right stick does nothing",
-                 (unsigned)rr, b, (unsigned)rm, mx);
-            return;
-        }
-        int mx = 0;
-        if (sceAVConfigGetDisplayMaxBrightness(&mx) < 0 || mx <= 0) mx = 65536;
-        bright_max = b > mx ? b : mx;
-        bright_orig = bright_cur = b;
-        plog("screen: brightness %d of %d", b, bright_max);
-    }
-    int step = bright_max / 20, lo = bright_max / 10;
-    int nb = bright_cur + (ry < 0 ? step : -step);
-    if (nb > bright_max) nb = bright_max;
-    if (nb < lo) nb = lo;
-    if (nb != bright_cur) {
-        int r = sceAVConfigSetDisplayBrightness(nb);
-        if (r < 0) { plog("screen: brightness %d -> 0x%08X", nb, (unsigned)r); return; }
-        bright_cur = nb;
-    }
-    snprintf(film_note, sizeof film_note, T("Brightness %d%%"), (int)(((long long)bright_cur * 100 + bright_max / 2) / bright_max));
-    film_note_until = now + 1500;
-    osd_until_us = now + 1500;
-}
-
-static void brightness_restore(void)
-{
-    if (bright_orig <= 0 || bright_cur == bright_orig) return;
-    int r = sceAVConfigSetDisplayBrightness(bright_orig);
-    plog("screen: brightness back to %d -> 0x%08X", bright_orig, (unsigned)r);
-    bright_cur = bright_orig;
 }
 
 static void move_sel(unsigned p, int count)
@@ -1832,8 +1879,8 @@ static void move_sel(unsigned p, int count)
     if (!count) return;
     if (p & SCE_CTRL_DOWN)  sel = (sel + 1) % count;
     if (p & SCE_CTRL_UP)    sel = (sel + count - 1) % count;
-    if (p & SCE_CTRL_RIGHT) { sel += SCR_SRC_ROWS; if (sel >= count) sel = count - 1; }
-    if (p & SCE_CTRL_LEFT)  { sel -= SCR_SRC_ROWS; if (sel < 0) sel = 0; }
+    if (p & (SCE_CTRL_RIGHT | SCE_CTRL_RTRIGGER)) { sel += SCR_SRC_ROWS; if (sel >= count) sel = count - 1; }   /* a page */
+    if (p & (SCE_CTRL_LEFT | SCE_CTRL_LTRIGGER))  { sel -= SCR_SRC_ROWS; if (sel < 0) sel = 0; }
 }
 
 static void stop_all(void)
@@ -1935,9 +1982,15 @@ int main(void)
     while (now_ms() - t0 < 1500) splash_frame(T("Loading playlists..."));   /* let the logo be seen */
     if (splash_img) { vita2d_wait_rendering_done(); vita2d_free_texture(splash_img); splash_img = NULL; }
 
-    int menu_open = 0, menu_sel = 0, confirm_delete = 0, about_open = 0, quit = 0, section_menu = 0, section_sel = 0;
+    int menu_open = 0, menu_sel = 0, about_open = 0, quit = 0, section_menu = 0, section_sel = 0;
     for (;;) {
         unsigned p = read_pressed();
+        {   /* the left stick up / down moves like the d-pad in the playlists, forms and menus (the channel
+             * screen uses it for the categories) */
+            int menus = form_kind != FORM_NONE || menu_open || about_open || section_menu ||
+                        (state == ST_CHANNELS && resume_ask) || (state == ST_PLAYING && res_menu);
+            if (lstick_ud && (menus || state == ST_SOURCES)) { p |= lstick_ud > 0 ? SCE_CTRL_DOWN : SCE_CTRL_UP; lstick_ud = 0; }
+        }
         if (ime_active) p = 0;                               /* the keyboard owns the buttons */
         if (screen_off && (p || !radio_playing())) { screen_off_set(0); p = 0; }   /* any button: screen on again */
         keep_awake();
@@ -1955,7 +2008,12 @@ int main(void)
             vita2d_swap_buffers();
             continue;
         }
-        if (form_kind != FORM_NONE) {
+        if (form_kind != FORM_NONE && confirm_delete) {      /* "Delete this playlist?" over the edit form */
+            if (p & SCE_CTRL_CROSS) { confirm_delete = 0; delete_source(edit_index); }
+            else if (p & SCE_CTRL_CIRCLE) confirm_delete = 0;
+            if (form_kind != FORM_NONE) draw_form(); else draw_sources();
+        }
+        else if (form_kind != FORM_NONE) {
             if (p & SCE_CTRL_DOWN) form_move(1);
             if (p & SCE_CTRL_UP) form_move(-1);
             if (form_kind == FORM_SOURCE && form_sel == 0 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
@@ -1967,18 +2025,30 @@ int main(void)
                 f_res = (f_res + ((p & SCE_CTRL_LEFT) ? RES_N - 1 : 1)) % RES_N;
             if (form_kind == FORM_SETTINGS && form_sel == 2 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
                 f_lang = (f_lang + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3;
-            if (p & SCE_CTRL_CROSS) form_activate();
+            if (p & SCE_CTRL_START) {                        /* START saves (like the Save button) */
+                if (form_kind == FORM_SOURCE) save_source_form(); else save_settings_form();
+            } else if (p & SCE_CTRL_CROSS) form_activate();
             if (p & SCE_CTRL_CIRCLE) { form_kind = FORM_NONE; status[0] = 0; }
             if (form_kind != FORM_NONE) draw_form();
-            else draw_sources();
+            else {
+                if (filters_changed) apply_filters_now();
+                if (state == ST_CHANNELS && !job_active && !job_pending) draw_channels(); else draw_sources();
+            }
         }
-        else if (state == ST_SOURCES) {
-            if (menu_open) {
+        else if (about_open || menu_open) {                  /* Select's menu over the playlists or the channels */
+            if (about_open) {
+                if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_CROSS)) about_open = 0;
+            } else {
                 if (p & SCE_CTRL_DOWN) menu_sel = (menu_sel + 1) % MENU_N;
                 if (p & SCE_CTRL_UP) menu_sel = (menu_sel + MENU_N - 1) % MENU_N;
-                if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_START)) menu_open = 0;
-                if (p & SCE_CTRL_CROSS) {
+                if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) menu_open = 0;
+                else if (p & SCE_CTRL_CROSS) {
                     menu_open = 0;
+                    /* adding a playlist and reading them again happen on the playlists screen */
+                    if (state == ST_CHANNELS && (menu_sel == MENU_ADD || menu_sel == MENU_RELOAD)) {
+                        leave_episodes();
+                        state = ST_SOURCES; sel = cur_src; scroll = 0;
+                    }
                     switch (menu_sel) {
                     case MENU_ADD: open_source_form(-1); break;
                     case MENU_SETTINGS: open_settings_form(); break;
@@ -1987,7 +2057,20 @@ int main(void)
                     default: quit = 1; break;
                     }
                 }
-            } else if (section_menu) {                       /* Xtream: live TV, films or series */
+            }
+            if (form_kind != FORM_NONE) draw_form();
+            else {
+                if (state == ST_CHANNELS) draw_channels(); else draw_sources();
+                if (menu_open) {
+                    const char *items[MENU_N];
+                    for (int k = 0; k < MENU_N; k++) items[k] = T(MENU_ITEMS[k]);
+                    scr_menu(T("Menu"), items, MENU_N, menu_sel);
+                }
+                if (about_open) scr_about(APP_VERSION);
+            }
+        }
+        else if (state == ST_SOURCES) {
+            if (section_menu) {                       /* Xtream: live TV, films or series */
                 if (p & SCE_CTRL_DOWN) section_sel = (section_sel + 1) % 3;
                 if (p & SCE_CTRL_UP) section_sel = (section_sel + 2) % 3;
                 if (p & SCE_CTRL_CIRCLE) section_menu = 0;
@@ -1995,24 +2078,13 @@ int main(void)
                     section_menu = 0;
                     load_begin(&sources[sel], section_sel == 0 ? LOAD_LIVE : section_sel == 1 ? LOAD_FILM_CATS : LOAD_SERIES_CATS, NULL, 0);
                 }
-            } else if (about_open) {
-                if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_CROSS)) about_open = 0;
-            } else if (confirm_delete) {
-                if (p & SCE_CTRL_CROSS) {
-                    confirm_delete = 0;
-                    memmove(&sources[sel], &sources[sel + 1], sizeof(Source) * (size_t)(nsources - sel - 1));
-                    nsources--;
-                    if (save_sources() == 0) set_status(0, "Deleted", NULL);
-                }
-                if (p & SCE_CTRL_CIRCLE) confirm_delete = 0;
             } else {
                 move_sel(p, nsources);
-                if (p & SCE_CTRL_START) { menu_open = 1; menu_sel = 0; }
+                if (p & SCE_CTRL_SELECT) { menu_open = 1; menu_sel = 0; }
                 if (p & SCE_CTRL_SQUARE) open_source_form(-1);
-                if ((p & (SCE_CTRL_TRIANGLE | SCE_CTRL_SELECT)) && nsources) {
+                if ((p & SCE_CTRL_TRIANGLE) && nsources) {      /* edit (deleting is at the end of the form) */
                     if (sources[sel].auto_added) set_status(0, "This entry is a file in ux0:data/VitaIPTV (delete or rename it there)", NULL);
-                    else if (p & SCE_CTRL_TRIANGLE) open_source_form(sel);
-                    else confirm_delete = 1;
+                    else open_source_form(sel);
                 }
                 if ((p & SCE_CTRL_CROSS) && nsources) {
                     const Source *s = &sources[sel];
@@ -2053,20 +2125,9 @@ int main(void)
             if (form_kind != FORM_NONE) draw_form();
             else if (state == ST_SOURCES) {
                 draw_sources();
-                if (menu_open) {
-                    const char *items[MENU_N];
-                    for (int k = 0; k < MENU_N; k++) items[k] = T(MENU_ITEMS[k]);
-                    scr_menu(T("Menu"), items, MENU_N, menu_sel);
-                }
-                if (about_open) scr_about(APP_VERSION);
                 if (section_menu && nsources) {
                     const char *items[3] = { T("Live TV"), T("Films"), T("Series") };
                     scr_menu(sources[sel].name, items, 3, section_sel);
-                }
-                if (confirm_delete && nsources) {
-                    char line[160];
-                    snprintf(line, sizeof line, T("\"%s\" will be removed from the list."), sources[sel].name);
-                    scr_confirm(T("Delete this playlist?"), line);
                 }
             }
         }
@@ -2134,7 +2195,7 @@ int main(void)
             }
             if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SQUARE) && (!vod || nvis || searching))
                 ime_open("Search channels", search_q, 0, IME_SEARCH, NULL, 0);
-            if (state == ST_CHANNELS && (p & SCE_CTRL_SELECT) && search_fold[0]) clear_search();
+            if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SELECT)) { menu_open = 1; menu_sel = 0; }   /* the menu */
             if (state == ST_CHANNELS && !job_active) {
                 draw_channels();
                 if (resume_ask && resume_vi < nvis) {
@@ -2149,42 +2210,60 @@ int main(void)
             else if (state == ST_PLAYING) draw_tsp_screen(1);
         }
         else { /* ST_PLAYING */
-            /* One set of buttons for live TV and films: X / START pause, L / R, left / right and both sticks
-             * move through a film (hold, let go to jump there), up / down the previous / next channel or film,
-             * Triangle information, Square 720p / 1080p, Select stream analysis, O back. */
+            /* One set of buttons for live TV and films: X pause, left / right and the left stick move through a
+             * film (hold, let go to jump there), up / down the previous / next channel or film, Triangle
+             * information, Square the next picture size, Select the size menu with the analysis, O back. */
             if (p) osd_until_us = now_ms() + 4000;            /* any button shows the bars again */
             int film = film_playing();
             unsigned held = prev_btn;
             const TspStatus *ms = play_mode == 2 ? tsp_status() : NULL;
-            if (res_menu && (!ms || ms->hls_nv <= 0)) res_menu = 0;
-            if (res_menu) {                                  /* Select: picture sizes, newest first; analysis at the end */
+            if (res_menu && play_mode == 1) res_menu = 0;
+            if (res_menu) {
+                /* Select: the picture sizes (HLS, newest first) or the one size it has; the analysis at the end */
                 static char names[TSP_MAX_VARIANTS + 2][64];
                 const char *items[TSP_MAX_VARIANTS + 2];
-                int n = 0, nv = ms->hls_nv;
-                if (settings.res_pref) snprintf(names[n], sizeof names[n], "%s%s: %s", res_want ? "" : "> ", T("Settings"),
-                                                 RES_VALUES[1] == settings.res_pref ? "1080p" : settings.res_pref == 720 ? "720p" :
-                                                 settings.res_pref == 540 ? "540p" : settings.res_pref == 480 ? "480p" : T("Lowest"));
-                else snprintf(names[n], sizeof names[n], "%s%s", res_want ? "" : "> ", T("Automatic"));
-                items[n] = names[n]; n++;
-                for (int i = nv - 1; i >= 0; i--, n++) {
-                    char nm[24];
-                    res_name(ms, i, nm, sizeof nm);
-                    int cur = res_want && i == ms->hls_vcur;
-                    if (ms->hls_vh[i] > 0)
-                        snprintf(names[n], sizeof names[n], "%s%s   %dx%d, %ld.%ld Mbit/s", cur ? "> " : "", nm, ms->hls_vw[i], ms->hls_vh[i],
-                                 ms->hls_vbw[i] / 1000000, ms->hls_vbw[i] / 100000 % 10);
-                    else snprintf(names[n], sizeof names[n], "%s%s", cur ? "> " : "", nm);
-                    items[n] = names[n];
+                int n = 0, nv = ms && !via_proxy && !film ? ms->hls_nv : 0;
+                int radio = ms && ms->audio_only && ms->state != TSP_ERROR;
+                if (nv > 0) {
+                    if (settings.res_pref) snprintf(names[n], sizeof names[n], "%s%s (%s)", res_want ? "" : "> ", T("Settings"),
+                                                     res_pref_name(settings.res_pref));
+                    else snprintf(names[n], sizeof names[n], "%s%s", res_want ? "" : "> ", T("Automatic"));
+                    items[n] = names[n]; n++;
+                    for (int i = nv - 1; i >= 0; i--, n++) {
+                        char nm[24];
+                        res_name(ms, i, nm, sizeof nm);
+                        int cur = res_want && i == ms->hls_vcur;
+                        if (ms->hls_vh[i] > 0)
+                            snprintf(names[n], sizeof names[n], "%s%s   %dx%d, %ld.%ld Mbit/s", cur ? "> " : "", nm, ms->hls_vw[i], ms->hls_vh[i],
+                                     ms->hls_vbw[i] / 1000000, ms->hls_vbw[i] / 100000 % 10);
+                        else snprintf(names[n], sizeof names[n], "%s%s", cur ? "> " : "", nm);
+                        items[n] = names[n];
+                    }
+                } else {                                     /* one size: what it is (X does nothing there) */
+                    if (radio) snprintf(names[n], sizeof names[n], "%s", T("Sound only (radio)"));
+                    else if (ms && ms->width > 0) snprintf(names[n], sizeof names[n], T("%dx%d (the only size)"), ms->width, ms->height);
+                    else snprintf(names[n], sizeof names[n], "%s", T("Size not known yet"));
+                    items[n] = names[n]; n++;
                 }
                 snprintf(names[n], sizeof names[n], "%s", T("Stream analysis"));
                 items[n] = names[n]; n++;
+                if (res_menu_sel >= n) res_menu_sel = n - 1;
                 if (p & SCE_CTRL_DOWN) res_menu_sel = (res_menu_sel + 1) % n;
                 if (p & SCE_CTRL_UP) res_menu_sel = (res_menu_sel + n - 1) % n;
                 if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) res_menu = 0;
                 else if (p & SCE_CTRL_CROSS) {
                     res_menu = 0;
-                    if (res_menu_sel == n - 1) start_probe();
-                    else if (res_menu_sel == 0) {
+                    if (res_menu_sel == n - 1) {
+                        if (film) {
+                            int pos = 0, dur = 0;
+                            tsp_vod_pos(&pos, &dur);
+                            save_film_position();
+                            probe_return_ms = pos;
+                        }
+                        start_probe();
+                    } else if (nv <= 0) {
+                        /* the size line: nothing to choose */
+                    } else if (res_menu_sel == 0) {
                         res_want = 0; res_bw = 0; res_manual = 0;
                         plog("player: HLS automatic size (menu)");
                         play_channel_ex(play_vis, 0);
@@ -2198,9 +2277,16 @@ int main(void)
                 }
                 if (play_mode == 1) draw_probe_screen();
                 else {
-                    draw_tsp_screen(1);
-                    if (res_menu) scr_menu(T("Resolution"), items, n, res_menu_sel);
+                    if (play_mode == 0) draw_mp4_screen(1); else draw_tsp_screen(1);
+                    if (res_menu) scr_menu(T(nv > 0 ? "Resolution" : radio ? "Stream" : "Resolution"), items, n, res_menu_sel);
                 }
+            } else if (play_mode == 1) {                     /* stream analysis: O (or Select) back to the picture */
+                if (p & SCE_CTRL_CROSS) start_probe();
+                else if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) {   /* (a film where it was) */
+                    if (chans.items[vis[play_vis]].kind == CH_FILM) { film_start_ms = probe_return_ms; play_channel_ex(play_vis, 0); }
+                    else play_channel(play_vis);
+                }
+                draw_probe_screen();
             } else if (p & SCE_CTRL_CIRCLE) {
                 if (film) save_film_position();
                 seek_target = -1;
@@ -2210,25 +2296,17 @@ int main(void)
                 state = return_state;
                 if (state == ST_CHANNELS) { sel = play_vis; focus = 1; draw_channels(); }
                 else draw_sources();
-            } else if (play_mode == 1) {                     /* stream analysis */
-                if (p & SCE_CTRL_CROSS) start_probe();
-                if (p & (SCE_CTRL_SELECT | SCE_CTRL_TRIANGLE)) {   /* back to the picture (a film where it was) */
-                    if (chans.items[vis[play_vis]].kind == CH_FILM) { film_start_ms = probe_return_ms; play_channel_ex(play_vis, 0); }
-                    else play_channel(play_vis);
-                }
-                draw_probe_screen();
             } else {
                 const TspStatus *fs = play_mode == 2 ? tsp_status() : NULL;
-                brightness_stick();
                 int pos = 0, dur = 0;
                 if (film) { tsp_vod_pos(&pos, &dur); dur = film_length(); }
                 int can_jump = film && fs && (fs->seekable || via_proxy);   /* through the server: it starts again there */
-                /* moving through the film: a stick sideways (further = faster), or L / R / left / right held */
+                /* moving through the film: the left stick sideways (further = faster), or left / right held */
                 float d = 0;
                 int ax = abs(stick_x);
                 if (ax > 40) { d = (float)(ax - 40) / 87.0f; if (d > 1) d = 1; if (stick_x < 0) d = -d; }
-                if (held & (SCE_CTRL_RTRIGGER | SCE_CTRL_RIGHT)) d = 1;
-                if (held & (SCE_CTRL_LTRIGGER | SCE_CTRL_LEFT)) d = -1;
+                if (held & SCE_CTRL_RIGHT) d = 1;
+                if (held & SCE_CTRL_LEFT) d = -1;
                 unsigned now = now_ms();
                 if (d != 0 && can_jump) {
                     if (!film_scrub) { film_scrub = 1; scrub_t0 = scrub_last = now; if (seek_target < 0) seek_target = pos; }
@@ -2279,16 +2357,11 @@ int main(void)
                     film = film_playing();
                     fs = play_mode == 2 ? tsp_status() : NULL;
                 }
-                if ((p & (SCE_CTRL_CROSS | SCE_CTRL_START)) && fs) tsp_pause(!fs->paused);
+                if ((p & SCE_CTRL_CROSS) && fs) tsp_pause(!fs->paused);   /* (START: favourites in 0.5.0) */
                 if (p & SCE_CTRL_TRIANGLE) show_info = !show_info;
-                if (p & SCE_CTRL_SELECT) {
-                    if (fs && fs->hls_nv > 0 && !via_proxy && !film) {   /* HLS: the picture size menu */
-                        res_menu = 1;
-                        res_menu_sel = 0;
-                    } else {                                     /* stream analysis */
-                        if (film) { save_film_position(); probe_return_ms = pos; }
-                        start_probe();
-                    }
+                if (p & SCE_CTRL_SELECT) {                       /* the size menu; one size: on the analysis line */
+                    res_menu = 1;
+                    res_menu_sel = fs && fs->hls_nv > 0 && !via_proxy && !film ? 0 : 1;
                 }
                 if ((p & SCE_CTRL_SQUARE) && radio_playing()) {   /* radio: screen off, sound and Wi-Fi go on */
                     screen_off_set(1);
@@ -2304,9 +2377,9 @@ int main(void)
                         plog("player: film %s from %d s", via_proxy ? "direct" : "through the server", pos / 1000);
                         play_channel_ex(play_vis, !via_proxy);
                     } else {
-                        if (fs->width) snprintf(film_note, sizeof film_note, T("This film has one picture size (%dx%d). 720p needs the transcoding server (START > Settings)"),
+                        if (fs->width) snprintf(film_note, sizeof film_note, T("This film has one picture size (%dx%d). 720p needs the transcoding server (channel list: Select > Settings)"),
                                                 fs->width, fs->height);
-                        else snprintf(film_note, sizeof film_note, "%s", T("A smaller picture needs the transcoding server (START > Settings)"));
+                        else snprintf(film_note, sizeof film_note, "%s", T("A smaller picture needs the transcoding server (channel list: Select > Settings)"));
                         film_note_until = now_ms() + 5000;
                     }
                 } else if (p & SCE_CTRL_SQUARE) {
@@ -2322,7 +2395,7 @@ int main(void)
                         fs = tsp_status();
                     } else if (settings.proxy[0]) { auto_proxy_tried = 1; play_channel_ex(play_vis, !via_proxy); }
                     else {
-                        snprintf(film_note, sizeof film_note, "%s", T("This channel has one picture size. Another needs the transcoding server (START > Settings)"));
+                        snprintf(film_note, sizeof film_note, "%s", T("This channel has one picture size. Another needs the transcoding server (channel list: Select > Settings)"));
                         film_note_until = now_ms() + 4000;
                         osd_until_us = now_ms() + 4000;
                     }
@@ -2349,6 +2422,22 @@ int main(void)
                 }
                 /* live TV that keeps waiting for data: the line is too slow for this picture size, so take the
                  * next smaller one the channel offers (the button goes back) */
+                /* the chosen variant sends no picture: another one (Haber61's "480p" was sound only) */
+                if (!film && !via_proxy && fs && fs->state == TSP_ERROR && fs->hls_no_video) {
+                    int nx = res_after_no_video(fs);
+                    if (nx >= 0) {
+                        char was[24], nm[24];
+                        res_name(fs, fs->hls_vcur, was, sizeof was);
+                        res_name(fs, nx, nm, sizeof nm);
+                        plog("player: HLS %s has no picture: %s", was, nm);
+                        res_choose(fs, nx, res_manual);
+                        snprintf(film_note, sizeof film_note, T("No picture in %s: switched to %s"), was, nm);
+                        film_note_until = now_ms() + 5000;
+                        osd_until_us = now_ms() + 5000;
+                        play_channel_ex(play_vis, 0);
+                        fs = tsp_status();
+                    }
+                }
                 int down = fs && fs->slow_network ? res_step_down(fs) : -1;
                 if (!film && !via_proxy && down >= 0 && (!res_fixed() || fs->hls_h >= 1000)) {
                     int was = fs->hls_h > 0 ? fs->hls_h : 720;
@@ -2396,7 +2485,6 @@ int main(void)
     sceNetCtlTerm();
     sceNetTerm();
     screen_off_set(0);
-    brightness_restore();
     sceKernelExitProcess(0);
     return 0;
 }

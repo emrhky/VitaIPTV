@@ -80,6 +80,11 @@ void hls_resolve(const char *base, const char *ref, int ref_len, char *out, size
     size_t host_len = strcspn(host, "/?#");
     if (r[0] == '/' && r[1] == '/') { snprintf(out, cap, "%.*s:%s", (int)scheme_len, base, r); return; }
     if (r[0] == '/') { snprintf(out, cap, "%.*s%s", (int)(host - base + host_len), base, r); return; }
+    if (r[0] == '?') {                                      /* only a new query: the base's path with it (RFC 3986) */
+        size_t pe = (size_t)(host - base) + host_len + strcspn(host + host_len, "?#");
+        snprintf(out, cap, "%.*s%s", (int)pe, base, r);
+        return;
+    }
     /* relative: the base path up to its last '/' (the query of the base is not part of it) */
     size_t path_end = (size_t)(host - base) + host_len + strcspn(host + host_len, "?#");
     size_t dir = path_end;
@@ -164,9 +169,19 @@ int hls_pick_variant(const HlsVariant *v, int n, int max_h)
 
 int hls_pick_wanted(const HlsVariant *v, int n, int want_h, long want_bw)
 {
-    if (want_bw > 0)
-        for (int i = 0; i < n; i++)
-            if (!v[i].hevc && !v[i].audio_only && v[i].bandwidth == want_bw && (v[i].height <= 1080)) return i;
+    if (want_bw > 0) {                                      /* the one picked from the list, by its bit rate */
+        int near = -1;
+        long nd = 0;
+        for (int i = 0; i < n; i++) {
+            if (v[i].hevc || v[i].audio_only || v[i].height > 1080 || v[i].width > 1920) continue;
+            if (v[i].bandwidth == want_bw) return i;
+            if (want_h > 0 && v[i].height > want_h) continue;  /* nearest: not above the size it was picked at */
+            long d = v[i].bandwidth > want_bw ? v[i].bandwidth - want_bw : want_bw - v[i].bandwidth;
+            if (near < 0 || d < nd) { near = i; nd = d; }
+        }
+        /* the server changed the numbers a little since (new list): the nearest, if within a quarter */
+        if (near >= 0 && nd <= want_bw / 4) return near;
+    }
     if (want_h == 0) {                                      /* the screen's own size first: sharp, light to decode */
         int best = -1;
         for (int i = 0; i < n; i++) {
