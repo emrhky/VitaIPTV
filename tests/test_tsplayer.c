@@ -2,6 +2,7 @@
 /* Integration test of tsplayer.c with a fake hardware decoder and real threads.
  * Built and run by tests/run_player_tests.py */
 #include "tsplayer.h"
+#include "spsfix.h"
 #include "curlio.h"
 #include <psp2/videodec.h>
 #include <psp2/kernel/sysmem.h>
@@ -52,6 +53,20 @@ static int kind_bit(const void *p)
 
 static int has_nal(const uint8_t *b, size_t n, int type)
 { for (size_t i = 0; i + 3 < n; i++) if (!b[i] && !b[i + 1] && b[i + 2] == 1 && (b[i + 3] & 31) == type) return 1; return 0; }
+/* 0.4.0: SPSs given to the decoder without bitstream_restriction (the player adds it: spsfix.c) */
+static int sps_unrestricted;
+static void check_sps(const uint8_t *b, size_t n)
+{
+    for (size_t i = 0; i + 3 < n; i++) {
+        if (b[i] || b[i + 1] || b[i + 2] != 1 || (b[i + 3] & 31) != 7) continue;
+        size_t s = i + 3, e = s;
+        while (e + 3 <= n && !(b[e] == 0 && b[e + 1] == 0 && (b[e + 2] == 1 || b[e + 2] == 0))) e++;
+        if (e + 3 > n) e = n;
+        uint8_t tmp[600];
+        if (sps_add_restriction(b + s, e - s, tmp, sizeof tmp, NULL)) sps_unrestricted++;
+        return;
+    }
+}
 
 int sceVideodecInitLibrary(SceVideodecType c, const SceVideodecQueryInitInfoHwAvcdec *i)
 { (void)c; if (lib_open) return (int)0x80620808; if (i->size != sizeof *i || i->horizontal % 16 || i->vertical % 16 || i->numOfStreams != 1) return (int)0x80620802;
@@ -88,6 +103,7 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
     if (n == 0) { int_flush = 1; return 0; }              /* an empty unit: what is inside comes out (as on the device) */
     if (n < 4 || b[0] || b[1] || !(b[2] == 1 || (b[2] == 0 && b[3] == 1))) return (int)0x8062000D;
     int_flush = 0;
+    if (has_nal(b, n, 7)) check_sps(b, n);
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
     if (wedged) { arr->numOfOutput = 0; return 0; }        /* stuck after an error, like on the device */
     if (oom_all) return (int)0x80620003;                     /* out of memory for every unit, keyframes too */
@@ -177,6 +193,7 @@ int sceAvcdecDecodeAuInternal(SceAvcdecCtrl *d, SceAvcdecAu *au, SceInt32 *st)
     if (n < 4 || b[0] || b[1] || !(b[2] == 1 || (b[2] == 0 && b[3] == 1))) return (int)0x8062000D;
     if ((has_nal(b, n, 10) || has_nal(b, n, 11)) && !has_nal(b, n, 1) && !has_nal(b, n, 5)) { int_flush = 1; int_eos++; return 0; }   /* end of sequence/stream */
     int_flush = 0;
+    if (has_nal(b, n, 7)) check_sps(b, n);
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
     if (npend >= int_cap) return (int)0x8062000A;           /* ES buffer full */
     static int full_at = -1;
@@ -1046,6 +1063,55 @@ hls:
         show("hls live", &r);
         printf("               %d HTTP requests\n", mock_http_requests);
         assert(r.changes >= 40 && r.changes <= 110 && r.st.state != TSP_ERROR && mock_http_requests >= 5);
+        /* 0.4.0: the address in the list redirects to another server and path (Star TV); the playlist's short
+         * names are relative to the address that answered. 0.3.0 asked the first server: HTTP 404. */
+        {
+            static char rn[40][64], rp[40][512];
+            int q = 0;
+            mock_http_reset();
+            snprintf(rn[q], 64, "startv4puhu"); snprintf(rp[q], 512, "@http://dogus.invalid/dogusdyg_star/live.m3u8?st=T&e=1"); q++;
+            snprintf(rn[q], 64, "dogusdyg_star/live.m3u8"); snprintf(rp[q], 512, "%s/master_dyg.m3u8", argv[16]); q++;
+            snprintf(rn[q], 64, "dogusdyg_star/live_720p1500000kbps/index.m3u8"); snprintf(rp[q], 512, "%s/index.m3u8", argv[16]); q++;
+            for (int i = 0; i < 20 && q < 39; i++) {
+                snprintf(rn[q], 64, "dogusdyg_star/live_720p1500000kbps/seg%03d.ts", i); snprintf(rp[q], 512, "%s/seg%03d.ts", argv[16], i);
+                FILE *f = fopen(rp[q], "rb"); if (!f) break; fclose(f); q++;
+            }
+            for (int i = 0; i < q; i++) { mock_http_map[i][0] = rn[i]; mock_http_map[i][1] = rp[i]; }
+            tsp_set_options(1, 0);
+            r = play("http://a.invalid/live/hls/startv4puhu?m3u8", 6);
+            show("hls redirect", &r);
+            assert(r.st.state != TSP_ERROR && r.changes >= 60 && r.st.hls_h == 720 && r.st.hls_nv == 3);
+            tsp_set_options(0, 720);
+        }
+        /* 0.4.0: a variant that says 854x480 but sends only sound (Haber61): the error says so, the UI then
+         * takes another variant */
+        {
+            static char nn[24][64], np[24][512];
+            int q = 0;
+            mock_http_reset();
+            snprintf(nn[q], 64, "master_nov.m3u8"); snprintf(np[q], 512, "%s/master_nov.m3u8", argv[16]); q++;
+            snprintf(nn[q], 64, "nov.m3u8"); snprintf(np[q], 512, "%s/nov.m3u8", argv[16]); q++;
+            for (int i = 0; i < 5; i++) { snprintf(nn[q], 64, "nov/seg%03d.ts", i); snprintf(np[q], 512, "%s/nov/seg%03d.ts", argv[16], i); q++; }
+            for (int i = 0; i < q; i++) { mock_http_map[i][0] = nn[i]; mock_http_map[i][1] = np[i]; }
+            tsp_set_options(1, 480);
+            r = play("http://example.invalid/tv/master_nov.m3u8", 14);
+            show("hls no video", &r);
+            assert(r.st.state == TSP_ERROR && r.st.hls_no_video && r.st.hls_vh[r.st.hls_vcur] == 480);
+            tsp_set_options(0, 720);
+        }
+        /* 0.4.0: 720p25, IBBP, 2 references, SPS without VUI (Ciftci TV): every SPS the decoder gets has the
+         * bitstream_restriction added, the pictures come */
+        {
+            static char vn[64], vp[512];
+            mock_http_reset();
+            snprintf(vn, 64, "novui.ts"); snprintf(vp, 512, "%s/novui.ts", argv[16]);
+            mock_http_map[0][0] = vn; mock_http_map[0][1] = vp;
+            sps_unrestricted = 0;
+            r = play("http://example.invalid/tv/novui.ts", 6);
+            show("sps no vui", &r);
+            printf("               %d SPS without restriction reached the decoder\n", sps_unrestricted);
+            assert(r.st.state != TSP_ERROR && r.changes >= 60 && sps_unrestricted == 0);
+        }
         if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls")) return 0;
         /* a playlist whose segments are missing: a clear error, not a hang */
         for (int i = 4; i < k; i++) mock_http_map[i][0] = "none.ts";

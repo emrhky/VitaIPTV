@@ -104,7 +104,7 @@ int mock_http_no_ranges;
 int mock_http_range_requests;
 static int http_range;
 static long http_rfrom, http_rto, http_end;
-static char http_hdrs[256];
+static char http_hdrs[768];
 static double http_t0;
 #include <time.h>
 #include <unistd.h>
@@ -124,6 +124,7 @@ int sceHttpDeleteConnection(int i) { (void)i; return 0; }
 const char *mock_http_map[64][2];
 int mock_http_requests;
 static int http_mapped;
+static char http_loc[512];                /* a map entry "@address": that request answers 302 Location: address */
 static const char *map_lookup(const char *u)
 {
     size_t n = strcspn(u, "?#");
@@ -138,7 +139,9 @@ int sceHttpCreateRequestWithURL(int c, int m, const char *u, unsigned long long 
 { (void)c;(void)m;(void)cl;
   mock_http_requests++;
   const char *mf = map_lookup(u);
-  if (mf) { if (http_f) fclose(http_f); http_f = fopen(mf, "rb"); http_pos = 0; http_mapped = 1; }
+  http_loc[0] = 0;
+  if (mf && mf[0] == '@') { if (http_f) fclose(http_f); http_f = NULL; http_mapped = 1; snprintf(http_loc, sizeof http_loc, "%s", mf + 1); }
+  else if (mf) { if (http_f) fclose(http_f); http_f = fopen(mf, "rb"); http_pos = 0; http_mapped = 1; }
   else if (mock_http_map[0][0]) { if (http_f) fclose(http_f); http_f = NULL; http_mapped = 1; }   /* unknown address: 404 */
   else if (!http_f) { http_f = fopen(mock_http_file, "rb"); http_pos = 0; }
   http_sess_bytes = 0; http_t0 = mock_now(); mock_http_sessions++; http_range = 0; http_end = -1; return 3; }
@@ -164,6 +167,7 @@ int sceHttpSendRequest(int r, const void *p, unsigned s)
     if (mock_net_state != 3) return (int)0x80431068;      /* no network (standby, Wi-Fi coming back) */
     http_end = -1;
     http_hdrs[0] = 0;
+    if (http_loc[0]) snprintf(http_hdrs, sizeof http_hdrs, "Content-Length: 0\r\nLocation: %s\r\n", http_loc);
     if (http_f && http_range && !mock_http_no_ranges) {
         long z = http_file_size();
         mock_http_range_requests++;
@@ -178,7 +182,7 @@ int sceHttpSendRequest(int r, const void *p, unsigned s)
 int sceHttpGetStatusCode(int r, int *s)
 {
     (void)r;
-    *s = (http_mapped && !http_f) ? 404 : mock_http_status;
+    *s = http_loc[0] ? 302 : (http_mapped && !http_f) ? 404 : mock_http_status;
     if (*s == 200 && http_range && !mock_http_no_ranges) *s = 206;
     return 0;
 }
