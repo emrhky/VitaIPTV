@@ -20,6 +20,8 @@ int main(void)
     res("http://a.tv/live/x/master.m3u8", "http://b.tv/s.ts", "http://b.tv/s.ts");
     res("http://a.tv/live/hls/startv4puhu?m3u8", "startv4puhu-720p.m3u8", "http://a.tv/live/hls/startv4puhu-720p.m3u8");
     res("http://a.tv", "s.ts", "http://a.tv/s.ts");
+    res("http://a.tv/live/x/master.m3u8?old=1", "?q=720", "http://a.tv/live/x/master.m3u8?q=720");   /* 0.4.0 */
+    res("http://b.tv/dyg_star/live.m3u8?st=T&e=1", "live_720p/index.m3u8?st=U", "http://b.tv/dyg_star/live_720p/index.m3u8?st=U");
 
     const char *master =
         "\xEF\xBB\xBF#EXTM3U\r\n#EXT-X-VERSION:3\r\n"
@@ -45,6 +47,17 @@ int main(void)
     assert(hls_pick_wanted(v, n, 720, 1400000) == 2);                            /* from the list: that bit rate */
     assert(hls_pick_wanted(v, n, 720, 6000000) == 1);                            /* HEVC one: not playable, the best 720p */
     assert(hls_pick_wanted(v, n, 0, 123) == 1);                                  /* gone from the list: automatic */
+    /* 0.4.0: the numbers changed a little (new list): the nearest within a quarter, not above the size */
+    assert(hls_pick_wanted(v, n, 720, 1500000) == 2 && hls_pick_wanted(v, n, 720, 2500000) == 1);
+    assert(hls_pick_wanted(v, n, 720, 1900000) == 1);                            /* none within 25 %: the best 720p */
+    assert(hls_pick_wanted(v, n, 480, 1300000) == 3);                            /* 720p is near but above 480 */
+    {   /* wider than 1920: never picked from the list */
+        const char *w4k = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=9000000,RESOLUTION=3840x1080\na.m3u8\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nb.m3u8\n";
+        HlsVariant w[4];
+        int nw = hls_parse_master(w4k, "http://x/y.m3u8", w, 4);
+        assert(nw == 2 && hls_pick_wanted(w, nw, 1080, 9000000) == 1);
+    }
     const char *m540 = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=5000000,RESOLUTION=1920x1080\na.m3u8\n"
         "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nb.m3u8\n#EXT-X-STREAM-INF:BANDWIDTH=1600000,RESOLUTION=960x540\nc.m3u8\n"
         "#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nd.m3u8\n";

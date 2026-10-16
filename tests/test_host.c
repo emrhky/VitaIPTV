@@ -257,20 +257,25 @@ int main(void)
         ch.group[0] = 0;
         for (unsigned k = 0; k < sizeof no / sizeof no[0]; k++) { snprintf(ch.name, sizeof ch.name, "%s", no[k]); assert(!iptv_is_adult(&ch)); }
         Settings sa; settings_parse("hide_adult=1\n", &sa); assert(sa.hide_adult == 1);
-        {   /* 1080p filter */
+        {   /* 0.4.0: 4K filter (the 1080p one is gone: its old setting does not turn this on) */
             Channel hc; memset(&hc, 0, sizeof hc);
-            const char *yes[] = { "TRT 1 FHD", "Sinema 1080p", "Movie UHD", "Sports 4K", "Kanal Full HD", "X 1080i" };
-            const char *no[] = { "TRT 1 HD", "Kanal 10800", "Discovery", "HD Sinema", "4Kids" };
-            for (unsigned k = 0; k < sizeof yes / sizeof yes[0]; k++) { snprintf(hc.name, sizeof hc.name, "%s", yes[k]); assert(iptv_is_hd1080(&hc)); }
-            for (unsigned k = 0; k < sizeof no / sizeof no[0]; k++) { snprintf(hc.name, sizeof hc.name, "%s", no[k]); assert(!iptv_is_hd1080(&hc)); }
-            Settings sh; settings_parse("hide_1080p=1\n", &sh); assert(sh.hide_1080p == 1 && sh.res_pref == 0);
+            const char *yes[] = { "Movie UHD", "Sports 4K", "Doga 2160p", "TRT 4K HDR", "Demo 8K", "Kanal Ultra HD", "Spor [UHD]" };
+            const char *no[] = { "TRT 1 FHD", "Sinema 1080p", "TRT 1 HD", "Discovery", "4Kids", "Kanal 2160 Plus" };
+            for (unsigned k = 0; k < sizeof yes / sizeof yes[0]; k++) { snprintf(hc.name, sizeof hc.name, "%s", yes[k]); assert(iptv_is_4k(&hc)); }
+            for (unsigned k = 0; k < sizeof no / sizeof no[0]; k++) { snprintf(hc.name, sizeof hc.name, "%s", no[k]); assert(!iptv_is_4k(&hc)); }
+            Settings sh; settings_parse("hide_1080p=1\n", &sh); assert(sh.hide_4k == 0 && sh.res_pref == 0);
+            settings_parse("hide_4k=1\n", &sh); assert(sh.hide_4k == 1);
+            {
+                char ob[512]; Settings so; memset(&so, 0, sizeof so); so.hide_4k = 1;
+                assert(settings_format(&so, ob, sizeof ob) > 0 && strstr(ob, "hide_4k=1\n") && !strstr(ob, "1080p"));
+            }
             {   /* 0.3.0: preferred picture size */
                 Settings sr; settings_parse("resolution=540\n", &sr); assert(sr.res_pref == 540);
                 char srf[256]; settings_format(&sr, srf, sizeof srf); Settings sr2; settings_parse(srf, &sr2); assert(sr2.res_pref == 540);
                 settings_parse("resolution=-1\n", &sr); assert(sr.res_pref == -1);
                 settings_parse("resolution=999\n", &sr); assert(sr.res_pref == 0);
             }
-            char shf[256]; settings_format(&sh, shf, sizeof shf); Settings sj; settings_parse(shf, &sj); assert(sj.hide_1080p == 1);
+            char shf[256]; settings_format(&sh, shf, sizeof shf); Settings sj; settings_parse(shf, &sj); assert(sj.hide_4k == 1);
             Settings sx; settings_parse("hd_1080p=1\nhide_adult=1\n", &sx); assert(sx.hide_adult == 1);   /* an old line is ignored */
             char sxf[256]; settings_format(&sx, sxf, sizeof sxf); assert(!strstr(sxf, "hd_1080p"));
         }

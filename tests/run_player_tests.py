@@ -83,6 +83,26 @@ open(f"{T}/hls/master2.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2
 open(f"{T}/hls/master3.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=6000000,RESOLUTION=1920x1080\nhd/big.m3u8\n"
     "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nindex.m3u8?v=720\n"
     "#EXT-X-STREAM-INF:BANDWIDTH=1600000,RESOLUTION=960x540\nindex.m3u8?v=540\n")
+# 0.4.0: a channel whose address redirects to another server (Star TV): the variants are relative to the
+# address that answered, not to the one in the list
+open(f"{T}/hls/master_dyg.m3u8", "w").write("#EXTM3U\n#EXT-X-VERSION:3\n"
+    "#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=3000000,RESOLUTION=1920x1080\nlive_1080p3000000kbps/index.m3u8?st=K1&e=1\n"
+    "#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=1500000,RESOLUTION=1280x720\nlive_720p1500000kbps/index.m3u8?st=K1&e=1\n"
+    "#EXT-X-STREAM-INF:PROGRAM-ID=1,BANDWIDTH=900000,RESOLUTION=854x480\nlive_480p900000kbps/index.m3u8?st=K1&e=1\n")
+# 0.4.0: a variant with sound only (Haber61's "480p")
+os.makedirs(f"{T}/hls/nov", exist_ok=True)
+for i in range(5):
+    sh(f"ffmpeg -loglevel error -y -i {T}/hls/seg{i:03d}.ts -vn -c:a copy -copyts -f mpegts {T}/hls/nov/seg{i:03d}.ts")
+open(f"{T}/hls/nov.m3u8", "w").write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+    + "".join(f"#EXTINF:1.000000,\nnov/seg{i:03d}.ts\n" for _ in range(3) for i in range(5)) + "#EXT-X-ENDLIST\n")
+open(f"{T}/hls/master_nov.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=210000,RESOLUTION=854x480\nnov.m3u8\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nindex.m3u8\n")
+# 0.4.0: 720p25 whose SPS has no VUI (no bitstream_restriction), IBBP with 2 references (Ciftci TV): the
+# player adds the restriction for the decoder
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=25 -f lavfi "
+   f"-i sine=frequency=440:sample_rate=48000 -t 10 -c:v libx264 -profile:v main -bf 2 -b-pyramid none -refs 2 "
+   f"-g 50 -pix_fmt yuv420p -c:a aac -f mpegts {T}/nvx.ts")
+sh(f"python3 {ROOT}/tests/ts_strip_vui.py {T}/nvx.ts {T}/hls/novui.ts")
 live = open(f"{T}/hls/index.m3u8").read().replace("#EXT-X-ENDLIST", "").replace("#EXT-X-PLAYLIST-TYPE:VOD\n", "")
 open(f"{T}/hls/live.m3u8", "w").write(live)
 VSRC = ("-f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 12 "
@@ -163,7 +183,7 @@ for name, ac in (("fast60", "-c:a aac -ac 2"), ("fast60_ac3", "-c:a ac3")):
        f"-c:v libx264 -preset ultrafast -bf 2 -x264-params b-pyramid=0 -g 60 -pix_fmt yuv420p {ac} -f mpegts {T}/{name}.ts")
 M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c -lm -o {T}/test_tsplayer")
+   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c -lm -o {T}/test_tsplayer")
 r = subprocess.run(f"{T}/test_tsplayer {T}/s720.ts {T}/s1080.ts {T}/hevc.ts {T}/midgop.ts {T}/dropped.ts "
                    f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4 {T}/f1080_60.ts",
                    shell=True, capture_output=True, text=True)
