@@ -465,6 +465,7 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
             conn_close(&c);
             continue;
         }
+        if (rq->final_url && rq->final_cap) snprintf(rq->final_url, rq->final_cap, "%s", url);
         if (code >= 400) { conn_close(&c); ret = 0; break; }   /* the caller looks at the status */
         Body b;
         memset(&b, 0, sizeof b);

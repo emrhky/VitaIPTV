@@ -54,6 +54,7 @@ typedef struct {
     int hls_nv, hls_vcur;
     int hls_vw[TSP_MAX_VARIANTS], hls_vh[TSP_MAX_VARIANTS];   /* height 0 = not given */
     long hls_vbw[TSP_MAX_VARIANTS];     /* bit rate, bit/s (tsp_set_hls_bw picks one exactly) */
+    volatile int hls_no_video;          /* the error: this HLS variant carries no picture (another one may) */
 } TspStatus;
 
 /* For the next tsp_start: hd1080 = decode above 720p; hls_want = the HLS variant to choose: 0 automatic (about

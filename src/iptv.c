@@ -952,7 +952,8 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "auto_proxy")) st->auto_proxy = atoi(v) != 0;
             else if (!strcmp(k, "lang")) { st->lang = atoi(v); if (st->lang < 0 || st->lang > 2) st->lang = 0; }
             else if (!strcmp(k, "hide_adult")) st->hide_adult = atoi(v) != 0;
-            else if (!strcmp(k, "hide_1080p")) st->hide_1080p = atoi(v) != 0;
+            else if (!strcmp(k, "hide_4k")) st->hide_4k = atoi(v) != 0;
+            /* hide_1080p= (before v0.4.0): that filter is gone, the 4K one starts off */
             else if (!strcmp(k, "resolution")) {
                 int r = atoi(v);
                 st->res_pref = r == 1080 || r == 720 || r == 540 || r == 480 || r == -1 ? r : 0;
@@ -966,8 +967,8 @@ void settings_parse(const char *text, Settings *st)
 
 int settings_format(const Settings *st, char *out, size_t outsz)
 {
-    int w = snprintf(out, outsz, "# Vita IPTV settings\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_1080p=%d\nresolution=%d\n",
-                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_1080p, st->res_pref);
+    int w = snprintf(out, outsz, "# Vita IPTV settings\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_4k=%d\nresolution=%d\n",
+                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_4k, st->res_pref);
     return (w < 0 || (size_t)w >= outsz) ? -1 : w;
 }
 
@@ -1074,28 +1075,29 @@ int iptv_remove_adult(ChannelList *l)
     return removed;
 }
 
-/* ---------------------------------------------------------- 1080p filter */
+/* ---------------------------------------------------------- 4K filter */
+/* (0.4.0: was "1080p channels"; the Vita plays 1080p, and 4K streams it cannot: those go by their label) */
 
-static int hd1080_text(const char *text)
+static int uhd_text(const char *text)
 {
-    static const char *const words[] = { "1080p", "1080i", "1080", "fhd", "uhd", "4k", "2160p", "fullhd", "full-hd" };
+    static const char *const words[] = { "4k", "uhd", "2160p", "8k", "4320p" };
     char f[IPTV_NAME_MAX * 2];
     iptv_fold(text, f, sizeof f);
-    if (strstr(f, "full hd")) return 1;
+    if (strstr(f, "ultra hd")) return 1;
     for (size_t i = 0; i < sizeof words / sizeof words[0]; i++) if (has_word(f, words[i])) return 1;
     return 0;
 }
 
-int iptv_is_hd1080(const Channel *c)
+int iptv_is_4k(const Channel *c)
 {
-    return hd1080_text(c->name) || hd1080_text(c->group);
+    return uhd_text(c->name) || uhd_text(c->group);
 }
 
-int iptv_remove_hd1080(ChannelList *l)
+int iptv_remove_4k(ChannelList *l)
 {
     int o = 0, removed = 0;
     for (int i = 0; i < l->count; i++) {
-        if (iptv_is_hd1080(&l->items[i])) { removed++; continue; }
+        if (iptv_is_4k(&l->items[i])) { removed++; continue; }
         if (o != i) l->items[o] = l->items[i];
         o++;
     }

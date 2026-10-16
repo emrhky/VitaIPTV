@@ -1,5 +1,6 @@
 #include "screens.h"
 #include "lang.h"
+#include "qr_github.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -213,10 +214,12 @@ void scr_form(const char *title, const char *subtitle, const ScrField *f, int n,
     for (int i = 0; i < n; i++) {
         int y = FORM_Y + i * fh, on = f[i].enabled;
         unsigned lc = on ? UI_DIM : RGBA8(80, 84, 100, 255), vc = on ? UI_TEXT : RGBA8(90, 94, 110, 255);
-        if (f[i].kind == SCR_F_BUTTON) {
-            int bw = 300, bx = 480 - bw / 2;
-            vita2d_draw_rectangle(bx, y + 6, bw, fh - 12, i == sel ? UI_ACCENT : UI_PANEL2);
-            ui_text_center(480, y + ty + 1, i == sel ? RGBA8(255, 255, 255, 255) : vc, 1.05f, f[i].label);
+        if (f[i].kind == SCR_F_BUTTON || f[i].kind == SCR_F_DANGER) {
+            int bw = 300, bx = 480 - bw / 2, red = f[i].kind == SCR_F_DANGER;
+            unsigned bg = i == sel ? (red ? RGBA8(200, 52, 58, 255) : UI_ACCENT) : (red ? RGBA8(78, 30, 38, 255) : UI_PANEL2);
+            unsigned fg = i == sel ? RGBA8(255, 255, 255, 255) : red ? RGBA8(255, 130, 130, 255) : vc;
+            vita2d_draw_rectangle(bx, y + 6, bw, fh - 12, bg);
+            ui_text_center(480, y + ty + 1, fg, 1.05f, f[i].label);
             continue;
         }
         if (i == sel) {
@@ -258,14 +261,23 @@ void scr_menu(const char *title, const char *const *items, int n, int sel)
 
 void scr_confirm(const char *title, const char *line)
 {
+    /* 0.4.0: its own box, tall enough for the buttons (they were drawn below the message box) */
     vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 120));
-    ui_message(title, line, UI_WARN, 0, 0);
-    int y = 544 / 2 + 46, x = 480 - 120;
-    x += ui_button(x, y, UI_BTN_CROSS) + 8;
-    ui_text(x, y + 7, UI_TEXT, 1.0f, T("Yes"));
-    x = 480 + 30;
-    x += ui_button(x, y, UI_BTN_CIRCLE) + 8;
-    ui_text(x, y + 7, UI_TEXT, 1.0f, T("No"));
+    int w = 620, h = 176, x = (960 - w) / 2, y = (544 - h) / 2 - 10;
+    ui_panel(x, y, w, h, RGBA8(24, 28, 42, 245));
+    ui_text_center(480, y + 44, UI_WARN, 1.15f, title);
+    if (line && line[0]) {
+        if (ui_text_w(1.0f, line) > w - 40) ui_text_fit(x + 20, y + 78, UI_DIM, 1.0f, line, w - 40);
+        else ui_text_center(480, y + 78, UI_DIM, 1.0f, line);
+    }
+    int by = y + h - 42;                                     /* button centres, inside the box */
+    int yes_w = 30 + 8 + ui_text_w(1.0f, T("Yes")), no_w = 30 + 8 + ui_text_w(1.0f, T("No"));
+    int bx = 480 - (yes_w + 60 + no_w) / 2;
+    bx += ui_button(bx, by, UI_BTN_CROSS) + 8;
+    ui_text(bx, by + 7, UI_TEXT, 1.0f, T("Yes"));
+    bx += ui_text_w(1.0f, T("Yes")) + 60;
+    bx += ui_button(bx, by, UI_BTN_CIRCLE) + 8;
+    ui_text(bx, by + 7, UI_TEXT, 1.0f, T("No"));
 }
 
 static void splash_background(void)
@@ -297,16 +309,37 @@ void scr_splash(const vita2d_texture *img, const char *status, const char *versi
     }
 }
 
+/* 0.4.0 (the approved layout): everything centred, the GitHub address and its QR code, "emrhky" small
+ * at the bottom right. The version comes from the build (APP_VERSION, "v0.4.0"). */
 void scr_about(const char *version)
 {
-    vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 140));
-    ui_panel(220, 90, 520, 340, RGBA8(24, 28, 42, 245));
-    ui_logo(480, 170, 96);
-    ui_text_center(480, 258, UI_TEXT, 1.4f, "Vita IPTV");
-    ui_text_center(480, 286, UI_DIM, 0.9f, version);
-    ui_text_center(480, 326, UI_DIM, 0.9f, T("Live TV (MPEG-TS, H.264 up to 720p, AAC) and radio."));
-    ui_text_center(480, 350, UI_DIM, 0.9f, T("Other formats via the transcoding server (see README)."));
-    ui_text_center(480, 400, UI_DIM, 0.9f, T("Press O to close"));
+    vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 160));
+    const int x = 200, y = 20, w = 560, h = 504;
+    ui_panel(x, y, w, h, RGBA8(24, 28, 42, 248));
+    ui_logo(480, y + 56, 72);
+    ui_text_center(480, y + 132, UI_TEXT, 1.45f, "Vita IPTV");
+    ui_text_center(481, y + 132, UI_TEXT, 1.45f, "Vita IPTV");
+    ui_text_center(480, y + 158, UI_DIM, 0.9f, version);
+    ui_text_center(480, y + 194, UI_TEXT, 1.0f, T("IPTV player for the PS Vita: live TV, films, series, radio."));
+    ui_text_center(480, y + 218, UI_DIM, 0.85f, T("M3U and Xtream playlists \xC2\xB7 HLS, MPEG-TS, MKV, MP4, FLV \xC2\xB7 HTTPS"));
+    ui_text_center(480, y + 240, UI_DIM, 0.85f, T("H.264 hardware decoder up to 1080p."));
+    vita2d_draw_rectangle(x + 40, y + 256, w - 80, 1, UI_LINE);
+    ui_text_center(480, y + 284, UI_ACCENT, 1.05f, "github.com/emrhky/VitaIPTV");
+    ui_text_center(481, y + 284, UI_ACCENT, 1.05f, "github.com/emrhky/VitaIPTV");
+    {   /* the QR code of that page: 3 px a module, 4 modules of white around it */
+        const int m = 3, q = 4, side = (QR_GITHUB_N + 2 * q) * m;
+        int qx = 480 - side / 2, qy = y + 298;
+        vita2d_draw_rectangle(qx, qy, side, side, RGBA8(255, 255, 255, 255));
+        for (int r = 0; r < QR_GITHUB_N; r++)
+            for (int c = 0; c < QR_GITHUB_N; c++)
+                if (QR_GITHUB[r] >> (QR_GITHUB_N - 1 - c) & 1)
+                    vita2d_draw_rectangle(qx + (q + c) * m, qy + (q + r) * m, m, m, RGBA8(0, 0, 0, 255));
+    }
+    ui_text_center(480, y + 440, UI_DIM, 0.8f, T("MIT License \xC2\xB7 third-party notices in the VPK"));
+    int cw = 30 + 8 + ui_text_w(1.05f, T("Close")), bx = 480 - cw / 2, by = y + h - 26;
+    bx += ui_button(bx, by, UI_BTN_CIRCLE) + 8;
+    ui_text(bx, by + 8, UI_TEXT, 1.05f, T("Close"));
+    ui_text(x + w - 16 - ui_text_w(0.85f, "emrhky"), y + h - 16, UI_DIM, 0.85f, "emrhky");
 }
 
 /* one list inside a rectangle; returns nothing, draws rows + scrollbar */

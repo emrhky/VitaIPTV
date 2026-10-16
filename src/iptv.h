@@ -47,7 +47,7 @@ typedef struct {
     int auto_proxy;             /* use it automatically for channels the Vita cannot play */
     int lang;                   /* 0 = like the console, 1 = English, 2 = Turkish */
     int hide_adult;             /* leave adult channels out of the lists */
-    int hide_1080p;             /* leave channels labelled 1080p/FHD/UHD/4K out (the Vita plays up to 720p) */
+    int hide_4k;                /* leave channels labelled 4K / UHD / 2160p / 8K out (the Vita cannot play them) */
     int res_pref;               /* HLS picture size: 0 automatic (about 540p, else 720p), 1080/720/540/480, -1 the smallest */
 } Settings;
 
@@ -120,8 +120,8 @@ int  proxy_url_at(const Settings *st, const char *url, int start_s, char *out, s
 int  iptv_is_adult(const Channel *c);
 /* Removes adult channels from the list; returns how many were removed. */
 int  iptv_remove_adult(ChannelList *l);
-int  iptv_is_hd1080(const Channel *c);               /* name or group says 1080p / FHD / UHD / 4K */
-int  iptv_remove_hd1080(ChannelList *l);
+int  iptv_is_4k(const Channel *c);                   /* name or group says 4K / UHD / 2160p / 8K */
+int  iptv_remove_4k(ChannelList *l);
 
 /* ---- search helpers ---- */
 /* Lower-cases and folds accents, Turkish letters included (Ç->c, Ğ->g, İ/ı->i, Ö->o, Ş->s, Ü->u),
