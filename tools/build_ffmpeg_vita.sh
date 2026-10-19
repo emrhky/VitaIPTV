@@ -25,6 +25,10 @@ if [ ! -d "ffmpeg-$VER" ]; then
 fi
 cd "ffmpeg-$VER"
 
+# GCC 14 and later (VitaSDK since 2025) turn some old warnings into errors; FFmpeg 7.1 has a few of them
+# (libavutil/opt.c: enum pointers passed as int pointers, in functions this app does not call)
+LENIENT="-Wno-error=incompatible-pointer-types -Wno-error=int-conversion -Wno-error=implicit-function-declaration"
+
 EXTRA=""
 [ "${ASM:-0}" = "1" ] || EXTRA="--disable-asm"
 
@@ -37,7 +41,7 @@ make distclean >/dev/null 2>&1 || true
     --disable-avdevice --disable-avformat --disable-swscale --disable-postproc --disable-avfilter --disable-swresample \
     --disable-pthreads --disable-w32threads --disable-os2threads --disable-runtime-cpudetect \
     --disable-debug --enable-small --enable-static --disable-shared \
-    --extra-cflags="-O2 -ffunction-sections -fdata-sections" \
+    --extra-cflags="-O2 -ffunction-sections -fdata-sections $LENIENT" \
     $EXTRA
 
 make -j"$(nproc)"
