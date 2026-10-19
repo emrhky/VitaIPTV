@@ -977,9 +977,9 @@ int settings_format(const Settings *st, char *out, size_t outsz)
 int proxy_url_at(const Settings *st, const char *url, int start_s, char *out, size_t outsz)
 {
     if (proxy_url(st, url, out, outsz) != 0) return -1;
-    if (start_s <= 0) return 0;
     size_t n = strlen(out);
-    int w = snprintf(out + n, outsz - n, "&start=%d", start_s);
+    /* 0.5.0: film=1 asks the server for the film's length (sent back as X-Content-Duration) */
+    int w = start_s > 0 ? snprintf(out + n, outsz - n, "&film=1&start=%d", start_s) : snprintf(out + n, outsz - n, "&film=1");
     return (w < 0 || (size_t)w >= outsz - n) ? -1 : 0;
 }
 

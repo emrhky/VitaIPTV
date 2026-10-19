@@ -5,7 +5,8 @@
 #include <string.h>
 
 #define LIST_Y   70
-#define ROW_H    33
+#define ROW_H    36                       /* 0.5.0: 36 (was 33) for text at the size of the settings */
+#define LIST_FS  1.2f                     /* 0.5.0: the size of the settings screen (FS in scr_form) */
 
 /* Playlist cards: a big coloured type tag, the name and a dim second line. */
 #define CARD_H 56
@@ -286,24 +287,24 @@ void scr_menu(const char *title, const char *const *items, int n, int sel)
 {
     /* 0.5.0: long menus (sizes, the server, audio tracks) get lower rows; the box is as wide as the longest item */
     char tb[192];
-    int rh = 42;
+    int rh = 44;
     if (64 + n * rh > 520) rh = (520 - 64) / (n > 0 ? n : 1);
-    if (rh < 24) rh = 24;
-    float sc = rh >= 34 ? 1.0f : 0.9f;
+    if (rh < 26) rh = 26;
+    float sc = rh >= 36 ? LIST_FS : rh >= 31 ? 1.05f : 0.95f;   /* 0.5.0: the size of the settings while it fits */
     int w = 420;
     for (int i = 0; i < n; i++) { int iw = ui_text_w(sc, ui_title(items[i], tb, sizeof tb)) + 60; if (iw > w) w = iw; }
-    if (ui_text_w(1.1f, title) + 60 > w) w = ui_text_w(1.1f, title) + 60;
+    if (ui_text_w(1.25f, title) + 60 > w) w = ui_text_w(1.25f, title) + 60;
     if (w > 900) w = 900;
     int h = 64 + n * rh, x = (960 - w) / 2, y = (544 - h) / 2 - 10;
     if (y < 4) y = 4;
     vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 120));
     ui_panel(x, y, w, h, RGBA8(24, 28, 42, 245));
-    ui_text_fit(x + (w - (ui_text_w(1.1f, title) < w - 40 ? ui_text_w(1.1f, title) : w - 40)) / 2, y + 36, UI_TEXT, 1.1f, title, w - 40);
+    ui_text_fit(x + (w - (ui_text_w(1.25f, title) < w - 40 ? ui_text_w(1.25f, title) : w - 40)) / 2, y + 36, UI_TEXT, 1.25f, title, w - 40);
     vita2d_draw_rectangle(x + 20, y + 50, w - 40, 1, UI_LINE);
     for (int i = 0; i < n; i++) {
         int ry = y + 58 + i * rh;
         if (i == sel) vita2d_draw_rectangle(x + 12, ry, w - 24, rh - 6, UI_SEL);
-        ui_text_center(480, ry + (rh - 6) / 2 + (int)(8 * sc), UI_TEXT, sc, ui_title(items[i], tb, sizeof tb));   /* (0.4.5: capitals) */
+        ui_text_center(480, ry + (rh - 6) / 2 + (int)(9 * sc), UI_TEXT, sc, ui_title(items[i], tb, sizeof tb));   /* (0.4.5: capitals) */
     }
 }
 
@@ -311,18 +312,19 @@ void scr_confirm(const char *title, const char *line)
 {
     /* 0.4.0: its own box, tall enough for the buttons (they were drawn below the message box) */
     vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 120));
-    int w = 620, h = 176, x = (960 - w) / 2, y = (544 - h) / 2 - 10;
+    /* 0.5.0: the letters at the size of the settings */
+    int w = 760, h = 196, x = (960 - w) / 2, y = (544 - h) / 2 - 10;
     ui_panel(x, y, w, h, RGBA8(24, 28, 42, 245));
-    ui_text_center(480, y + 44, UI_WARN, 1.15f, title);
-    if (line && line[0]) ui_text_wrap(x + 20, y + 78, UI_DIM, 1.0f, line, w - 40, 24, 2, 1);   /* 0.5.0: wraps */
-    int by = y + h - 42;                                     /* button centres, inside the box */
-    int yes_w = 30 + 8 + ui_text_w(1.0f, T("Yes")), no_w = 30 + 8 + ui_text_w(1.0f, T("No"));
+    ui_text_center(480, y + 46, UI_WARN, 1.3f, title);
+    if (line && line[0]) ui_text_wrap(x + 24, y + 84, UI_DIM, LIST_FS, line, w - 48, 28, 2, 1);
+    int by = y + h - 44;                                     /* button centres, inside the box */
+    int yes_w = 30 + 8 + ui_text_w(LIST_FS, T("Yes")), no_w = 30 + 8 + ui_text_w(LIST_FS, T("No"));
     int bx = 480 - (yes_w + 60 + no_w) / 2;
     bx += ui_button(bx, by, UI_BTN_CROSS) + 8;
-    ui_text(bx, by + 7, UI_TEXT, 1.0f, T("Yes"));
-    bx += ui_text_w(1.0f, T("Yes")) + 60;
+    ui_text(bx, by + 8, UI_TEXT, LIST_FS, T("Yes"));
+    bx += ui_text_w(LIST_FS, T("Yes")) + 60;
     bx += ui_button(bx, by, UI_BTN_CIRCLE) + 8;
-    ui_text(bx, by + 7, UI_TEXT, 1.0f, T("No"));
+    ui_text(bx, by + 8, UI_TEXT, LIST_FS, T("No"));
 }
 
 static void splash_background(void)
@@ -359,18 +361,18 @@ void scr_splash(const vita2d_texture *img, const char *status, const char *versi
 void scr_about(const char *version)
 {
     vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 160));
-    const int x = 200, y = 20, w = 560, h = 504;
+    const int x = 110, y = 20, w = 740, h = 504;             /* 0.5.0: wider, the letters at the size of the settings */
     ui_panel(x, y, w, h, RGBA8(24, 28, 42, 248));
     ui_logo(480, y + 56, 72);
     ui_text_center(480, y + 132, UI_TEXT, 1.45f, "Vita IPTV");
     ui_text_center(481, y + 132, UI_TEXT, 1.45f, "Vita IPTV");
-    ui_text_center(480, y + 158, UI_DIM, 0.9f, version);
-    ui_text_center(480, y + 194, UI_TEXT, 1.0f, T("IPTV player for the PS Vita: live TV, films, series, radio."));
-    ui_text_center(480, y + 218, UI_DIM, 0.85f, T("M3U and Xtream playlists \xC2\xB7 HLS, MPEG-TS, MKV, MP4, FLV \xC2\xB7 HTTPS"));
-    ui_text_center(480, y + 240, UI_DIM, 0.85f, T("H.264 hardware decoder up to 1080p."));
+    ui_text_center(480, y + 160, UI_DIM, 1.05f, version);
+    ui_text_center(480, y + 196, UI_TEXT, LIST_FS, T("IPTV player for the PS Vita: live TV, films, series, radio."));
+    ui_text_center(480, y + 222, UI_DIM, 1.05f, T("M3U and Xtream playlists \xC2\xB7 HLS, MPEG-TS, MKV, MP4, FLV \xC2\xB7 HTTPS"));
+    ui_text_center(480, y + 245, UI_DIM, 1.05f, T("H.264 hardware decoder up to 1080p."));
     vita2d_draw_rectangle(x + 40, y + 256, w - 80, 1, UI_LINE);
-    ui_text_center(480, y + 284, UI_ACCENT, 1.05f, "github.com/emrhky/VitaIPTV");
-    ui_text_center(481, y + 284, UI_ACCENT, 1.05f, "github.com/emrhky/VitaIPTV");
+    ui_text_center(480, y + 286, UI_ACCENT, LIST_FS, "github.com/emrhky/VitaIPTV");
+    ui_text_center(481, y + 286, UI_ACCENT, LIST_FS, "github.com/emrhky/VitaIPTV");
     {   /* the QR code of that page: 3 px a module, 4 modules of white around it */
         const int m = 3, q = 4, side = (QR_GITHUB_N + 2 * q) * m;
         int qx = 480 - side / 2, qy = y + 298;
@@ -380,11 +382,11 @@ void scr_about(const char *version)
                 if (QR_GITHUB[r] >> (QR_GITHUB_N - 1 - c) & 1)
                     vita2d_draw_rectangle(qx + (q + c) * m, qy + (q + r) * m, m, m, RGBA8(0, 0, 0, 255));
     }
-    ui_text_center(480, y + 440, UI_DIM, 0.8f, T("MIT License \xC2\xB7 third-party notices in the VPK"));
-    int cw = 30 + 8 + ui_text_w(1.05f, T("Close")), bx = 480 - cw / 2, by = y + h - 26;
+    ui_text_center(480, y + 442, UI_DIM, 1.0f, T("MIT License \xC2\xB7 third-party notices in the VPK"));
+    int cw = 30 + 8 + ui_text_w(LIST_FS, T("Close")), bx = 480 - cw / 2, by = y + h - 26;
     bx += ui_button(bx, by, UI_BTN_CIRCLE) + 8;
-    ui_text(bx, by + 8, UI_TEXT, 1.05f, T("Close"));
-    ui_text(x + w - 16 - ui_text_w(0.85f, "emrhky"), y + h - 16, UI_DIM, 0.85f, "emrhky");
+    ui_text(bx, by + 8, UI_TEXT, LIST_FS, T("Close"));
+    ui_text(x + w - 16 - ui_text_w(1.0f, "emrhky"), y + h - 16, UI_DIM, 1.0f, "emrhky");
 }
 
 /* one list inside a rectangle; returns nothing, draws rows + scrollbar */
@@ -416,17 +418,17 @@ static void list_area(int x0, int w, int count, int sel, int *scroll, ScrRowFn f
         if (numbers && row.number > 0) {
             char nb[16];
             snprintf(nb, sizeof nb, "%d", row.number);
-            ui_text(x0 + 54 - ui_text_w(0.85f, nb), y + 23, is_sel ? UI_TEXT : UI_DIM, 0.85f, nb);
-            x = x0 + 64;
+            ui_text(x0 + 60 - ui_text_w(1.0f, nb), y + 25, is_sel ? UI_TEXT : UI_DIM, 1.0f, nb);
+            x = x0 + 70;
         }
         int rw = 0;
         if (row.right && row.right[0]) {
-            rw = ui_text_w(0.85f, row.right);
-            if (rw > 160) rw = 160;
-            ui_text_fit(x0 + w - 18 - rw, y + 23, is_sel ? RGBA8(200, 210, 240, 255) : UI_DIM, 0.85f, row.right, 160);
+            rw = ui_text_w(1.0f, row.right);
+            if (rw > 170) rw = 170;
+            ui_text_fit(x0 + w - 18 - rw, y + 25, is_sel ? RGBA8(200, 210, 240, 255) : UI_DIM, 1.0f, row.right, 170);
         }
         if (row.fav) { ui_star(x + 8, y + ROW_H / 2, 8, UI_FAV); x += 22; }   /* 0.5.0: a favourite */
-        ui_text_fit(x, y + 23, (focused || is_sel) ? UI_TEXT : RGBA8(190, 194, 210, 255), 1.0f, row.name, x0 + w - 28 - rw - x);
+        ui_text_fit(x, y + 26, (focused || is_sel) ? UI_TEXT : RGBA8(190, 194, 210, 255), LIST_FS, row.name, x0 + w - 28 - rw - x);
     }
     ui_scrollbar(x0 + w - 8, LIST_Y + 2, SCR_ROWS * ROW_H - 4, *scroll, SCR_ROWS, count);
 }
@@ -438,7 +440,7 @@ void scr_dual(const ScrDual *d)
     vita2d_draw_rectangle(0, UI_HEADER_H + 2, LW, UI_FOOTER_Y - UI_HEADER_H - 2, RGBA8(18, 21, 31, 255));
     vita2d_draw_rectangle(LW, UI_HEADER_H + 2, 2, UI_FOOTER_Y - UI_HEADER_H - 2, d->focus == 0 ? UI_ACCENT : UI_LINE);
     list_area(8, LW - 4, d->lcount, d->lsel, d->lscroll, d->lrow, d->ctx, d->focus == 0, d->lmark, 0);
-    if (d->rcount == 0 && d->rempty) ui_text_center(LW + (960 - LW) / 2, 270, UI_DIM, 1.0f, d->rempty);
+    if (d->rcount == 0 && d->rempty) ui_text_center(LW + (960 - LW) / 2, 270, UI_DIM, LIST_FS, d->rempty);
     list_area(LW + 12, 960 - LW - 14, d->rcount, d->rsel, d->rscroll, d->rrow, d->ctx, d->focus == 1, 1, 1);
     ui_footer(d->hints, d->nhints, d->status, d->status_err);
 }
