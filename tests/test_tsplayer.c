@@ -583,6 +583,17 @@ int main(int argc, char **argv)
                r.st.audio_rate == 48000 && r.st.audio_ch == 2 && r.synced && r.av_bad * 5 <= r.avn);
     else                                                     /* without it: the picture plays, the audio says why not */
         assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames == 0 && strstr(r.st.audio_msg, "ac3"));
+    if (a52_available()) {                                   /* 0.5.0 test modes: 1 decoded but not played, 3 in halves */
+        tsp_set_ac3_test(1);
+        r = play(argv[12], 10);
+        show("ac3 test 1", &r);
+        assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames > 100);
+        tsp_set_ac3_test(3);
+        r = play(argv[12], 10);
+        show("ac3 test 3", &r);
+        assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames > 200 && r.st.audio_ch == 2 && r.synced && r.av_bad * 5 <= r.avn);
+        tsp_set_ac3_test(0);
+    }
     {   /* 0.5.0: two audio tracks (Turkish AAC, English AC-3): the list, the language asked for, a track asked for */
         static char p2[512], p3[512];
         snprintf(p2, sizeof p2, "%s/twoaudio.ts", argv[16]);
