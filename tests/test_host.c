@@ -220,6 +220,10 @@ int main(void)
     lang_set(LANG_TR);
     assert(!strcmp(T("Back"), "Geri") && !strcmp(T("Something unknown"), "Something unknown"));
     assert(!strcmp(T_msg("Server answered HTTP 407"), "Sunucu HTTP 407 yanıtı verdi"));
+    /* 0.5.0: a message with a number in it that stayed English */
+    assert(!strcmp(T_msg("The Vita decoder gives no picture for this stream (37 errors). The transcoding server can play it"),
+                   "Vita çözücüsü bu yayından görüntü vermiyor (37 hata). Dönüştürme sunucusuyla izlenebilir"));
+    assert(!strcmp(T("Favorites"), "Favoriler") && !strcmp(T("Added to favorites"), "Favorilere eklendi"));
     assert(!strcmp(T_msg("1920x1080 is above the Vita decoder limit (720p)"), "1920x1080, Vita çözücüsünün sınırının (720p) üstünde"));
     assert(!strcmp(T_msg("1920x1080 is above 720p"), "1920x1080, 720p üstünde"));
     assert(!strcmp(T_msg("1080p decoder could not start (0x80620003), see log.txt"), "1080p çözücü başlatılamadı (0x80620003), log.txt'ye bakın"));
@@ -235,6 +239,13 @@ int main(void)
 
     /* settings keep the language */
     Settings sl; settings_parse("lang=2\n", &sl); assert(sl.lang == 2);
+    {   /* 0.4.5: "use automatically" has three choices; plain_letters stays when set */
+        Settings sa; settings_parse("auto_proxy=2\nplain_letters=1\n", &sa); assert(sa.auto_proxy == 2 && sa.plain_letters == 1);
+        char saf[512]; assert(settings_format(&sa, saf, sizeof saf) > 0);
+        Settings sb; settings_parse(saf, &sb); assert(sb.auto_proxy == 2 && sb.plain_letters == 1);
+        settings_parse("auto_proxy=7\n", &sb); assert(sb.auto_proxy == 1 && sb.plain_letters == 0);
+        Settings sc; settings_defaults(&sc); settings_format(&sc, saf, sizeof saf); assert(!strstr(saf, "plain_letters"));
+    }
     char slf[256]; settings_format(&sl, slf, sizeof slf); Settings sl2; settings_parse(slf, &sl2); assert(sl2.lang == 2);
 
     /* adult filter */
