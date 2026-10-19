@@ -1,6 +1,7 @@
 /* AC-3 / E-AC-3 decoding (src/a52dec.c) against ffmpeg's own stereo decode; run by tests/run_a52_test.py.
  * usage: test_a52 in.(e)ac3 ref.s16 rate */
 #include "a52dec.h"
+#include <libavcodec/avcodec.h>
 #include <assert.h>
 #include <math.h>
 #include <stdio.h>
@@ -47,6 +48,46 @@ int main(int argc, char **argv)
     uint32_t fr, er;
     a52_stats(d, &fr, &er);
     a52_destroy(d);
+    {   /* 0.5.0: Matroska style, 8 whole frames in one block with one time, as one packet or as 8 laced frames (the films on the device): every frame
+         * must get its own time, 1 frame later each (the parser repeated the packet's time for all 8) */
+        AVCodecParserContext *ps = av_parser_init(AV_CODEC_ID_AC3);
+        AVCodecContext *cx = avcodec_alloc_context3(NULL);
+        long fo[4096], fl[4096];
+        int nf = 0;
+        long p2 = 0;
+        while (p2 < n && nf < 4096) {
+            uint8_t *o; int os;
+            int u = av_parser_parse2(ps, cx, &o, &os, b + p2, (int)(n - p2), AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+            if (os > 0) { fl[nf] = os; fo[nf] = (long)(o - b); if (fo[nf] < 0 || fo[nf] + os > n) break; nf++; }
+            if (u <= 0) break;
+            p2 += u;
+        }
+        av_parser_close(ps);
+        avcodec_free_context(&cx);
+        A52Dec *d2 = a52_create(); assert(d2);
+        int saved_frames = frames; size_t saved_n = out_n;
+        int64_t prev_pts = last_pts; last_pts = -2; pts_bad = 0; first_pts = -1;
+        int64_t pt = 90000;
+        int64_t step = 0;
+        for (int k = 0; k + 8 <= nf; k += 8) {
+            long st = fo[k], ln = fo[k + 7] + fl[k + 7] - fo[k];
+            int contiguous = 1;
+            for (int j = 1; j < 8; j++) if (fo[k + j] != fo[k + j - 1] + fl[k + j - 1]) contiguous = 0;
+            if (!contiguous) continue;
+            if ((k / 8) % 2) a52_feed(d2, b + st, (size_t)ln, pt, on_pcm, NULL);   /* one packet of 8 */
+            else for (int j = 0; j < 8; j++) a52_feed(d2, b + fo[k + j], (size_t)fl[k + j], pt, on_pcm, NULL);   /* 8 laced frames, each with the block's time */
+            if (!step && out_rate) step = 1536LL * 90000 / out_rate;
+            pt += 8 * (step ? step : 2880);
+        }
+        a52_destroy(d2);
+        printf("8 frames per packet: %d frames, time errors %d, first %lld last %lld (step %lld)\n", frames - saved_frames, pts_bad,
+               (long long)first_pts, (long long)last_pts, (long long)step);
+        assert(pts_bad == 0 && frames - saved_frames > 16);
+        /* times rise by one frame each: the last one is first + (frames-1) frames (within a tick per frame) */
+        long long want = first_pts + (long long)(frames - saved_frames - 1) * step;
+        assert(llabs(last_pts - want) <= frames - saved_frames);
+        frames = saved_frames; out_n = saved_n; last_pts = prev_pts;
+    }
     /* the reference */
     f = fopen(argv[2], "rb"); assert(f);
     fseek(f, 0, SEEK_END); long rn = ftell(f) / 2; fseek(f, 0, SEEK_SET);
