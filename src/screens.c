@@ -30,6 +30,7 @@ void scr_list(const ScrList *l)
         if (on) vita2d_draw_rectangle(12, y + 13, 4, CARD_H - 26, UI_ACCENT);
         int x = 28;
         if (row.badge) x += ui_tag(x, y + 11, 112, CARD_H - 22, row.badge, row.badge_col) + 18;
+        if (row.fav) { ui_star(x + 11, y + CARD_H / 2 - 1, 11, UI_FAV); x += 30; }   /* 0.5.0: a favourite list */
         int rw = 0;
         if (row.right && row.right[0]) {
             rw = ui_text_w(1.0f, row.right);
@@ -134,6 +135,17 @@ static void stat_row(int y, const char *row)
     }
 }
 
+/* 0.5.0: a note above the bottom bar, on as many 26-pixel rows as it needs (up to 3); returns the new top */
+static int note_band(int y, const char *s, unsigned col)
+{
+    UiWrap w;
+    if (!s || !s[0] || !ui_wrap(&w, 0.9f, s, 924, 3)) return y;
+    y -= 26 * w.n;
+    vita2d_draw_rectangle(0, y, 960, 26 * w.n, UI_SHADE);
+    for (int i = 0; i < w.n; i++) ui_text(18, y + 19 + i * 26, col, 0.9f, w.line[i]);
+    return y;
+}
+
 void scr_player(const ScrPlayer *p)
 {
     if (p->backdrop) scr_backdrop();
@@ -146,10 +158,11 @@ void scr_player(const ScrPlayer *p)
     if (!p->osd) return;
     vita2d_draw_rectangle(0, 0, 960, 62, UI_SHADE);
     vita2d_draw_rectangle(0, 62, 960, 2, UI_ACCENT);
-    int iw = p->info ? ui_text_w(0.9f, p->info) : 0;
-    ui_text_fit(20, 30, UI_TEXT, 1.25f, p->name, 900 - iw);
-    ui_text_fit(21, 30, UI_TEXT, 1.25f, p->name, 900 - iw);
-    if (p->group && p->group[0]) ui_text_fit(20, 52, UI_DIM, 0.9f, p->group, 700);
+    int iw = p->info ? ui_text_w(0.9f, p->info) : 0, nx = 20;
+    if (p->fav) { ui_star(31, 23, 11, UI_FAV); nx = 50; }      /* 0.5.0: a favourite */
+    ui_text_fit(nx, 30, UI_TEXT, 1.25f, p->name, 900 - iw - (nx - 20));
+    ui_text_fit(nx + 1, 30, UI_TEXT, 1.25f, p->name, 900 - iw - (nx - 20));
+    if (p->group && p->group[0]) ui_text_fit(20, 52, UI_DIM, 0.9f, p->group, 920);   /* (0.4.5: wider, the EPG line) */
     if (p->info && p->info[0]) ui_text(940 - iw, 30, UI_DIM, 0.9f, p->info);
     int y = UI_FOOTER_Y;
     if (p->film) y = time_line(p, y);
@@ -161,36 +174,41 @@ void scr_player(const ScrPlayer *p)
             vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE);
             stat_row(y + 19, rows[r]);
         }
-        if (p->stats_note && p->stats_note[0]) { y -= 26; vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE); ui_text_fit(18, y + 19, UI_DIM, 0.9f, p->stats_note, 924); }
+        y = note_band(y, p->stats_note, UI_DIM);
     } else {
-        if (p->stats2 && p->stats2[0]) { y -= 26; vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE); ui_text_fit(18, y + 19, UI_DIM, 0.9f, p->stats2, 924); }
-        if (p->stats1 && p->stats1[0]) { y -= 26; vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE); ui_text_fit(18, y + 19, UI_DIM, 0.9f, p->stats1, 924); }
+        y = note_band(y, p->stats2, UI_DIM);
+        y = note_band(y, p->stats1, UI_DIM);
     }
     ui_footer(p->hints, p->nhints, NULL, 0);
 }
 
 void scr_radio(const char *name, const char *group, const char *audio_info, int level, unsigned t_ms,
-               const UiHint *hints, int nhints, const char *note)
+               const UiHint *hints, int nhints, const char *note, int fav)
 {
     ui_header(T("Radio"), group, NULL);
+    if (fav) {                                               /* 0.5.0: a favourite station: a star before the name */
+        int nw = ui_text_w(1.7f, name);
+        ui_star(480 - nw / 2 - 24, 157, 13, UI_FAV);
+    }
     ui_badge(480 - ui_text_w(0.8f, T("ON AIR")) / 2 - 6, 96, T("ON AIR"), RGBA8(220, 60, 80, 255));
     ui_text_center(480, 168, UI_TEXT, 1.7f, name);
     ui_text_center(481, 168, UI_TEXT, 1.7f, name);
     ui_meter(160, 196, 640, 170, level, t_ms);
     vita2d_draw_rectangle(160, 368, 640, 2, UI_LINE);
     if (audio_info && audio_info[0]) ui_text_center(480, 404, UI_DIM, 1.0f, audio_info);
-    if (note && note[0]) ui_text_center(480, 440, UI_DIM, 0.9f, note);
+    if (note && note[0]) ui_text_wrap(60, 436, UI_DIM, 0.9f, note, 840, 24, 2, 1);   /* 0.5.0: two lines if long */
     ui_footer(hints, nhints, NULL, 0);
 }
 
 void scr_lines(const char *title, const char *subtitle, const char *const *lines, int n, const char *error,
                int busy, unsigned t_ms, const UiHint *hints, int nhints)
 {
-    ui_header(title, subtitle, NULL);
+    char tb[96];
+    ui_header(ui_title(title, tb, sizeof tb), subtitle, NULL);
     if (busy) { ui_message(T("Analyzing stream..."), subtitle, UI_TEXT, 1, t_ms); ui_footer(hints, nhints, NULL, 0); return; }
     ui_panel(20, 70, 920, 420, UI_PANEL);
     int y = 104;
-    if (error && error[0]) { ui_text_fit(40, y, UI_ERR, 1.05f, error, 880); y += 38; }
+    if (error && error[0]) y += 26 * ui_text_wrap(40, y, UI_ERR, 1.05f, error, 880, 26, 2, 0) + 12;   /* 0.5.0: wraps */
     for (int i = 0; i < n; i++) {
         unsigned col = UI_TEXT;
         if (!strncmp(lines[i], "Playable by hardware: YES", 25)) col = UI_OK;
@@ -205,41 +223,60 @@ void scr_lines(const char *title, const char *subtitle, const char *const *lines
 #define FORM_Y 76
 #define FORM_H 46
 
+/* 0.4.5: everything at 1.2 (as the playlist names), labels with capitals; the value column starts after the
+ * longest label (290..470), so a long one ("Hide channels named 4K / UHD") does not run into its box. */
 void scr_form(const char *title, const char *subtitle, const ScrField *f, int n, int sel,
               const UiHint *hints, int nhints, const char *status, int status_err)
 {
-    ui_header(title, subtitle, NULL);
+    const float FS = 1.2f;
+    char tb[192], lb[192];
+    ui_header(ui_title(title, tb, sizeof tb), subtitle, NULL);
     int fh = n > 8 ? 8 * FORM_H / n : FORM_H;              /* more than 8 rows: squeeze them to fit */
-    int ty = fh - 17;                                       /* text baseline inside a row */
+    int ty = fh / 2 + 8;                                    /* text baseline inside a row */
+    int lw = 0;
+    for (int i = 0; i < n; i++) {
+        if (f[i].kind == SCR_F_BUTTON || f[i].kind == SCR_F_DANGER) continue;
+        int w = ui_text_w(FS, ui_title(f[i].label, lb, sizeof lb));
+        if (w > lw) lw = w;
+    }
+    int bx = 36 + lw + 26;
+    if (bx < 290) bx = 290;
+    if (bx > 470) bx = 470;
+    int bw = 930 - bx;
     for (int i = 0; i < n; i++) {
         int y = FORM_Y + i * fh, on = f[i].enabled;
         unsigned lc = on ? UI_DIM : RGBA8(80, 84, 100, 255), vc = on ? UI_TEXT : RGBA8(90, 94, 110, 255);
+        const char *label = ui_title(f[i].label, lb, sizeof lb);
         if (f[i].kind == SCR_F_BUTTON || f[i].kind == SCR_F_DANGER) {
-            int bw = 300, bx = 480 - bw / 2, red = f[i].kind == SCR_F_DANGER;
+            int bbw = 320, bbx = 480 - bbw / 2, red = f[i].kind == SCR_F_DANGER;
             unsigned bg = i == sel ? (red ? RGBA8(200, 52, 58, 255) : UI_ACCENT) : (red ? RGBA8(78, 30, 38, 255) : UI_PANEL2);
             unsigned fg = i == sel ? RGBA8(255, 255, 255, 255) : red ? RGBA8(255, 130, 130, 255) : vc;
-            vita2d_draw_rectangle(bx, y + 6, bw, fh - 12, bg);
-            ui_text_center(480, y + ty + 1, fg, 1.05f, f[i].label);
+            vita2d_draw_rectangle(bbx, y + 4, bbw, fh - 8, bg);
+            ui_text_center(480, y + ty, fg, FS, label);
             continue;
         }
         if (i == sel) {
             vita2d_draw_rectangle(10, y + 2, 940, fh - 4, UI_SEL);
             vita2d_draw_rectangle(10, y + 2, 4, fh - 4, UI_ACCENT);
         }
-        ui_text(36, y + ty, i == sel ? UI_TEXT : lc, 1.0f, f[i].label);
-        int bx = 290, bw = 640;
-        vita2d_draw_rectangle(bx, y + 8, bw, fh - 16, i == sel ? RGBA8(30, 52, 110, 255) : UI_PANEL);
+        ui_text_fit(36, y + ty, i == sel ? UI_TEXT : lc, FS, label, bx - 36 - 12);
+        vita2d_draw_rectangle(bx, y + 5, bw, fh - 10, i == sel ? RGBA8(30, 52, 110, 255) : UI_PANEL);
         const char *v = f[i].value && f[i].value[0] ? f[i].value : (on ? T("(empty)") : "-");
         unsigned col = f[i].value && f[i].value[0] ? vc : RGBA8(100, 104, 122, 255);
         if (f[i].kind == SCR_F_CHOICE) {
-            ui_text(bx + 12, y + ty, i == sel ? UI_ACCENT : lc, 1.0f, "<");
-            ui_text_center(bx + bw / 2, y + ty, col, 1.0f, v);
-            ui_text(bx + bw - 24, y + ty, i == sel ? UI_ACCENT : lc, 1.0f, ">");
-        } else if (f[i].kind == SCR_F_TOGGLE) {
+            ui_text(bx + 12, y + ty, i == sel ? UI_ACCENT : lc, FS, "<");
+            const char *tv = ui_title(v, tb, sizeof tb);
+            if (ui_text_w(FS, tv) <= bw - 80) ui_text_center(bx + bw / 2, y + ty, col, FS, tv);
+            else ui_text_fit(bx + 40, y + ty, col, FS, tv, bw - 80);
+            ui_text(bx + bw - 26, y + ty, i == sel ? UI_ACCENT : lc, FS, ">");
+        } else if (f[i].kind == SCR_F_TOGGLE) {                /* a pill with the word in it */
             int onv = !strcmp(v, T("On"));
-            ui_badge(bx + 12, y + (fh - 18) / 2, v, onv ? RGBA8(40, 160, 90, 255) : RGBA8(110, 110, 130, 255));
+            const char *tv = ui_title(v, tb, sizeof tb);
+            int pw = ui_text_w(FS, tv) + 28;
+            ui_round_rect(bx + 10, y + 7, pw, fh - 14, (fh - 14) / 2, onv ? RGBA8(40, 160, 90, 255) : RGBA8(110, 110, 130, 255));
+            ui_text(bx + 24, y + ty, RGBA8(255, 255, 255, 255), FS, tv);
         } else {
-            ui_text_fit(bx + 12, y + ty, col, 1.0f, v, bw - 24);
+            ui_text_fit(bx + 12, y + ty, col, FS, v, bw - 24);
         }
     }
     ui_footer(hints, nhints, status, status_err);
@@ -247,15 +284,26 @@ void scr_form(const char *title, const char *subtitle, const ScrField *f, int n,
 
 void scr_menu(const char *title, const char *const *items, int n, int sel)
 {
-    int w = 420, rh = 42, h = 64 + n * rh, x = (960 - w) / 2, y = (544 - h) / 2 - 10;
+    /* 0.5.0: long menus (sizes, the server, audio tracks) get lower rows; the box is as wide as the longest item */
+    char tb[192];
+    int rh = 42;
+    if (64 + n * rh > 520) rh = (520 - 64) / (n > 0 ? n : 1);
+    if (rh < 24) rh = 24;
+    float sc = rh >= 34 ? 1.0f : 0.9f;
+    int w = 420;
+    for (int i = 0; i < n; i++) { int iw = ui_text_w(sc, ui_title(items[i], tb, sizeof tb)) + 60; if (iw > w) w = iw; }
+    if (ui_text_w(1.1f, title) + 60 > w) w = ui_text_w(1.1f, title) + 60;
+    if (w > 900) w = 900;
+    int h = 64 + n * rh, x = (960 - w) / 2, y = (544 - h) / 2 - 10;
+    if (y < 4) y = 4;
     vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 120));
     ui_panel(x, y, w, h, RGBA8(24, 28, 42, 245));
-    ui_text_center(480, y + 36, UI_TEXT, 1.1f, title);
+    ui_text_fit(x + (w - (ui_text_w(1.1f, title) < w - 40 ? ui_text_w(1.1f, title) : w - 40)) / 2, y + 36, UI_TEXT, 1.1f, title, w - 40);
     vita2d_draw_rectangle(x + 20, y + 50, w - 40, 1, UI_LINE);
     for (int i = 0; i < n; i++) {
         int ry = y + 58 + i * rh;
         if (i == sel) vita2d_draw_rectangle(x + 12, ry, w - 24, rh - 6, UI_SEL);
-        ui_text_center(480, ry + 26, UI_TEXT, 1.0f, items[i]);
+        ui_text_center(480, ry + (rh - 6) / 2 + (int)(8 * sc), UI_TEXT, sc, ui_title(items[i], tb, sizeof tb));   /* (0.4.5: capitals) */
     }
 }
 
@@ -266,10 +314,7 @@ void scr_confirm(const char *title, const char *line)
     int w = 620, h = 176, x = (960 - w) / 2, y = (544 - h) / 2 - 10;
     ui_panel(x, y, w, h, RGBA8(24, 28, 42, 245));
     ui_text_center(480, y + 44, UI_WARN, 1.15f, title);
-    if (line && line[0]) {
-        if (ui_text_w(1.0f, line) > w - 40) ui_text_fit(x + 20, y + 78, UI_DIM, 1.0f, line, w - 40);
-        else ui_text_center(480, y + 78, UI_DIM, 1.0f, line);
-    }
+    if (line && line[0]) ui_text_wrap(x + 20, y + 78, UI_DIM, 1.0f, line, w - 40, 24, 2, 1);   /* 0.5.0: wraps */
     int by = y + h - 42;                                     /* button centres, inside the box */
     int yes_w = 30 + 8 + ui_text_w(1.0f, T("Yes")), no_w = 30 + 8 + ui_text_w(1.0f, T("No"));
     int bx = 480 - (yes_w + 60 + no_w) / 2;
@@ -355,7 +400,13 @@ static void list_area(int x0, int w, int count, int sel, int *scroll, ScrRowFn f
         memset(&row, 0, sizeof row);
         fn(i, &row, ctx);
         int is_sel = mark && i == sel;
-        if (is_sel) {
+        if (row.moving) {                                   /* 0.4.5: being moved: amber, with arrows on the right */
+            vita2d_draw_rectangle(x0, y + 1, w - 10, ROW_H - 2, RGBA8(120, 84, 20, 255));
+            vita2d_draw_rectangle(x0, y + 1, 4, ROW_H - 2, UI_WARN);
+            int ax = x0 + w - 34, cy = y + ROW_H / 2;
+            ui_fill_triangle(ax, cy - 3, ax + 12, cy - 3, ax + 6, cy - 11, UI_WARN);
+            ui_fill_triangle(ax, cy + 3, ax + 12, cy + 3, ax + 6, cy + 11, UI_WARN);
+        } else if (is_sel) {
             vita2d_draw_rectangle(x0, y + 1, w - 10, ROW_H - 2, focused ? UI_SEL : UI_PANEL2);
             vita2d_draw_rectangle(x0, y + 1, 4, ROW_H - 2, focused ? UI_ACCENT : RGBA8(90, 110, 170, 255));
         } else if (r % 2) {
@@ -374,6 +425,7 @@ static void list_area(int x0, int w, int count, int sel, int *scroll, ScrRowFn f
             if (rw > 160) rw = 160;
             ui_text_fit(x0 + w - 18 - rw, y + 23, is_sel ? RGBA8(200, 210, 240, 255) : UI_DIM, 0.85f, row.right, 160);
         }
+        if (row.fav) { ui_star(x + 8, y + ROW_H / 2, 8, UI_FAV); x += 22; }   /* 0.5.0: a favourite */
         ui_text_fit(x, y + 23, (focused || is_sel) ? UI_TEXT : RGBA8(190, 194, 210, 255), 1.0f, row.name, x0 + w - 28 - rw - x);
     }
     ui_scrollbar(x0 + w - 8, LIST_Y + 2, SCR_ROWS * ROW_H - 4, *scroll, SCR_ROWS, count);

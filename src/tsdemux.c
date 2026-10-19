@@ -20,6 +20,8 @@ struct TsDemux {
     int npmt;
     Pes vpes, apes;
     int64_t next_audio_pts;
+    int pref_pid;                       /* 0.5.0: the audio stream wanted (-1 = none) and its language */
+    char pref_lang[4];
 };
 
 /* ------------------------------------------------------------------ helpers */
@@ -412,13 +414,55 @@ static void on_pat(TsDemux *d, const uint8_t *s, size_t n)
     }
 }
 
+void ts_lang3(const char *in, char out[4])
+{
+    static const char *const TWO[][2] = { { "tr", "tur" }, { "en", "eng" }, { "de", "deu" }, { "fr", "fra" }, { "es", "spa" },
+        { "it", "ita" }, { "ar", "ara" }, { "ru", "rus" }, { "nl", "nld" }, { "pt", "por" }, { "pl", "pol" }, { "el", "ell" },
+        { "ku", "kur" }, { "fa", "fas" }, { "az", "aze" }, { "ja", "jpn" }, { "ko", "kor" }, { "zh", "zho" }, { "hi", "hin" } };
+    char a[4] = { 0 };
+    int n = 0;
+    while (in && n < 3 && ((in[n] >= 'a' && in[n] <= 'z') || (in[n] >= 'A' && in[n] <= 'Z'))) { a[n] = (char)(in[n] | 32); n++; }
+    out[0] = 0;
+    if (n == 2) { for (size_t i = 0; i < sizeof TWO / sizeof TWO[0]; i++) if (!strcmp(a, TWO[i][0])) { memcpy(out, TWO[i][1], 4); return; } return; }
+    if (n != 3) return;
+    if (!strcmp(a, "ger")) strcpy(a, "deu");                 /* (the B codes some streams use) */
+    else if (!strcmp(a, "fre")) strcpy(a, "fra");
+    else if (!strcmp(a, "dut")) strcpy(a, "nld");
+    else if (!strcmp(a, "gre")) strcpy(a, "ell");
+    else if (!strcmp(a, "per")) strcpy(a, "fas");
+    else if (!strcmp(a, "chi")) strcpy(a, "zho");
+    else if (!strcmp(a, "und") || !strcmp(a, "mis") || !strcmp(a, "zxx") || !strcmp(a, "qaa")) return;
+    memcpy(out, a, 4);
+}
+
+int ts_audio_pick(const TsStream *st, int ns, int prefer_id, const char *prefer_lang)
+{
+    int best = -1, lang_best = -1;
+    char want[4];
+    ts_lang3(prefer_lang, want);
+    for (int i = 0; i < ns; i++) {
+        int r = audio_rank(st[i].codec);
+        if (r <= 0) continue;
+        int usable = st[i].codec != TS_CODEC_AAC_LATM;        /* (the player cannot play LATM: not chosen on purpose) */
+        if (usable && prefer_id >= 0 && st[i].pid == prefer_id) return i;
+        if (best < 0 || r > audio_rank(st[best].codec)) best = i;
+        if (usable && want[0] && !strcmp(st[i].lang, want) && (lang_best < 0 || r > audio_rank(st[lang_best].codec))) lang_best = i;
+    }
+    return lang_best >= 0 ? lang_best : best;
+}
+
+void ts_prefer_audio(TsDemux *d, int pid, const char *lang)
+{
+    d->pref_pid = pid;
+    ts_lang3(lang, d->pref_lang);
+}
+
 static void select_streams(TsDemux *d, int prog, const TsStream *st, int ns)
 {
     int vi = -1, ai = -1;
-    for (int i = 0; i < ns; i++) {
+    for (int i = 0; i < ns; i++)
         if (video_rank(st[i].codec) > (vi < 0 ? 0 : video_rank(st[vi].codec))) vi = i;
-        if (audio_rank(st[i].codec) > (ai < 0 ? 0 : audio_rank(st[ai].codec))) ai = i;
-    }
+    ai = ts_audio_pick(st, ns, d->pref_pid, d->pref_lang);   /* 0.5.0: the one asked for, else the best */
     if (vi < 0 && ai < 0) return;
     if (d->info.program >= 0 && d->info.program != prog) return;      /* keep the first program */
 
@@ -446,12 +490,16 @@ static void on_pmt(TsDemux *d, const uint8_t *s, size_t n)
         size_t il = ((size_t)(s[pos + 3] & 0x0F) << 8) | s[pos + 4], dpos = pos + 5;
         if (dpos + il > end) break;
         TsCodec c = codec_from_type(type);
-        if (type == 0x06)
-            for (size_t q = dpos; q + 2 <= dpos + il; q += 2 + (size_t)s[q + 1]) {
-                if (s[q] == 0x6A) c = TS_CODEC_AC3;
-                else if (s[q] == 0x7A) c = TS_CODEC_EAC3;
+        char lang[4] = "";
+        for (size_t q = dpos; q + 2 <= dpos + il; q += 2 + (size_t)s[q + 1]) {
+            if (type == 0x06 && s[q] == 0x6A) c = TS_CODEC_AC3;
+            else if (type == 0x06 && s[q] == 0x7A) c = TS_CODEC_EAC3;
+            else if (s[q] == 0x0A && s[q + 1] >= 3 && q + 5 <= dpos + il) {   /* ISO 639 language (0.5.0) */
+                char raw[4] = { (char)s[q + 2], (char)s[q + 3], (char)s[q + 4], 0 };
+                ts_lang3(raw, lang);
             }
-        if (ns < TS_MAX_STREAMS) { st[ns].pid = pid; st[ns].stream_type = type; st[ns].codec = c; ns++; }
+        }
+        if (ns < TS_MAX_STREAMS) { st[ns].pid = pid; st[ns].stream_type = type; st[ns].codec = c; memcpy(st[ns].lang, lang, 4); ns++; }
         pos = dpos + il;
     }
     if (ns) select_streams(d, prog, st, ns);
@@ -582,6 +630,7 @@ TsDemux *ts_create(const TsSink *sink)
     d->info.first_video_pts = d->info.min_video_pts = d->info.max_video_pts = -1;
     d->info.first_audio_pts = -1;
     d->next_audio_pts = -1;
+    d->pref_pid = -1;
     return d;
 }
 

@@ -5,6 +5,7 @@
 #include "flvdemux.h"
 #include "urlhdr.h"
 #include "mpadec.h"
+#include "a52dec.h"
 #include "hls.h"
 #include "spsfix.h"
 #include "curlio.h"
@@ -88,9 +89,12 @@ int sceCodecEngineFreeMemoryFromUnmapMemBlock(SceUID uid, SceUIntVAddr addr);
 
 /* options for the next tsp_start (tsp_set_options) */
 int g_slots_cap = NSLOTS;              /* most picture slots (the PC tests compare with the old four) */
+static int g_pictures_seen;             /* some stream gave a picture since the app started (the decoder works) */
 static int g_hd1080 = 1;                /* decode above 720p (the HD decoder; always on since v0.2) */
 static int g_hls_want = 720;            /* HLS: the variant to choose (see tsp_set_options) */
 static long g_hls_bw;                   /* ... with exactly this bit rate (0 = any) */
+static int g_aid = -1;                  /* 0.5.0: the audio track wanted (tsp_set_audio) */
+static char g_alang[4];
 #define NO_TS        0xFFFFFFFFu
 
 enum { SLOT_FREE = 0, SLOT_READY, SLOT_SHOWN, SLOT_OFF };   /* OFF: the decoder refused its memory */
@@ -230,11 +234,20 @@ typedef struct {
     uint8_t sps_src[256], sps_fix[300]; /* the last SPS seen and its fixed form (spsfix.c); fix_len 0 = as it is */
     size_t sps_src_len, sps_fix_len;
     int sps_fix_logged;
+    int sps_changes;                    /* 0.4.5: the SPS changed while playing (logged: where pictures stop on some HLS) */
+    /* 0.4.0: the stream's timing information (VUI HRD / pic_struct, buffering period / picture timing SEI).
+     * A 720p25 channel with it gave no picture from either decoder; the second try leaves it out. */
+    int hdr_timing, sei_timing, drop_timing, timing_tried, hdr_logged, sei_logged;
+    int hd_fallback;                    /* 0.4.1: the HD decoder (720p above 30 fps) gave nothing: the normal one */
+    int hdr_no_restr;                   /* the SPS has no bitstream_restriction (the second try adds it) */
     int64_t late_sum_us;
     volatile uint32_t ui_calls;         /* tsp_frame calls (UI frame rate) */
     int64_t shown_pts;
     uint8_t *asil;                      /* silence for audio pauses */
     MpaDec *mpa;                        /* MPEG audio (MP2/MP3) in software */
+    A52Dec *a52;                        /* 0.5.0: AC-3 / E-AC-3 in software (FFmpeg) */
+    uint8_t *a52pcm;
+    int a_nstreams;                     /* (the stream list the audio track list was made from) */
     uint8_t *mpcm;
     int port_rate, port_ch;
     volatile int is_hls;                /* the address answered with an HLS playlist */
@@ -471,6 +484,25 @@ static int au_has_sps(const uint8_t *b, size_t n)
     for (size_t i = 0; i + 3 < n; i++)
         if (b[i] == 0 && b[i + 1] == 0 && b[i + 2] == 1 && (b[i + 3] & 0x1F) == 7) return 1;
     return 0;
+}
+
+/* The payload types of the SEI units in an access unit (bit n: type n, up to 31): 0 buffering period,
+ * 1 picture timing. Only the first message of each unit. */
+static uint32_t au_sei_types(const uint8_t *b, size_t n)
+{
+    uint32_t m = 0;
+    for (size_t i = 0; i + 4 < n; i++) {
+        if (b[i] || b[i + 1] || b[i + 2] != 1) continue;
+        if ((b[i + 3] & 0x1F) == 6) {
+            unsigned type = 0;
+            size_t k = i + 4;
+            while (k < n && b[k] == 0xFF) { type += 255; k++; }
+            if (k < n) type += b[k];
+            if (type < 32) m |= 1u << type;
+        }
+        i += 3;
+    }
+    return m;
 }
 
 /* ---------------------------------------------------------------- decoder */
@@ -864,6 +896,29 @@ static void switch_to_hd_oom(Tsp *t)
     t->st.errors++;
 }
 
+/* 0.4.0: the public decoder gave no picture from the start and the stream carries timing information
+ * (Ciftci TV: NAL HRD, pic_struct, buffering period and picture timing SEI; both Vita decoders held its
+ * units and gave nothing): start it again at the next keyframe without that information. If that does
+ * not help either, the HD decoder comes next as before (still without it). */
+static void restart_without_timing(Tsp *t)
+{
+    sceKernelLockMutex(t->lock, 1, NULL);
+    t->ready = 0;
+    sceKernelUnlockMutex(t->lock, 1);
+    wait_ui_release(t);
+    free_plan(t);
+    decoder_core_close(t);
+    t->timing_tried = 1;
+    t->drop_timing = 1;
+    t->sps_src_len = 0;                                     /* the SPS is rewritten again, now without it */
+    t->oom_errs = 0;
+    t->no_out = 0;
+    t->skip_nonref = 0;
+    t->grow_pending = 0;
+    t->need_key = 1;
+    t->st.errors++;
+}
+
 static int take_free_slot(Tsp *t)
 {
     int s = -1;
@@ -1033,11 +1088,13 @@ static void take_picture(Tsp *t, SceAvcdecPicture *p, int si)
             plog("tsp: decoding works with frame memory %s, ES %s, pictures %s",
                  mem_name(t->fb_kind), mem_name(PLANS[t->plan].es), mem_name(PLANS[t->plan].pic));
         if (t->st.decoded == 0) t->first_pic_pts = opts;
-        if (t->st.decoded == 0)
+        if (t->st.decoded == 0) {
+            g_pictures_seen = 1;
             plog("tsp: first picture %ux%u (crop L%u R%u T%u B%u), pts %lld",
                  (unsigned)p->frame.horizontalSize, (unsigned)p->frame.verticalSize,
                  (unsigned)p->frame.frameCropLeftOffset, (unsigned)p->frame.frameCropRightOffset,
                  (unsigned)p->frame.frameCropTopOffset, (unsigned)p->frame.frameCropBottomOffset, (long long)opts);
+        }
         if (opts >= 0 && t->last_out_pts >= 0 && opts < t->last_out_pts && t->last_out_pts - opts < 90000LL * 10) t->out_of_order++;
         if (opts >= 0) t->last_out_pts = opts;
         Slot *sl = &t->slots[si];
@@ -1183,20 +1240,40 @@ static void decoder_flush(Tsp *t)
     plog("tsp: end of the stream: %d more picture%s taken out of the decoder", got, got == 1 ? "" : "s");
 }
 
-/* The SPS to give the decoder: with bitstream_restriction added when it has none (spsfix.c; 720p channels
- * whose SPS lacks it gave "Decoder produced no picture": the decoder waits for 5 pictures and runs out of
- * memory). The fixed form of the last SPS is kept, so a keyframe's SPS costs a compare. */
+/* The SPS to give the decoder. As it is, unless this is the second try after no picture from the start
+ * (drop_timing): then with bitstream_restriction added when it has none and without HRD / pic_struct
+ * (spsfix.c). 0.4.0's first build added the restriction to every stream; some then ran out of picture
+ * memory after a few seconds, so it is only the fallback now. The fixed form of the last SPS is kept, so
+ * a keyframe's SPS costs a compare. */
 static const uint8_t *sps_for_decoder(Tsp *t, const uint8_t *nal, size_t len, size_t *out_len)
 {
     *out_len = len;
     if (len == 0 || len > sizeof t->sps_src) return nal;
     if (len != t->sps_src_len || memcmp(nal, t->sps_src, len)) {
+        if (t->sps_src_len && t->st.decoded > 0 && t->sps_changes++ < 5) {
+            SpsInfo a, b;                                    /* 0.4.5: what changed (a 5-quality HLS channel lost its picture at unit 55) */
+            int ra = sps_info(t->sps_src, t->sps_src_len, &a), rb = sps_info(nal, len, &b);
+            plog("tsp: the SPS changed after %u pictures (%u -> %u bytes; refs %d -> %d, timing %d -> %d, HRD %d -> %d, restriction %d -> %d)",
+                 (unsigned)t->st.decoded, (unsigned)t->sps_src_len, (unsigned)len, ra ? -1 : a.refs, rb ? -1 : b.refs,
+                 ra ? -1 : a.timing, rb ? -1 : b.timing, ra ? -1 : a.nal_hrd || a.vcl_hrd, rb ? -1 : b.nal_hrd || b.vcl_hrd,
+                 ra ? -1 : a.restriction, rb ? -1 : b.restriction);
+        }
         memcpy(t->sps_src, nal, len);
         t->sps_src_len = len;
         int reorder = 0;
-        t->sps_fix_len = sps_add_restriction(nal, len, t->sps_fix, sizeof t->sps_fix, &reorder);
-        if (t->sps_fix_len && !t->sps_fix_logged++)
-            plog("tsp: the SPS has no bitstream_restriction: added (%d pictures to reorder) for the decoder", reorder);
+        SpsInfo in;
+        if (sps_info(nal, len, &in) == 0) {
+            t->hdr_timing = in.nal_hrd || in.vcl_hrd || in.pic_struct;
+            t->hdr_no_restr = !in.restriction;
+            if (!t->hdr_logged++)                           /* (to compare channels that play with ones that do not) */
+                plog("tsp: H.264 header: timing %s, HRD %s, picture timing %s, bitstream_restriction %s", in.timing ? "yes" : "no",
+                     in.nal_hrd ? (in.vcl_hrd ? "NAL+VCL" : "NAL") : in.vcl_hrd ? "VCL" : "no", in.pic_struct ? "yes" : "no", in.restriction ? "yes" : "no");
+        }
+        t->sps_fix_len = t->drop_timing ? sps_rewrite(nal, len, t->sps_fix, sizeof t->sps_fix, 1, &reorder) : 0;
+        if (t->sps_fix_len && !t->sps_fix_logged++) {
+            if (reorder >= 0) plog("tsp: second try: bitstream_restriction added to the SPS (%d pictures to reorder), timing taken out", reorder);
+            else plog("tsp: second try: timing taken out of the SPS");
+        }
     }
     if (!t->sps_fix_len) return nal;
     *out_len = t->sps_fix_len;
@@ -1204,7 +1281,7 @@ static const uint8_t *sps_for_decoder(Tsp *t, const uint8_t *nal, size_t len, si
 }
 
 /* Copies the access unit (optionally behind SPS/PPS) into the ES buffer, with each SPS as the decoder gets
- * it (see sps_for_decoder). Returns its size, 0 if too big. */
+ * it (see sps_for_decoder) and, on the second try without timing, no SEI units. Returns its size, 0 if too big. */
 static size_t build_es(Tsp *t, const VInfo *i, const uint8_t *data, size_t len, int with_params)
 {
     static const uint8_t sc[4] = { 0, 0, 0, 1 };
@@ -1217,7 +1294,7 @@ static size_t build_es(Tsp *t, const VInfo *i, const uint8_t *data, size_t len, 
         memcpy(t->es + n, sc, 4); n += 4;
         memcpy(t->es + n, i->pps, (size_t)i->pps_len); n += (size_t)i->pps_len;
     }
-    if (!au_has_sps(data, len)) {
+    if (!au_has_sps(data, len) && !t->drop_timing) {
         if (n + len > ES_CAP) return 0;
         memcpy(t->es + n, data, len);
         return n + len;
@@ -1236,6 +1313,13 @@ static size_t build_es(Tsp *t, const VInfo *i, const uint8_t *data, size_t len, 
         size_t b = s + 3, e = b;
         while (e + 3 <= len && !(data[e] == 0 && data[e + 1] == 0 && (data[e + 2] == 1 || (data[e + 2] == 0 && e + 3 < len && data[e + 3] == 1)))) e++;
         if (e + 3 > len) e = len;
+        if (t->drop_timing && e > b && (data[b] & 0x1F) == 6) {   /* SEI: left out (bytes before it kept) */
+            if (n + (s - p) > ES_CAP) return 0;
+            memcpy(t->es + n, data + p, s - p);
+            n += s - p;
+            p = e;
+            continue;
+        }
         if (n + (b - p) > ES_CAP) return 0;
         memcpy(t->es + n, data + p, b - p);                 /* bytes before it and its start code */
         n += b - p;
@@ -1395,6 +1479,15 @@ static void video_packet(Tsp *t, Pkt *p)
     if (!t->first_unit_us) t->first_unit_us = now_us();
     if (t->units_in++ == 0)                                 /* (where a start stopped, if it ever does: one crash in 0.2.7) */
         plog("tsp: first video unit: %u bytes, %dx%d, %s", (unsigned)len, i->width, i->height, start_ok ? "keyframe" : "no keyframe yet");
+    if (t->st.decoded == 0 && !t->sei_logged) {             /* (the first units only) */
+        uint32_t m = au_sei_types(data, len);
+        if (m) {
+            t->sei_logged = 1;
+            t->sei_timing = (m & 3) != 0;
+            plog("tsp: the stream sends SEI messages%s%s%s", m & 1 ? ", buffering period" : "", m & 2 ? ", picture timing" : "",
+                 (m & ~3u) ? ", others" : "");
+        }
+    }
     if (t->hd60_pending && start_ok && t->dec_open) {       /* 720p above 30 fps: the HD decoder from this keyframe */
         t->hd60_pending = 0;
         switch_to_hd_oom(t);
@@ -1437,6 +1530,20 @@ static void video_packet(Tsp *t, Pkt *p)
             t->force_internal = 1;
             t->oom_hd = 1;                                  /* (back to the public decoder if it does not start) */
             plog("tsp: %dp at %u fps: the HD decoder", i->height, (unsigned)((1000000u + fu / 2) / fu));
+        }
+        /* 0.5.0: 720p with 4 or more reference pictures: the public decoder ran out of picture memory after a
+         * few pictures on every such channel in the logs, and the switch to the HD decoder then waited for the
+         * next keyframe (191 pictures, about 8 s, lost). Take the HD decoder at once. */
+        {   /* (only with timing information in the header, as on both channels in the logs: x264's ordinary 720p has
+             * 4 reference pictures too and plays on the normal decoder) */
+            SpsInfo si;
+            int timing = i->sps_len > 0 && sps_info(i->sps, (size_t)i->sps_len, &si) == 0 && (si.nal_hrd || si.vcl_hrd || si.pic_struct);
+            if (mbs <= MBS_720P && g_hd1080 && !i->interlaced && !t->force_internal && i->height >= 700 && i->refs >= 4 && timing) {
+                t->force_internal = 1;
+                t->oom_hd = 1;
+                plog("tsp: %dp with %d reference pictures and timing information: the HD decoder (the normal one runs out of picture memory)",
+                     i->height, i->refs);
+            }
         }
         int r = decoder_open(t, i->width, i->height, i->refs, i->level);
         if (r < 0 && t->oom_hd && t->force_internal) {     /* the HD decoder did not start: back to the public one */
@@ -1483,6 +1590,13 @@ static void video_packet(Tsp *t, Pkt *p)
         if (!t->internal && !t->hd60 && t->vh <= 720 && g_hd1080 && !i->interlaced && t->frame_us && t->frame_us < 30000) {
             t->hd60 = t->hd60_pending = 1;                  /* (the rate was not known at the first keyframe) */
             plog("tsp: %dp at %u fps: the HD decoder from the next keyframe", t->vh, (unsigned)((1000000u + t->frame_us / 2) / t->frame_us));
+        }
+        /* 0.5.0: also 720p above 30 fps on the HD decoder: it gave 20-30 pictures a second at 720p50 on the
+         * device (waiting for the screen's slots, so the catch-up check above never saw it as slow) */
+        if (t->frame_us && t->frame_us < 30000 && i->height < 1000 && t->internal && t->hd60 && !t->pre_skip) {
+            t->pre_skip = 1;
+            plog("tsp: %dp at %u fps on the HD decoder: pictures nothing refers to are left out", i->height,
+                 (unsigned)((1000000u + t->frame_us / 2) / t->frame_us));
         }
         if (i->height >= 1000 && t->frame_us && t->frame_us < 30000) {
             t->pre_skip = 1;
@@ -1612,6 +1726,47 @@ static void video_packet(Tsp *t, Pkt *p)
      * failed until "Decoder produced no picture"; the same channel played once the stream had 1 ref).
      * Each failure waits for the next keyframe, so do not wait long: switch when the picture memory cannot
      * grow, or when it grew and still did not fit. Nothing was shown yet, so nothing is lost. */
+    if ((unsigned)r == 0x80620003u && t->st.decoded == 0 && (t->oom_errs >= 2 || !t->grow_pending) && !t->internal && !t->oom_hd &&
+        !t->timing_tried && (t->hdr_timing || t->sei_timing || t->hdr_no_restr)) {
+        plog("tsp: no picture from the start (%d times); trying the decoder again with the header adjusted (bitstream_restriction, no HRD / SEI timing)", t->oom_errs);
+        restart_without_timing(t);
+        return;
+    }
+    /* 0.4.1: the same for the HD decoder. A 720p50 channel (NAL HRD, picture timing, no bitstream_restriction)
+     * went to it at once because of its frame rate and it held the units without giving a picture, so the
+     * second try above never came. First again without the timing; if that gives nothing either and the HD
+     * decoder was only chosen for the frame rate, the normal decoder (some pictures may be left out). Each
+     * try gets its own time before "no picture" is reported. */
+    if ((unsigned)r == 0x80620003u && t->st.decoded == 0 && t->internal && t->oom_errs >= 2 && !i->interlaced) {
+        if (!t->timing_tried && (t->hdr_timing || t->sei_timing || t->hdr_no_restr)) {
+            plog("tsp: no picture from the HD decoder from the start (%d times); trying it again with the header adjusted (bitstream_restriction, no HRD / SEI timing)", t->oom_errs);
+            restart_without_timing(t);                       /* (the HD decoder opens again: hd60 / force_internal stay) */
+            t->start_us = now_us();
+            return;
+        }
+        if (t->hd60 && !t->hd_fallback) {
+            plog("tsp: no picture from the HD decoder at %dp; trying the normal decoder (header adjusted)", t->vh);
+            sceKernelLockMutex(t->lock, 1, NULL);
+            t->ready = 0;
+            sceKernelUnlockMutex(t->lock, 1);
+            wait_ui_release(t);
+            free_plan(t);
+            decoder_core_close(t);
+            t->hd_fallback = 1;
+            t->force_internal = 0;                           /* hd60 stays set: the HD decoder is not chosen again */
+            t->oom_hd = 1;                                   /* (and not switched to on out-of-memory errors) */
+            t->timing_tried = 1;
+            if (t->hdr_timing || t->sei_timing || t->hdr_no_restr) { t->drop_timing = 1; t->sps_src_len = 0; }
+            t->oom_errs = 0;
+            t->no_out = 0;
+            t->skip_nonref = 0;
+            t->grow_pending = 0;
+            t->need_key = 1;
+            t->st.errors++;
+            t->start_us = now_us();
+            return;
+        }
+    }
     if ((unsigned)r == 0x80620003u && t->st.decoded == 0 && (t->oom_errs >= 2 || !t->grow_pending) && !t->internal && !t->oom_hd && g_hd1080 &&
         !i->interlaced) {
         plog("tsp: the decoder is out of picture memory from the start (%d times); switching to the HD decoder", t->oom_errs);
@@ -1733,13 +1888,48 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
     q_push(t, &t->vq, p);
 }
 
+/* 0.5.0: the audio the player can play: AAC (the Vita's decoder), MPEG audio and AC-3 / E-AC-3 (software) */
+static int audio_playable(int c)
+{
+    return c == TS_CODEC_AAC || c == TS_CODEC_MPEG_AUDIO || ((c == TS_CODEC_AC3 || c == TS_CODEC_EAC3) && a52_available());
+}
+
+/* the status' list of audio tracks (for the menu), made again when the stream list changes */
+static void update_audio_tracks(Tsp *t, const TsInfo *i)
+{
+    if (t->a_nstreams == i->nstreams && t->st.a_n && t->st.a_cur >= 0 && t->st.a_id[t->st.a_cur] == i->audio_pid) return;
+    int n = 0, cur = -1;
+    for (int k = 0; k < i->nstreams && n < TSP_MAX_AUDIO; k++) {
+        const TsStream *s = &i->streams[k];
+        if (!audio_playable(s->codec)) continue;
+        if (t->mkv && s->stream_type != 2) continue;         /* (MKV: stream_type is the track type) */
+        t->st.a_id[n] = s->pid;
+        t->st.a_codec[n] = s->codec;
+        memcpy(t->st.a_lang[n], s->lang, 4);
+        if (s->pid == i->audio_pid) cur = n;
+        n++;
+    }
+    t->st.a_cur = cur;
+    t->st.a_n = n;
+    if (!t->a_nstreams || t->a_nstreams != i->nstreams) {
+        char list[160];
+        size_t o = 0;
+        for (int k = 0; k < n && o + 24 < sizeof list; k++)
+            o += (size_t)snprintf(list + o, sizeof list - o, "%s%s %s%s", k ? ", " : "", ts_codec_name((TsCodec)t->st.a_codec[k]),
+                                  t->st.a_lang[k][0] ? t->st.a_lang[k] : "-", k == cur ? " (playing)" : "");
+        if (n) plog("tsp: audio tracks: %s", list);
+    }
+    t->a_nstreams = i->nstreams;
+}
+
 static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
 {
     Tsp *t = ctx;
     if (stopping(t) || t->audio_off) return;
     if (!t->first_audio_us) t->first_audio_us = now_us();
     const TsInfo *i = dmx_info(t);
-    if (i->audio_codec != TS_CODEC_AAC && i->audio_codec != TS_CODEC_MPEG_AUDIO) {
+    update_audio_tracks(t, i);
+    if (!audio_playable(i->audio_codec)) {
         if (!t->audio_warned) {
             t->audio_warned = 1;
             snprintf(t->st.audio_msg, sizeof t->st.audio_msg, "Audio %s: not supported", ts_codec_name(i->audio_codec));
@@ -1752,7 +1942,7 @@ static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
     memset(p, 0, sizeof *p);
     p->pts = pts;
     p->len = len;
-    p->flags = i->audio_codec == TS_CODEC_MPEG_AUDIO;    /* 1 = MPEG audio, decoded in software */
+    p->flags = i->audio_codec == TS_CODEC_MPEG_AUDIO ? 1 : i->audio_codec == TS_CODEC_AC3 || i->audio_codec == TS_CODEC_EAC3 ? 2 : 0;   /* 1 MPEG, 2 AC-3 (software) */
     memcpy(p->data, data, len);
     q_push(t, &t->aq, p);
 }
@@ -1976,6 +2166,31 @@ static void mpa_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     audio_out(t, t->mpcm, samples, rate, ch, pts);
 }
 
+/* 0.5.0: an AC-3 / E-AC-3 frame from the software decoder (stereo already) */
+static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int ch, int src_ch, int eac3, int64_t pts)
+{
+    Tsp *t = ctx;
+    (void)src_ch;
+    if (t->audio_off) return;
+    if (!t->st.audio_frames && !t->a52pcm) plog("tsp: %s audio, %d Hz, played as %s (software decoder)", eac3 ? "E-AC-3" : "AC-3", rate, ch == 1 ? "mono" : "stereo");
+    if (samples % 64) { t->st.audio_errors++; return; }
+    if (!t->a52pcm) t->a52pcm = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
+    if (!t->a52pcm) return;
+    memcpy(t->a52pcm, pcm, (size_t)samples * 2u * (size_t)ch);
+    t->arate = rate;
+    t->ach = ch;
+    t->st.audio_rate = rate;
+    t->st.audio_ch = ch;
+    t->st.audio_ac3 = eac3 ? 2 : 1;
+    audio_out(t, t->a52pcm, samples, rate, ch, pts);
+}
+
+static void audio_a52(Tsp *t, Pkt *p)
+{
+    if (!t->a52 && !(t->a52 = a52_create())) { audio_disable(t, "Audio %s: not supported", "ac3"); return; }
+    a52_feed(t->a52, p->data, p->len, p->pts, a52_frame, t);
+}
+
 static void audio_mpeg(Tsp *t, Pkt *p)
 {
     if (!t->mpa && !(t->mpa = mpa_create())) { audio_disable(t, "Out of memory"); return; }
@@ -2045,12 +2260,16 @@ static int audio_main(SceSize args, void *argp)
             sceKernelDelayThread(2000);
             continue;
         }
-        if (!t->audio_off) { if (p->flags) audio_mpeg(t, p); else audio_packet(t, p); }
+        if (!t->audio_off) { if (p->flags == 2) audio_a52(t, p); else if (p->flags) audio_mpeg(t, p); else audio_packet(t, p); }
         free(p);
     }
     audio_close(t);
     mpa_destroy(t->mpa);                                    /* only this thread uses it */
     t->mpa = NULL;
+    a52_destroy(t->a52);
+    t->a52 = NULL;
+    free(t->a52pcm);
+    t->a52pcm = NULL;
     if (t->alib) { sceAudiodecTermLibrary(SCE_AUDIODEC_TYPE_AAC); t->alib = 0; }
     sceKernelLockMutex(t->qlock, 1, NULL);
     t->aclock_valid = 0;
@@ -2240,7 +2459,7 @@ static void explain_no_picture(Tsp *t)
         set_error(t, "No video data received");
         return;
     }
-    if (i->video_pid < 0 && i->audio_pid >= 0 && (i->audio_codec == TS_CODEC_AAC || i->audio_codec == TS_CODEC_MPEG_AUDIO) && !t->audio_off) {
+    if (i->video_pid < 0 && i->audio_pid >= 0 && audio_playable(i->audio_codec) && !t->audio_off) {
         if (!t->st.audio_only) plog("tsp: no video stream, playing audio only");
         t->st.audio_only = 1;
         return;
@@ -2252,7 +2471,18 @@ static void explain_no_picture(Tsp *t)
     else if (t->net_err[0] && t->st.bytes < 512 * 1024) set_error_kind(t, TSP_ERRK_NET, "%s", t->net_err);
     else if (!i->video_aus) set_error(t, "No video data received");
     else if (!t->dec_open) set_error_kind(t, TSP_ERRK_FORMAT, "No usable keyframe in %u pictures", i->video_aus);
+    /* 0.4.0: other channels gave pictures, so the decoder works and this stream is the problem: restarting
+     * the Vita does not help (that advice is for a decoder that gives nothing at all) */
+    else if (g_pictures_seen)
+        set_error_kind(t, TSP_ERRK_FORMAT, "The Vita decoder gives no picture for this stream (%u errors). The transcoding server can play it", t->st.errors);
     else set_error(t, "Decoder produced no picture (%u errors). Switch the Vita fully off and on again, then try a 720p channel", t->st.errors);
+    /* 0.4.0: an HLS variant that gave no picture at all, for whatever reason (Haber61's "480p" sent a few
+     * video units without a keyframe): the UI tries another variant, as for one with no video */
+    if (t->st.state == TSP_ERROR && t->st.err_kind != TSP_ERRK_NET && t->st.decoded == 0 && t->st.hls_nv > 1 &&
+        vcur >= 0 && t->st.hls_vh[vcur] > 0 && !t->st.hls_no_video) {
+        plog("tsp: HLS variant %dp gave no picture", t->st.hls_vh[vcur]);
+        t->st.hls_no_video = 1;
+    }
 }
 
 /* Nothing decoded for a long time: report instead of waiting forever. */
@@ -2262,7 +2492,7 @@ static void check_stall(Tsp *t)
     int hls_video = t->st.hls_nv > 1 && vcur >= 0 && t->st.hls_vh[vcur] > 0;
     if (!t->st.audio_only && !t->audio_off && !hls_video) {   /* the PMT already tells: radio channel */
         const TsInfo *i = dmx_info(t);
-        if (i->program >= 0 && i->video_pid < 0 && i->audio_pid >= 0 && (i->audio_codec == TS_CODEC_AAC || i->audio_codec == TS_CODEC_MPEG_AUDIO)) {
+        if (i->program >= 0 && i->video_pid < 0 && i->audio_pid >= 0 && audio_playable(i->audio_codec)) {
             t->st.audio_only = 1;
             plog("tsp: no video stream in the program, playing audio only");
         }
@@ -2424,6 +2654,7 @@ static void dmx_feed(Tsp *t, const uint8_t *b, size_t n)
         TsSink sink = { on_video, on_audio, t };
         if (mkv_probe(b, n)) {
             t->mkv = mkv_create(&sink);
+            if (t->mkv) mkv_prefer_audio(t->mkv, g_aid, g_alang);
             plog("tsp: Matroska (MKV) stream");
         } else if (flv_probe(b, n)) {
             t->flv = flv_create(&sink);
@@ -3145,6 +3376,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         if (start > 0 && mkv_seek(vio_read, &io, t->vod_total, &L, start, &off, &at) != 0) { off = L.first_cluster; at = 0; }
         TsSink sink = { on_video, on_audio, t };
         t->mkv = mkv_create(&sink);
+        if (t->mkv) mkv_prefer_audio(t->mkv, g_aid, g_alang);   /* (0.5.0: the audio track chosen in the menu) */
         if (t->mkv) mkv_feed(t->mkv, L.head, L.head_len);
         plog("tsp: Matroska: %d s, index %s, start at %d s (byte %llu)%s%s", (int)(L.duration_ms / 1000), L.cues_pos ? "yes" : "no",
              (int)(at / 1000), (unsigned long long)off, start > 0 ? ", found by: " : "", start > 0 ? vod_seek_note : "");
@@ -3680,6 +3912,12 @@ void tsp_set_options(int hd1080, int hls_want)
 
 void tsp_set_hls_bw(long bw) { g_hls_bw = bw > 0 ? bw : 0; }
 
+void tsp_set_audio(int id, const char *lang)
+{
+    g_aid = id;
+    ts_lang3(lang ? lang : "", g_alang);
+}
+
 /* The variants the screen can offer (playable, up to 1080p), smallest first; the chosen one marked. */
 static void hls_list_variants(Tsp *t, const HlsVariant *v, int n, int k)
 {
@@ -3765,6 +4003,8 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     t->qlock = sceKernelCreateMutex("tsp_qlock", 0, 0, NULL);
     TsSink sink = { on_video, on_audio, t };
     t->dmx = ts_create(&sink);
+    if (t->dmx) ts_prefer_audio(t->dmx, g_aid, g_alang);    /* 0.5.0: the audio track chosen in the menu */
+    t->st.a_cur = -1;
     if (!t->dmx || t->lock < 0 || t->qlock < 0) {
         if (t->dmx) ts_destroy(t->dmx);
         if (t->lock >= 0) sceKernelDeleteMutex(t->lock);

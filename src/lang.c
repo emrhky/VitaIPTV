@@ -10,7 +10,29 @@ int  lang_get(void) { return g_lang; }
 typedef struct { const char *en, *tr; } Pair;
 
 static const Pair FIXED[] = {
+    /* 0.5.0: favourites */
+    { "Favorites", "Favoriler" }, { "Favorite", "Favori" }, { "Added to favorites", "Favorilere eklendi" },
+    { "Removed from favorites", "Favorilerden çıkarıldı" }, { "The favorites list is full", "Favori listesi dolu" },
+    { "Films and series cannot be favorites yet", "Film ve diziler henüz favorilere eklenemiyor" },
+    { "Previous channel", "Önceki kanal" },
+    /* 0.4.5 */
+    { "Fav.", "Fav." }, { "Res.", "Çöz." }, { "P. Channel", "Ö. Kanal" },
+    { "When needed", "Gerektiğinde" }, { "Always", "Her zaman" },
+    { "Recently Watched", "Son İzlenenler" }, { "Reorder", "Taşı" }, { "Order saved", "Sıra kaydedildi" },
+    { "Order not changed", "Sıra değiştirilmedi" },
+    { "Up / down", "Yukarı / aşağı" },
+    { "built", "derleme" },
+    { "Now", "Şimdi" }, { "Next", "Sonra" },
+    /* 0.5.0 */
+    { "Through the Server", "Sunucu Üzerinden" }, { "Direct (without the server)", "Doğrudan (sunucusuz)" },
+    { "Clear Recently Watched", "Son İzlenenleri Temizle" }, { "Clear recently watched?", "Son izlenenler temizlensin mi?" },
+    { "The recently watched channels of every playlist are removed. Favorites stay.",
+      "Bütün listelerin son izlenen kanalları silinir. Favoriler kalır." },
+    { "Recently watched cleared", "Son izlenenler temizlendi" }, { "Nothing to clear", "Temizlenecek bir şey yok" },
+    { "Up / down moves the channel, Triangle saves the order", "Yukarı / aşağı kanalı taşır, Üçgen sırayı kaydeder" },
     /* 0.4.0 */
+    { "No channel before this one yet", "Henüz önceki kanal yok" },
+    { "The channel before is not in this list", "Önceki kanal bu listede değil" },
     { "Sound only (radio)", "Sadece ses (radyo)" }, { "%dx%d (the only size)", "%dx%d (tek boyut)" },
     { "Size not known yet", "Boyut henüz belli değil" }, { "Stream", "Yayın" }, { "Delete playlist", "Listeyi sil" },
     { "Hide channels named 4K / UHD", "Adında 4K/UHD geçen kanalları gizle" }, { "Close", "Kapat" },
@@ -137,7 +159,6 @@ static const Pair FIXED[] = {
     { "Referer (if needed)", "Referer (gerekirse)" }, { "User-Agent (if needed)", "User-Agent (gerekirse)" },
     { "Referer (e.g. https://site/page)", "Referer (örn. https://site/sayfa)" }, { "User-Agent", "User-Agent" },
     { "Waiting for the network...", "Ağ bekleniyor..." },
-    { "Screen off", "Ekranı kapat" }, { "The screen cannot be turned off here", "Ekran burada kapatılamıyor" },
     { "Radio", "Radyo" }, { "ON AIR", "YAYINDA" }, { "Buffering...", "Arabelleğe alınıyor..." },
     { "Matroska (MKV)", "Matroska (MKV)" },
     { "Stream analysis", "Yayın analizi" }, { "Analyzing stream...", "Yayın analiz ediliyor..." },
@@ -164,6 +185,9 @@ static const Pair FIXED[] = {
 
 /* messages with numbers: %d %u %s %08X in the English text, %s placeholders (same order) in the Turkish one */
 static const Pair PATTERNS[] = {
+    /* (0.5.0: was among the fixed texts, so the message with its number in it stayed English) */
+    { "The Vita decoder gives no picture for this stream (%u errors). The transcoding server can play it",
+      "Vita çözücüsü bu yayından görüntü vermiyor (%s hata). Dönüştürme sunucusuyla izlenebilir" },
     { "%dx%d is above the Vita decoder limit (720p)", "%sx%s, Vita çözücüsünün sınırının (720p) üstünde" },
     { "%dx%d is above the Vita decoder limit (1080p)", "%sx%s, Vita çözücüsünün sınırının (1080p) üstünde" },
     { "%dx%d is above 720p", "%sx%s, 720p üstünde" },
@@ -177,7 +201,7 @@ static const Pair PATTERNS[] = {
     { "The server did not answer (0x%08X)", "Sunucu yanıt vermedi (0x%s)" },
     { "Connection failed (%s)", "Bağlantı kurulamadı (%s)" },
     { "HTTPS failed (0x%08X): this site needs newer TLS than the Vita has. Copy the .m3u file to ux0:data/VitaIPTV/ instead",
-      "HTTPS basarisiz (0x%s): bu site Vita'dakinden yeni TLS istiyor. .m3u dosyasini PC'den ux0:data/VitaIPTV/ klasorune kopyalayin" },
+      "HTTPS başarısız (0x%s): bu site Vita'dakinden yeni TLS istiyor. .m3u dosyasını PC'den ux0:data/VitaIPTV/ klasörüne kopyalayın" },
     { "Bad address (0x%08X)", "Geçersiz adres (0x%s)" }, { "Request failed (0x%08X)", "İstek başarısız (0x%s)" },
     { "Read error (0x%08X)", "Okuma hatası (0x%s)" }, { "HTTP init failed (0x%08X)", "HTTP başlatılamadı (0x%s)" },
     { "Stream stopped (connection lost %d times)", "Yayın durdu (bağlantı %s kez koptu)" },

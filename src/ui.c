@@ -5,13 +5,32 @@
 #include <string.h>
 
 static vita2d_pgf *g_pgf;
-static vita2d_pvf *g_pvf;                   /* the system UI font: has Turkish and other Latin letters */
+static vita2d_pvf *g_pvf;                   /* the system fonts */
+static int g_turkish;                       /* 0.4.5: Turkish letters drawn as they are (the Latin font is loaded) */
 
-void ui_init(vita2d_pgf *pgf)
+/* 0.4.5: Latin letters (Turkish ğ ş ı İ included) from the system's Latin font, the one the Vita's own menus
+ * use; everything else (Cyrillic, Greek, Japanese...) from the default font as before. vita2d's default font
+ * is the one for the default language only, which drew ğ ş ı badly: until now they were drawn as g s i. */
+static int in_latin(unsigned int c)
+{
+    return c < 0x250 || (c >= 0x1E00 && c < 0x1F00) || (c >= 0x2000 && c < 0x2070) || c == 0x20AC || c == 0x2122;
+}
+
+void ui_init(vita2d_pgf *pgf, int plain_letters)
 {
     g_pgf = pgf;
-    g_pvf = vita2d_load_default_pvf();
+    vita2d_system_pvf_config cfg[2];
+    memset(cfg, 0, sizeof cfg);
+    cfg[0].code = SCE_PVF_LANGUAGE_LATIN;
+    cfg[0].in_font_group = in_latin;
+    cfg[1].code = SCE_PVF_DEFAULT_LANGUAGE_CODE;
+    cfg[1].in_font_group = NULL;
+    g_pvf = vita2d_load_system_pvf(2, cfg);
+    g_turkish = g_pvf != NULL && !plain_letters;
+    if (!g_pvf) g_pvf = vita2d_load_default_pvf();          /* (as before 0.4.5) */
 }
+
+int ui_font_state(void) { return g_turkish ? 2 : g_pvf ? 1 : 0; }
 
 void ui_shutdown(void)
 {
@@ -35,6 +54,7 @@ static int raw_w(float scale, const char *s)
  * Returns s itself if nothing changes. */
 const char *ui_plain(const char *s, char *buf, size_t cap)
 {
+    if (g_turkish) return s;                                 /* 0.4.5: the Latin font draws them */
     const unsigned char *p = (const unsigned char *)s;
     int any = 0;
     for (; *p; p++) if (*p == 0xC3 || *p == 0xC4 || *p == 0xC5) { any = 1; break; }
@@ -57,6 +77,41 @@ const char *ui_plain(const char *s, char *buf, size_t cap)
     return buf;
 }
 
+/* 0.4.5: every word of a short label starts with a capital. Words start after a space or "("; Turkish:
+ * i -> İ, ı -> I, ç ğ ö ş ü -> Ç Ğ Ö Ş Ü. Joining words stay small (not as the first word). */
+static int small_word(const char *w, size_t n)
+{
+    static const char *const EN[] = { "a", "an", "the", "of", "from", "to", "and", "or", "in", "on", "with", "for", "by", "at", "via" };
+    static const char *const TR[] = { "ve", "ile", "veya", "de", "da" };
+    for (size_t i = 0; i < sizeof EN / sizeof EN[0]; i++) if (strlen(EN[i]) == n && !strncmp(EN[i], w, n)) return 1;
+    for (size_t i = 0; i < sizeof TR / sizeof TR[0]; i++) if (strlen(TR[i]) == n && !strncmp(TR[i], w, n)) return 1;
+    return 0;
+}
+
+const char *ui_title(const char *s, char *buf, size_t cap)
+{
+    size_t o = 0;
+    int start = 1, first = 1, tr = lang_get() == LANG_TR;
+    for (const unsigned char *p = (const unsigned char *)s; *p && o + 3 < cap;) {
+        if (start && *p != ' ' && *p != '(') {
+            size_t n = strcspn((const char *)p, " ()/");
+            start = 0;
+            if (!first && small_word((const char *)p, n)) { first = 0; goto copy; }
+            first = 0;
+            if (*p == 'i' && tr) { buf[o++] = (char)0xC4; buf[o++] = (char)0xB0; p++; continue; }   /* İ */
+            if (*p >= 'a' && *p <= 'z') { buf[o++] = (char)(*p - 32); p++; continue; }
+            if (p[0] == 0xC4 && p[1] == 0xB1) { buf[o++] = 'I'; p += 2; continue; }                   /* ı -> I */
+            if (p[0] == 0xC3 && (p[1] == 0xA7 || p[1] == 0xB6 || p[1] == 0xBC)) { buf[o++] = (char)0xC3; buf[o++] = (char)(p[1] - 0x20); p += 2; continue; }
+            if ((p[0] == 0xC4 || p[0] == 0xC5) && p[1] == 0x9F) { buf[o++] = (char)p[0]; buf[o++] = (char)0x9E; p += 2; continue; }   /* ğ ş */
+        }
+    copy:
+        if (*p == ' ' || *p == '(') start = 1;
+        buf[o++] = (char)*p++;
+    }
+    buf[o] = 0;
+    return buf;
+}
+
 /* Both fonts draw with y on the baseline. */
 void ui_text(int x, int y, unsigned col, float scale, const char *s)
 {
@@ -70,29 +125,103 @@ int ui_text_w(float scale, const char *s)
     return raw_w(scale, ui_plain(s, buf, sizeof buf));
 }
 
-void ui_text_fit(int x, int y, unsigned col, float scale, const char *s, int maxw)
+/* s in buf, cut with "..." at the end when it is wider than maxw */
+void ui_fit_copy(char *buf, size_t cap, float scale, const char *s, int maxw)
 {
-    char buf[256];
-    snprintf(buf, sizeof buf, "%s", s);
+    snprintf(buf, cap, "%s", s);
     size_t n = strlen(buf);
     if (ui_text_w(scale, buf) > maxw) {
         while (n > 0) {
             n--;
             while (n > 0 && ((unsigned char)buf[n] & 0xC0) == 0x80) n--;
             buf[n] = 0;
-            char tmp[256];
-            if (n > sizeof tmp - 4) continue;
+            char tmp[512];
+            if (n + 4 > sizeof tmp || n + 4 > cap) continue;
             memcpy(tmp, buf, n);
             memcpy(tmp + n, "...", 4);
             if (ui_text_w(scale, tmp) <= maxw) { memcpy(buf, tmp, n + 4); break; }
         }
     }
+}
+
+void ui_text_fit(int x, int y, unsigned col, float scale, const char *s, int maxw)
+{
+    char buf[256];
+    ui_fit_copy(buf, sizeof buf, scale, s, maxw);
     ui_text(x, y, col, scale, buf);
 }
 
 void ui_text_center(int cx, int y, unsigned col, float scale, const char *s)
 {
     ui_text(cx - ui_text_w(scale, s) / 2, y, col, scale, s);
+}
+
+/* 0.5.0: long notes and error messages go on to the next line instead of running off the screen. Breaks at
+ * spaces (a word wider than the line is cut between letters); what does not fit in maxlines ends in "...". */
+int ui_wrap(UiWrap *w, float scale, const char *s, int maxw, int maxlines)
+{
+    w->n = 0;
+    if (!s) return 0;
+    if (maxlines > UI_WRAP_LINES) maxlines = UI_WRAP_LINES;
+    while (*s == ' ') s++;
+    while (*s && w->n < maxlines) {
+        char *out = w->line[w->n];
+        const size_t cap = sizeof w->line[0];
+        if (w->n == maxlines - 1) {                          /* the last line takes the rest */
+            ui_fit_copy(out, cap, scale, s, maxw);
+            w->n++;
+            break;
+        }
+        size_t best = 0, i = 0;                              /* best: the longest piece ending before a space */
+        while (s[i]) {
+            size_t j = i;
+            while (s[j] == ' ') j++;
+            while (s[j] && s[j] != ' ') j++;                 /* the next word */
+            if (j >= cap) break;
+            char tmp[sizeof w->line[0]];
+            memcpy(tmp, s, j);
+            tmp[j] = 0;
+            if (ui_text_w(scale, tmp) > maxw) break;
+            best = i = j;
+        }
+        if (!s[best] && best) {                              /* all of it fits */
+            memcpy(out, s, best);
+            out[best] = 0;
+            w->n++;
+            break;
+        }
+        if (best == 0) {                                     /* one long word: as many letters as fit */
+            size_t j = 0;
+            while (s[j] && s[j] != ' ' && j + 4 < cap) {
+                size_t k = j + 1;
+                while (((unsigned char)s[k] & 0xC0) == 0x80) k++;
+                char tmp[sizeof w->line[0]];
+                memcpy(tmp, s, k);
+                tmp[k] = 0;
+                if (j && ui_text_w(scale, tmp) > maxw) break;
+                j = k;
+            }
+            best = j;
+        }
+        memcpy(out, s, best);
+        out[best] = 0;
+        while (best && out[best - 1] == ' ') out[--best] = 0;
+        w->n++;
+        s += strlen(out);
+        while (*s == ' ') s++;
+    }
+    return w->n;
+}
+
+int ui_text_wrap(int x, int y, unsigned col, float scale, const char *s, int maxw, int line_h, int maxlines, int center)
+{
+    UiWrap w;
+    ui_wrap(&w, scale, s, maxw, maxlines);
+    for (int i = 0; i < w.n; i++) {
+        if (center) ui_text_center(x + maxw / 2, y + i * line_h, col, scale, w.line[i]);
+        else ui_text(x, y + i * line_h, col, scale, w.line[i]);
+    }
+    return w.n;
 }
 
 void ui_panel(int x, int y, int w, int h, unsigned fill)
@@ -194,22 +323,69 @@ int ui_button(int x, int cy, int btn)
     }
 }
 
+/* the width ui_button draws (without drawing) */
+static int button_w(int btn)
+{
+    if (btn == UI_BTN_L || btn == UI_BTN_R || btn == UI_BTN_LR || btn == UI_BTN_START || btn == UI_BTN_SELECT) {
+        const char *t = btn == UI_BTN_L ? "L" : btn == UI_BTN_R ? "R" : btn == UI_BTN_LR ? "L/R" : btn == UI_BTN_START ? "START" : "SELECT";
+        return ui_text_w(1.0f, t) + 24;
+    }
+    return 2 * BR;
+}
+
 void ui_footer(const UiHint *hints, int n, const char *status, int status_err)
 {
-    if (status && status[0]) {
-        vita2d_draw_rectangle(0, UI_FOOTER_Y - 30, 960, 30, RGBA8(20, 22, 32, 230));
-        ui_text_fit(18, UI_FOOTER_Y - 9, status_err ? UI_ERR : UI_DIM, 1.0f, status, 924);
+    if (status && status[0]) {                               /* 0.5.0: a long one takes two lines */
+        UiWrap w;
+        ui_wrap(&w, 1.0f, status, 924, 2);
+        int h = 30 + (w.n - 1) * 24;
+        vita2d_draw_rectangle(0, UI_FOOTER_Y - h, 960, h, RGBA8(20, 22, 32, 230));
+        for (int i = 0; i < w.n; i++)
+            ui_text(18, UI_FOOTER_Y - h + 21 + i * 24, status_err ? UI_ERR : UI_DIM, 1.0f, w.line[i]);
     }
     vita2d_draw_rectangle(0, UI_FOOTER_Y, 960, 544 - UI_FOOTER_Y, UI_PANEL);
     vita2d_draw_rectangle(0, UI_FOOTER_Y, 960, 1, UI_LINE);
-    int x = 16, cy = UI_FOOTER_Y + (544 - UI_FOOTER_Y) / 2;
-    for (int i = 0; i < n; i++) {
-        const char *label = T(hints[i].label);
-        int need = 2 * BR + 8 + ui_text_w(1.15f, label) + 20;
+    /* 0.4.1: the hints before UI_BTN_SEP from the left, the ones after it ending at the right edge. When they
+     * do not all fit, the gaps get narrower and the labels a little smaller; still too wide: the last ones go. */
+    char tb[96];                                             /* (0.4.5: labels with capitals: ui_title) */
+    int cy = UI_FOOTER_Y + (544 - UI_FOOTER_Y) / 2, sep = n;
+    for (int i = 0; i < n; i++) if (hints[i].btn == UI_BTN_SEP) { sep = i; break; }
+    /* sizes tried in turn: the gaps get narrower first, then the labels smaller */
+    static const float SC[] = { 1.15f, 1.15f, 1.05f, 1.0f, 0.95f, 0.9f };
+    static const int GAP[] = { 20, 14, 12, 10, 10, 8 }, PAD[] = { 8, 6, 6, 5, 5, 4 };
+    float sc = 1.15f;
+    int gap = 20, pad = 8, wr = 0;
+    for (int k = 0; k < 6; k++) {
+        sc = SC[k]; gap = GAP[k]; pad = PAD[k];
+        int wl = 0;
+        wr = 0;
+        for (int i = 0; i < n; i++) {
+            if (i == sep) continue;
+            int w = button_w(hints[i].btn) + pad + ui_text_w(sc, ui_title(T(hints[i].label), tb, sizeof tb)) + gap;
+            if (i < sep) wl += w; else wr += w;
+        }
+        if (16 + wl + wr - gap + (sep < n ? 24 : 0) <= 944) break;
+    }
+    int ty = cy + 8 + (int)((sc - 1.15f) * 4);
+    int x = 16;
+    for (int i = 0; i < sep; i++) {
+        const char *label = ui_title(T(hints[i].label), tb, sizeof tb);
+        int need = button_w(hints[i].btn) + pad + ui_text_w(sc, label) + gap;
         if (x + need > 950) break;
-        x += ui_button(x, cy, hints[i].btn) + 8;
-        ui_text(x, cy + 8, UI_TEXT, 1.15f, label);
-        x += ui_text_w(1.15f, label) + 20;
+        x += ui_button(x, cy, hints[i].btn) + pad;
+        ui_text(x, ty, UI_TEXT, sc, label);
+        x += ui_text_w(sc, label) + gap;
+    }
+    if (sep >= n) return;
+    int rx = 944 - (wr - gap);
+    if (rx < x + 4) rx = x + 4;                              /* (the right part moves over when the left is long) */
+    for (int i = sep + 1; i < n; i++) {
+        const char *label = ui_title(T(hints[i].label), tb, sizeof tb);
+        int need = button_w(hints[i].btn) + pad + ui_text_w(sc, label);
+        if (rx + need > 950) break;
+        rx += ui_button(rx, cy, hints[i].btn) + pad;
+        ui_text(rx, ty, UI_TEXT, sc, label);
+        rx += ui_text_w(sc, label) + gap;
     }
 }
 
@@ -291,17 +467,32 @@ void ui_message(const char *title, const char *line, unsigned title_col, int spi
 {
     title = T_msg(title);
     line = line ? T_msg(line) : NULL;
-    int w = 620, h = spinner ? 150 : 120, x = (960 - w) / 2, y = (544 - h) / 2 - 10;
+    /* 0.5.0: a long line goes on below (up to 4 lines, the box grows) instead of ending in "..." */
+    const int w = 620, x = (960 - w) / 2;
+    UiWrap lw;
+    lw.n = 0;
+    if (line && line[0]) ui_wrap(&lw, 1.0f, line, w - 40, 4);
+    int extra = lw.n > 1 ? (lw.n - 1) * 26 : 0;
+    int h = (spinner ? 150 : 120) + extra, y = (544 - h) / 2 - 10;
     ui_panel(x, y, w, h, RGBA8(24, 28, 42, 240));
     int ty = y + 40;
     if (spinner) { ui_spinner(480, y + 40, t_ms); ty = y + 92; }
-    ui_text_center(480, ty, title_col, 1.15f, title);
-    if (line && line[0]) {
-        char buf[200];
-        snprintf(buf, sizeof buf, "%s", line);
-        if (ui_text_w(1.0f, buf) > w - 40) ui_text_fit(x + 20, ty + 32, UI_DIM, 1.0f, buf, w - 40);
-        else ui_text_center(480, ty + 32, UI_DIM, 1.0f, buf);
+    if (ui_text_w(1.15f, title) <= w - 40) ui_text_center(480, ty, title_col, 1.15f, title);
+    else ui_text_fit(x + 20, ty, title_col, 1.15f, title, w - 40);
+    for (int i = 0; i < lw.n; i++) ui_text_center(480, ty + 32 + i * 26, UI_DIM, 1.0f, lw.line[i]);
+}
+
+void ui_star(float cx, float cy, float r, unsigned col)
+{
+    float px[10], py[10];
+    for (int k = 0; k < 10; k++) {                           /* points and the corners between them, top first */
+        float a = -1.5707963f + (float)k * 0.6283185f, rr = k % 2 ? r * 0.42f : r;
+        px[k] = cx + rr * cosf(a);
+        py[k] = cy + rr * sinf(a);
     }
+    /* five points (no seams through them) and a disc for the middle */
+    for (int k = 0; k < 10; k += 2) ui_fill_triangle(px[(k + 9) % 10], py[(k + 9) % 10], px[k], py[k], px[k + 1], py[k + 1], col);
+    vita2d_draw_fill_circle(cx, cy, r * 0.42f, col);
 }
 
 void ui_fill_triangle(float x0, float y0, float x1, float y1, float x2, float y2, unsigned col)

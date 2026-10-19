@@ -13,6 +13,7 @@ typedef enum { TSP_IDLE = 0, TSP_CONNECTING, TSP_WAIT_KEY, TSP_PLAYING, TSP_ENDE
 typedef enum { TSP_ERRK_NONE = 0, TSP_ERRK_FORMAT, TSP_ERRK_NET, TSP_ERRK_OTHER } TspErrKind;
 
 #define TSP_MAX_VARIANTS 8
+#define TSP_MAX_AUDIO    8
 
 typedef struct {
     volatile int state;                 /* TspState */
@@ -55,6 +56,12 @@ typedef struct {
     int hls_vw[TSP_MAX_VARIANTS], hls_vh[TSP_MAX_VARIANTS];   /* height 0 = not given */
     long hls_vbw[TSP_MAX_VARIANTS];     /* bit rate, bit/s (tsp_set_hls_bw picks one exactly) */
     volatile int hls_no_video;          /* the error: this HLS variant carries no picture (another one may) */
+    /* 0.5.0: the audio tracks the player can play (TS / MKV), in the stream's order, and the one playing */
+    volatile int audio_ac3;             /* AC-3 (1) / E-AC-3 (2) decoded in software, else 0 */
+    int a_n, a_cur;                     /* a_cur -1 = none */
+    int a_id[TSP_MAX_AUDIO];            /* PID / MKV track number (tsp_set_audio) */
+    int a_codec[TSP_MAX_AUDIO];         /* TsCodec */
+    char a_lang[TSP_MAX_AUDIO][4];      /* ISO 639-2, "" = not given */
 } TspStatus;
 
 /* For the next tsp_start: hd1080 = decode above 720p; hls_want = the HLS variant to choose: 0 automatic (about
@@ -63,6 +70,9 @@ typedef struct {
 void              tsp_set_options(int hd1080, int hls_want);
 /* For the next tsp_start, after tsp_set_options: the HLS variant with exactly this bit rate (from hls_vbw[]). */
 void              tsp_set_hls_bw(long bw);
+/* 0.5.0: for the next tsp_start: the audio track to play (a_id[] of the status; -1 = none), else the best one in
+ * this language ("tur"...; NULL / "" = any), else the best one (AAC first). */
+void              tsp_set_audio(int id, const char *lang);
 int               tsp_start(const char *url);       /* 0 = started */
 /* A film or episode (a file on a server that sends parts of it): starts at start_ms (the keyframe at or
  * before it). MKV, MP4 and TS files. */
