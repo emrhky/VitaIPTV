@@ -8,7 +8,6 @@
 #include "a52dec.h"
 #include "hls.h"
 #include "spsfix.h"
-#include "aac_pace_frame.h"
 #include "curlio.h"
 #include "vod.h"
 #include "httpio.h"                     /* plog() */
@@ -239,8 +238,11 @@ typedef struct {
     /* 0.4.0: the stream's timing information (VUI HRD / pic_struct, buffering period / picture timing SEI).
      * A 720p25 channel with it gave no picture from either decoder; the second try leaves it out. */
     int hdr_timing, sei_timing, drop_timing, timing_tried, hdr_logged, sei_logged;
-    int pace_on, pace_logged;           /* 0.5.0: the AAC decoder kept busy while AC-3 plays in software (aac_pace) */
-    uint32_t pace_n, pace_err;
+    /* 0.5.0 test builds: the first sound frames of the software decoder, logged together (a52_trace) */
+    struct { int64_t in_pts, pts, clk; uint32_t t_ms, block_us; uint16_t n; } a52tr[300];
+    int a52tr_n, a52tr_done;
+    int64_t a52_in_pts;                     /* the time of the last packet given to the software decoder */
+    uint64_t a52_t0;
     /* 0.5.0: detail line for the picture / sound timing (stats_tick) */
     uint64_t pic_last_us, pic_gap_max_us;   /* video thread: time between pictures coming out of the decoder */
     uint32_t pic_gaps_long, pic_n;          /* ... gaps above 3 picture times, pictures counted */
@@ -1352,7 +1354,9 @@ static size_t build_es(Tsp *t, const VInfo *i, const uint8_t *data, size_t len, 
 }
 
 static int audio_now(Tsp *t, uint64_t now, int64_t *apts);
-static int g_via_server;                                    /* 0.5.0: the next stream comes through the transcoding server */
+static int g_via_server;
+static int g_ac3_test;                                      /* 0.5.0 test builds (tsp_set_ac3_test) */
+void tsp_set_ac3_test(int mode) { g_ac3_test = mode; }                                    /* 0.5.0: the next stream comes through the transcoding server */
 void tsp_set_via_server(int on) { g_via_server = on; }
 
 /* A decoder slower than the stream (1080p at 50/60 fps may be): leave out the pictures nothing else needs
@@ -2193,6 +2197,22 @@ static void mpa_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     audio_out(t, t->mpcm, samples, rate, ch, pts);
 }
 
+/* 0.5.0 test builds: the first sound frames of the software decoder in one go (writing a line per frame while
+ * playing would disturb what is measured): time since the first frame, the packet's time, the frame's time, its
+ * samples, how long the output blocked, and the sound clock right after (all ms; pts from the first frame). */
+static void a52_trace(Tsp *t)
+{
+    t->a52tr_done = 1;
+    int64_t b = t->a52tr_n && t->a52tr[0].pts >= 0 ? t->a52tr[0].pts : 0;
+    plog("tsp: AC-3 trace (%d frames): t_ms packet_ms frame_ms samples block_ms clock_ms", t->a52tr_n);
+    for (int k = 0; k < t->a52tr_n; k++) {
+        #define MS(v) ((v) >= 0 ? (long)(((v) - b) / 90) : -1L)
+        plog("tsp: tr %u %ld %ld %u %u %ld", (unsigned)t->a52tr[k].t_ms, MS(t->a52tr[k].in_pts), MS(t->a52tr[k].pts), (unsigned)t->a52tr[k].n,
+             (unsigned)(t->a52tr[k].block_us / 1000), MS(t->a52tr[k].clk));
+        #undef MS
+    }
+}
+
 /* 0.5.0: an AC-3 / E-AC-3 frame from the software decoder (stereo already) */
 static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int ch, int src_ch, int eac3, int64_t pts)
 {
@@ -2209,39 +2229,42 @@ static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     t->st.audio_rate = rate;
     t->st.audio_ch = ch;
     t->st.audio_ac3 = eac3 ? 2 : 1;
-    audio_out(t, t->a52pcm, samples, rate, ch, pts);
-}
-
-/* 0.5.0: one AAC frame through the Vita decoder (see audio_a52); nothing is played */
-static void aac_pace(Tsp *t)
-{
-    if (!t->adec || sizeof AAC_PACE_FRAME > t->aes_cap) return;
-    memcpy(t->aes, AAC_PACE_FRAME, sizeof AAC_PACE_FRAME);
-    t->actrl.pEs = t->aes;
-    t->actrl.inputEsSize = (SceUInt32)sizeof AAC_PACE_FRAME;
-    t->actrl.pPcm = t->apcm;
-    int r = sceAudiodecDecode(&t->actrl);
-    t->pace_n++;
-    if (r < 0) {
-        if (t->pace_err++ < 3) plog("tsp: AAC pace frame -> 0x%08X", (unsigned)r);
-        if (t->pace_err >= 20 && t->pace_err == t->pace_n) t->pace_on = 0;   /* (never works: stop trying) */
-    } else if (!t->pace_logged++) plog("tsp: AAC pace frame decoded (%u bytes of PCM)", (unsigned)t->actrl.outputPcmSize);
+    uint64_t o0 = now_us();
+    if (!t->a52_t0) t->a52_t0 = o0;
+    if (g_ac3_test == 1) {                                  /* test 1: not played; the time a frame lasts, as the output would */
+        t->st.audio_frames++;
+        uint64_t dur = (uint64_t)samples * 1000000ULL / (uint64_t)rate;
+        sceKernelDelayThread((SceUInt)dur);
+    } else if (g_ac3_test == 3 && samples % 128 == 0 && samples >= 256) {   /* test 3: two halves (768 for AC-3) */
+        int h = samples / 2;
+        audio_out(t, t->a52pcm, h, rate, ch, pts);
+        if (!t->audio_off) audio_out(t, t->a52pcm + (size_t)h * 2u * (size_t)ch, h, rate, ch, pts >= 0 ? pts + (int64_t)h * 90000 / rate : -1);
+    } else {
+        audio_out(t, t->a52pcm, samples, rate, ch, pts);
+    }
+    if (!t->a52tr_done && t->a52tr_n < (int)(sizeof t->a52tr / sizeof t->a52tr[0])) {   /* trace: kept, logged at once later */
+        uint64_t now = now_us();
+        int k = t->a52tr_n++;
+        t->a52tr[k].in_pts = t->a52_in_pts;
+        t->a52tr[k].pts = pts;
+        t->a52tr[k].n = (uint16_t)samples;
+        t->a52tr[k].t_ms = (uint32_t)((now - t->a52_t0) / 1000);
+        t->a52tr[k].block_us = (uint32_t)(now - o0);
+        int64_t c = -1;
+        if (t->aclock_valid) c = t->aclock_pts + (int64_t)(now - t->aclock_us) * 9 / 100;
+        t->a52tr[k].clk = c;
+    }
+    if (!t->a52tr_done && t->a52tr_n >= (int)(sizeof t->a52tr / sizeof t->a52tr[0])) a52_trace(t);
 }
 
 static void audio_a52(Tsp *t, Pkt *p)
 {
     if (!t->a52) {
         if (!(t->a52 = a52_create())) { audio_disable(t, "Audio %s: not supported", "ac3"); return; }
-        /* 0.5.0: AAC films played smoothly on the HD decoder, the same films with AC-3 / E-AC-3 (sound in
-         * software) dropped 30-45% of their pictures: the HD decoder answered in 1-3 ms instead of 5-9 ms and gave
-         * its pictures in bursts. The AAC decoder and the HD decoder share the codec engine; setting up the library
-         * alone did not help (device log). So an AAC decoder also decodes a frame for every sound frame, as when
-         * AAC plays; its output is not played. */
-        int r = audio_open(t, 48000, 2);
-        t->pace_on = r >= 0;
-        plog("tsp: AAC decoder kept busy beside the software sound (codec engine) -> 0x%08X", (unsigned)r);
+        if (g_ac3_test) plog("tsp: AC-3 test mode %d (%s)", g_ac3_test, g_ac3_test == 1 ? "decoded, not played" :
+                             g_ac3_test == 2 ? "audio thread at video priority" : "sound in 768-sample parts");
     }
-    if (t->pace_on) aac_pace(t);
+    t->a52_in_pts = p->pts;
     a52_feed(t->a52, p->data, p->len, p->pts, a52_frame, t);
 }
 
@@ -2320,6 +2343,7 @@ static int audio_main(SceSize args, void *argp)
     audio_close(t);
     mpa_destroy(t->mpa);                                    /* only this thread uses it */
     t->mpa = NULL;
+    if (t->a52tr_n && !t->a52tr_done) a52_trace(t);       /* (a short play: what was kept) */
     a52_destroy(t->a52);
     t->a52 = NULL;
     free(t->a52pcm);
@@ -2490,7 +2514,7 @@ static void stats_tick(Tsp *t)
                  "sound clock vs real time %+d ms%s",
                  (unsigned)t->pic_n, (unsigned)(t->pic_gap_max_us / 1000), (unsigned)t->pic_gaps_long, (unsigned)t->aout_n,
                  (unsigned)(t->aout_min_us / 1000), t->aout_n ? (unsigned)(t->aout_sum_us / t->aout_n / 1000) : 0u,
-                 (unsigned)(t->aout_max_us / 1000), clk, t->pace_on ? ", AAC pacing on" : "");
+                 (unsigned)(t->aout_max_us / 1000), clk, g_ac3_test ? ", AC-3 test mode" : "");
         t->pic_n = t->pic_gaps_long = 0;
         t->pic_gap_max_us = 0;
         t->aout_n = 0;
@@ -4125,7 +4149,8 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     t->st.state = TSP_CONNECTING;
     t->running = 2;
     g_tsp = t;
-    t->athread = start_thread("tsp_audio", audio_main, 0x10000100 - 10, t);   /* audio slightly higher priority */
+    /* audio slightly higher priority (0.5.0 test 2: the same as the video thread) */
+    t->athread = start_thread("tsp_audio", audio_main, g_ac3_test == 2 ? 0x10000100 : 0x10000100 - 10, t);
     t->vthread = start_thread("tsp_video", video_main, 0x10000100, t);
     t->thread = start_thread("tsp_reader", worker, 0x10000100, t);
     if (t->thread < 0 || t->vthread < 0 || t->athread < 0) {

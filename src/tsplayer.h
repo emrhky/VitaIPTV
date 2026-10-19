@@ -75,6 +75,9 @@ void              tsp_set_hls_bw(long bw);
 void              tsp_set_audio(int id, const char *lang);
 /* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */
 void              tsp_set_via_server(int on);
+/* 0.5.0 test builds: AC-3 / E-AC-3 stutter on the HD decoder. 0 normal, 1 decoded but not played (the picture runs
+ * on its own clock), 2 the audio thread at the video thread's priority, 3 the sound output in 768-sample parts. */
+void              tsp_set_ac3_test(int mode);
 int               tsp_start(const char *url);       /* 0 = started */
 /* A film or episode (a file on a server that sends parts of it): starts at start_ms (the keyframe at or
  * before it). MKV, MP4 and TS files. */

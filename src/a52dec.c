@@ -125,10 +125,11 @@ void a52_feed(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out ou
         int used = av_parser_parse2(d->parser, d->ctx, &fr, &fs, data, (int)len, in_pts, in_pts, 0);
         in_pts = AV_NOPTS_VALUE;
         if (used < 0) { d->errors++; return; }
+        if ((size_t)used > len) used = (int)len;            /* (never more than was given) */
         data += used;
         len -= (size_t)used;
         if (fs > 0) decode(d, fr, fs, d->parser->pts != AV_NOPTS_VALUE ? d->parser->pts : -1, out, ctx);
-        if (used == 0 && fs == 0) break;
+        if (used == 0 && fs == 0) { d->errors++; break; }   /* the parser took nothing: the rest of this packet is lost (counted) */
     }
 }
 
