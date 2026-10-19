@@ -15,6 +15,7 @@ Then on the Vita: Select > Settings > Transcoding server = http://<this PC's IP>
 
 Endpoints
     GET /play?url=<url-encoded stream address>   the converted stream
+        &start=<s>   a film from that second;  &film=1   also send the film's length (X-Content-Duration)
     GET /ping                                    "ok" (used by the app's "Test" button)
     GET /                                        short status page
 """
@@ -31,6 +32,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 ARGS = None
+DURATIONS = {}                     # film address -> length in seconds (asked once per film)
+DURATIONS_LOCK = threading.Lock()
 ACTIVE = {}
 ACTIVE_LOCK = threading.Lock()
 
@@ -84,6 +87,44 @@ def ffmpeg_command(url, start=0):
     return cmd
 
 
+def ffprobe_path():
+    """ffprobe next to the ffmpeg in use (same folder, or the PATH)"""
+    import os
+    f = ARGS.ffmpeg
+    d, b = os.path.split(f)
+    name = b.replace("ffmpeg", "ffprobe") if "ffmpeg" in b else "ffprobe"
+    p = os.path.join(d, name) if d else name
+    return p if (d and os.path.exists(p)) or shutil.which(p) else None
+
+
+def film_duration(url):
+    """The film's length in seconds (0 if unknown), for the Vita's time line. Asked before ffmpeg starts (not at
+    the same time: many IPTV accounts allow one connection), and kept: a jump does not ask again."""
+    with DURATIONS_LOCK:
+        if url in DURATIONS:
+            return DURATIONS[url]
+    exe = ffprobe_path()
+    dur = 0.0
+    if exe:
+        src, link_ua, link_ref = split_headers(url)
+        cmd = [exe, "-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"]
+        if src.startswith(("http://", "https://")):
+            cmd += ["-rw_timeout", "10000000"]
+            if link_ua or ARGS.user_agent:
+                cmd += ["-user_agent", link_ua or ARGS.user_agent]
+            if link_ref:
+                cmd += ["-referer", link_ref]
+        cmd.append(src)
+        try:
+            out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=15).stdout
+            dur = float(out.decode("ascii", "replace").strip().splitlines()[0])
+        except (OSError, ValueError, IndexError, subprocess.TimeoutExpired):
+            dur = 0.0
+    with DURATIONS_LOCK:
+        DURATIONS[url] = dur
+    return dur
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "VitaIPTVProxy/1.0"
 
@@ -119,6 +160,8 @@ class Handler(BaseHTTPRequestHandler):
             start = max(0, int(parse_qs(u.query).get("start", ["0"])[0]))
         except ValueError:
             start = 0
+        film = parse_qs(u.query).get("film", ["0"])[0] == "1"
+        duration = film_duration(url) if film else 0.0       # (the Vita shows where the film is)
         cmd = ffmpeg_command(url, start)
         try:
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
@@ -151,6 +194,8 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("[%s] start  %s\n" % (time.strftime("%H:%M:%S"), safe(url)))
         self.send_response(200)
         self.send_header("Content-Type", "video/mp2t")
+        if duration > 0:
+            self.send_header("X-Content-Duration", "%.1f" % duration)
         self.send_header("Cache-Control", "no-cache")
         self.send_header("Connection", "close")
         self.end_headers()
