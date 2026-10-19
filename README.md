@@ -7,7 +7,7 @@ listen to radio from your own M3U playlists or Xtream accounts, decoded by the V
 
 <p align="center"><img src="https://github.com/user-attachments/assets/010c908b-58ff-4be5-982d-5e6c4701ef0c" width="640" alt="Vita IPTV screenshot"></p>
 
-**Version 0.5.0** - AC-3 / E-AC-3 (Dolby Digital) sound, choosing the audio track, favourites, recently watched channels, now / next for Xtream channels, Turkish letters, the transcoding server from the player's menu (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
+**Version 0.5.0** - AC-3 / E-AC-3 sound, choosing the audio track, favourites, recently watched channels, now / next for Xtream channels, Turkish letters, the transcoding server from the player's menu (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
 
 This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
