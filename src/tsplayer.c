@@ -8,6 +8,7 @@
 #include "a52dec.h"
 #include "hls.h"
 #include "spsfix.h"
+#include "aac_pace_frame.h"
 #include "curlio.h"
 #include "vod.h"
 #include "httpio.h"                     /* plog() */
@@ -238,8 +239,15 @@ typedef struct {
     /* 0.4.0: the stream's timing information (VUI HRD / pic_struct, buffering period / picture timing SEI).
      * A 720p25 channel with it gave no picture from either decoder; the second try leaves it out. */
     int hdr_timing, sei_timing, drop_timing, timing_tried, hdr_logged, sei_logged;
-    int timing_restart_pending;         /* 0.5.0: the HD decoder gives its pictures in bursts: again without the timing at the next keyframe */
-    uint32_t burst_prev_shown, burst_prev_behind;   /* (the counts at the last stats line) */
+    int pace_on, pace_logged;           /* 0.5.0: the AAC decoder kept busy while AC-3 plays in software (aac_pace) */
+    uint32_t pace_n, pace_err;
+    /* 0.5.0: detail line for the picture / sound timing (stats_tick) */
+    uint64_t pic_last_us, pic_gap_max_us;   /* video thread: time between pictures coming out of the decoder */
+    uint32_t pic_gaps_long, pic_n;          /* ... gaps above 3 picture times, pictures counted */
+    uint64_t aout_max_us, aout_sum_us;      /* audio thread: sceAudioOutOutput blocking time */
+    uint32_t aout_n, aout_min_us;
+    int64_t aclk_prev_pts;                  /* audio clock at the last stats line (90 kHz) */
+    uint64_t aclk_prev_us;
     int hd_fallback;                    /* 0.4.1: the HD decoder (720p above 30 fps) gave nothing: the normal one */
     int hdr_no_restr;                   /* the SPS has no bitstream_restriction (the second try adds it) */
     int64_t late_sum_us;
@@ -1107,6 +1115,13 @@ static void take_picture(Tsp *t, SceAvcdecPicture *p, int si)
         sl->pts = opts;
         sl->seq = t->out_seq++;
         sl->ready_us = now_us();
+        if (t->pic_last_us) {                               /* 0.5.0: detail line: how evenly pictures come out */
+            uint64_t g = sl->ready_us - t->pic_last_us;
+            if (g > t->pic_gap_max_us) t->pic_gap_max_us = g;
+            if (g > 3ULL * (t->frame_us ? t->frame_us : 40000)) t->pic_gaps_long++;
+        }
+        t->pic_last_us = sl->ready_us;
+        t->pic_n++;
         sl->state = SLOT_READY;
         sceKernelUnlockMutex(t->lock, 1);
         t->st.decoded++;
@@ -1337,6 +1352,8 @@ static size_t build_es(Tsp *t, const VInfo *i, const uint8_t *data, size_t len, 
 }
 
 static int audio_now(Tsp *t, uint64_t now, int64_t *apts);
+static int g_via_server;                                    /* 0.5.0: the next stream comes through the transcoding server */
+void tsp_set_via_server(int on) { g_via_server = on; }
 
 /* A decoder slower than the stream (1080p at 50/60 fps may be): leave out the pictures nothing else needs
  * (non-reference pictures, about half in most streams), for a steady lower picture rate in time with the
@@ -1493,14 +1510,6 @@ static void video_packet(Tsp *t, Pkt *p)
     if (t->hd60_pending && start_ok && t->dec_open) {       /* 720p above 30 fps: the HD decoder from this keyframe */
         t->hd60_pending = 0;
         switch_to_hd_oom(t);
-        t->st.errors--;                                     /* (not an error) */
-    }
-    /* 0.5.0: see stats_tick: the HD decoder held its pictures and gave them in bursts; at this keyframe again
-     * without the stream's timing information (HRD, buffering period / picture timing SEI) */
-    if (t->timing_restart_pending && (flags & TS_FLAG_KEYFRAME) && t->dec_open) {
-        t->timing_restart_pending = 0;
-        plog("tsp: HD decoder restarted at a keyframe without the timing information");
-        restart_without_timing(t);
         t->st.errors--;                                     /* (not an error) */
     }
     if (!t->dec_open) {
@@ -2084,7 +2093,15 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
         }
         t->audio_delay_us = 0;
     }
-    sceAudioOutOutput(t->aport, pcm);
+    {
+        uint64_t o0 = now_us();
+        sceAudioOutOutput(t->aport, pcm);
+        uint32_t od = (uint32_t)(now_us() - o0);           /* 0.5.0: detail line */
+        t->aout_sum_us += od;
+        if (od > t->aout_max_us) t->aout_max_us = od;
+        if (!t->aout_n || od < t->aout_min_us) t->aout_min_us = od;
+        t->aout_n++;
+    }
     if (t->st.audio_frames++ == 0) plog("tsp: first audio frame output");
     if (pts >= 0) {                      /* the previous buffer is playing now */
         int64_t dur = (int64_t)samples * 90000 / rate;
@@ -2195,23 +2212,36 @@ static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     audio_out(t, t->a52pcm, samples, rate, ch, pts);
 }
 
+/* 0.5.0: one AAC frame through the Vita decoder (see audio_a52); nothing is played */
+static void aac_pace(Tsp *t)
+{
+    if (!t->adec || sizeof AAC_PACE_FRAME > t->aes_cap) return;
+    memcpy(t->aes, AAC_PACE_FRAME, sizeof AAC_PACE_FRAME);
+    t->actrl.pEs = t->aes;
+    t->actrl.inputEsSize = (SceUInt32)sizeof AAC_PACE_FRAME;
+    t->actrl.pPcm = t->apcm;
+    int r = sceAudiodecDecode(&t->actrl);
+    t->pace_n++;
+    if (r < 0) {
+        if (t->pace_err++ < 3) plog("tsp: AAC pace frame -> 0x%08X", (unsigned)r);
+        if (t->pace_err >= 20 && t->pace_err == t->pace_n) t->pace_on = 0;   /* (never works: stop trying) */
+    } else if (!t->pace_logged++) plog("tsp: AAC pace frame decoded (%u bytes of PCM)", (unsigned)t->actrl.outputPcmSize);
+}
+
 static void audio_a52(Tsp *t, Pkt *p)
 {
     if (!t->a52) {
         if (!(t->a52 = a52_create())) { audio_disable(t, "Audio %s: not supported", "ac3"); return; }
-        /* 0.5.0: the Vita's audio decoder library is set up as for AAC although the sound is decoded in software.
-         * AAC films played smoothly on the HD decoder, the same kind of films with E-AC-3 did not (pictures in
-         * bursts); the library and the HD decoder share the codec engine. (Freed with the AAC one at the end.) */
-        if (!t->alib) {
-            SceAudiodecInitParam ip;
-            memset(&ip, 0, sizeof ip);
-            ip.aac.size = sizeof ip.aac;
-            ip.aac.totalStreams = 1;
-            int r = sceAudiodecInitLibrary(SCE_AUDIODEC_TYPE_AAC, &ip);
-            plog("tsp: sceAudiodecInitLibrary AAC (for the codec engine, sound in software) -> 0x%08X", (unsigned)r);
-            t->alib = r >= 0;
-        }
+        /* 0.5.0: AAC films played smoothly on the HD decoder, the same films with AC-3 / E-AC-3 (sound in
+         * software) dropped 30-45% of their pictures: the HD decoder answered in 1-3 ms instead of 5-9 ms and gave
+         * its pictures in bursts. The AAC decoder and the HD decoder share the codec engine; setting up the library
+         * alone did not help (device log). So an AAC decoder also decodes a frame for every sound frame, as when
+         * AAC plays; its output is not played. */
+        int r = audio_open(t, 48000, 2);
+        t->pace_on = r >= 0;
+        plog("tsp: AAC decoder kept busy beside the software sound (codec engine) -> 0x%08X", (unsigned)r);
     }
+    if (t->pace_on) aac_pace(t);
     a52_feed(t->a52, p->data, p->len, p->pts, a52_frame, t);
 }
 
@@ -2444,26 +2474,29 @@ static void stats_tick(Tsp *t)
                  "%u%% HD decoder busy, %u%% other; picture to screen avg %u ms; screen frames with no picture %u, behind %u",
                  pd, psl, pda, pb, used < 100 ? 100 - used : 0, wn ? (unsigned)(wsum / wn / 1000) : 0, (unsigned)none, (unsigned)more);
             if (dr) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
-            /* 0.5.0: the HD decoder keeps up with the stream but holds its pictures and gives them in bursts
-             * (about 100 at once in 5 s), so nearly half come too late for the screen and are dropped. Seen on
-             * 1080p films whose video carries timing information (NAL HRD, buffering period and picture
-             * timing SEI); the decoder then gives the pictures in display order itself (no "out of order").
-             * The same films' pictures, without that information, came one by one. Once per stream. */
-            uint32_t sh = t->st.shown, be = t->drop_behind;
-            uint32_t sh_d = sh - t->burst_prev_shown, be_d = be - t->burst_prev_behind;
-            t->burst_prev_shown = sh;
-            t->burst_prev_behind = be;
-            unsigned sfps10 = t->frame_us ? (unsigned)(10000000u / t->frame_us) : 0;
-            if (t->internal && t->dec_open && !t->timing_tried && !t->timing_restart_pending && (t->sei_timing || t->hdr_timing) &&
-                !t->cur_interlaced && !t->paused && !t->buffering && t->frame_us >= 30000 && t->out_of_order < 3 &&
-                dr >= 20 && sh_d + be_d >= 50 && be_d * 4 >= sh_d + be_d && sfps10 && dfps10 * 10 >= sfps10 * 9) {
-                t->timing_restart_pending = 1;
-                plog("tsp: the HD decoder gives its pictures in bursts (%u of %u too late) and the stream carries timing "
-                     "information: again without it at the next keyframe", (unsigned)be_d, (unsigned)(sh_d + be_d));
-            }
         }
     }
     cpu_line(t, now);
+    {   /* 0.5.0: picture / sound timing in detail (the AC-3 films that stuttered on the HD decoder) */
+        int64_t ap = 0;
+        int have = audio_now(t, now, &ap);
+        int clk = 0;
+        if (have && t->aclk_prev_us && t->aclk_prev_pts >= 0 && !t->paused && !t->buffering)
+            clk = (int)((ap - t->aclk_prev_pts) / 90) - (int)((now - t->aclk_prev_us) / 1000);   /* + = the sound clock ran ahead of real time */
+        t->aclk_prev_pts = have ? ap : -1;
+        t->aclk_prev_us = now;
+        if (t->pic_n || t->aout_n)
+            plog("tsp: detail: pictures %u, longest gap %u ms, gaps over 3 pictures %u; sound output %u calls, blocked min %u avg %u max %u ms; "
+                 "sound clock vs real time %+d ms%s",
+                 (unsigned)t->pic_n, (unsigned)(t->pic_gap_max_us / 1000), (unsigned)t->pic_gaps_long, (unsigned)t->aout_n,
+                 (unsigned)(t->aout_min_us / 1000), t->aout_n ? (unsigned)(t->aout_sum_us / t->aout_n / 1000) : 0u,
+                 (unsigned)(t->aout_max_us / 1000), clk, t->pace_on ? ", AAC pacing on" : "");
+        t->pic_n = t->pic_gaps_long = 0;
+        t->pic_gap_max_us = 0;
+        t->aout_n = 0;
+        t->aout_sum_us = t->aout_max_us = 0;
+        t->aout_min_us = 0;
+    }
     if (t->reader_done) return;                             /* (called by the video thread now: no reads to tune) */
 
     /* sceHttpReadData returns only when the request is full: small reads keep radio responsive, larger ones
@@ -2540,7 +2573,7 @@ static void check_stall(Tsp *t)
     }
     /* 0.5.0: a film through the server from the middle: the server first finds the place and starts converting
      * (more than 10 s on a phone; "No video data" / "No usable keyframe" before) */
-    uint64_t stall = t->vod_stream ? 3 * STALL_US : STALL_US;
+    uint64_t stall = t->vod_stream || g_via_server ? 3 * STALL_US : STALL_US;   /* (also live channels through the server) */
     if (t->st.decoded || t->st.audio_only || t->st.state == TSP_ERROR || now_us() - t->start_us < stall) return;
     explain_no_picture(t);
 }

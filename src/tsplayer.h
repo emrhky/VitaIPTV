@@ -73,6 +73,8 @@ void              tsp_set_hls_bw(long bw);
 /* 0.5.0: for the next tsp_start: the audio track to play (a_id[] of the status; -1 = none), else the best one in
  * this language ("tur"...; NULL / "" = any), else the best one (AAC first). */
 void              tsp_set_audio(int id, const char *lang);
+/* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */
+void              tsp_set_via_server(int on);
 int               tsp_start(const char *url);       /* 0 = started */
 /* A film or episode (a file on a server that sends parts of it): starts at start_ms (the keyframe at or
  * before it). MKV, MP4 and TS files. */
