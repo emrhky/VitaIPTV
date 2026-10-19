@@ -3,7 +3,7 @@
 /* Whole screens drawn from plain data, so main.c only decides *what* to show. */
 #include "ui.h"
 
-#define SCR_ROWS 12                     /* list rows per page */
+#define SCR_ROWS 11                     /* list rows per page (0.5.0: 11 taller rows for the bigger letters) */
 #define SCR_SRC_ROWS 7                  /* playlist cards per page */
 
 typedef struct {
@@ -13,6 +13,8 @@ typedef struct {
     const char *right;                  /* dim text on the right (may be NULL) */
     const char *sub;                    /* second, dim line under the name (playlist cards, may be NULL) */
     int number;                         /* shown before the name if > 0 */
+    int fav;                            /* 0.5.0: a star before the name (favourite) */
+    int moving;                         /* 0.4.5: the row being moved (reordering the favourites) */
 } ScrRow;
 typedef void (*ScrRowFn)(int i, ScrRow *row, void *ctx);
 
@@ -68,11 +70,12 @@ typedef struct {
     const char *stats3;                 /* third line (table mode) */
     int stats_table;                    /* stats1-3 are rows of cells "label\vvalue" separated by tabs, in fixed columns */
     const char *stats_note;             /* table mode: a plain line above the table (may be NULL) */
+    int fav;                            /* 0.5.0: a star before the name (favourite) */
 } ScrPlayer;
 void scr_player(const ScrPlayer *p);
 
 void scr_radio(const char *name, const char *group, const char *audio_info, int level, unsigned t_ms,
-               const UiHint *hints, int nhints, const char *note);
+               const UiHint *hints, int nhints, const char *note, int fav);
 
 enum { SCR_F_TEXT, SCR_F_CHOICE, SCR_F_TOGGLE, SCR_F_BUTTON, SCR_F_DANGER };   /* DANGER: a red button */
 typedef struct { const char *label; const char *value; int kind; int enabled; } ScrField;

@@ -24,7 +24,7 @@ typedef enum {
 #define TS_FLAG_INTRA    4      /* non-IDR picture whose first slice is an I slice (no recovery SEI) */
 #define TS_MAX_STREAMS   16
 
-typedef struct { int pid, stream_type; TsCodec codec; } TsStream;
+typedef struct { int pid, stream_type; TsCodec codec; char lang[4]; } TsStream;   /* lang (0.5.0): ISO 639-2, "" = none */
 
 typedef struct {
     /* program layout */
@@ -62,6 +62,14 @@ void          ts_flush(TsDemux *d);                 /* end of stream: emit pendi
 const TsInfo *ts_info(const TsDemux *d);
 
 const char   *ts_codec_name(TsCodec c);
+/* 0.5.0: the audio stream to play: the one with id prefer_id (PID / MKV track number) if there is such an audio
+ * stream, else the best one in prefer_lang ("tur", "eng"...; "" = any), else the best one (AAC first). Returns
+ * the index in st, -1 if there is no audio. */
+int           ts_audio_pick(const TsStream *st, int ns, int prefer_id, const char *prefer_lang);
+/* A language code as 3 lower-case letters ("tr" / "TUR" / "tr-TR" -> "tur"); "" when it is none. */
+void          ts_lang3(const char *in, char out[4]);
+/* For the next PMT: the audio stream to choose (see ts_audio_pick). Call right after ts_create. */
+void          ts_prefer_audio(TsDemux *d, int pid, const char *lang);
 /* Parses an H.264 SPS NAL unit (nal[0] = NAL header) into the video fields of inf. 0 = ok. */
 int           ts_parse_sps(const uint8_t *nal, size_t len, TsInfo *inf);
 double        ts_video_fps(const TsInfo *i);        /* 0 if unknown */

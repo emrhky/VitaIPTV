@@ -16,5 +16,8 @@ void          mkv_destroy(MkvDemux *d);
 void          mkv_feed(MkvDemux *d, const uint8_t *data, size_t len);
 void          mkv_flush(MkvDemux *d);
 const TsInfo *mkv_info(const MkvDemux *d);             /* same fields as for TS */
+/* 0.5.0: the audio track to choose (track number, -1 = none; else the language, see ts_audio_pick).
+ * Call right after mkv_create. */
+void          mkv_prefer_audio(MkvDemux *d, int track, const char *lang);
 
 #endif

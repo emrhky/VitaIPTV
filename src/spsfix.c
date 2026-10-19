@@ -75,24 +75,34 @@ static void wr_ue(Wr *w, uint32_t v)
     wr_u(w, x, len + 1);
 }
 
-size_t sps_add_restriction(const uint8_t *nal, size_t len, uint8_t *out, size_t cap, int *reorder)
+/* Where the parts of an SPS are (bit positions in the payload without emulation bytes). */
+typedef struct {
+    uint8_t rbsp[512];
+    size_t payload_bits;
+    size_t vui_flag_pos;                /* the vui_parameters_present_flag */
+    size_t hrd_pos;                     /* the nal_hrd_parameters_present_flag (VUI only) */
+    size_t ps_end;                      /* just after pic_struct_present_flag (VUI only) */
+    SpsInfo info;
+} Parsed;
+
+static int parse(const uint8_t *nal, size_t len, Parsed *ps)
 {
-    uint8_t rbsp[512], wb[540];
     size_t n = 0;
-    if (len < 4 || (nal[0] & 0x1F) != 7) return 0;
+    memset(&ps->info, 0, sizeof ps->info);
+    if (len < 4 || (nal[0] & 0x1F) != 7) return -1;
     for (size_t i = 1; i < len; i++) {
-        if (n >= sizeof rbsp) return 0;
+        if (n >= sizeof ps->rbsp) return -1;
         if (i >= 3 && nal[i] == 3 && nal[i - 1] == 0 && nal[i - 2] == 0) continue;
-        rbsp[n++] = nal[i];
+        ps->rbsp[n++] = nal[i];
     }
     /* the payload ends before the stop bit (rbsp_trailing_bits); trailing zero bytes are padding */
-    while (n && rbsp[n - 1] == 0) n--;
-    if (!n) return 0;
+    while (n && ps->rbsp[n - 1] == 0) n--;
+    if (!n) return -1;
     int last = 0;
-    while (!((rbsp[n - 1] >> last) & 1)) last++;
-    size_t payload_bits = n * 8 - (size_t)last - 1;
+    while (!((ps->rbsp[n - 1] >> last) & 1)) last++;
+    ps->payload_bits = n * 8 - (size_t)last - 1;
 
-    Rd b = { rbsp, payload_bits, 0, 0 };
+    Rd b = { ps->rbsp, ps->payload_bits, 0, 0 };
     int profile = (int)rd_u(&b, 8);
     rd_u(&b, 16);                                           /* constraint flags, level */
     rd_ue(&b);                                              /* sps id */
@@ -123,45 +133,74 @@ size_t sps_add_restriction(const uint8_t *nal, size_t len, uint8_t *out, size_t 
     if (!rd_u(&b, 1)) rd_u(&b, 1);                          /* frame_mbs_only, mb_adaptive */
     rd_u(&b, 1);                                            /* direct_8x8_inference */
     if (rd_u(&b, 1)) { rd_ue(&b); rd_ue(&b); rd_ue(&b); rd_ue(&b); }
-    if (b.err || refs > 16) return 0;
-    size_t vui_flag_pos = b.pos;
-    size_t keep;                                            /* bits copied as they are */
-    int vui = (int)rd_u(&b, 1);
-    if (b.err) return 0;
-    if (!vui) keep = vui_flag_pos;
-    else {
-        if (rd_u(&b, 1) && rd_u(&b, 8) == 255) rd_u(&b, 32);   /* aspect ratio */
-        if (rd_u(&b, 1)) rd_u(&b, 1);                           /* overscan */
-        if (rd_u(&b, 1)) { rd_u(&b, 5); if (rd_u(&b, 1)) rd_u(&b, 24); }   /* video signal type */
-        if (rd_u(&b, 1)) { rd_ue(&b); rd_ue(&b); }              /* chroma location */
-        if (rd_u(&b, 1)) { rd_u(&b, 32); rd_u(&b, 32); rd_u(&b, 1); }   /* timing */
-        int nal_hrd = (int)rd_u(&b, 1);
-        if (nal_hrd) skip_hrd(&b);
-        int vcl_hrd = (int)rd_u(&b, 1);
-        if (vcl_hrd) skip_hrd(&b);
-        if (nal_hrd || vcl_hrd) rd_u(&b, 1);                    /* low_delay_hrd */
-        rd_u(&b, 1);                                            /* pic_struct_present */
-        if (b.err) return 0;
-        keep = b.pos;
-        if (rd_u(&b, 1)) return 0;                              /* the restriction is there already */
-        if (b.err) return 0;
-    }
+    if (b.err || refs > 16) return -1;
+    ps->info.refs = (int)refs;
+    ps->vui_flag_pos = b.pos;
+    ps->info.vui = (int)rd_u(&b, 1);
+    if (b.err) return -1;
+    if (!ps->info.vui) return 0;
+    if (rd_u(&b, 1) && rd_u(&b, 8) == 255) rd_u(&b, 32);   /* aspect ratio */
+    if (rd_u(&b, 1)) rd_u(&b, 1);                           /* overscan */
+    if (rd_u(&b, 1)) { rd_u(&b, 5); if (rd_u(&b, 1)) rd_u(&b, 24); }   /* video signal type */
+    if (rd_u(&b, 1)) { rd_ue(&b); rd_ue(&b); }              /* chroma location */
+    if (rd_u(&b, 1)) { rd_u(&b, 32); rd_u(&b, 32); rd_u(&b, 1); ps->info.timing = 1; }
+    ps->hrd_pos = b.pos;
+    ps->info.nal_hrd = (int)rd_u(&b, 1);
+    if (ps->info.nal_hrd) skip_hrd(&b);
+    ps->info.vcl_hrd = (int)rd_u(&b, 1);
+    if (ps->info.vcl_hrd) skip_hrd(&b);
+    if (ps->info.nal_hrd || ps->info.vcl_hrd) rd_u(&b, 1); /* low_delay_hrd */
+    ps->info.pic_struct = (int)rd_u(&b, 1);
+    if (b.err) return -1;
+    ps->ps_end = b.pos;
+    ps->info.restriction = (int)rd_u(&b, 1);
+    if (b.err) return -1;
+    return 0;
+}
 
-    uint32_t dpb = refs ? refs : 1;
+int sps_info(const uint8_t *nal, size_t len, SpsInfo *info)
+{
+    Parsed ps;
+    if (parse(nal, len, &ps) < 0) { memset(info, 0, sizeof *info); return -1; }
+    *info = ps.info;
+    return 0;
+}
+
+size_t sps_rewrite(const uint8_t *nal, size_t len, uint8_t *out, size_t cap, int drop_timing, int *reorder)
+{
+    Parsed ps;
+    uint8_t wb[540];
+    if (parse(nal, len, &ps) < 0) return 0;
+    int hrd_info = ps.info.vui && (ps.info.nal_hrd || ps.info.vcl_hrd || ps.info.pic_struct);
+    int drop = drop_timing && hrd_info;
+    if (ps.info.restriction && !drop) return 0;             /* nothing to change */
+
+    uint32_t dpb = ps.info.refs ? (uint32_t)ps.info.refs : 1;
     Wr w = { wb, sizeof wb, 0, 0 };
-    Rd c = { rbsp, payload_bits, 0, 0 };
-    for (size_t i = 0; i < keep; i++) wr_u(&w, rd_u(&c, 1), 1);
-    if (!vui) {
+    Rd c = { ps.rbsp, ps.payload_bits, 0, 0 };
+    if (!ps.info.vui) {
+        for (size_t i = 0; i < ps.vui_flag_pos; i++) wr_u(&w, rd_u(&c, 1), 1);
         wr_u(&w, 1, 1);                                     /* vui_parameters_present */
         wr_u(&w, 0, 1); wr_u(&w, 0, 1); wr_u(&w, 0, 1); wr_u(&w, 0, 1); wr_u(&w, 0, 1);   /* aspect .. timing */
         wr_u(&w, 0, 1); wr_u(&w, 0, 1);                     /* nal / vcl hrd */
         wr_u(&w, 0, 1);                                     /* pic_struct_present */
+    } else if (drop) {                                      /* up to the HRD, then none and no pic_struct */
+        for (size_t i = 0; i < ps.hrd_pos; i++) wr_u(&w, rd_u(&c, 1), 1);
+        wr_u(&w, 0, 1); wr_u(&w, 0, 1);                     /* nal / vcl hrd */
+        wr_u(&w, 0, 1);                                     /* pic_struct_present */
+    } else {
+        for (size_t i = 0; i < ps.ps_end; i++) wr_u(&w, rd_u(&c, 1), 1);
     }
-    wr_u(&w, 1, 1);                                         /* bitstream_restriction */
-    wr_u(&w, 1, 1);                                         /* motion_vectors_over_pic_boundaries */
-    wr_ue(&w, 2); wr_ue(&w, 1); wr_ue(&w, 16); wr_ue(&w, 16);   /* the standard's values when absent */
-    wr_ue(&w, dpb);                                         /* max_num_reorder_frames */
-    wr_ue(&w, dpb);                                         /* max_dec_frame_buffering */
+    if (drop && ps.info.restriction) {                      /* its own restriction stays as it is */
+        c.pos = ps.ps_end;
+        while (c.pos < ps.payload_bits) wr_u(&w, rd_u(&c, 1), 1);
+    } else {
+        wr_u(&w, 1, 1);                                     /* bitstream_restriction */
+        wr_u(&w, 1, 1);                                     /* motion_vectors_over_pic_boundaries */
+        wr_ue(&w, 2); wr_ue(&w, 1); wr_ue(&w, 16); wr_ue(&w, 16);   /* the standard's values when absent */
+        wr_ue(&w, dpb);                                     /* max_num_reorder_frames */
+        wr_ue(&w, dpb);                                     /* max_dec_frame_buffering */
+    }
     wr_u(&w, 1, 1);                                         /* stop bit */
     while (w.pos & 7) wr_u(&w, 0, 1);
     if (w.err) return 0;
@@ -182,6 +221,11 @@ size_t sps_add_restriction(const uint8_t *nal, size_t len, uint8_t *out, size_t 
         out[o++] = wb[i];
         zeros = wb[i] == 0 ? zeros + 1 : 0;
     }
-    if (reorder) *reorder = (int)dpb;
+    if (reorder) *reorder = ps.info.restriction ? -1 : (int)dpb;
     return o;
+}
+
+size_t sps_add_restriction(const uint8_t *nal, size_t len, uint8_t *out, size_t cap, int *reorder)
+{
+    return sps_rewrite(nal, len, out, cap, 0, reorder);
 }

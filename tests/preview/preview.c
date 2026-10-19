@@ -21,7 +21,8 @@ static const char *src_names[] = { "Ev internet - Xtream", "Spor paketi", "Belge
 static const char *src_badge[] = { "XTREAM", "XTREAM", "M3U", "STREAM", "FILE" };
 static const char *src_sub[] = { "tv.example.net:8080", "spor.example.com", "raw.example.org", "trt.example.tr", "Turkiye_IP_TV.m3u" };
 static const unsigned src_col[] = { RGBA8(124, 77, 230, 255), RGBA8(124, 77, 230, 255), RGBA8(33, 120, 235, 255), RGBA8(22, 160, 105, 255), RGBA8(222, 128, 30, 255) };
-static void src_row(int i, ScrRow *r, void *c) { (void)c; r->name = src_names[i]; r->badge = src_badge[i]; r->badge_col = src_col[i]; r->sub = src_sub[i]; }
+static int fav_demo;                                         /* 0.5.0: favourites in the sample data */
+static void src_row(int i, ScrRow *r, void *c) { (void)c; r->name = src_names[i]; r->badge = src_badge[i]; r->badge_col = src_col[i]; r->sub = src_sub[i]; r->fav = fav_demo && i < 2; }
 
 /* channels */
 static const char *ch_names[] = { "TRT 1 HD", "Kanal D HD", "Show TV HD", "Star TV HD", "ATV HD", "TV8 HD", "FOX HD", "TRT Haber HD",
@@ -29,7 +30,7 @@ static const char *ch_names[] = { "TRT 1 HD", "Kanal D HD", "Show TV HD", "Star 
 static const char *ch_groups[] = { "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Haber", "Haber", "Haber", "Haber",
     "Spor", "Çocuk", "Çocuk", "Çocuk", "Spor" };
 static int show_group = 0;
-static void ch_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[i]; r->number = i + 1; r->right = show_group ? ch_groups[i] : NULL; }
+static void ch_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[i]; r->number = i + 1; r->right = show_group ? ch_groups[i] : NULL; r->fav = fav_demo && i < 3; r->moving = fav_demo == 2 && i == 1; }
 static int search_idx[] = { 12, 13 };
 static void search_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[search_idx[i]]; r->number = search_idx[i] + 1; r->right = ch_groups[search_idx[i]]; }
 
@@ -37,7 +38,12 @@ static void grp_row_pv(int i, ScrRow *r, void *c)
 {
     static const char *gr[] = { "All", "Ulusal", "Haber", "Spor", "Çocuk", "Belgesel", "Müzik", "Yerel", "Radyolar" };
     static const char *cnt[] = { "16", "7", "4", "2", "3", "0", "0", "0", "0" };
-    (void)c; r->name = i == 0 ? T("All") : gr[i]; r->right = cnt[i];
+    (void)c;
+    if (fav_demo) {                                          /* "Favorites" first, then the rest one down */
+        if (i == 0) { r->name = T("Favorites"); r->right = "3"; r->fav = 1; return; }
+        i--;
+    }
+    r->name = i == 0 ? T("All") : gr[i]; r->right = cnt[i];
 }
 
 static vita2d_texture wait_tex;
@@ -61,6 +67,7 @@ int main(int argc, char **argv)
     load_backdrop();
     (void)argv;
     preview_init();
+    ui_init(NULL, 0);                                        /* (0.4.5: Turkish letters as they are) */
     if (argc > 1) lang_set(LANG_TR);
     int scroll;
 
@@ -119,9 +126,9 @@ int main(int argc, char **argv)
     preview_clear(UI_BG); scr_menu("Film A (2020)", rm, 2, 0); shot("5c_resume");
 
     UiHint hr[] = { { UI_BTN_UPDOWN, "Station" }, { UI_BTN_SELECT, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
-    for (int k = 0; k < 12; k++) { preview_clear(UI_BG); scr_radio("Radyo Fenomen", "Radyolar", "AAC  48 kHz  stereo", 760, 1234 + k * 16, hr, 3, ""); }
+    for (int k = 0; k < 12; k++) { preview_clear(UI_BG); scr_radio("Radyo Fenomen", "Radyolar", "AAC  48 kHz  stereo", 760, 1234 + k * 16, hr, 3, "", 0); }
     preview_clear(UI_BG);
-    scr_radio("Radyo Fenomen", "Radyolar", "AAC  48 kHz  stereo", 760, 1234, hr, 3, NULL);
+    scr_radio("Radyo Fenomen", "Radyolar", "AAC  48 kHz  stereo", 760, 1234, hr, 3, NULL, 1);
     shot("8_radio");
 
     const char *lines[] = { "HTTP 200, 4192 KB in 6.0 s (5694 kbit/s)", "Streams: 0x1B=h264, 0x0F=aac",
@@ -135,18 +142,31 @@ int main(int argc, char **argv)
     ScrList sl2 = { "Vita IPTV", T("Playlists"), "5 playlists", 5, 1, &scroll, src_row, NULL, T("No playlists"), hs2, 4, T("Saved as Xtream (faster, live channels only)"), 0 };
     const char *menu[] = { T("Add playlist"), T("Settings"), T("Reload sources"), T("About"), T("Quit") };
     preview_clear(UI_BG); scroll = 0; scr_list(&sl2); scr_menu(T("Menu"), menu, 5, 1); shot("a_menu");
+    UiHint hf2[] = { { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_CIRCLE, "Cancel" }, { UI_BTN_SEP, "" }, { UI_BTN_START, "Save" } };
     UiHint hf[] = { { UI_BTN_UPDOWN, "Move" }, { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_START, "Save" }, { UI_BTN_CIRCLE, T("Cancel") } };
     ScrField ff[] = { { T("Type"), T("Xtream (server + username + password)"), SCR_F_CHOICE, 1 }, { T("Name"), "Ev internet", SCR_F_TEXT, 1 },
                       { T("Server address"), "http://tv.example.com:8080", SCR_F_TEXT, 1 }, { T("Username"), "ali", SCR_F_TEXT, 1 },
                       { T("Password"), "********", SCR_F_TEXT, 1 }, { T("Save"), NULL, SCR_F_BUTTON, 1 }, { T("Cancel"), NULL, SCR_F_BUTTON, 1 },
                       { T("Delete playlist"), NULL, SCR_F_DANGER, 1 } };
-    preview_clear(UI_BG); scr_form(T("Edit playlist"), T("Tip: a pasted get.php link fills everything"), ff, 8, 2, hf, 4, NULL, 0); shot("c_form");
+    preview_clear(UI_BG); scr_form(T("Edit playlist"), T("Tip: a pasted get.php link fills everything"), ff, 8, 2, hf2, 4, NULL, 0); shot("c_form");
     preview_clear(UI_BG); scr_form(T("Edit playlist"), NULL, ff, 8, 7, hf, 4, NULL, 0);
     scr_confirm(T("Delete this playlist?"), "\"Spor paketi\" will be removed from the list."); shot("b_confirm");
-    ScrField fs[] = { { T("Transcoding server"), "http://192.168.1.20:8090", SCR_F_TEXT, 1 }, { T("Use automatically"), T("On"), SCR_F_TOGGLE, 1 },
+    ScrField fs[] = { { T("Transcoding server"), "http://192.168.1.20:8090", SCR_F_TEXT, 1 }, { T("Use automatically"), T("When needed"), SCR_F_CHOICE, 1 },
                       { T("Language"), T("Automatic (system)"), SCR_F_CHOICE, 1 }, { T("Hide adult channels"), T("On"), SCR_F_TOGGLE, 1 }, { T("Hide channels named 4K / UHD"), T("Off"), SCR_F_TOGGLE, 1 },
-                      { T("Test server"), NULL, SCR_F_BUTTON, 1 }, { T("Save"), NULL, SCR_F_BUTTON, 1 }, { T("Cancel"), NULL, SCR_F_BUTTON, 1 } };
-    preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), fs, 8, 5, hf, 4, T("Server is running"), 0); shot("d_settings");
+                      { T("Preferred resolution"), T("Automatic"), SCR_F_CHOICE, 1 },
+                      { T("Test server"), NULL, SCR_F_BUTTON, 1 }, { T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 },
+                      { T("Save"), NULL, SCR_F_BUTTON, 1 }, { T("Cancel"), NULL, SCR_F_BUTTON, 1 } };
+    preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), fs, 10, 2, hf2, 4, T("Server is running"), 0); shot("d_settings");
+    preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 10, 7, hf2, 4, NULL, 0);
+    scr_confirm(T("Clear recently watched?"), T("The recently watched channels of every playlist are removed. Favorites stay.")); shot("d2_clear_recent");
+    {   /* 0.5.0: the Select menu while playing: resolutions, the server line, audio tracks */
+        static char a1[80], a2[80];
+        snprintf(a1, sizeof a1, "> %s: %s (AAC)", T("Audio"), "Türkçe");
+        snprintf(a2, sizeof a2, "%s: %s (E-AC-3)", T("Audio"), "English");
+        const char *sm[] = { T("Automatic"), "1920x1080", "> 1280x720", "720x576", T("Through the Server"), a1, a2, T("Stream analysis") };
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f);
+        scr_menu(T("Resolution"), sm, 8, 5); shot("5e_select_menu");
+    }
     preview_clear(UI_BG); scroll = 0; scr_list(&sl2); scr_about("v0.4.0"); shot("e_about");
     preview_clear(UI_BG); scr_splash(NULL, "Loading playlists...", "v1.0", 900); shot("f_splash_drawn");
     /* two-pane channel screen */
@@ -167,6 +187,86 @@ int main(int argc, char **argv)
             show_group = 0;
             preview_clear(UI_BG); gscroll2 = cscroll2 = 0; scr_dual(&d); shot(f ? "g_dual_right" : "g_dual_left");
         }
+    }
+    /* 0.5.0: long notes wrap; favourites */
+    {
+        static char msg[200];
+        snprintf(msg, sizeof msg, "The Vita decoder gives no picture for this stream (%u errors). The transcoding server can play it", 37u);
+        ScrPlayer pw = { "beIN Sports 1 HD (FHD)", "Spor", NULL, 1, hp, 4, NULL, NULL, "Cannot play this channel", T_msg(msg), UI_ERR, 0, 0 };
+        pw.stats1 = T("Tip: a transcoding server on your PC can play this channel (channel list: Select > Settings, see README)");
+        preview_clear(0); scr_player(&pw); shot("h_wrap_error");
+        ScrPlayer pn = pl;
+        pn.stats1 = T("This channel has one picture size. Another needs the transcoding server (channel list: Select > Settings)");
+        pn.stats2 = NULL;
+        pn.fav = 1;
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pn); shot("h_wrap_note_fav");
+        ScrPlayer pt2 = pl;
+        static char r0[200];
+        snprintf(r0, sizeof r0, "%s\v1920x1080\t%s\v43 / 50 fps\t%s\v12345\t%s\v678", T("Video"), T("Frame rate"), T("Shown"), T("Dropped"));
+        pt2.stats1 = r0; pt2.stats2 = r0; pt2.stats3 = r0; pt2.stats_table = 1;
+        pt2.stats_note = T("This film has one picture size (%dx%d). 720p needs the transcoding server (channel list: Select > Settings)");
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pt2); shot("h_wrap_table");
+        preview_clear(UI_BG); scr_radio("Radyo Fenomen", "Radyolar", "AAC  48 kHz  stereo", 760, 1234, hr, 3,
+            T("This channel has one picture size. Another needs the transcoding server (channel list: Select > Settings)"), 1); shot("h_wrap_radio");
+        ScrList sw = sl2;
+        sw.status = T_msg("HTTPS failed (0x80435001): this site needs newer TLS than the Vita has. Copy the .m3u file to ux0:data/VitaIPTV/ instead");
+        sw.status_err = 1;
+        fav_demo = 1;
+        UiHint hs3[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+        sw.hints = hs3; sw.nhints = 5;
+        preview_clear(UI_BG); scroll = 0; scr_list(&sw); shot("i_fav_playlists");
+        static int gs, cs;
+        UiHint hr3[] = { { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_CROSS, "Play" }, { UI_BTN_LR, "Page" },
+                         { UI_BTN_SQUARE, "Search" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_START, "Fav." } };
+        ScrDual d; memset(&d, 0, sizeof d);
+        d.title = "Ev internet - Xtream"; d.subtitle = T("Favorites"); d.right = "3 channels";
+        d.lcount = 10; d.lsel = 0; d.lscroll = &gs; d.lrow = grp_row_pv;
+        d.rcount = 16; d.rsel = 1; d.rscroll = &cs; d.rrow = ch_row;
+        d.focus = 1; d.lmark = 1; d.hints = hr3; d.nhints = 7; d.status = T("Added to favorites");
+        preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot("i_fav_channels");
+        preview_clear(UI_BG); scr_confirm(T("Delete this playlist?"),
+            "\"A very long playlist name that goes on and on - Xtream backup server\" will be removed from the list."); shot("i_confirm_wrap");
+        fav_demo = 0;
+    }
+    /* 0.4.5: reordering a favourite, the EPG line in the player */
+    {
+        static int gs, cs;
+        UiHint hm[] = { { UI_BTN_UPDOWN, "Up / down" }, { UI_BTN_TRIANGLE, "Save" }, { UI_BTN_CIRCLE, "Cancel" } };
+        fav_demo = 2;
+        ScrDual d; memset(&d, 0, sizeof d);
+        d.title = "Ev internet - Xtream"; d.subtitle = T("Favorites"); d.right = "3 channels";
+        d.lcount = 10; d.lsel = 0; d.lscroll = &gs; d.lrow = grp_row_pv;
+        d.rcount = 3; d.rsel = 1; d.rscroll = &cs; d.rrow = ch_row;
+        d.focus = 1; d.lmark = 1; d.hints = hm; d.nhints = 3; d.status = T("Up / down moves the channel, Triangle saves the order");
+        preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot("k_fav_move");
+        d.hints = NULL; d.nhints = 0; d.status = "Şimdi: Ana Haber Bülteni (19:00-20:30)  ·  Sonra: Kızılcık Şerbeti (20:30)";
+        fav_demo = 1; d.rcount = 16;
+        preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot("k_epg_list");
+        fav_demo = 0;
+        ScrPlayer pe2 = pl;
+        pe2.group = "Şimdi: Ana Haber Bülteni (19:00-20:30)  ·  Sonra: Kızılcık Şerbeti (20:30)";
+        pe2.fav = 1;
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pe2); shot("k_epg_player");
+    }
+    /* 0.4.1: the button bars, left and right */
+    {
+        UiHint b1[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" }, { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+        UiHint b2[] = { { UI_BTN_CROSS, "Channels" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
+        UiHint b3[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+        UiHint b4[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_SQUARE, "1080p" }, { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_L, "P. Channel" }, { UI_BTN_SELECT, "Res." }, { UI_BTN_START, "Fav." } };
+        UiHint b5[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_SQUARE, "720p" }, { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_LEFTRIGHT, "Seek" }, { UI_BTN_L, "P. Channel" }, { UI_BTN_SELECT, "Res." }, { UI_BTN_START, "Fav." } };
+        UiHint b6[] = { { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_CIRCLE, "Cancel" }, { UI_BTN_SEP, "" }, { UI_BTN_START, "Save" } };
+        UiHint b7[] = { { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_L, "P. Channel" }, { UI_BTN_SELECT, "Analyze" }, { UI_BTN_START, "Fav." } };
+        const UiHint *bars[] = { b1, b2, b3, b4, b5, b6, b7 };
+        int nb[] = { 6, 6, 7, 8, 9, 4, 5 };
+        preview_clear(UI_BG);
+        for (int k = 0; k < 7; k++) {
+            /* each bar drawn, then its strip copied up (the bar is always at the bottom) */
+            ui_footer(bars[k], nb[k], NULL, 0);
+            extern uint32_t fb[];
+            memmove(&fb[(k * 70 + 20) * 960], &fb[496 * 960], sizeof(uint32_t) * 960 * 48);
+        }
+        shot("j_bars");
     }
     return 0;
 }

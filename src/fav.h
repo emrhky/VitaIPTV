@@ -1,0 +1,62 @@
+#ifndef FAV_H
+#define FAV_H
+/* 0.5.0: favourite playlists and live channels (ux0:data/VitaIPTV/favorites.txt).
+ * A playlist is known by its type, address and username; a channel by its playlist and, for Xtream, the
+ * channel's id (the password can change), else its address. The file keeps the order they were added in. */
+#include <stddef.h>
+#include <stdint.h>
+#include "iptv.h"
+
+#define FAV_MAX      1000
+#define FAV_SRC_MAX  (IPTV_URL_MAX + IPTV_CRED_MAX + 8)
+
+enum { FAV_LIST = 'L', FAV_CHANNEL = 'C', FAV_RECENT = 'R' };   /* R (0.4.5): recently watched, newest first */
+#define FAV_RECENT_MAX 20                                            /* per playlist */
+
+typedef struct {
+    char kind;                          /* FAV_LIST, FAV_CHANNEL or FAV_RECENT */
+    char src[FAV_SRC_MAX];              /* the playlist's key */
+    char ch[IPTV_URL_MAX];              /* the channel's key (channels only) */
+    char name[IPTV_NAME_MAX];           /* the channel's name, to make the file readable */
+} FavEntry;
+
+typedef struct {
+    FavEntry *e;
+    int n, cap;
+} FavList;
+
+void fav_init(FavList *f);
+void fav_free(FavList *f);
+
+/* the key of a playlist / of a channel in it */
+void fav_source_key(const Source *s, char *out, size_t outsz);
+void fav_channel_key(const Source *s, const Channel *c, char *out, size_t outsz);
+
+/* favorites.txt: read (adds to f, returns the count) and written (length, -1 if it did not fit) */
+int  fav_parse(const char *text, FavList *f);
+int  fav_format(const FavList *f, char *out, size_t outsz);
+
+/* index of the entry, -1 if it is not a favourite (ch is ignored for playlists) */
+int  fav_find(const FavList *f, char kind, const char *src, const char *ch);
+/* adds it at the end or removes it: 1 added, 0 removed, -1 the list is full */
+int  fav_toggle(FavList *f, char kind, const char *src, const char *ch, const char *name);
+
+/* A playlist's address or username was edited: its favourites (itself and its channels) go with it.
+ * Returns how many entries changed. */
+int  fav_rename_source(FavList *f, const char *old_src, const char *new_src);
+
+/* For each channel of l: its place among the playlist's entries of that kind (FAV_CHANNEL: 0 = first in the
+ * favourites' order; FAV_RECENT: 0 = watched last), -1 if it is not one. Returns how many channels have one.
+ * rank must hold l->count ints. */
+int  fav_rank_kind(const FavList *f, char kind, const Source *s, const ChannelList *l, int *rank);
+int  fav_rank_channels(const FavList *f, const Source *s, const ChannelList *l, int *rank);   /* FAV_CHANNEL */
+
+/* 0.4.5: the favourite channel ch moves one place up (dir -1) or down (+1) among its playlist's favourites.
+ * Returns 1 if it moved, 0 if it is already at that end (or not a favourite). */
+int  fav_move(FavList *f, const char *src, const char *ch, int dir);
+
+/* 0.4.5: a channel was watched: it goes to the front of its playlist's recent list (kept to FAV_RECENT_MAX).
+ * Returns 0, -1 if the list is full. */
+int  fav_push_recent(FavList *f, const char *src, const char *ch, const char *name);
+
+#endif

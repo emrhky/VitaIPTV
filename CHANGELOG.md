@@ -29,6 +29,36 @@
 - **Turkish letters** (ç ğ ı İ ö ş ü) are drawn with the Vita's own Latin system font instead of being replaced.
 
 
+## v0.5.0 - 2026-10-19
+
+### Sound
+- **AC-3 / E-AC-3 now plays, decoded in software and mixed down to stereo
+  (5.1 and 7.1 come out as stereo). Before, these films and channels played without sound. Built with a small
+  FFmpeg 7.1 (LGPL, only the AC-3 / E-AC-3 decoders, `tools/build_ffmpeg_vita.sh`).
+- **Choosing the audio track:** a channel or film with more than one sound lists them in the **Select** menu with
+  their language, e.g. *Audio: Turkish (E-AC-3)*. The language comes from the stream (TS language descriptors,
+  Matroska language). Without a choice the stream's default track plays, AAC before AC-3.
+ 
+### Favourites and recently watched
+- **START** marks a channel or a playlist as a favourite (star). Favourite channels come first and have their own
+  *Favorites* category.
+- In *Favorites*, **Triangle** picks up a channel, Up / Down moves it, Triangle again saves the order.
+- **Recently Watched:** a category with the last 20 channels of the playlist.
+- *Clear Recently Watched* in the settings (after a question) empties it for every playlist; favourites stay.
+
+### Now / next (Xtream)
+- The programme on now and the next one, in the top bar while watching and for the selected channel in the list.
+
+### Transcoding server
+- New setting: **off / when needed / always**. With *always*, every channel and film goes through the server once
+  it is set up.
+- **Select** while watching moves the channel or film to the server (*Through the Server*) and back.
+- The server also runs on an Android phone (Termux) besides a PC.
+
+### Screens
+- **Turkish letters** (ç ğ ı İ ö ş ü) are drawn with the Vita's own Latin system font instead of being replaced.
+
+
 ## 0.3.0
 
 The main changes since 0.2.2

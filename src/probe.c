@@ -1,5 +1,6 @@
 #include "nettls.h"
 #include "probe.h"
+#include "spsfix.h"
 #include "tsdemux.h"
 #include "mkvdemux.h"
 #include "flvdemux.h"
@@ -30,6 +31,7 @@ typedef struct {
 /* H.264 pictures that no other picture refers to (nal_ref_idc 0): the player can skip them when the
  * decoder cannot keep up. Counted here for the report; one probe runs at a time. */
 static uint32_t g_pics, g_nonref;
+static uint32_t g_sei;                  /* SEI payload types seen (bit n: type n): 0 buffering period, 1 picture timing */
 static void count_video(void *ctx, const uint8_t *d, size_t n, int64_t pts, int64_t dts, int flags)
 {
     (void)ctx; (void)pts; (void)dts; (void)flags;
@@ -38,6 +40,7 @@ static void count_video(void *ctx, const uint8_t *d, size_t n, int64_t pts, int6
         if (d[i] || d[i + 1] || d[i + 2] != 1) continue;
         int type = d[i + 3] & 0x1F;
         if (type == 1 || type == 5) { slices++; if ((d[i + 3] >> 5) & 3) ref = 1; }
+        if (type == 6 && i + 4 < n && d[i + 4] < 32) g_sei |= 1u << d[i + 4];
         i += 3;
     }
     g_pics++;
@@ -123,6 +126,14 @@ static void summarize(ProbeResult *r, const TsInfo *i, int http_status, unsigned
                      i->frame_mbs_only ? "" : " interlaced", ts_video_fps(i), i->bit_depth);
             add_line(r, "Keyframes: %u (+%u other I-pictures) of %u pictures, reference frames: %d", i->keyframes, i->intra_aus, i->video_aus, i->ref_frames);
             if (g_pics >= 10) add_line(r, "Non-reference pictures: %u of %u (%u%%)", g_nonref, g_pics, g_nonref * 100 / g_pics);
+            {   /* 0.4.0: timing information (a 720p channel with it gave no picture; the player retries without it) */
+                SpsInfo si = { 0 };
+                int hdr = i->sps_len > 0 && sps_info(i->sps, (size_t)i->sps_len, &si) == 0 && (si.nal_hrd || si.vcl_hrd || si.pic_struct);
+                if (hdr || (g_sei & 3))
+                    add_line(r, "Timing info:%s%s%s%s (if no picture comes, the player retries without it)",
+                             hdr && (si.nal_hrd || si.vcl_hrd) ? " HRD" : "", hdr && si.pic_struct ? " pic_struct" : "",
+                             g_sei & 1 ? " buffering-SEI" : "", g_sei & 2 ? " timing-SEI" : "");
+            }
             int big = i->width > 1280 || i->height > 720;
             double fps = ts_video_fps(i);
             if (i->bit_depth != 8 || i->chroma_format != 1) verdict = "NO: Vita cannot decode this H.264 variant";
@@ -382,7 +393,7 @@ static int probe_main(SceSize args, void *argp)
     (void)args; (void)argp;
     ProbeCtx *c = *(ProbeCtx **)argp;
     ProbeResult *r = &c->res;
-    g_pics = g_nonref = 0;
+    g_pics = g_nonref = g_sei = 0;
     TsSink sink = { count_video, NULL, NULL };
     Demux dm = { ts_create(&sink), NULL, NULL }, *d = &dm;
     uint8_t *buf = malloc(CHUNK);

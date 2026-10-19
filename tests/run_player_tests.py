@@ -65,7 +65,7 @@ shift_audio(f"{T}/s720.ts", f"{T}/aearly.ts", -1.5)
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=44100 -t 5 "
    f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a aac -ac 1 -f mpegts {T}/mono441.ts")
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5 "
-   f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a ac3 -f mpegts {T}/ac3.ts")
+   f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a ac3 -ac 6 -f mpegts {T}/ac3.ts")
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1280x720', r=30)} -c:v libx264 -profile:v high -bf 3 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -f matroska {T}/bframes.mkv")
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5 "
    f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a mp2 -b:a 192k -f mpegts {T}/mp2.ts")
@@ -103,6 +103,32 @@ sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=25 -f lav
    f"-i sine=frequency=440:sample_rate=48000 -t 10 -c:v libx264 -profile:v main -bf 2 -b-pyramid none -refs 2 "
    f"-g 50 -pix_fmt yuv420p -c:a aac -f mpegts {T}/nvx.ts")
 sh(f"python3 {ROOT}/tests/ts_strip_vui.py {T}/nvx.ts {T}/hls/novui.ts")
+# 0.4.0: a "480p" variant that sends video units but no keyframe (Haber61 on its second test): IDR, SPS and
+# PPS taken out; the player must go on to another variant
+os.makedirs(f"{T}/hls/nok", exist_ok=True)
+for i in range(5):
+    sh(f"ffmpeg -loglevel error -y -i {T}/hls/seg{i:03d}.ts -c copy -bsf:v \"filter_units=remove_types=5|7|8\" -copyts "
+       f"-f mpegts {T}/hls/nok/seg{i:03d}.ts")
+open(f"{T}/hls/nok.m3u8", "w").write("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+    + "".join(f"#EXTINF:1.000000,\nnok/seg{i:03d}.ts\n" for _ in range(3) for i in range(5)) + "#EXT-X-ENDLIST\n")
+open(f"{T}/hls/master_nok.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1280000,RESOLUTION=854x480\nnok.m3u8\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nindex.m3u8\n")
+# 0.4.0: 720p25 with NAL HRD, pic_struct and buffering period / picture timing SEI (Ciftci TV); the mock
+# decoder refuses such units like the Vita did, the player's second try leaves the timing out
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=25 -f lavfi "
+   f"-i sine=frequency=440:sample_rate=48000 -t 10 -c:v libx264 -profile:v main -bf 2 -b-pyramid none -refs 2 "
+   f"-g 50 -b:v 1200k -maxrate 1200k -bufsize 600k -x264-params nal-hrd=vbr:pic-struct=1 -pix_fmt yuv420p "
+   f"-c:a aac -f mpegts {T}/hls/timing.ts")
+# 0.5.0: 720p25 with 4 reference pictures and the timing information: the HD decoder from the start
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=25 -f lavfi "
+   f"-i sine=frequency=440:sample_rate=48000 -t 6 -c:v libx264 -preset ultrafast -profile:v main -bf 2 -refs 4 "
+   f"-g 50 -b:v 1500k -maxrate 1500k -bufsize 750k -x264-params nal-hrd=vbr:pic-struct=1 -pix_fmt yuv420p "
+   f"-c:a aac -f mpegts {T}/hls/timing4.ts")
+# 0.4.1: the same at 720p50 (the HD decoder is chosen for the frame rate)
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=50 -f lavfi "
+   f"-i sine=frequency=440:sample_rate=48000 -t 10 -c:v libx264 -preset ultrafast -profile:v main -bf 2 -b-pyramid none -refs 2 "
+   f"-g 50 -b:v 1500k -maxrate 1500k -bufsize 750k -x264-params nal-hrd=vbr:pic-struct=1 -pix_fmt yuv420p "
+   f"-c:a aac -f mpegts {T}/hls/timing50.ts")
 live = open(f"{T}/hls/index.m3u8").read().replace("#EXT-X-ENDLIST", "").replace("#EXT-X-PLAYLIST-TYPE:VOD\n", "")
 open(f"{T}/hls/live.m3u8", "w").write(live)
 VSRC = ("-f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 12 "
@@ -181,9 +207,19 @@ sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=60 -f la
 for name, ac in (("fast60", "-c:a aac -ac 2"), ("fast60_ac3", "-c:a ac3")):
     sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=60 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 8 "
        f"-c:v libx264 -preset ultrafast -bf 2 -x264-params b-pyramid=0 -g 60 -pix_fmt yuv420p {ac} -f mpegts {T}/{name}.ts")
+# 0.5.0: two audio tracks, Turkish AAC and English AC-3 (TS with ISO 639 descriptors, MKV with Language)
+for ext, fmt in (("ts", "mpegts"), ("mkv", "matroska")):
+    sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 "
+       f"-f lavfi -i sine=frequency=880:sample_rate=48000 -t 6 -map 0:v -map 1:a -map 2:a -c:v libx264 -g 25 -pix_fmt yuv420p "
+       f"-c:a:0 aac -c:a:1 ac3 -metadata:s:a:0 language=tur -metadata:s:a:1 language=eng -f {fmt} {T}/hls/twoaudio.{ext}")
 M = f"{ROOT}/tests/mock_rt"
-sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c -lm -o {T}/test_tsplayer")
+# with FFMPEG_PREFIX (an FFmpeg with the ac3/eac3 decoders, see run_a52_test.py) the AC-3 audio is decoded too
+FP = os.environ.get("FFMPEG_PREFIX", "")
+A52 = f"-DHAVE_A52 -I{FP}/include" if FP and os.path.exists(f"{FP}/lib/libavcodec.a") else ""
+A52L = f"{FP}/lib/libavcodec.a {FP}/lib/libavutil.a" if A52 else ""
+print("AC-3 decoding:", "with FFmpeg from " + FP if A52 else "not built in")
+sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL {A52} -I{ROOT}/src -I{M} "
+   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
 r = subprocess.run(f"{T}/test_tsplayer {T}/s720.ts {T}/s1080.ts {T}/hevc.ts {T}/midgop.ts {T}/dropped.ts "
                    f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4 {T}/f1080_60.ts",
                    shell=True, capture_output=True, text=True)
