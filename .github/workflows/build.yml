@@ -1,16 +1,47 @@
-   name: Build VPK
-   on: [push, workflow_dispatch]
-   jobs:
-     build:
-       runs-on: ubuntu-latest
-       container: vitasdk/vitasdk:latest
-       steps:
-         - uses: actions/checkout@v4
-         - name: Build
-           run: |
-             cmake -B build
-             cmake --build build
-         - uses: actions/upload-artifact@v4
-           with:
-             name: VitaIPTV
-             path: build/VitaIPTV.vpk
+# Builds VitaIPTV.vpk on GitHub (Actions tab). Runs on every push to the "test" branch, and by hand
+# ("Run workflow"). The VPK is attached to the run as an artifact (VitaIPTV-vpk).
+name: Build VPK
+
+on:
+  push:
+    branches: [test]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: vitasdk/vitasdk:latest       # VitaSDK with vita2d and the other vdpm packages
+    steps:
+      - name: Tools
+        run: apk add --no-cache bash make cmake curl xz tar python3 git
+
+      - uses: actions/checkout@v4
+
+      - name: FFmpeg cache (AC-3 / E-AC-3)
+        id: ffcache
+        uses: actions/cache@v4
+        with:
+          path: third_party/ffmpeg-vita
+          key: ffmpeg-vita-7.1-${{ hashFiles('tools/build_ffmpeg_vita.sh') }}
+
+      - name: Build FFmpeg (AC-3 / E-AC-3 only)
+        if: steps.ffcache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          export VITASDK=${VITASDK:-/usr/local/vitasdk}
+          chmod +x tools/build_ffmpeg_vita.sh
+          ./tools/build_ffmpeg_vita.sh
+
+      - name: Build the app
+        shell: bash
+        run: |
+          export VITASDK=${VITASDK:-/usr/local/vitasdk}
+          rm -rf build && mkdir build && cd build
+          cmake .. | tee cmake.log
+          grep -q "AC-3 / E-AC-3: FFmpeg" cmake.log || { echo "FFmpeg was not found: no AC-3 sound"; exit 1; }
+          make -j"$(nproc)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: VitaIPTV-vpk
+          path: build/VitaIPTV.vpk
