@@ -19,7 +19,7 @@ sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=50 -f la
 open(f"{T}/page.ts", "w").write("<html><body>blocked</body></html>")
 M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -Wno-missing-field-initializers -pthread -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_probe_net.c {ROOT}/src/probe.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/hls.c "
+   f"{ROOT}/tests/test_probe_net.c {ROOT}/src/probe.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/hls.c "
    f"{ROOT}/src/vod.c {ROOT}/src/curlio.c {M}/mock_rt.c -lm -o {T}/test_probe_net")
 r = subprocess.run(f"{T}/test_probe_net {T}", shell=True, capture_output=True, text=True, timeout=300)
 print(r.stdout); print(r.stderr[-4000:])

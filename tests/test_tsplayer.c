@@ -2,6 +2,8 @@
 /* Integration test of tsplayer.c with a fake hardware decoder and real threads.
  * Built and run by tests/run_player_tests.py */
 #include "tsplayer.h"
+#include "a52dec.h"
+#include "tsdemux.h"
 #include "spsfix.h"
 #include "curlio.h"
 #include <psp2/videodec.h>
@@ -55,6 +57,12 @@ static int has_nal(const uint8_t *b, size_t n, int type)
 { for (size_t i = 0; i + 3 < n; i++) if (!b[i] && !b[i + 1] && b[i + 2] == 1 && (b[i + 3] & 31) == type) return 1; return 0; }
 /* 0.4.0: SPSs given to the decoder without bitstream_restriction (the player adds it: spsfix.c) */
 static int sps_unrestricted;
+/* 0.4.0: like the Vita with Ciftci TV: a stream with timing information (HRD / pic_struct in the SPS, or
+ * SEI units) gets no picture from either decoder ("out of memory" for every unit) */
+static int refuse_timing, sps_timing, refuse_unrestricted, sps_norestr;
+static int int_refuse_all;                  /* 0.4.1: the HD decoder takes every unit and gives nothing ("out of memory") */
+static int timing_refused(const uint8_t *b, size_t n)
+{ return (refuse_timing && (sps_timing || has_nal(b, n, 6))) || (refuse_unrestricted && sps_norestr); }
 static void check_sps(const uint8_t *b, size_t n)
 {
     for (size_t i = 0; i + 3 < n; i++) {
@@ -63,7 +71,10 @@ static void check_sps(const uint8_t *b, size_t n)
         while (e + 3 <= n && !(b[e] == 0 && b[e + 1] == 0 && (b[e + 2] == 1 || b[e + 2] == 0))) e++;
         if (e + 3 > n) e = n;
         uint8_t tmp[600];
-        if (sps_add_restriction(b + s, e - s, tmp, sizeof tmp, NULL)) sps_unrestricted++;
+        sps_norestr = sps_add_restriction(b + s, e - s, tmp, sizeof tmp, NULL) != 0;
+        if (sps_norestr) sps_unrestricted++;
+        SpsInfo in;
+        sps_timing = sps_info(b + s, e - s, &in) == 0 && (in.nal_hrd || in.vcl_hrd || in.pic_struct);
         return;
     }
 }
@@ -106,7 +117,7 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
     if (has_nal(b, n, 7)) check_sps(b, n);
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
     if (wedged) { arr->numOfOutput = 0; return 0; }        /* stuck after an error, like on the device */
-    if (oom_all) return (int)0x80620003;                     /* out of memory for every unit, keyframes too */
+    if (oom_all || timing_refused(b, n)) return (int)0x80620003;   /* out of memory for every unit, keyframes too */
     if (d_every && sps_seen && !has_nal(b, n, 5) && ++d_calls % d_every == 0) return (int)0x8062000D;   /* "invalid stream" now and then */
     if (need_refs && created_refs < need_refs) {             /* the same pictures fail every time they are tried */
         int has = !(au->pts.upper == 0xFFFFFFFFu && au->pts.lower == 0xFFFFFFFFu);
@@ -196,6 +207,7 @@ int sceAvcdecDecodeAuInternal(SceAvcdecCtrl *d, SceAvcdecAu *au, SceInt32 *st)
     if (has_nal(b, n, 7)) check_sps(b, n);
     if (!sps_seen) { if (!has_nal(b, n, 7) || !has_nal(b, n, 8)) return (int)0x8062000D; sps_seen = 1; }
     if (npend >= int_cap) return (int)0x8062000A;           /* ES buffer full */
+    if (timing_refused(b, n) || int_refuse_all) return (int)0x80620003;
     static int full_at = -1;
     if (int_full_every && !int_full_left && (int_units + 1) % int_full_every == 0 && full_at != int_units) { int_full_left = 4; full_at = int_units; }
     if (int_full_left) { int_full_left--; int_full_hits++; if (int_full_left) return (int)0x8062000A; }   /* busy for a while */
@@ -564,9 +576,42 @@ int main(int argc, char **argv)
     r = play(argv[11], 10);                                 /* 44.1 kHz mono */
     show("44.1k mono", &r);
     assert(r.st.state == TSP_ENDED && r.st.audio_rate == 44100 && r.st.audio_ch == 1 && r.synced && r.av_bad * 10 <= r.avn);
-    r = play(argv[12], 10);                                 /* AC-3 audio: picture plays, audio says why not */
+    r = play(argv[12], 10);                                 /* AC-3 audio (5.1: comes out as stereo) */
     show("ac3 audio", &r);
-    assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames == 0 && strstr(r.st.audio_msg, "ac3"));
+    if (a52_available())                                     /* 0.5.0: decoded in software (built with FFmpeg) */
+        assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames > 100 && r.st.audio_ac3 == 1 && !r.st.audio_msg[0] &&
+               r.st.audio_rate == 48000 && r.st.audio_ch == 2 && r.synced && r.av_bad * 5 <= r.avn);
+    else                                                     /* without it: the picture plays, the audio says why not */
+        assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames == 0 && strstr(r.st.audio_msg, "ac3"));
+    {   /* 0.5.0: two audio tracks (Turkish AAC, English AC-3): the list, the language asked for, a track asked for */
+        static char p2[512], p3[512];
+        snprintf(p2, sizeof p2, "%s/twoaudio.ts", argv[16]);
+        snprintf(p3, sizeof p3, "%s/twoaudio.mkv", argv[16]);
+        for (int k = 0; k < 2; k++) {
+            const char *path = k ? p3 : p2;
+            tsp_set_audio(-1, NULL);
+            r = play(path, 6);
+            show(k ? "mkv 2 audio" : "ts 2 audio", &r);
+            int want = a52_available() ? 2 : 1;
+            printf("               audio tracks %d, playing %d (%s)\n", r.st.a_n, r.st.a_cur, r.st.a_cur >= 0 ? r.st.a_lang[r.st.a_cur] : "-");
+            assert(r.st.a_n == want && r.st.a_cur >= 0 && !strcmp(r.st.a_lang[r.st.a_cur], "tur") && r.st.audio_frames > 50);   /* AAC first */
+            if (want == 2) {
+                int eng = r.st.a_lang[0][0] == 'e' ? 0 : 1, id = r.st.a_id[eng];
+                assert(!strcmp(r.st.a_lang[eng], "eng") && r.st.a_codec[eng] == TS_CODEC_AC3);
+                tsp_set_audio(-1, "en");                     /* by language */
+                r = play(path, 6);
+                show(k ? "mkv eng" : "ts eng", &r);
+                assert(r.st.a_cur >= 0 && !strcmp(r.st.a_lang[r.st.a_cur], "eng") && r.st.audio_ac3 == 1 && r.st.audio_frames > 50);
+                tsp_set_audio(id, "tur");                    /* the track wins over the language */
+                r = play(path, 6);
+                assert(r.st.a_cur >= 0 && r.st.a_id[r.st.a_cur] == id);
+            }
+            tsp_set_audio(-1, "fra");                        /* a language that is not there: the best one */
+            r = play(path, 6);
+            assert(r.st.a_cur >= 0 && !strcmp(r.st.a_lang[r.st.a_cur], "tur"));
+        }
+        tsp_set_audio(-1, NULL);
+    }
     if (argc > 23) {                                         /* a few AAC frames claiming 7 channels: skipped, sound stays on */
         r = play(argv[23], 10);
         show("aac glitch", &r);
@@ -1099,8 +1144,9 @@ hls:
             assert(r.st.state == TSP_ERROR && r.st.hls_no_video && r.st.hls_vh[r.st.hls_vcur] == 480);
             tsp_set_options(0, 720);
         }
-        /* 0.4.0: 720p25, IBBP, 2 references, SPS without VUI (Ciftci TV): every SPS the decoder gets has the
-         * bitstream_restriction added, the pictures come */
+        /* 0.4.0: 720p25, IBBP, 2 references, SPS without VUI: the SPS goes to the decoder as it is (the
+         * restriction was added to every stream in the first 0.4.0 build: some ran out of memory with it);
+         * a decoder that refuses it gives pictures after the second try, with the restriction */
         {
             static char vn[64], vp[512];
             mock_http_reset();
@@ -1110,7 +1156,72 @@ hls:
             r = play("http://example.invalid/tv/novui.ts", 6);
             show("sps no vui", &r);
             printf("               %d SPS without restriction reached the decoder\n", sps_unrestricted);
-            assert(r.st.state != TSP_ERROR && r.changes >= 60 && sps_unrestricted == 0);
+            assert(r.st.state != TSP_ERROR && r.changes >= 60 && sps_unrestricted > 0);
+            refuse_unrestricted = 1; sps_norestr = 0;
+            int ic0 = int_creates;
+            r = play("http://example.invalid/tv/novui.ts", 6);
+            show("sps no vui, 2nd", &r);
+            refuse_unrestricted = 0; sps_norestr = 0;
+            assert(r.st.state != TSP_ERROR && r.changes >= 50 && int_creates == ic0);
+        }
+        /* 0.4.0: a variant with video units but no keyframe (Haber61, second test): marked for the UI to go on */
+        {
+            static char kn[24][64], kp[24][512];
+            int q = 0;
+            mock_http_reset();
+            snprintf(kn[q], 64, "master_nok.m3u8"); snprintf(kp[q], 512, "%s/master_nok.m3u8", argv[16]); q++;
+            snprintf(kn[q], 64, "nok.m3u8"); snprintf(kp[q], 512, "%s/nok.m3u8", argv[16]); q++;
+            for (int i = 0; i < 5; i++) { snprintf(kn[q], 64, "nok/seg%03d.ts", i); snprintf(kp[q], 512, "%s/nok/seg%03d.ts", argv[16], i); q++; }
+            for (int i = 0; i < q; i++) { mock_http_map[i][0] = kn[i]; mock_http_map[i][1] = kp[i]; }
+            tsp_set_options(1, 480);
+            r = play("http://example.invalid/tv/master_nok.m3u8", 14);
+            show("hls no keyframe", &r);
+            assert(r.st.state == TSP_ERROR && r.st.hls_no_video && r.st.decoded == 0 && r.st.hls_vh[r.st.hls_vcur] == 480);
+            tsp_set_options(0, 720);
+        }
+        /* 0.4.0: HRD + picture timing SEI that the decoder refuses (Ciftci TV): the second try without them plays */
+        {
+            static char tn[64], tp[512];
+            mock_http_reset();
+            snprintf(tn, 64, "timing.ts"); snprintf(tp, 512, "%s/timing.ts", argv[16]);
+            mock_http_map[0][0] = tn; mock_http_map[0][1] = tp;
+            refuse_timing = 1; sps_timing = 0;
+            int ic0 = int_creates;
+            r = play("http://example.invalid/tv/timing.ts", 6);
+            show("sps timing", &r);
+            refuse_timing = 0; sps_timing = 0;
+            assert(r.st.state != TSP_ERROR && r.changes >= 50 && int_creates == ic0);   /* (the public decoder, not the HD one) */
+        }
+        /* 0.4.1: the same timing at 720p50: the HD decoder is chosen for the frame rate; it gave nothing on the
+         * device and the second try never came. Now: the HD decoder again without the timing, and plays. */
+        {
+            static char tn[64], tp[512];
+            mock_http_reset();
+            snprintf(tn, 64, "timing50.ts"); snprintf(tp, 512, "%s/timing50.ts", argv[16]);
+            mock_http_map[0][0] = tn; mock_http_map[0][1] = tp;
+            refuse_timing = 1; sps_timing = 0;
+            tsp_set_options(1, 720);                         /* (the HD decoder available, as in the app) */
+            int ic0 = int_creates, c0 = creates;
+            r = play("http://example.invalid/tv/timing50.ts", 6);
+            show("hd timing 720p50", &r);
+            printf("               HD decoders %d, normal %d\n", int_creates - ic0, creates - c0);
+            assert(r.st.state != TSP_ERROR && r.changes >= 50 && int_creates - ic0 >= 2 && creates == c0);
+            /* ... and an HD decoder that gives nothing at all: the normal decoder takes the stream */
+            int_refuse_all = 1;
+            ic0 = int_creates; c0 = creates;
+            r = play("http://example.invalid/tv/timing50.ts", 8);
+            show("hd nothing 720p50", &r);
+            printf("               HD decoders %d, normal %d\n", int_creates - ic0, creates - c0);
+            int_refuse_all = 0; refuse_timing = 0; sps_timing = 0;
+            assert(r.st.state != TSP_ERROR && r.changes >= 50 && int_creates - ic0 == 2 && creates - c0 >= 1);
+            /* 0.5.0: 720p with 4 reference pictures and timing information: the HD decoder at once */
+            snprintf(tn, 64, "timing4.ts"); snprintf(tp, 512, "%s/timing4.ts", argv[16]);
+            ic0 = int_creates; c0 = creates;
+            r = play("http://example.invalid/tv/timing4.ts", 6);
+            show("720p 4 refs", &r);
+            printf("               HD decoders %d, normal %d\n", int_creates - ic0, creates - c0);
+            assert(r.st.state != TSP_ERROR && r.changes >= 50 && int_creates - ic0 == 1 && creates == c0);   /* (one HD decoder, no normal one) */
+            tsp_set_options(0, 720);
         }
         if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls")) return 0;
         /* a playlist whose segments are missing: a clear error, not a hang */
