@@ -949,7 +949,8 @@ void settings_parse(const char *text, Settings *st)
             trim_inplace(k);
             trim_inplace(v);
             if (!strcmp(k, "proxy")) copy_trunc(st->proxy, sizeof st->proxy, v, strlen(v));
-            else if (!strcmp(k, "auto_proxy")) st->auto_proxy = atoi(v) != 0;
+            else if (!strcmp(k, "auto_proxy")) { st->auto_proxy = atoi(v); if (st->auto_proxy < 0 || st->auto_proxy > 2) st->auto_proxy = 1; }
+            else if (!strcmp(k, "plain_letters")) st->plain_letters = atoi(v) != 0;
             else if (!strcmp(k, "lang")) { st->lang = atoi(v); if (st->lang < 0 || st->lang > 2) st->lang = 0; }
             else if (!strcmp(k, "hide_adult")) st->hide_adult = atoi(v) != 0;
             else if (!strcmp(k, "hide_4k")) st->hide_4k = atoi(v) != 0;
@@ -967,8 +968,9 @@ void settings_parse(const char *text, Settings *st)
 
 int settings_format(const Settings *st, char *out, size_t outsz)
 {
-    int w = snprintf(out, outsz, "# Vita IPTV settings\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_4k=%d\nresolution=%d\n",
-                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_4k, st->res_pref);
+    int w = snprintf(out, outsz, "# Vita IPTV settings (auto_proxy: 0 off, 1 when needed, 2 always)\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_4k=%d\nresolution=%d\n%s",
+                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_4k, st->res_pref,
+                     st->plain_letters ? "plain_letters=1\n" : "");
     return (w < 0 || (size_t)w >= outsz) ? -1 : w;
 }
 
