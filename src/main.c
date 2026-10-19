@@ -1393,7 +1393,8 @@ static void play_channel_ex(int vi, int use_proxy)
     }
     tsp_set_options(1, res_effective());                     /* 1080p is always on since v0.2 */
     tsp_set_audio(aud_id, aud_lang);                         /* 0.5.0: the audio track (or language) chosen */
-    tsp_set_via_server(use_proxy);                           /* (0.5.0: 30 s for the first picture) */
+    tsp_set_via_server(use_proxy);
+    tsp_set_ac3_test(settings.ac3_test);                     /* (0.5.0 test builds, settings.txt only) */                           /* (0.5.0: 30 s for the first picture) */
     tsp_set_hls_bw(res_bw);
     via_proxy = 0;
     char purl[IPTV_URL_MAX * 3 + 64];

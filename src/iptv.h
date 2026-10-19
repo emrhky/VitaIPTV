@@ -49,6 +49,7 @@ typedef struct {
     int hide_adult;             /* leave adult channels out of the lists */
     int hide_4k;                /* leave channels labelled 4K / UHD / 2160p / 8K out (the Vita cannot play them) */
     int res_pref;               /* HLS picture size: 0 automatic (about 540p, else 720p), 1080/720/540/480, -1 the smallest */
+    int ac3_test;               /* 0.5.0 test builds: 1 AC-3 decoded but not played, 2 audio thread at video priority, 3 sound in 768-sample parts; only in settings.txt */
     int plain_letters;          /* 0.4.5: 1 = Turkish letters drawn as plain ones (g s i c o u) as before; only in settings.txt */
 } Settings;
 
