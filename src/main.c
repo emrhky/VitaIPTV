@@ -1536,6 +1536,10 @@ static int film_length(void)
 {
     const TspStatus *st = tsp_status();
     if (st && st->dur_ms > 0) film_dur_ms = st->dur_ms;
+    if (!film_dur_ms && nvis) {                              /* 0.5.0: through the server: the length kept with the resume point */
+        int k = resume_find(resume, nresume, cur_channel()->url);
+        if (k >= 0 && resume[k].dur_ms > 0) film_dur_ms = resume[k].dur_ms;
+    }
     return film_dur_ms;
 }
 

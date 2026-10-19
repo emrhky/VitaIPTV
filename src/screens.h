@@ -3,7 +3,7 @@
 /* Whole screens drawn from plain data, so main.c only decides *what* to show. */
 #include "ui.h"
 
-#define SCR_ROWS 12                     /* list rows per page */
+#define SCR_ROWS 11                     /* list rows per page (0.5.0: 11 taller rows for the bigger letters) */
 #define SCR_SRC_ROWS 7                  /* playlist cards per page */
 
 typedef struct {

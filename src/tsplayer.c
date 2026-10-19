@@ -238,6 +238,8 @@ typedef struct {
     /* 0.4.0: the stream's timing information (VUI HRD / pic_struct, buffering period / picture timing SEI).
      * A 720p25 channel with it gave no picture from either decoder; the second try leaves it out. */
     int hdr_timing, sei_timing, drop_timing, timing_tried, hdr_logged, sei_logged;
+    int timing_restart_pending;         /* 0.5.0: the HD decoder gives its pictures in bursts: again without the timing at the next keyframe */
+    uint32_t burst_prev_shown, burst_prev_behind;   /* (the counts at the last stats line) */
     int hd_fallback;                    /* 0.4.1: the HD decoder (720p above 30 fps) gave nothing: the normal one */
     int hdr_no_restr;                   /* the SPS has no bitstream_restriction (the second try adds it) */
     int64_t late_sum_us;
@@ -1493,6 +1495,14 @@ static void video_packet(Tsp *t, Pkt *p)
         switch_to_hd_oom(t);
         t->st.errors--;                                     /* (not an error) */
     }
+    /* 0.5.0: see stats_tick: the HD decoder held its pictures and gave them in bursts; at this keyframe again
+     * without the stream's timing information (HRD, buffering period / picture timing SEI) */
+    if (t->timing_restart_pending && (flags & TS_FLAG_KEYFRAME) && t->dec_open) {
+        t->timing_restart_pending = 0;
+        plog("tsp: HD decoder restarted at a keyframe without the timing information");
+        restart_without_timing(t);
+        t->st.errors--;                                     /* (not an error) */
+    }
     if (!t->dec_open) {
         if (!start_ok || i->width == 0 || i->sps_len == 0 || i->pps_len == 0) {
             if (!t->err_set) t->st.state = TSP_WAIT_KEY;
@@ -2187,7 +2197,21 @@ static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
 
 static void audio_a52(Tsp *t, Pkt *p)
 {
-    if (!t->a52 && !(t->a52 = a52_create())) { audio_disable(t, "Audio %s: not supported", "ac3"); return; }
+    if (!t->a52) {
+        if (!(t->a52 = a52_create())) { audio_disable(t, "Audio %s: not supported", "ac3"); return; }
+        /* 0.5.0: the Vita's audio decoder library is set up as for AAC although the sound is decoded in software.
+         * AAC films played smoothly on the HD decoder, the same kind of films with E-AC-3 did not (pictures in
+         * bursts); the library and the HD decoder share the codec engine. (Freed with the AAC one at the end.) */
+        if (!t->alib) {
+            SceAudiodecInitParam ip;
+            memset(&ip, 0, sizeof ip);
+            ip.aac.size = sizeof ip.aac;
+            ip.aac.totalStreams = 1;
+            int r = sceAudiodecInitLibrary(SCE_AUDIODEC_TYPE_AAC, &ip);
+            plog("tsp: sceAudiodecInitLibrary AAC (for the codec engine, sound in software) -> 0x%08X", (unsigned)r);
+            t->alib = r >= 0;
+        }
+    }
     a52_feed(t->a52, p->data, p->len, p->pts, a52_frame, t);
 }
 
@@ -2420,6 +2444,23 @@ static void stats_tick(Tsp *t)
                  "%u%% HD decoder busy, %u%% other; picture to screen avg %u ms; screen frames with no picture %u, behind %u",
                  pd, psl, pda, pb, used < 100 ? 100 - used : 0, wn ? (unsigned)(wsum / wn / 1000) : 0, (unsigned)none, (unsigned)more);
             if (dr) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
+            /* 0.5.0: the HD decoder keeps up with the stream but holds its pictures and gives them in bursts
+             * (about 100 at once in 5 s), so nearly half come too late for the screen and are dropped. Seen on
+             * 1080p films whose video carries timing information (NAL HRD, buffering period and picture
+             * timing SEI); the decoder then gives the pictures in display order itself (no "out of order").
+             * The same films' pictures, without that information, came one by one. Once per stream. */
+            uint32_t sh = t->st.shown, be = t->drop_behind;
+            uint32_t sh_d = sh - t->burst_prev_shown, be_d = be - t->burst_prev_behind;
+            t->burst_prev_shown = sh;
+            t->burst_prev_behind = be;
+            unsigned sfps10 = t->frame_us ? (unsigned)(10000000u / t->frame_us) : 0;
+            if (t->internal && t->dec_open && !t->timing_tried && !t->timing_restart_pending && (t->sei_timing || t->hdr_timing) &&
+                !t->cur_interlaced && !t->paused && !t->buffering && t->frame_us >= 30000 && t->out_of_order < 3 &&
+                dr >= 20 && sh_d + be_d >= 50 && be_d * 4 >= sh_d + be_d && sfps10 && dfps10 * 10 >= sfps10 * 9) {
+                t->timing_restart_pending = 1;
+                plog("tsp: the HD decoder gives its pictures in bursts (%u of %u too late) and the stream carries timing "
+                     "information: again without it at the next keyframe", (unsigned)be_d, (unsigned)(sh_d + be_d));
+            }
         }
     }
     cpu_line(t, now);
@@ -2497,7 +2538,10 @@ static void check_stall(Tsp *t)
             plog("tsp: no video stream in the program, playing audio only");
         }
     }
-    if (t->st.decoded || t->st.audio_only || t->st.state == TSP_ERROR || now_us() - t->start_us < STALL_US) return;
+    /* 0.5.0: a film through the server from the middle: the server first finds the place and starts converting
+     * (more than 10 s on a phone; "No video data" / "No usable keyframe" before) */
+    uint64_t stall = t->vod_stream ? 3 * STALL_US : STALL_US;
+    if (t->st.decoded || t->st.audio_only || t->st.state == TSP_ERROR || now_us() - t->start_us < stall) return;
     explain_no_picture(t);
 }
 
@@ -2752,6 +2796,31 @@ static const char *url_path_for_log(const char *url, char *buf, size_t cap)
 }
 
 /* "Location:" of an answer's headers */
+/* 0.5.0: "X-Content-Duration: 5554.2" (seconds; the transcoding server sends it for films) -> ms, 0 if none */
+static int http_duration_ms(const char *h, size_t hl)
+{
+    static const char key[] = "x-content-duration:";
+    const size_t kl = sizeof key - 1;
+    for (size_t i = 0; i + kl < hl; i++) {
+        if (i && h[i - 1] != '\n') continue;
+        size_t k = 0;
+        while (k < kl && (h[i + k] | 0x20) == key[k]) k++;
+        if (k < kl) continue;
+        const char *v = h + i + kl, *e = h + hl;
+        while (v < e && (*v == ' ' || *v == '\t')) v++;
+        double sec = 0, frac = 0.1;
+        int any = 0, dot = 0;
+        for (; v < e && ((*v >= '0' && *v <= '9') || (*v == '.' && !dot)); v++) {
+            if (*v == '.') { dot = 1; continue; }
+            any = 1;
+            if (!dot) sec = sec * 10 + (*v - '0'); else { sec += (*v - '0') * frac; frac /= 10; }
+        }
+        if (!any || sec <= 0 || sec > 100.0 * 3600) return 0;
+        return (int)(sec * 1000.0);
+    }
+    return 0;
+}
+
 static int http_location(const char *h, size_t hl, char *out, size_t cap)
 {
     const char *e = h + hl;
@@ -2846,6 +2915,14 @@ static int hls_get_once(Tsp *t, const char *url, char *out, size_t cap, uint8_t 
         if (sceHttpGetAllResponseHeaders(req, &hdr, &hl) >= 0 && hdr && hl && http_location(hdr, hl, loc, lcap)) { total = 0; goto done; }
     }
     if (*status >= 400) goto done;
+    if (!out && t->vod_stream && !t->st.dur_ms) {           /* 0.5.0: a film through the server: its length, if the server says it */
+        char *hdr = NULL;
+        unsigned int hl = 0;
+        if (sceHttpGetAllResponseHeaders(req, &hdr, &hl) >= 0 && hdr && hl) {
+            int d = http_duration_ms(hdr, hl);
+            if (d > 0) { t->st.dur_ms = d; plog("tsp: the server says the film is %d s long", d / 1000); }
+        }
+    }
     total = 0;
     while (!stopping(t)) {
         if (out) {
