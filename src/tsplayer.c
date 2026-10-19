@@ -2242,7 +2242,7 @@ static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     } else {
         audio_out(t, t->a52pcm, samples, rate, ch, pts);
     }
-    if (!t->a52tr_done && t->a52tr_n < (int)(sizeof t->a52tr / sizeof t->a52tr[0])) {   /* trace: kept, logged at once later */
+    if (g_ac3_test && !t->a52tr_done && t->a52tr_n < (int)(sizeof t->a52tr / sizeof t->a52tr[0])) {   /* trace (test modes only): kept, logged at once later */
         uint64_t now = now_us();
         int k = t->a52tr_n++;
         t->a52tr[k].in_pts = t->a52_in_pts;
