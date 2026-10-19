@@ -14,6 +14,7 @@ struct A52Dec {
     AVFrame *frame;
     int16_t pcm[A52_MAX_SAMPLES * 2];
     int64_t next_pts;                   /* 90 kHz, -1 = unknown */
+    int64_t last_pp;                    /* the parser's last time stamp (it repeats it for every frame of a packet) */
     uint32_t frames, errors;
 };
 
@@ -35,6 +36,7 @@ A52Dec *a52_create(void)
     av_opt_set_chlayout(d->ctx->priv_data, "downmix", &stereo, 0);  /* the decoder mixes 5.1 down itself */
     if (avcodec_open2(d->ctx, c, NULL) < 0) { a52_destroy(d); return NULL; }
     d->next_pts = -1;
+    d->last_pp = AV_NOPTS_VALUE;
     return d;
 }
 
@@ -128,7 +130,17 @@ void a52_feed(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out ou
         if ((size_t)used > len) used = (int)len;            /* (never more than was given) */
         data += used;
         len -= (size_t)used;
-        if (fs > 0) decode(d, fr, fs, d->parser->pts != AV_NOPTS_VALUE ? d->parser->pts : -1, out, ctx);
+        if (fs > 0) {
+            /* 0.5.0: the parser gives the packet's time to EVERY frame that came in that packet. Matroska puts
+             * several AC-3 frames in one block (8 frames, 256 ms, in the films on the device): all 8 got the same
+             * time, so the sound clock stood still for 224 ms and then jumped 256 ms, and the picture, which
+             * follows that clock, was dropped as late again and again. Only a new time counts; the frames after
+             * it continue from the previous one. */
+            int64_t pp = d->parser->pts;
+            if (pp == d->last_pp) pp = AV_NOPTS_VALUE;
+            else if (pp != AV_NOPTS_VALUE) d->last_pp = pp;
+            decode(d, fr, fs, pp != AV_NOPTS_VALUE ? pp : -1, out, ctx);
+        }
         if (used == 0 && fs == 0) { d->errors++; break; }   /* the parser took nothing: the rest of this packet is lost (counted) */
     }
 }

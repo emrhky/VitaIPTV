@@ -17,6 +17,7 @@ struct MpaDec {
     struct { uint64_t off; int64_t pts; } mark[MARKS];
     int nmark;
     int64_t next_pts;                   /* time of the next frame, -1 = unknown */
+    int64_t last_p;                     /* 0.5.0: the last packet time used (Matroska laced frames all carry the block's time) */
     uint32_t frames, skipped;
     int16_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
 };
@@ -27,6 +28,7 @@ MpaDec *mpa_create(void)
     if (!d) return NULL;
     mp3dec_init(&d->dec);
     d->next_pts = -1;
+    d->last_p = -1;
     return d;
 }
 
@@ -68,7 +70,7 @@ static void run(MpaDec *d, size_t keep, MpaOut out, void *ctx)
             break;
         }
         int64_t p = frame_pts(d, d->base + (uint64_t)info.frame_offset);
-        if (p >= 0) d->next_pts = p;
+        if (p >= 0 && p != d->last_p) { d->next_pts = p; d->last_p = p; }   /* (a repeated time: the frames after it go on from the previous one) */
         int64_t pts = d->next_pts;
         int n = samples > 0 ? samples : (info.layer == 1 ? 384 : 1152);
         if (d->next_pts >= 0) d->next_pts += (int64_t)n * 90000 / info.hz;
