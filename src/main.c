@@ -23,6 +23,7 @@
 #include "player.h"
 #include "probe.h"
 #include "tsplayer.h"
+#include "tsdemux.h"
 #include "httpio.h"
 #include "ui.h"
 #include "screens.h"
@@ -34,6 +35,9 @@
 #include <psp2/system_param.h>
 #include <psp2/power.h>
 #include "lang.h"
+#include "fav.h"
+#include "epg.h"
+#include <psp2/rtc.h>
 
 int _newlib_heap_size_user = 96 * 1024 * 1024;
 
@@ -48,9 +52,13 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define SOURCES_FILE  DATA_DIR "/sources.txt"
 #define SETTINGS_FILE DATA_DIR "/settings.txt"
 #define RESUME_FILE   DATA_DIR "/resume.txt"
+#define FAV_FILE      DATA_DIR "/favorites.txt"
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v0.4.0"
+#define APP_VERSION   "v0.5.0"
+#endif
+#ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
+#define APP_BUILD     __DATE__ " " __TIME__
 #endif
 #define MAX_SOURCES   64
 #define MAX_GROUPS    1024
@@ -90,6 +98,18 @@ static char series_name[IPTV_NAME_MAX];
 static ResumeEntry resume[MAX_RESUME];      /* where films were left */
 static int nresume;
 static int via_proxy, auto_proxy_tried;     /* current channel goes through the transcoding server */
+/* 0.5.0: favourites. Playlists: shown first (sorder: the screen's order -> sources[]). Live channels: first in
+ * their category and in "All", and a "Favorites" category at the top (g_fav, -1 when there are none). */
+static FavList favs;
+static int sorder[MAX_SOURCES];
+static int *fav_rank, fav_rank_n;           /* per channel of chans: its place among the favourites, -1 = not one */
+static int nfav_ch;                         /* favourite channels in this list */
+static int g_fav = -1, g_all = 0;           /* the "Favorites" and "All" categories (live TV) */
+static int *rec_rank, nrec_ch, g_recent = -1;   /* 0.4.5: recently watched (rank 0 = last), its category */
+static int fav_moving, move_ci;             /* 0.4.5: Triangle in "Favorites": the channel chans[move_ci] is moved */
+static FavEntry *move_saved;                /* ... and the order before, for O */
+static int move_saved_n;
+static int fav_dirty;                       /* changed in the player: the list is sorted again on the way back */
 
 /* ---- helpers ----------------------------------------------------------- */
 static unsigned now_ms(void) { return (unsigned)(sceKernelGetProcessTimeWide() / 1000); }
@@ -285,18 +305,101 @@ static int read_file(const char *path, Mem *m)
 }
 
 /* ---- data -------------------------------------------------------------- */
+/* the favourite place of channel i (live TV lists only), -1 if it is not a favourite */
+static int ch_fav(int i)
+{
+    return section == SEC_LIVE && !in_episodes && fav_rank && i >= 0 && i < fav_rank_n && fav_rank_n == chans.count ? fav_rank[i] : -1;
+}
+
+static int *cmp_rank;                       /* (the ranks cmp_fav sorts by) */
+static int cmp_fav(const void *a, const void *b)
+{
+    int x = *(const int *)a, y = *(const int *)b, rx = cmp_rank[x], ry = cmp_rank[y];
+    return rx != ry ? (rx < ry ? -1 : 1) : (x < y ? -1 : x > y);
+}
+
 static void rebuild_visible(void)
 {
     free(vis);
     vis = malloc(sizeof(int) * (size_t)(chans.count ? chans.count : 1));
     nvis = 0;
+    if (!search_fold[0] && section == SEC_LIVE && cur_group == g_recent && g_recent >= 0 && rec_rank && fav_rank_n == chans.count) {
+        for (int i = 0; i < chans.count; i++) if (rec_rank[i] >= 0) vis[nvis++] = i;   /* 0.4.5: watched last first */
+        cmp_rank = rec_rank;
+        qsort(vis, (size_t)nvis, sizeof(int), cmp_fav);
+        sel = scroll = 0;
+        return;
+    }
+    if (!search_fold[0] && section == SEC_LIVE && nfav_ch > 0 && fav_rank_n == chans.count) {
+        /* 0.5.0: the favourites first, in the order they were added; "Favorites" holds only them */
+        for (int i = 0; i < chans.count; i++) {
+            if (fav_rank[i] < 0) continue;
+            if (cur_group == g_fav || cur_group == g_all || !strcmp(chans.items[i].group, groups[cur_group])) vis[nvis++] = i;
+        }
+        cmp_rank = fav_rank;
+        qsort(vis, (size_t)nvis, sizeof(int), cmp_fav);
+        if (cur_group != g_fav)
+            for (int i = 0; i < chans.count; i++)
+                if (fav_rank[i] < 0 && (cur_group == g_all || !strcmp(chans.items[i].group, groups[cur_group]))) vis[nvis++] = i;
+        sel = scroll = 0;
+        return;
+    }
     for (int i = 0; i < chans.count; i++) {
         const Channel *c = &chans.items[i];
         if (search_fold[0]) { if (iptv_match(c->name, search_fold)) vis[nvis++] = i; }   /* search: all groups */
         else if (section != SEC_LIVE) { if (in_episodes || cur_group == loaded_group) vis[nvis++] = i; }
-        else if (cur_group == 0 || !strcmp(c->group, groups[cur_group])) vis[nvis++] = i;
+        else if (cur_group == g_all || (cur_group != g_fav && cur_group != g_recent && !strcmp(c->group, groups[cur_group]))) vis[nvis++] = i;
     }
     sel = scroll = 0;
+}
+
+/* the favourite places of the channels in chans (live TV of a playlist) */
+static void fav_update_ranks(void)
+{
+    free(fav_rank);
+    free(rec_rank);
+    fav_rank = rec_rank = NULL;
+    fav_rank_n = nfav_ch = nrec_ch = 0;
+    if (section != SEC_LIVE || in_episodes || !chans.count || cur_src < 0 || cur_src >= nsources) return;
+    fav_rank = malloc(sizeof(int) * (size_t)chans.count);
+    rec_rank = malloc(sizeof(int) * (size_t)chans.count);
+    if (!fav_rank || !rec_rank) { free(fav_rank); free(rec_rank); fav_rank = rec_rank = NULL; return; }
+    fav_rank_n = chans.count;
+    nfav_ch = fav_rank_channels(&favs, &sources[cur_src], &chans, fav_rank);
+    nrec_ch = fav_rank_kind(&favs, FAV_RECENT, &sources[cur_src], &chans, rec_rank);
+}
+
+/* the category names (live TV): "Favorites" (when there are any), "All", then the list's own groups */
+static void build_group_names(void)
+{
+    ngroups = 0;
+    g_fav = g_recent = -1;
+    if (nfav_ch > 0) { g_fav = ngroups; snprintf(groups[ngroups++], sizeof groups[0], "Favorites"); }
+    if (nrec_ch > 0) { g_recent = ngroups; snprintf(groups[ngroups++], sizeof groups[0], "Recently Watched"); }
+    g_all = ngroups;
+    snprintf(groups[ngroups++], sizeof groups[0], "All");
+    for (int i = 0; i < chans.count && ngroups < MAX_GROUPS; i++) {
+        const char *g = chans.items[i].group;
+        if (!g[0]) continue;
+        int found = 0;
+        for (int k = g_all + 1; k < ngroups; k++) if (!strcmp(groups[k], g)) { found = 1; break; }
+        if (!found) snprintf(groups[ngroups++], sizeof groups[0], "%s", g);
+    }
+    memset(gcount, 0, sizeof gcount);
+    if (g_fav >= 0) gcount[g_fav] = nfav_ch;
+    if (g_recent >= 0) gcount[g_recent] = nrec_ch;
+    gcount[g_all] = chans.count;
+    for (int i = 0; i < chans.count; i++)
+        for (int k = g_all + 1; k < ngroups; k++) if (!strcmp(groups[k], chans.items[i].group)) { gcount[k]++; break; }
+}
+
+/* a category's name on the screen */
+static const char *group_title(int i)
+{
+    if (section == SEC_LIVE && i == g_fav) return T("Favorites");
+    if (section == SEC_LIVE && i == g_all) return T("All");
+    if (section == SEC_LIVE && i == g_recent) return T("Recently Watched");
+    return i >= 0 && i < ngroups ? groups[i] : "";
 }
 
 static void build_groups(void)
@@ -309,20 +412,9 @@ static void build_groups(void)
         int n = iptv_remove_4k(&chans);
         if (n) plog("list: %d 4K/UHD channels hidden", n);
     }
-    ngroups = 1;
-    snprintf(groups[0], sizeof groups[0], "All");
-    cur_group = 0;
-    for (int i = 0; i < chans.count && ngroups < MAX_GROUPS; i++) {
-        const char *g = chans.items[i].group;
-        if (!g[0]) continue;
-        int found = 0;
-        for (int k = 1; k < ngroups; k++) if (!strcmp(groups[k], g)) { found = 1; break; }
-        if (!found) snprintf(groups[ngroups++], sizeof groups[0], "%s", g);
-    }
-    memset(gcount, 0, sizeof gcount);
-    gcount[0] = chans.count;
-    for (int i = 0; i < chans.count; i++)
-        for (int k = 1; k < ngroups; k++) if (!strcmp(groups[k], chans.items[i].group)) { gcount[k]++; break; }
+    fav_update_ranks();                                      /* (after the filters: they move channels) */
+    build_group_names();
+    cur_group = 0;                                           /* the favourites first, when there are some */
     focus = ngroups > 1 ? 0 : 1;                            /* choose a category first when there are some */
     gscroll = 0;
     rebuild_visible();
@@ -349,6 +441,7 @@ static void build_vod_groups(void)
     cur_group = 0;
     loaded_group = -1;
     in_episodes = 0;
+    g_fav = g_all = g_recent = -1;                           /* (films / series: no "All", no favourites yet) */
     focus = 0;
     gscroll = 0;
     rebuild_visible();
@@ -381,6 +474,33 @@ static void add_local_files(void)
     sceIoDclose(d);
 }
 
+/* 0.5.0: favourite playlists first (in the order they were added), then the rest as in sources.txt */
+static int src_is_fav(int i)
+{
+    char k[FAV_SRC_MAX];
+    fav_source_key(&sources[i], k, sizeof k);
+    return fav_find(&favs, FAV_LIST, k, NULL);
+}
+
+static void sort_sources(void)
+{
+    int n = 0, rank[MAX_SOURCES];
+    for (int i = 0; i < nsources; i++) rank[i] = src_is_fav(i);
+    for (int r = 0; r < favs.n; r++)                         /* (favs.n is small) */
+        for (int i = 0; i < nsources; i++) if (rank[i] == r) sorder[n++] = i;
+    for (int i = 0; i < nsources; i++) if (rank[i] < 0) sorder[n++] = i;
+}
+
+static int src_at(int d) { return d >= 0 && d < nsources ? sorder[d] : 0; }      /* screen row -> sources[] */
+static int src_disp(int i)                                                         /* sources[] -> screen row */
+{
+    for (int d = 0; d < nsources; d++) if (sorder[d] == i) return d;
+    return 0;
+}
+
+static void load_favorites(void);
+static void save_favorites(void);
+
 static void load_sources(void)
 {
     sceIoMkdir(DATA_DIR, 0777);
@@ -400,6 +520,7 @@ static void load_sources(void)
         set_status(0, "Press Square to add your first playlist.", NULL);
         nsources = 0;
         add_local_files();
+        sort_sources();
         sel = scroll = 0;
         return;
     }
@@ -408,6 +529,7 @@ static void load_sources(void)
     add_local_files();
     if (nsources == 0) set_status(0, "Press Square to add your first playlist.", NULL);
     else status[0] = 0;
+    sort_sources();
     sel = scroll = 0;
 }
 
@@ -420,19 +542,187 @@ static int write_text_file(const char *path, const char *text)
     return (fclose(f) == 0 && ok) ? 0 : -1;
 }
 
-/* Writes the user's sources (not the auto-found files) back to sources.txt and rescans. */
-static int save_sources(void)
+/* Writes the user's sources (not the auto-found files) back to sources.txt and rescans; the row of
+ * sources[keep] stays selected. */
+static int save_sources(int keep)
 {
     char *buf = malloc(64 * 1024);
     if (!buf) return -1;
     int n = sources_format(sources, nsources, buf, 64 * 1024);
     int r = n < 0 ? -1 : write_text_file(SOURCES_FILE, buf);
     free(buf);
-    int keep = sel;
     load_sources();
-    sel = keep < nsources ? keep : (nsources ? nsources - 1 : 0);
+    if (keep >= nsources) keep = nsources - 1;
+    sel = keep >= 0 ? src_disp(keep) : 0;
     if (r < 0) set_status(1, "Could not write %s", SOURCES_FILE);
     return r;
+}
+
+/* ---- favourites (0.5.0) ---------------------------------------------------------------------------- */
+static void load_favorites(void)
+{
+    Mem m = {0};
+    fav_free(&favs);
+    if (read_file(FAV_FILE, &m) == 0) { fav_parse(m.buf, &favs); free(m.buf); }
+    plog("fav: %d favourites", favs.n);
+}
+
+static void save_favorites(void)
+{
+    size_t cap = (size_t)favs.n * (FAV_SRC_MAX + IPTV_URL_MAX + IPTV_NAME_MAX + 8) + 256;
+    char *buf = malloc(cap);
+    int ok = buf && fav_format(&favs, buf, cap) >= 0 && write_text_file(FAV_FILE, buf) == 0;
+    free(buf);
+    if (!ok) set_status(1, "Could not write %s", FAV_FILE);
+}
+
+/* the open category (live TV) by what it is: its place changes when the "Favorites" category comes or goes */
+static int grp_saved_kind;                  /* 1 favourites, 2 all, 3 recently watched, 0 a named group */
+static char grp_saved_name[IPTV_GROUP_MAX];
+
+static void group_remember(void)
+{
+    grp_saved_kind = cur_group == g_fav && g_fav >= 0 ? 1 : cur_group == g_all ? 2 : cur_group == g_recent && g_recent >= 0 ? 3 : 0;
+    snprintf(grp_saved_name, sizeof grp_saved_name, "%s", cur_group >= 0 && cur_group < ngroups ? groups[cur_group] : "");
+}
+
+static void group_restore(void)
+{
+    if (grp_saved_kind == 1 && g_fav >= 0) { cur_group = g_fav; return; }
+    if (grp_saved_kind == 3 && g_recent >= 0) { cur_group = g_recent; return; }
+    cur_group = g_all >= 0 ? g_all : 0;                      /* (the favourites are gone: "All") */
+    if (grp_saved_kind == 0)
+        for (int k = g_all + 1; k < ngroups; k++) if (!strcmp(groups[k], grp_saved_name)) { cur_group = k; break; }
+}
+
+/* After a favourite changed: categories and order again. The channel chans[keep_ci] stays selected (when it is
+ * still in the category; otherwise the row where it was). */
+static void fav_regroup(int keep_ci)
+{
+    if (section != SEC_LIVE || in_episodes) return;
+    int old_sel = sel;
+    group_remember();
+    fav_update_ranks();
+    build_group_names();
+    group_restore();
+    if (gscroll > ngroups) gscroll = 0;
+    rebuild_visible();
+    sel = nvis ? (old_sel < nvis ? old_sel : nvis - 1) : 0;
+    for (int i = 0; i < nvis; i++) if (vis[i] == keep_ci) { sel = i; break; }
+    if (!nvis && focus == 1 && !search_fold[0]) focus = 0;
+    fav_dirty = 0;
+}
+
+/* START on a channel: added to the favourites or taken out. Returns 1 added, 0 removed, -1 not possible. */
+static int fav_toggle_channel(int ci)
+{
+    if (section != SEC_LIVE || in_episodes || ci < 0 || ci >= chans.count || cur_src < 0 || cur_src >= nsources) return -1;
+    const Channel *c = &chans.items[ci];
+    char sk[FAV_SRC_MAX], ck[IPTV_URL_MAX];
+    fav_source_key(&sources[cur_src], sk, sizeof sk);
+    fav_channel_key(&sources[cur_src], c, ck, sizeof ck);
+    int r = fav_toggle(&favs, FAV_CHANNEL, sk, ck, c->name);
+    if (r >= 0) {
+        save_favorites();
+        plog("fav: channel \"%s\" %s (%d favourites)", c->name, r ? "added" : "removed", favs.n);
+        fav_update_ranks();                                  /* (the star at once; the order on the list screen) */
+        fav_dirty = 1;
+    }
+    return r;
+}
+
+/* START on a playlist (or a single stream that is playing) */
+static int fav_toggle_source(int i)
+{
+    if (i < 0 || i >= nsources) return -1;
+    char sk[FAV_SRC_MAX];
+    fav_source_key(&sources[i], sk, sizeof sk);
+    int r = fav_toggle(&favs, FAV_LIST, sk, NULL, NULL);
+    if (r >= 0) {
+        save_favorites();
+        plog("fav: playlist \"%s\" %s", sources[i].name, r ? "added" : "removed");
+        sort_sources();
+    }
+    return r;
+}
+
+static const char *fav_note(int r)
+{
+    return T(r == 1 ? "Added to favorites" : r == 0 ? "Removed from favorites" : "The favorites list is full");
+}
+
+/* 0.5.0: Settings > "Clear Recently Watched": every playlist's list goes; returns how many were removed */
+static int clear_recent(void)
+{
+    int k = 0, removed = 0;
+    for (int i = 0; i < favs.n; i++) {
+        if (favs.e[i].kind == FAV_RECENT) { removed++; continue; }
+        if (k != i) favs.e[k] = favs.e[i];
+        k++;
+    }
+    favs.n = k;
+    if (removed) {
+        save_favorites();
+        plog("fav: %d recently watched cleared", removed);
+        fav_dirty = 1;
+        if (state == ST_CHANNELS) fav_regroup(nvis && sel < nvis ? vis[sel] : -1);
+    }
+    return removed;
+}
+
+/* ---- 0.4.5: reordering the favourites (Triangle in the "Favorites" category) ---- */
+static void fav_move_begin(int ci)
+{
+    free(move_saved);
+    move_saved = malloc(sizeof(FavEntry) * (size_t)(favs.n ? favs.n : 1));
+    if (!move_saved) return;
+    memcpy(move_saved, favs.e, sizeof(FavEntry) * (size_t)favs.n);
+    move_saved_n = favs.n;
+    fav_moving = 1;
+    move_ci = ci;
+    set_status(0, "Up / down moves the channel, Triangle saves the order", NULL);
+}
+
+static void select_ci(int ci)
+{
+    for (int i = 0; i < nvis; i++) if (vis[i] == ci) { sel = i; return; }
+}
+
+static void fav_move_step(int dir)
+{
+    if (move_ci < 0 || move_ci >= chans.count || !fav_rank || fav_rank_n != chans.count) return;
+    char sk[FAV_SRC_MAX], ck[IPTV_URL_MAX];
+    fav_source_key(&sources[cur_src], sk, sizeof sk);
+    fav_channel_key(&sources[cur_src], &chans.items[move_ci], ck, sizeof ck);
+    if (!fav_move(&favs, sk, ck, dir)) return;
+    int r = fav_rank[move_ci];                               /* two places swap: no need to work them all out again */
+    for (int i = 0; i < chans.count; i++) {
+        if (fav_rank[i] == r) fav_rank[i] = r + dir;
+        else if (fav_rank[i] == r + dir) fav_rank[i] = r;
+    }
+    int keep_scroll = scroll;
+    rebuild_visible();
+    scroll = keep_scroll;
+    select_ci(move_ci);
+}
+
+static void fav_move_end(int save)
+{
+    if (save) {
+        save_favorites();
+        plog("fav: order changed (%d favourites)", favs.n);
+        if (!status_err) set_status(0, "Order saved", NULL);
+    } else if (move_saved && move_saved_n <= favs.cap) {     /* O: as it was */
+        memcpy(favs.e, move_saved, sizeof(FavEntry) * (size_t)move_saved_n);
+        favs.n = move_saved_n;
+        fav_update_ranks();
+        rebuild_visible();
+        select_ci(move_ci);
+        set_status(0, "Order not changed", NULL);
+    }
+    free(move_saved);
+    move_saved = NULL;
+    fav_moving = 0;
 }
 
 static void load_settings(void)
@@ -715,6 +1005,7 @@ static void load_begin(const Source *s, int what, const char *arg, int group)
         channel_list_free(&chans);
         channel_list_init(&chans);
         nvis = 0;
+        fav_rank_n = nfav_ch = 0;                            /* (they belonged to the old list) */
         if (what == LOAD_FILMS || what == LOAD_SERIES) loaded_group = -1;
     }
     memset(&job, 0, sizeof job);
@@ -796,6 +1087,139 @@ static int load_poll(unsigned p)
     return 1;
 }
 
+/* ---- Xtream EPG, now / next (0.4.5) ----------------------------------------------------------------
+ * One request at a time on its own thread (the screen keeps moving); the answers are kept 5 minutes per
+ * channel. The channel list asks for the selected channel after it stayed selected half a second, the
+ * player for the channel that plays. */
+#define EPG_SLOTS 48
+typedef struct { char id[16]; int src; unsigned at; int ok; EpgInfo e; } EpgSlot;
+static EpgSlot epg_cache[EPG_SLOTS];
+static int epg_ring;
+static volatile int epg_job;                /* 0 free, 1 asked (the thread works), 2 answered */
+static volatile int epg_quit;
+static char epg_job_url[IPTV_URL_MAX + 200], epg_job_id[16];
+static int epg_job_src, epg_job_ok;
+static EpgInfo epg_job_info;
+static int tz_min;                          /* local time - UTC, minutes (daylight saving included) */
+static SceUID epg_tid = -1;
+
+static int64_t dt_minutes(const SceDateTime *t)
+{
+    return epg_days(t->year, t->month, t->day) * 1440 + t->hour * 60 + t->minute;
+}
+
+static int64_t now_unix(void)
+{
+    SceDateTime u;
+    memset(&u, 0, sizeof u);
+    sceRtcGetCurrentClock(&u, 0);
+    return dt_minutes(&u) * 60 + u.second;
+}
+
+static void epg_time_zone(void)
+{
+    SceDateTime u, l;
+    memset(&u, 0, sizeof u);
+    memset(&l, 0, sizeof l);
+    sceRtcGetCurrentClock(&u, 0);
+    sceRtcGetCurrentClockLocalTime(&l);
+    int64_t d = dt_minutes(&l) - dt_minutes(&u);
+    tz_min = d >= -14 * 60 && d <= 14 * 60 ? (int)d : 0;
+}
+
+static int epg_stop_cb(void *ctx) { (void)ctx; return epg_quit; }
+
+static int epg_thread(SceSize args, void *argp)
+{
+    (void)args; (void)argp;
+    while (!epg_quit) {
+        if (epg_job == 1) {
+            Mem m = {0};
+            CioRequest rq = { epg_job_url, NULL, NULL, 8, 10, mem_data, epg_stop_cb, &m };
+            int st = 0;
+            char e[96];
+            int r = cio_get(&rq, &st, e, sizeof e);
+            memset(&epg_job_info, 0, sizeof epg_job_info);
+            epg_job_ok = r >= 0 && st < 400 && m.buf != NULL;
+            int n = epg_job_ok ? epg_parse_short(m.buf, m.len, now_unix(), &epg_job_info) : 0;
+            static int logged;
+            if (logged++ < 3) plog("epg: stream %s -> HTTP %d, %d listings%s%s", epg_job_id, st, n, r < 0 ? ", " : "", r < 0 ? e : "");
+            free(m.buf);
+            __sync_synchronize();
+            epg_job = 2;
+        }
+        sceKernelDelayThread(30000);
+    }
+    return 0;
+}
+
+static void epg_start(void)
+{
+    if (!cio_available()) return;
+    epg_time_zone();
+    epg_tid = sceKernelCreateThread("epg", epg_thread, 0x10000110, 256 * 1024, 0, 0, NULL);
+    if (epg_tid >= 0) sceKernelStartThread(epg_tid, 0, NULL);
+    plog("epg: thread 0x%08X, time zone %+d min", (unsigned)epg_tid, tz_min);
+}
+
+static void epg_stop(void)
+{
+    if (epg_tid < 0) return;
+    epg_quit = 1;
+    SceUInt to = 3000000;
+    sceKernelWaitThreadEnd(epg_tid, NULL, &to);
+    sceKernelDeleteThread(epg_tid);
+    epg_tid = -1;
+}
+
+static EpgSlot *epg_slot(int src, const char *id)
+{
+    for (int i = 0; i < EPG_SLOTS; i++) if (epg_cache[i].src == src && epg_cache[i].id[0] && !strcmp(epg_cache[i].id, id)) return &epg_cache[i];
+    return NULL;
+}
+
+/* The "Now: ... / Next: ..." line of channel c of the open playlist (Xtream live channels), NULL when there is
+ * none (yet). ask: start a request when it is not known or old. */
+static const char *epg_for(const Channel *c, int ask)
+{
+    static char line[320];
+    if (epg_tid < 0 || cur_src < 0 || cur_src >= nsources || sources[cur_src].type != SRC_XTREAM || section != SEC_LIVE || in_episodes) return NULL;
+    char id[16];
+    if (!c || c->kind != CH_LIVE || !epg_stream_id(c->url, id, sizeof id)) return NULL;
+    if (epg_job == 2) {                                      /* an answer came: into the cache */
+        EpgSlot *d = epg_slot(epg_job_src, epg_job_id);
+        if (!d) { d = &epg_cache[epg_ring]; epg_ring = (epg_ring + 1) % EPG_SLOTS; }
+        snprintf(d->id, sizeof d->id, "%s", epg_job_id);
+        d->src = epg_job_src;
+        d->at = now_ms();
+        d->ok = epg_job_ok;
+        d->e = epg_job_info;
+        __sync_synchronize();
+        epg_job = 0;
+    }
+    EpgSlot *sl = epg_slot(cur_src, id);
+    unsigned nm = now_ms();
+    int64_t now = now_unix();
+    int stale = !sl || nm - sl->at > (sl->ok ? 300000u : 60000u) || (sl->ok && sl->e.has_now && now >= sl->e.now.end);
+    if (stale && ask && epg_job == 0 && !(epg_job_src == cur_src && !strcmp(epg_job_id, id) && sl && nm - sl->at < 5000)) {
+        char action[64];
+        snprintf(action, sizeof action, "get_short_epg&stream_id=%s&limit=4", id);
+        if (xtream_api_url(&sources[cur_src], action, epg_job_url, sizeof epg_job_url) == 0) {
+            snprintf(epg_job_id, sizeof epg_job_id, "%s", id);
+            epg_job_src = cur_src;
+            __sync_synchronize();
+            epg_job = 1;
+        }
+    }
+    if (!sl || !sl->ok) return NULL;
+    EpgInfo e = sl->e;
+    if (e.has_now && now >= e.now.end) {                     /* the programme ended since: the next one is on */
+        if (e.has_next && now < e.next.end) { e.now = e.next; e.has_next = 0; }
+        else e.has_now = 0;
+    }
+    return epg_line(&e, tz_min, T("Now"), T("Next"), line, sizeof line) ? line : NULL;
+}
+
 /* ---- playback ---------------------------------------------------------- */
 static unsigned play_started_us, osd_until_us;
 static int got_frame;
@@ -818,6 +1242,8 @@ static int res_want;
 static long res_bw;
 static int res_manual;               /* chosen with Select / Square (not by stepping down on a slow line) */
 static int res_menu, res_menu_sel;   /* Select in the player: the picture size menu */
+static int aud_id = -1;              /* 0.5.0: the audio track chosen for this channel (-1 = the best one) */
+static char aud_lang[4];             /* ... and its language, kept for the next channels and films */
 static long res_novideo[TSP_MAX_VARIANTS];   /* variants of this channel that sent no picture (by bit rate) */
 static int res_nnovideo;
 
@@ -895,6 +1321,51 @@ static int res_after_no_video(const TspStatus *st)
     return -1;
 }
 
+/* 0.4.0: a channel whose variant gave no picture opens on the one it went to while you zap (Haber61's
+ * "480p" failed again each time); back in the list it is forgotten, so a variant the server repairs comes
+ * back. Keyed by a hash of the link. */
+#define NOPIC_MAX 16
+static struct { uint32_t key; int h; long bw; } nopic[NOPIC_MAX];
+static int nnopic;
+
+static uint32_t url_key(const char *u)
+{
+    uint32_t h = 2166136261u;                                /* FNV-1a */
+    while (*u) { h ^= (uint8_t)*u++; h *= 16777619u; }
+    return h ? h : 1;
+}
+
+static void nopic_remember(const char *url, int h, long bw)
+{
+    uint32_t k = url_key(url);
+    int i = 0;
+    while (i < nnopic && nopic[i].key != k) i++;
+    if (i == nnopic) {
+        if (nnopic < NOPIC_MAX) nnopic++;
+        else { memmove(&nopic[0], &nopic[1], sizeof nopic[0] * (NOPIC_MAX - 1)); i = NOPIC_MAX - 1; }   /* oldest out */
+    }
+    nopic[i].key = k; nopic[i].h = h; nopic[i].bw = bw;
+}
+
+/* The channel played before this one (index in chans, checked by its link's hash: lists change). */
+static int last_chan = -1, prev_chan = -1;
+static uint32_t last_key, prev_key;
+
+static int prev_visible(void)
+{
+    if (prev_chan < 0 || prev_chan >= chans.count || url_key(chans.items[prev_chan].url) != prev_key) return -1;
+    for (int i = 0; i < nvis; i++) if (vis[i] == prev_chan) return i;
+    /* in another category (live TV): the list goes to "All", where every channel is (films / series: only the
+     * open category is loaded) */
+    if (section == SEC_LIVE && !in_episodes && ngroups > 0) {
+        search_q[0] = search_fold[0] = 0;
+        cur_group = g_all >= 0 ? g_all : 0;
+        rebuild_visible();
+        for (int i = 0; i < nvis; i++) if (vis[i] == prev_chan) return i;
+    }
+    return -1;
+}
+
 static int is_mp4_url(const char *u)
 {
     const char *q = strpbrk(u, "?#");
@@ -921,6 +1392,9 @@ static void play_channel_ex(int vi, int use_proxy)
         return;
     }
     tsp_set_options(1, res_effective());                     /* 1080p is always on since v0.2 */
+    tsp_set_audio(aud_id, aud_lang);                         /* 0.5.0: the audio track (or language) chosen */
+    tsp_set_via_server(use_proxy);
+    tsp_set_ac3_test(settings.ac3_test);                     /* (0.5.0 test builds, settings.txt only) */                           /* (0.5.0: 30 s for the first picture) */
     tsp_set_hls_bw(res_bw);
     via_proxy = 0;
     char purl[IPTV_URL_MAX * 3 + 64];
@@ -952,16 +1426,45 @@ static void play_channel_ex(int vi, int use_proxy)
     }
 }
 
+/* 0.4.5: "Use automatically: Always": every channel through the transcoding server (not the files on the
+ * memory card: the server cannot reach them). Square still switches to the direct stream and back. */
+static int proxy_always(const char *url)
+{
+    return settings.auto_proxy == 2 && settings.proxy[0] && strncasecmp(url, "ux0:", 4) != 0;
+}
+
 static void play_channel(int vi)
 {
+    int ci = vis[vi];                                        /* L in the player: the channel before */
+    if (last_chan >= 0 && last_chan != ci && last_chan < chans.count && url_key(chans.items[last_chan].url) == last_key) {
+        prev_chan = last_chan; prev_key = last_key;
+    }
+    last_chan = ci;
+    last_key = url_key(chans.items[ci].url);
+    if (return_state == ST_CHANNELS && section == SEC_LIVE && !in_episodes && cur_src >= 0 && cur_src < nsources) {
+        char sk[FAV_SRC_MAX], ck[IPTV_URL_MAX];              /* 0.4.5: recently watched (sorted on the way back) */
+        fav_source_key(&sources[cur_src], sk, sizeof sk);
+        fav_channel_key(&sources[cur_src], &chans.items[ci], ck, sizeof ck);
+        if (fav_push_recent(&favs, sk, ck, chans.items[ci].name) == 0) { save_favorites(); fav_dirty = 1; }
+    }
     auto_proxy_tried = 0;
     film_dur_ms = 0;
+    aud_id = -1;                                             /* (0.5.0: the language chosen stays, the track number not) */
     res_want = 0;                                            /* every channel opens at the size in the settings */
     res_bw = 0;
     res_manual = 0;
     res_menu = 0;
     res_nnovideo = 0;
-    play_channel_ex(vi, 0);
+    {
+        uint32_t k = url_key(chans.items[vis[vi]].url);
+        for (int i = 0; i < nnopic; i++)
+            if (nopic[i].key == k) {
+                res_want = nopic[i].h; res_bw = nopic[i].bw;   /* (not "chosen": a slow line may still step down) */
+                plog("player: this channel's %dp variant worked earlier (another gave no picture): taking it", nopic[i].h);
+                break;
+            }
+    }
+    play_channel_ex(vi, proxy_always(chans.items[vis[vi]].url));
 }
 
 static void start_probe(void)
@@ -979,16 +1482,50 @@ static void start_probe(void)
 #define NH(a) ((int)(sizeof a / sizeof a[0]))
 /* 0.4.0: one layout everywhere. X pause, up / down channel, Triangle information, Square the next picture size,
  * Select the size menu (with the stream analysis), O back; films move with left / right (and the left stick). */
-static const UiHint HINTS_VIDEO[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_TRIANGLE, "Info" },
-                                      { UI_BTN_SELECT, "Resolution" }, { UI_BTN_CIRCLE, "Back" } };
-static const UiHint HINTS_VIDEO_SRV[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_SQUARE, "Server" },
-                                          { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_SELECT, "Resolution" }, { UI_BTN_CIRCLE, "Back" } };
-static const UiHint HINTS_RADIO[] = { { UI_BTN_UPDOWN, "Station" }, { UI_BTN_SELECT, "Analyze" }, { UI_BTN_CIRCLE, "Back" } };
-static const UiHint HINTS_FILM[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_LEFTRIGHT, "Seek" }, { UI_BTN_TRIANGLE, "Info" },
-                                     { UI_BTN_SQUARE, "720p" }, { UI_BTN_SELECT, "Resolution" }, { UI_BTN_CIRCLE, "Back" } };
+/* 0.4.1: the bar of the player is built in play_hints() (left: X, Square, Triangle, O; right: L, Select, START) */
 static const UiHint HINTS_PROBE[] = { { UI_BTN_CROSS, "Again" }, { UI_BTN_CIRCLE, "Back" } };
 
 static const Channel *cur_channel(void) { return &chans.items[vis[play_vis]]; }
+
+/* 0.5.0: "Türkçe (AC-3)" for audio track k of the status */
+static void audio_track_name(const TspStatus *st, int k, char *out, size_t cap)
+{
+    static const char *const LANGS[][3] = { { "tur", "Turkish", "Türkçe" }, { "eng", "English", "İngilizce" }, { "deu", "German", "Almanca" },
+        { "fra", "French", "Fransızca" }, { "spa", "Spanish", "İspanyolca" }, { "ita", "Italian", "İtalyanca" }, { "ara", "Arabic", "Arapça" },
+        { "rus", "Russian", "Rusça" }, { "nld", "Dutch", "Felemenkçe" }, { "por", "Portuguese", "Portekizce" }, { "pol", "Polish", "Lehçe" },
+        { "ell", "Greek", "Yunanca" }, { "kur", "Kurdish", "Kürtçe" }, { "fas", "Persian", "Farsça" }, { "aze", "Azerbaijani", "Azerbaycanca" },
+        { "jpn", "Japanese", "Japonca" }, { "kor", "Korean", "Korece" }, { "zho", "Chinese", "Çince" }, { "hin", "Hindi", "Hintçe" } };
+    const char *l = st->a_lang[k], *name = NULL;
+    for (size_t i = 0; i < sizeof LANGS / sizeof LANGS[0]; i++) if (!strcmp(l, LANGS[i][0])) name = LANGS[i][lang_get() == LANG_TR ? 2 : 1];
+    int c = st->a_codec[k];
+    const char *cn = c == TS_CODEC_AAC ? "AAC" : c == TS_CODEC_MPEG_AUDIO ? "MP2" : c == TS_CODEC_AC3 ? "AC-3" : c == TS_CODEC_EAC3 ? "E-AC-3" : "?";
+    char up[4];
+    for (int i = 0; i < 4; i++) up[i] = (char)(l[i] >= 'a' && l[i] <= 'z' ? l[i] - 32 : l[i]);
+    if (name) snprintf(out, cap, "%s (%s)", name, cn);
+    else if (l[0]) snprintf(out, cap, "%s (%s)", up, cn);
+    else snprintf(out, cap, "%d (%s)", k + 1, cn);
+}
+
+/* 0.4.1: the player's button bar. Left: X pause, Square (the next picture size / the server / 720p for a film:
+ * only when it does something), Triangle information, O back. Right: L the channel before (when the list is
+ * behind it), Select the size menu, START favourite. Radio: O back | L, Select analysis, START. Films: left /
+ * right moves through it (right side). paused: X says "Play". Returns the count (h holds 10). */
+static int play_hints(UiHint *h, int radio, int film, int paused, const char *square)
+{
+    int n = 0;
+    int zap = return_state == ST_CHANNELS && nvis > 1;
+    int can_fav = return_state == ST_SOURCES || (section == SEC_LIVE && !in_episodes);
+    if (!radio) h[n++] = (UiHint){ UI_BTN_CROSS, paused ? "Play" : "Pause" };
+    if (!radio && square) h[n++] = (UiHint){ UI_BTN_SQUARE, square };
+    if (!radio) h[n++] = (UiHint){ UI_BTN_TRIANGLE, "Info" };
+    h[n++] = (UiHint){ UI_BTN_CIRCLE, "Back" };
+    h[n++] = (UiHint){ UI_BTN_SEP, "" };
+    if (film) h[n++] = (UiHint){ UI_BTN_LEFTRIGHT, "Seek" };
+    if (zap) h[n++] = (UiHint){ UI_BTN_L, "P. Channel" };          /* (0.4.5: short words, the bar is full) */
+    h[n++] = (UiHint){ UI_BTN_SELECT, radio ? "Analyze" : "Res." };
+    if (can_fav) h[n++] = (UiHint){ UI_BTN_START, "Fav." };
+    return n;
+}
 
 /* a film or episode is playing in the TS player (pause, jumps, resume point) */
 static int film_playing(void) { return play_mode == 2 && nvis && cur_channel()->kind == CH_FILM && tsp_status(); }
@@ -1001,6 +1538,10 @@ static int film_length(void)
 {
     const TspStatus *st = tsp_status();
     if (st && st->dur_ms > 0) film_dur_ms = st->dur_ms;
+    if (!film_dur_ms && nvis) {                              /* 0.5.0: through the server: the length kept with the resume point */
+        int k = resume_find(resume, nresume, cur_channel()->url);
+        if (k >= 0 && resume[k].dur_ms > 0) film_dur_ms = resume[k].dur_ms;
+    }
     return film_dur_ms;
 }
 
@@ -1102,6 +1643,13 @@ static void draw_probe_screen(void)
     scr_lines(T("Stream analysis"), cur_channel()->name, lines, n, err, busy, now_ms(), HINTS_PROBE, NH(HINTS_PROBE));
 }
 
+/* 0.5.0: the star in the player: a favourite channel, or a single stream whose playlist is one */
+static int player_fav(void)
+{
+    if (return_state == ST_SOURCES) return cur_src >= 0 && cur_src < nsources && src_is_fav(cur_src) >= 0;
+    return nvis && play_vis < nvis && ch_fav(vis[play_vis]) >= 0;
+}
+
 static void draw_tsp_screen(int osd)
 {
     const Channel *c = cur_channel();
@@ -1113,10 +1661,13 @@ static void draw_tsp_screen(int osd)
         char ai[96], kr[24];
         fmt_rate(kr, sizeof kr, st->audio_rate);
         if (st->audio_msg[0]) snprintf(ai, sizeof ai, "%s", T_msg(st->audio_msg));
-        else if (st->audio_frames) snprintf(ai, sizeof ai, "AAC   %s   %s", kr, st->audio_ch == 1 ? "mono" : "stereo");
+        else if (st->audio_frames) snprintf(ai, sizeof ai, "%s   %s   %s", st->audio_ac3 == 2 ? "E-AC-3" : st->audio_ac3 ? "AC-3" :
+                                            st->audio_mpeg ? "MP2" : "AAC", kr, st->audio_ch == 1 ? "mono" : "stereo");
         else snprintf(ai, sizeof ai, "%s", T("Buffering..."));
-        scr_radio(c->name, c->group, ai, st->audio_level, now_ms(), HINTS_RADIO, NH(HINTS_RADIO),
-                  st->state == TSP_ENDED ? T("Stream ended") : now_ms() < film_note_until ? film_note : NULL);
+        UiHint rh[10];
+        int nrh = play_hints(rh, 1, 0, 0, NULL);
+        scr_radio(c->name, c->group, ai, st->audio_level, now_ms(), rh, nrh,
+                  st->state == TSP_ENDED ? T("Stream ended") : now_ms() < film_note_until ? film_note : NULL, player_fav());
         return;
     }
     if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields); got_frame = 1; }
@@ -1132,23 +1683,20 @@ static void draw_tsp_screen(int osd)
     sp.backdrop = !tx;
     sp.name = c->name;
     sp.group = c->group;
+    {
+        const char *el = epg_for(c, 1);                      /* 0.4.5: now / next instead of the category */
+        if (el) sp.group = el;
+    }
+    sp.fav = player_fav();
     /* Square: switch an HLS channel between its 720p and 1080p variants (1080p option on, the channel has one) */
-    UiHint hints[8];
-    const UiHint *base = settings.proxy[0] ? HINTS_VIDEO_SRV : HINTS_VIDEO;
-    int nh = settings.proxy[0] ? NH(HINTS_VIDEO_SRV) : NH(HINTS_VIDEO);
-    memcpy(hints, base, sizeof(UiHint) * (size_t)nh);
+    UiHint hints[10];
     static char sq_label[24];
     int sq_next = st && !via_proxy ? res_square_next(st) : -1;
-    if (sq_next >= 0) {                                      /* Square: the next picture size instead of the server */
-        int k = 0;
-        while (k < nh && hints[k].btn != UI_BTN_SQUARE) k++;
-        if (k == nh) { memmove(&hints[2], &hints[1], sizeof(UiHint) * (size_t)(nh - 1)); k = 1; nh++; }
-        hints[k] = (UiHint){ UI_BTN_SQUARE, res_name(st, sq_next, sq_label, sizeof sq_label) };
-    }
+    /* Square: the next picture size; else the server (or back from it); a film: 720p through the server */
+    const char *square = sq_next >= 0 ? res_name(st, sq_next, sq_label, sizeof sq_label) : settings.proxy[0] ? "Server" : NULL;
+    if (film_playing()) square = via_proxy ? "Original" : "720p";
+    int nh = play_hints(hints, 0, film_playing(), st && st->paused, square);
     if (film_playing()) {                                    /* films: pause, jumps, time line */
-        memcpy(hints, HINTS_FILM, sizeof HINTS_FILM);
-        nh = NH(HINTS_FILM);
-        if (via_proxy) hints[3].label = "Original";
         int pos = 0, dur = 0;
         tsp_vod_pos(&pos, &dur);
         dur = film_length();
@@ -1171,8 +1719,7 @@ static void draw_tsp_screen(int osd)
         sp.spinner = 1;
         osd = 1;
     }
-    if (st && st->paused) {                                  /* live TV pauses too */
-        for (int k = 0; k < nh; k++) if (hints[k].btn == UI_BTN_CROSS) hints[k].label = "Play";
+    if (st && st->paused) {                                  /* live TV pauses too (X says "Play": play_hints) */
         sp.paused = 1;
         osd = 1;
     }
@@ -1245,6 +1792,7 @@ static void draw_tsp_screen(int osd)
                 int av;
                 if (st->audio_msg[0]) snprintf(au, sizeof au, "%s", T("off"));
                 else if (!st->audio_frames) snprintf(au, sizeof au, "%s", T("waiting"));
+                else if (st->audio_ac3) snprintf(au, sizeof au, "%s %s %s", st->audio_ac3 == 2 ? "E-AC-3" : "AC-3", kr, st->audio_ch == 1 ? "mono" : "stereo");
                 else if (st->audio_mpeg) snprintf(au, sizeof au, "MP%d %s %s", st->audio_mpeg, kr, st->audio_ch == 1 ? "mono" : "stereo");
                 else snprintf(au, sizeof au, "AAC %s %s", kr, st->audio_ch == 1 ? "mono" : "stereo");
                 if (!st->audio_msg[0] && st->audio_frames && tsp_av_offset(&av)) {
@@ -1282,8 +1830,10 @@ static void draw_mp4_screen(int osd)
     sp.backdrop = !got_frame;
     sp.name = c->name;
     sp.group = c->group;
-    sp.hints = HINTS_VIDEO;
-    sp.nhints = NH(HINTS_VIDEO);
+    sp.fav = player_fav();
+    static UiHint mh[10];
+    sp.nhints = play_hints(mh, 0, 0, 0, settings.proxy[0] ? "Server" : NULL);
+    sp.hints = mh;
     sp.t_ms = now_ms();
     sp.osd = osd || !got_frame;
     if (!got_frame) {
@@ -1320,7 +1870,9 @@ static void src_row(int i, ScrRow *r, void *ctx)
 {
     (void)ctx;
     static char where[96];
+    i = src_at(i);                                           /* 0.5.0: favourites first */
     const Source *s = &sources[i];
+    r->fav = src_is_fav(i) >= 0;
     r->name = s->name;
     r->sub = src_where(s, where, sizeof where);
     switch (s->type) {
@@ -1341,6 +1893,8 @@ static void ch_row(int i, ScrRow *r, void *ctx)
     const Channel *c = &chans.items[vis[i]];
     r->name = c->name;
     r->number = vis[i] + 1;
+    r->fav = ch_fav(vis[i]) >= 0;
+    r->moving = fav_moving && vis[i] == move_ci;
     if (search_fold[0] || in_episodes) r->right = c->group;   /* the category is on the left otherwise */
     if (c->kind == CH_FILM) {                                  /* where it was left */
         int k = resume_find(resume, nresume, c->url);
@@ -1351,7 +1905,7 @@ static void ch_row(int i, ScrRow *r, void *ctx)
 static void draw_sources(void)
 {
     static const UiHint H[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" },
-                                { UI_BTN_SELECT, "Menu" } };
+                                { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
     char right[32];
     snprintf(right, sizeof right, T("%d playlists"), nsources);
     ScrList l = { "Vita IPTV", T("Playlists"), right, nsources, sel, &scroll, src_row, NULL,
@@ -1363,7 +1917,8 @@ static void grp_row(int i, ScrRow *r, void *ctx)
 {
     static char cnt[16];
     (void)ctx;
-    r->name = section == SEC_LIVE && i == 0 ? T("All") : groups[i];
+    r->name = group_title(i);
+    r->fav = section == SEC_LIVE && i == g_fav;
     if (gcount[i] >= 0) { snprintf(cnt, sizeof cnt, "%d", gcount[i]); r->right = cnt; }
 }
 
@@ -1371,18 +1926,22 @@ static void draw_channels(void)
 {
     if (frames_after_load < 4)
         plog("ui: channel screen frame %d (%d groups, %d channels, focus %d)", frames_after_load++, ngroups, nvis, focus);
-    static const UiHint HL[] = { { UI_BTN_UPDOWN, "Category" }, { UI_BTN_CROSS, "Channels" }, { UI_BTN_SQUARE, "Search" },
-                                 { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Back" } };
-    static const UiHint HR[] = { { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_CROSS, "Play" }, { UI_BTN_LR, "Page" },
-                                 { UI_BTN_SQUARE, "Search" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Back" } };
-    static const UiHint HS[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "New search" }, { UI_BTN_SELECT, "Menu" },
-                                 { UI_BTN_CIRCLE, "Back" } };
-    static const UiHint HLV[] = { { UI_BTN_UPDOWN, "Category" }, { UI_BTN_CROSS, "Open" }, { UI_BTN_SELECT, "Menu" },
-                                  { UI_BTN_CIRCLE, "Back" } };
-    static const UiHint HRV[] = { { UI_BTN_UPDOWN, "Move" }, { UI_BTN_CROSS, "Play" }, { UI_BTN_LR, "Page" },
-                                  { UI_BTN_SQUARE, "Search" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Back" } };
-    static const UiHint HRS[] = { { UI_BTN_UPDOWN, "Move" }, { UI_BTN_CROSS, "Open" }, { UI_BTN_LR, "Page" },
-                                  { UI_BTN_SQUARE, "Search" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Back" } };
+    /* 0.4.1: X, Square, O on the left; L/R page, Select (and START on channels) on the right */
+    static const UiHint HL[] = { { UI_BTN_CROSS, "Channels" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
+                                 { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
+    static const UiHint HR[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
+                                 { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+    static const UiHint HS[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "New search" }, { UI_BTN_CIRCLE, "Back" },
+                                 { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+    static const UiHint HRF[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_TRIANGLE, "Reorder" }, { UI_BTN_CIRCLE, "Back" },
+                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+    static const UiHint HMV[] = { { UI_BTN_UPDOWN, "Up / down" }, { UI_BTN_TRIANGLE, "Save" }, { UI_BTN_CIRCLE, "Cancel" } };
+    static const UiHint HLV[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_CIRCLE, "Back" },
+                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
+    static const UiHint HRV[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
+                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
+    static const UiHint HRS[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
+                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
     char sub[160], right[48], title[IPTV_NAME_MAX + 32];
     int searching = search_fold[0] != 0, vod = section != SEC_LIVE;
     if (searching) {
@@ -1392,7 +1951,7 @@ static void draw_channels(void)
         snprintf(sub, sizeof sub, "%s", series_name);
         snprintf(right, sizeof right, T("%d episodes"), nvis);
     } else {
-        snprintf(sub, sizeof sub, "%s", vod ? (ngroups ? groups[cur_group] : "") : cur_group == 0 ? T("All") : groups[cur_group]);
+        snprintf(sub, sizeof sub, "%s", vod ? (ngroups ? groups[cur_group] : "") : group_title(cur_group));
         snprintf(right, sizeof right, T(section == SEC_FILMS ? "%d films" : section == SEC_SERIES ? "%d series" : "%d channels"), nvis);
     }
     snprintf(title, sizeof title, "%s%s%s", sources[cur_src].name, vod ? "  -  " : "",
@@ -1410,10 +1969,22 @@ static void draw_channels(void)
                                              : "No channels");
     const UiHint *hr = vod ? (section == SEC_SERIES && !in_episodes ? HRS : HRV) : HR;
     int nhr = vod ? NH(HRV) : NH(HR);
+    if (!vod && cur_group == g_fav && g_fav >= 0 && nvis > 1) { hr = HRF; nhr = NH(HRF); }   /* 0.4.5: Triangle moves */
+    if (fav_moving) { hr = HMV; nhr = NH(HMV); }
     d.hints = searching ? HS : focus == 0 ? (vod ? HLV : HL) : hr;
     d.nhints = searching ? NH(HS) : focus == 0 ? (vod ? NH(HLV) : NH(HL)) : nhr;
     d.status = status;
     d.status_err = status_err;
+    {   /* 0.4.5: the selected channel's now / next on the status line, after half a second on it */
+        static int last_ci = -1;
+        static unsigned since;
+        if (!vod && !status[0] && nvis && sel < nvis && (focus == 1 || searching) && !fav_moving) {
+            int ci = vis[sel];
+            if (ci != last_ci) { last_ci = ci; since = now_ms(); }
+            const char *el = epg_for(&chans.items[ci], now_ms() - since > 500);
+            if (el) { d.status = el; d.status_err = 0; }
+        }
+    }
     scr_dual(&d);
 }
 
@@ -1496,6 +2067,7 @@ static int form_kind, form_sel, edit_index;              /* edit_index -1 = new 
 static int f_type;                                        /* 0 Xtream, 1 M3U, 2 single stream */
 static char f_name[IPTV_NAME_MAX], f_url[IPTV_URL_MAX], f_user[IPTV_CRED_MAX], f_pass[IPTV_CRED_MAX], f_proxy[IPTV_URL_MAX];
 static int f_auto, f_lang, f_adult, f_hd, f_res;
+static const char *const AUTO_NAMES[3] = { "Off", "When needed", "Always" };
 static const char *const LANG_NAMES[3] = { "Automatic (system)", "English", "Türkçe" };
 static const char *const TYPE_NAMES[3] = { "Xtream (server + username + password)", "M3U playlist (link)", "Single stream (link)" };
 
@@ -1543,8 +2115,10 @@ static int source_field_enabled(int i)
 }
 
 #define SRC_FIELDS 7                                     /* (+1: "Delete playlist" when editing one) */
-#define SET_FIELDS 9
+#define SET_FIELDS 10                                    /* (0.5.0: + "Clear Recently Watched") */
 static int confirm_delete;                               /* the edit form's "Delete playlist?" box */
+static int confirm_clear_recent;                         /* 0.5.0: the settings' "Clear recently watched?" box */
+static int server_test_pending;                          /* 0.5.0: "Test server" runs after the frame (it draws its own) */
 static int filters_changed;                              /* settings saved: 1 adult on, 2 adult off, 4 4K on, 8 4K off */
 
 static int src_field_count(void) { return edit_index >= 0 ? SRC_FIELDS + 1 : SRC_FIELDS; }
@@ -1600,18 +2174,24 @@ static void save_source_form(void)
     snprintf(s.url, sizeof s.url, "%s", f_url);
     snprintf(s.user, sizeof s.user, "%s", f_user);          /* single stream: Referer and User-Agent */
     snprintf(s.pass, sizeof s.pass, "%s", f_pass);
-    if (edit_index >= 0) sources[edit_index] = s;
-    else {
+    int keep = edit_index;                                   /* the row that stays selected */
+    if (edit_index >= 0) {
+        char ok[FAV_SRC_MAX], nk[FAV_SRC_MAX];               /* 0.5.0: a new address keeps its favourites */
+        fav_source_key(&sources[edit_index], ok, sizeof ok);
+        fav_source_key(&s, nk, sizeof nk);
+        if (fav_rename_source(&favs, ok, nk)) save_favorites();
+        sources[edit_index] = s;
+    } else {
         int n = 0;                                           /* new entries go before the auto-found files */
         while (n < nsources && !sources[n].auto_added) n++;
         if (nsources >= MAX_SOURCES) { set_status(1, "Too many sources", NULL); return; }
         memmove(&sources[n + 1], &sources[n], sizeof(Source) * (size_t)(nsources - n));
         sources[n] = s;
         nsources++;
-        sel = n;
+        keep = n;
     }
     form_kind = FORM_NONE;
-    if (save_sources() == 0)
+    if (save_sources(keep) == 0)
         set_status(0, converted ? "Saved as Xtream (faster; live TV, films and series)" : "Saved", NULL);
 }
 
@@ -1655,10 +2235,8 @@ static void delete_source(int i)
     if (i < 0 || i >= nsources) return;
     memmove(&sources[i], &sources[i + 1], sizeof(Source) * (size_t)(nsources - i - 1));
     nsources--;
-    sel = i < nsources ? i : nsources - 1;
-    if (sel < 0) sel = 0;
     form_kind = FORM_NONE;
-    if (save_sources() == 0) set_status(0, "Deleted", NULL);
+    if (save_sources(i < nsources ? i : nsources - 1) == 0) set_status(0, "Deleted", NULL);
 }
 
 static void form_activate(void)
@@ -1677,13 +2255,14 @@ static void form_activate(void)
     } else {
         switch (form_sel) {
         case 0: ime_open("Transcoding server (e.g. http://192.168.1.20:8090)", f_proxy, 0, IME_FIELD, f_proxy, sizeof f_proxy); break;
-        case 1: f_auto = !f_auto; break;
+        case 1: f_auto = (f_auto + 1) % 3; break;
         case 2: f_lang = (f_lang + 1) % 3; break;
         case 3: f_adult = !f_adult; break;
         case 4: f_hd = !f_hd; break;
         case 5: f_res = (f_res + 1) % RES_N; break;
-        case 6: test_server(); break;
-        case 7: save_settings_form(); break;
+        case 6: server_test_pending = 1; break;              /* (0.5.0: not inside the frame: it crashed the app) */
+        case 7: confirm_clear_recent = 1; break;
+        case 8: save_settings_form(); break;
         default: form_kind = FORM_NONE; status[0] = 0; break;
         }
     }
@@ -1691,8 +2270,8 @@ static void form_activate(void)
 
 static void draw_form(void)
 {
-    static const UiHint H[] = { { UI_BTN_UPDOWN, "Move" }, { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_START, "Save" },
-                                { UI_BTN_CIRCLE, "Cancel" } };
+    static const UiHint H[] = { { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_CIRCLE, "Cancel" },
+                                { UI_BTN_SEP, "" }, { UI_BTN_START, "Save" } };
     ScrField f[SET_FIELDS > SRC_FIELDS + 1 ? SET_FIELDS : SRC_FIELDS + 1];
     char stars[IPTV_CRED_MAX];
     if (form_kind == FORM_SOURCE) {
@@ -1718,15 +2297,17 @@ static void draw_form(void)
         }
     } else {
         f[0] = (ScrField){ T("Transcoding server"), f_proxy, SCR_F_TEXT, 1 };
-        f[1] = (ScrField){ T("Use automatically"), T(f_auto ? "On" : "Off"), SCR_F_TOGGLE, 1 };
+        f[1] = (ScrField){ T("Use automatically"), T(AUTO_NAMES[f_auto]), SCR_F_CHOICE, 1 };   /* 0.4.5: off / when needed / always */
         f[2] = (ScrField){ T("Language"), T(LANG_NAMES[f_lang]), SCR_F_CHOICE, 1 };
         f[3] = (ScrField){ T("Hide adult channels"), T(f_adult ? "On" : "Off"), SCR_F_TOGGLE, 1 };
         f[4] = (ScrField){ T("Hide channels named 4K / UHD"), T(f_hd ? "On" : "Off"), SCR_F_TOGGLE, 1 };
         f[5] = (ScrField){ T("Preferred resolution"), T(RES_NAMES[f_res]), SCR_F_CHOICE, 1 };
         f[6] = (ScrField){ T("Test server"), NULL, SCR_F_BUTTON, 1 };
-        f[7] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
-        f[8] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
+        f[7] = (ScrField){ T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 };
+        f[8] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
+        f[9] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
         scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), f, SET_FIELDS, form_sel, H, NH(H), status, status_err);
+        if (confirm_clear_recent) scr_confirm(T("Clear recently watched?"), T("The recently watched channels of every playlist are removed. Favorites stay."));
     }
 }
 
@@ -1743,12 +2324,12 @@ static void apply_filters_now(void)
         return;
     }
     if (how & (2 | 8)) { leave_episodes(); load_start(s); return; }
-    char gname[IPTV_GROUP_MAX], cname[IPTV_NAME_MAX] = "";
-    snprintf(gname, sizeof gname, "%s", groups[cur_group]);
+    char cname[IPTV_NAME_MAX] = "";
+    group_remember();
     if (nvis && sel < nvis) snprintf(cname, sizeof cname, "%s", chans.items[vis[sel]].name);
     int was_focus = focus, before = chans.count;
     build_groups();
-    for (int k = 1; k < ngroups; k++) if (!strcmp(groups[k], gname)) { cur_group = k; break; }
+    group_restore();
     rebuild_visible();
     for (int i = 0; i < nvis; i++) if (!strcmp(chans.items[vis[i]].name, cname)) { sel = i; break; }
     if (ngroups > 1) focus = nvis ? was_focus : 0;
@@ -1757,7 +2338,6 @@ static void apply_filters_now(void)
 
 /* ---- power: keep the screen on for video and radio; for radio also block standby */
 static unsigned last_tick;
-static int suspend_locked;
 
 static int radio_playing(void)
 {
@@ -1766,46 +2346,12 @@ static int radio_playing(void)
     return st && st->audio_only && st->state < TSP_ENDED;
 }
 
-/* Radio: Square turns the screen off (its light, not the system: the Wi-Fi and the sound go on; putting the
- * Vita to sleep stopped both). Any button turns it on again at the brightness it had. */
-static int screen_off, screen_brightness = -1;
-
-static void screen_off_set(int off)
-{
-    if (off == screen_off) return;
-    if (off) {
-        int b = -1;
-        if (sceRegMgrGetKeyInt("/CONFIG/DISPLAY", "brightness", &b) < 0 || b <= 0) b = -1;
-        if (b < 0) {                                         /* cannot put it back afterwards: do not turn it off */
-            snprintf(film_note, sizeof film_note, "%s", T("The screen cannot be turned off here"));
-            film_note_until = now_ms() + 3000;
-            plog("screen: brightness not readable, staying on");
-            return;
-        }
-        screen_brightness = b;
-        int r = sceAVConfigSetDisplayBrightness(0);
-        plog("screen: off (brightness was %d) -> 0x%08X", b, (unsigned)r);
-        if (r < 0) return;
-        screen_off = 1;
-    } else {
-        int r = sceAVConfigSetDisplayBrightness(screen_brightness > 0 ? screen_brightness : 65536 / 2);
-        plog("screen: on (brightness %d) -> 0x%08X", screen_brightness, (unsigned)r);
-        screen_off = 0;
-    }
-}
-
 static void keep_awake(void)
 {
+    /* 0.4.0: no sceKernelPowerLock for the radio any more: closed with the PS button while a station was
+     * playing, the app left the lock behind and the Vita hung when the next app started (every version
+     * since radio). The ticks below keep it awake the same way while the app runs. */
     int radio = radio_playing();
-    if (radio && !suspend_locked) {
-        int r = sceKernelPowerLock(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
-        plog("power: lock standby for radio -> 0x%08X", (unsigned)r);
-        suspend_locked = 1;
-    } else if (!radio && suspend_locked) {
-        sceKernelPowerUnlock(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
-        plog("power: unlock standby");
-        suspend_locked = 0;
-    }
     if (state != ST_PLAYING) return;
     int video = 0, audio = radio;
     if (play_mode == 0) video = 1;
@@ -1939,7 +2485,7 @@ int main(void)
     vita2d_init();
     vita2d_set_clear_color(UI_BG);
     pgf = vita2d_load_default_pgf();
-    ui_init(pgf);
+    ui_init(pgf, settings.plain_letters);
     splash_img = vita2d_load_PNG_file("app0:resources/splash.png");
     wait_img = vita2d_load_PNG_file("app0:resources/waiting.png");   /* behind loading screens */
     scr_set_backdrop(wait_img);
@@ -1959,12 +2505,13 @@ int main(void)
     sceSslInit(300 * 1024);
     sceHttpInit(1024 * 1024);
     cio_init();
+    epg_start();                                             /* 0.4.5: now / next of Xtream channels */
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
     splash_frame(T("Loading playlists..."));
     sceIoMkdir(DATA_DIR, 0777);
     player_log_reset();
-    plog("version %s", APP_VERSION);
+    plog("version %s, built %s", APP_VERSION, APP_BUILD);
     {   /* a video plugin (reAvPlayer) patches the system decoder and breaks normal 720p playback */
         FILE *cf = fopen("ur0:tai/config.txt", "rb");
         if (cf) {
@@ -1974,10 +2521,13 @@ int main(void)
         }
     }
     plog("settings: server %s", settings.proxy[0] ? settings.proxy : "none");
+    plog("font: %s", ui_font_state() == 2 ? "Latin system font (Turkish letters as they are)" :
+         ui_font_state() == 1 ? (settings.plain_letters ? "Latin system font, Turkish letters plain (plain_letters=1)" : "default font only (Turkish letters plain)") : "none");
     plog("clocks: cpu 444 -> 0x%08X, bus 222 -> 0x%08X, gpu 222 -> 0x%08X, xbar 166 -> 0x%08X",
          (unsigned)clocks_rc[0], (unsigned)clocks_rc[1], (unsigned)clocks_rc[2], (unsigned)clocks_rc[3]);
     plog("https: %s", cio_available() ? "built-in TLS (mbedTLS)" : "system only (built without TLS)");
     channel_list_init(&chans);
+    load_favorites();                                        /* (before the playlists: they are sorted by it) */
     load_sources();
     while (now_ms() - t0 < 1500) splash_frame(T("Loading playlists..."));   /* let the logo be seen */
     if (splash_img) { vita2d_wait_rendering_done(); vita2d_free_texture(splash_img); splash_img = NULL; }
@@ -1992,12 +2542,16 @@ int main(void)
             if (lstick_ud && (menus || state == ST_SOURCES)) { p |= lstick_ud > 0 ? SCE_CTRL_DOWN : SCE_CTRL_UP; lstick_ud = 0; }
         }
         if (ime_active) p = 0;                               /* the keyboard owns the buttons */
-        if (screen_off && (p || !radio_playing())) { screen_off_set(0); p = 0; }   /* any button: screen on again */
         keep_awake();
         update_clocks(state == ST_PLAYING || job_active || job_pending);
         if (job_pending) {                                   /* load the list now, outside a frame */
             job_pending = 0;
             load_run();
+            p = 0;
+        }
+        if (server_test_pending) {                           /* 0.5.0: "Test server" too (it draws its own "busy" frame) */
+            server_test_pending = 0;
+            test_server();
             p = 0;
         }
         frame_begin();
@@ -2008,7 +2562,15 @@ int main(void)
             vita2d_swap_buffers();
             continue;
         }
-        if (form_kind != FORM_NONE && confirm_delete) {      /* "Delete this playlist?" over the edit form */
+        if (form_kind != FORM_NONE && confirm_clear_recent) {   /* 0.5.0: "Clear recently watched?" over the settings */
+            if (p & SCE_CTRL_CROSS) {
+                confirm_clear_recent = 0;
+                int n = clear_recent();
+                set_status(0, n ? "Recently watched cleared" : "Nothing to clear", NULL);
+            } else if (p & SCE_CTRL_CIRCLE) confirm_clear_recent = 0;
+            draw_form();
+        }
+        else if (form_kind != FORM_NONE && confirm_delete) {      /* "Delete this playlist?" over the edit form */
             if (p & SCE_CTRL_CROSS) { confirm_delete = 0; delete_source(edit_index); }
             else if (p & SCE_CTRL_CIRCLE) confirm_delete = 0;
             if (form_kind != FORM_NONE) draw_form(); else draw_sources();
@@ -2018,7 +2580,8 @@ int main(void)
             if (p & SCE_CTRL_UP) form_move(-1);
             if (form_kind == FORM_SOURCE && form_sel == 0 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
                 set_form_type((f_type + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3);
-            if (form_kind == FORM_SETTINGS && form_sel == 1 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_auto = !f_auto;
+            if (form_kind == FORM_SETTINGS && form_sel == 1 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
+                f_auto = (f_auto + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3;
             if (form_kind == FORM_SETTINGS && form_sel == 3 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_adult = !f_adult;
             if (form_kind == FORM_SETTINGS && form_sel == 4 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_hd = !f_hd;
             if (form_kind == FORM_SETTINGS && form_sel == 5 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
@@ -2047,12 +2610,12 @@ int main(void)
                     /* adding a playlist and reading them again happen on the playlists screen */
                     if (state == ST_CHANNELS && (menu_sel == MENU_ADD || menu_sel == MENU_RELOAD)) {
                         leave_episodes();
-                        state = ST_SOURCES; sel = cur_src; scroll = 0;
+                        state = ST_SOURCES; sel = src_disp(cur_src); scroll = 0;
                     }
                     switch (menu_sel) {
                     case MENU_ADD: open_source_form(-1); break;
                     case MENU_SETTINGS: open_settings_form(); break;
-                    case MENU_RELOAD: load_sources(); load_settings(); break;
+                    case MENU_RELOAD: load_favorites(); load_sources(); load_settings(); break;
                     case MENU_ABOUT: about_open = 1; break;
                     default: quit = 1; break;
                     }
@@ -2066,7 +2629,11 @@ int main(void)
                     for (int k = 0; k < MENU_N; k++) items[k] = T(MENU_ITEMS[k]);
                     scr_menu(T("Menu"), items, MENU_N, menu_sel);
                 }
-                if (about_open) scr_about(APP_VERSION);
+                if (about_open) {                            /* 0.4.5: with the build time (which build is running) */
+                    char ab[96];
+                    snprintf(ab, sizeof ab, "%s  \xC2\xB7  %s %s", APP_VERSION, T("built"), APP_BUILD);
+                    scr_about(ab);
+                }
             }
         }
         else if (state == ST_SOURCES) {
@@ -2076,19 +2643,24 @@ int main(void)
                 if (p & SCE_CTRL_CIRCLE) section_menu = 0;
                 if ((p & SCE_CTRL_CROSS) && nsources) {
                     section_menu = 0;
-                    load_begin(&sources[sel], section_sel == 0 ? LOAD_LIVE : section_sel == 1 ? LOAD_FILM_CATS : LOAD_SERIES_CATS, NULL, 0);
+                    load_begin(&sources[src_at(sel)], section_sel == 0 ? LOAD_LIVE : section_sel == 1 ? LOAD_FILM_CATS : LOAD_SERIES_CATS, NULL, 0);
                 }
             } else {
                 move_sel(p, nsources);
                 if (p & SCE_CTRL_SELECT) { menu_open = 1; menu_sel = 0; }
                 if (p & SCE_CTRL_SQUARE) open_source_form(-1);
                 if ((p & SCE_CTRL_TRIANGLE) && nsources) {      /* edit (deleting is at the end of the form) */
-                    if (sources[sel].auto_added) set_status(0, "This entry is a file in ux0:data/VitaIPTV (delete or rename it there)", NULL);
-                    else open_source_form(sel);
+                    if (sources[src_at(sel)].auto_added) set_status(0, "This entry is a file in ux0:data/VitaIPTV (delete or rename it there)", NULL);
+                    else open_source_form(src_at(sel));
+                }
+                if ((p & SCE_CTRL_START) && nsources) {         /* 0.5.0: a favourite playlist goes to the top */
+                    int i = src_at(sel), r = fav_toggle_source(i);
+                    sel = src_disp(i);
+                    set_status(r < 0, fav_note(r), NULL);
                 }
                 if ((p & SCE_CTRL_CROSS) && nsources) {
-                    const Source *s = &sources[sel];
-                    cur_src = sel;
+                    const Source *s = &sources[src_at(sel)];
+                    cur_src = src_at(sel);
                     search_q[0] = search_fold[0] = 0;
                     if (s->type == SRC_STREAM) {
                         section = SEC_LIVE;
@@ -2103,6 +2675,7 @@ int main(void)
                                 plog("list: the link is too long for its User-Agent/Referer (it plays without them)");
                             if (iptv_is_film_url(s->url)) chans.items[0].kind = CH_FILM;
                             chans.count = chans.cap = 1;
+                            fav_rank_n = nfav_ch = 0;
                             free(vis);
                             vis = malloc(sizeof(int));
                             vis[0] = 0;
@@ -2127,7 +2700,7 @@ int main(void)
                 draw_sources();
                 if (section_menu && nsources) {
                     const char *items[3] = { T("Live TV"), T("Films"), T("Series") };
-                    scr_menu(sources[sel].name, items, 3, section_sel);
+                    scr_menu(sources[src_at(sel)].name, items, 3, section_sel);
                 }
             }
         }
@@ -2143,6 +2716,14 @@ int main(void)
                     play_channel(resume_vi);
                 }
                 if (p & SCE_CTRL_CIRCLE) resume_ask = 0;
+                p = 0;
+                rstick_ud = lstick_ud = 0;
+            }
+            if (fav_moving) {                                /* 0.4.5: moving a favourite: only up / down, Triangle, O */
+                int dir = (p & SCE_CTRL_DOWN) || rstick_ud > 0 ? 1 : (p & SCE_CTRL_UP) || rstick_ud < 0 ? -1 : 0;
+                if (dir) fav_move_step(dir);
+                if (p & SCE_CTRL_TRIANGLE) fav_move_end(1);
+                else if (p & SCE_CTRL_CIRCLE) fav_move_end(0);
                 p = 0;
                 rstick_ud = lstick_ud = 0;
             }
@@ -2175,7 +2756,7 @@ int main(void)
                     if (searching) clear_search();          /* first O leaves the search */
                     else if (in_episodes) leave_episodes();
                     else if (ngroups > 1 || vod) focus = 0;
-                    else { state = ST_SOURCES; sel = cur_src; scroll = 0; }
+                    else { state = ST_SOURCES; sel = src_disp(cur_src); scroll = 0; }
                 }
             } else {                                         /* category list */
                 if (ngroups) {
@@ -2191,11 +2772,22 @@ int main(void)
                         load_begin(&sources[cur_src], section == SEC_FILMS ? LOAD_FILMS : LOAD_SERIES, vcats[cur_group].id, cur_group);
                     else if (nvis) focus = 1;
                 }
-                if (p & SCE_CTRL_CIRCLE) { leave_episodes(); state = ST_SOURCES; sel = cur_src; scroll = 0; }
+                if (p & SCE_CTRL_CIRCLE) { leave_episodes(); state = ST_SOURCES; sel = src_disp(cur_src); scroll = 0; }
             }
+            if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_TRIANGLE) && !vod && !searching && focus == 1 &&
+                cur_group == g_fav && g_fav >= 0 && nvis > 1 && sel < nvis)
+                fav_move_begin(vis[sel]);                    /* 0.4.5: reorder the favourites */
             if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SQUARE) && (!vod || nvis || searching))
                 ime_open("Search channels", search_q, 0, IME_SEARCH, NULL, 0);
             if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SELECT)) { menu_open = 1; menu_sel = 0; }   /* the menu */
+            if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_START)) {   /* 0.5.0: favourite channel */
+                if (vod) set_status(0, "Films and series cannot be favorites yet", NULL);
+                else if (nvis && (focus == 1 || searching) && sel < nvis) {
+                    int ci = vis[sel], r = fav_toggle_channel(ci);
+                    if (r >= 0) fav_regroup(ci);
+                    set_status(r < 0, fav_note(r), NULL);
+                }
+            }
             if (state == ST_CHANNELS && !job_active) {
                 draw_channels();
                 if (resume_ask && resume_vi < nvis) {
@@ -2219,17 +2811,21 @@ int main(void)
             const TspStatus *ms = play_mode == 2 ? tsp_status() : NULL;
             if (res_menu && play_mode == 1) res_menu = 0;
             if (res_menu) {
-                /* Select: the picture sizes (HLS, newest first) or the one size it has; the analysis at the end */
-                static char names[TSP_MAX_VARIANTS + 2][64];
-                const char *items[TSP_MAX_VARIANTS + 2];
+                /* Select: the picture sizes (HLS, newest first) or the one size it has; 0.5.0: the transcoding server
+                 * (on / off) and the audio tracks; the analysis at the end */
+                enum { MA_NONE, MA_AUTO, MA_VARIANT, MA_SERVER, MA_AUDIO, MA_ANALYSIS };
+                static char names[TSP_MAX_VARIANTS + TSP_MAX_AUDIO + 4][72];
+                const char *items[TSP_MAX_VARIANTS + TSP_MAX_AUDIO + 4];
+                int act[TSP_MAX_VARIANTS + TSP_MAX_AUDIO + 4], arg[TSP_MAX_VARIANTS + TSP_MAX_AUDIO + 4];
                 int n = 0, nv = ms && !via_proxy && !film ? ms->hls_nv : 0;
                 int radio = ms && ms->audio_only && ms->state != TSP_ERROR;
+                #define MENU_ADD(a_, g_) do { items[n] = names[n]; act[n] = (a_); arg[n] = (g_); n++; } while (0)
                 if (nv > 0) {
                     if (settings.res_pref) snprintf(names[n], sizeof names[n], "%s%s (%s)", res_want ? "" : "> ", T("Settings"),
                                                      res_pref_name(settings.res_pref));
                     else snprintf(names[n], sizeof names[n], "%s%s", res_want ? "" : "> ", T("Automatic"));
-                    items[n] = names[n]; n++;
-                    for (int i = nv - 1; i >= 0; i--, n++) {
+                    MENU_ADD(MA_AUTO, 0);
+                    for (int i = nv - 1; i >= 0; i--) {
                         char nm[24];
                         res_name(ms, i, nm, sizeof nm);
                         int cur = res_want && i == ms->hls_vcur;
@@ -2237,23 +2833,36 @@ int main(void)
                             snprintf(names[n], sizeof names[n], "%s%s   %dx%d, %ld.%ld Mbit/s", cur ? "> " : "", nm, ms->hls_vw[i], ms->hls_vh[i],
                                      ms->hls_vbw[i] / 1000000, ms->hls_vbw[i] / 100000 % 10);
                         else snprintf(names[n], sizeof names[n], "%s%s", cur ? "> " : "", nm);
-                        items[n] = names[n];
+                        MENU_ADD(MA_VARIANT, i);
                     }
                 } else {                                     /* one size: what it is (X does nothing there) */
                     if (radio) snprintf(names[n], sizeof names[n], "%s", T("Sound only (radio)"));
                     else if (ms && ms->width > 0) snprintf(names[n], sizeof names[n], T("%dx%d (the only size)"), ms->width, ms->height);
                     else snprintf(names[n], sizeof names[n], "%s", T("Size not known yet"));
-                    items[n] = names[n]; n++;
+                    MENU_ADD(MA_NONE, 0);
                 }
+                if (settings.proxy[0] && play_mode == 2 && !radio) {   /* 0.5.0: this channel through the server, or back */
+                    snprintf(names[n], sizeof names[n], "%s", T(via_proxy ? "Direct (without the server)" : "Through the Server"));
+                    MENU_ADD(MA_SERVER, 0);
+                }
+                if (ms && !via_proxy && ms->a_n > 1)            /* 0.5.0: the audio tracks */
+                    for (int k = 0; k < ms->a_n && k < TSP_MAX_AUDIO; k++) {
+                        char ln[40];
+                        audio_track_name(ms, k, ln, sizeof ln);
+                        snprintf(names[n], sizeof names[n], "%s%s: %s", k == ms->a_cur ? "> " : "", T("Audio"), ln);
+                        MENU_ADD(MA_AUDIO, k);
+                    }
                 snprintf(names[n], sizeof names[n], "%s", T("Stream analysis"));
-                items[n] = names[n]; n++;
+                MENU_ADD(MA_ANALYSIS, 0);
+                #undef MENU_ADD
                 if (res_menu_sel >= n) res_menu_sel = n - 1;
                 if (p & SCE_CTRL_DOWN) res_menu_sel = (res_menu_sel + 1) % n;
                 if (p & SCE_CTRL_UP) res_menu_sel = (res_menu_sel + n - 1) % n;
                 if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) res_menu = 0;
                 else if (p & SCE_CTRL_CROSS) {
                     res_menu = 0;
-                    if (res_menu_sel == n - 1) {
+                    int a = act[res_menu_sel], g = arg[res_menu_sel];
+                    if (a == MA_ANALYSIS) {
                         if (film) {
                             int pos = 0, dur = 0;
                             tsp_vod_pos(&pos, &dur);
@@ -2261,18 +2870,33 @@ int main(void)
                             probe_return_ms = pos;
                         }
                         start_probe();
-                    } else if (nv <= 0) {
-                        /* the size line: nothing to choose */
-                    } else if (res_menu_sel == 0) {
+                    } else if (a == MA_AUTO) {
                         res_want = 0; res_bw = 0; res_manual = 0;
                         plog("player: HLS automatic size (menu)");
                         play_channel_ex(play_vis, 0);
-                    } else {
-                        int i = nv - res_menu_sel;
+                    } else if (a == MA_VARIANT) {
                         char nm[24];
-                        plog("player: HLS %s (menu)", res_name(ms, i, nm, sizeof nm));
-                        res_choose(ms, i, 1);
+                        plog("player: HLS %s (menu)", res_name(ms, g, nm, sizeof nm));
+                        res_choose(ms, g, 1);
                         play_channel_ex(play_vis, 0);
+                    } else if (a == MA_SERVER || a == MA_AUDIO) {
+                        int to_proxy = a == MA_SERVER ? !via_proxy : via_proxy;
+                        if (a == MA_AUDIO) {                 /* the track, and its language for the next channels */
+                            aud_id = ms->a_id[g];
+                            snprintf(aud_lang, sizeof aud_lang, "%s", ms->a_lang[g]);
+                            plog("player: audio track %d (%s) (menu)", aud_id, aud_lang[0] ? aud_lang : "-");
+                        } else {
+                            auto_proxy_tried = 1;            /* (not back again by itself) */
+                            plog("player: %s (menu)", to_proxy ? "through the transcoding server" : "direct, without the server");
+                        }
+                        if (film) {                          /* a film goes on where it is */
+                            int pos = 0, dur = 0;
+                            tsp_vod_pos(&pos, &dur);
+                            save_film_position();
+                            film_start_ms = pos;
+                            seek_target = -1;
+                        }
+                        play_channel_ex(play_vis, to_proxy);
                     }
                 }
                 if (play_mode == 1) draw_probe_screen();
@@ -2291,11 +2915,16 @@ int main(void)
                 if (film) save_film_position();
                 seek_target = -1;
                 film_scrub = 0;
+                nnopic = 0;                                  /* (see nopic_remember) */
                 stop_all();
                 tsp_vod_cache_clear();                       /* the film's index was kept for jumps */
                 state = return_state;
-                if (state == ST_CHANNELS) { sel = play_vis; focus = 1; draw_channels(); }
-                else draw_sources();
+                if (state == ST_CHANNELS) {
+                    sel = play_vis; focus = 1;
+                    if (fav_dirty && play_vis < nvis) fav_regroup(vis[play_vis]);   /* 0.5.0: changed while playing */
+                    draw_channels();
+                }
+                else { sel = src_disp(cur_src); draw_sources(); }   /* (a single stream: its row, also after START) */
             } else {
                 const TspStatus *fs = play_mode == 2 ? tsp_status() : NULL;
                 int pos = 0, dur = 0;
@@ -2344,9 +2973,18 @@ int main(void)
                 /* previous / next channel, or film / episode in the list */
                 int zap = return_state == ST_CHANNELS && nvis > 1;
                 int next = (p & SCE_CTRL_DOWN) ? 1 : (p & SCE_CTRL_UP) ? -1 : 0;
-                if (next && zap) {
+                int target = next && zap ? (play_vis + nvis + next) % nvis : -1;
+                if ((p & SCE_CTRL_LTRIGGER) && zap) {         /* 0.4.0: L goes back to the channel before */
+                    target = prev_visible();
+                    if (target < 0) {
+                        snprintf(film_note, sizeof film_note, "%s", T(prev_chan < 0 ? "No channel before this one yet" : "The channel before is not in this list"));
+                        film_note_until = now_ms() + 2500;
+                        osd_until_us = now_ms() + 2500;
+                    }
+                }
+                if (target >= 0) {
                     if (film) save_film_position();
-                    int vi = (play_vis + nvis + next) % nvis;
+                    int vi = target;
                     film_start_ms = 0;
                     if (chans.items[vis[vi]].kind == CH_FILM) {      /* a film goes on where it was left */
                         int k = resume_find(resume, nresume, chans.items[vis[vi]].url);
@@ -2357,16 +2995,22 @@ int main(void)
                     film = film_playing();
                     fs = play_mode == 2 ? tsp_status() : NULL;
                 }
-                if ((p & SCE_CTRL_CROSS) && fs) tsp_pause(!fs->paused);   /* (START: favourites in 0.5.0) */
+                if ((p & SCE_CTRL_CROSS) && fs) tsp_pause(!fs->paused);
+                if (p & SCE_CTRL_START) {                        /* 0.5.0: favourite (a single stream: its playlist) */
+                    int r = -1;
+                    if (return_state == ST_SOURCES) r = fav_toggle_source(cur_src);
+                    else if (section == SEC_LIVE && !in_episodes) r = fav_toggle_channel(vis[play_vis]);
+                    snprintf(film_note, sizeof film_note, "%s", r < 0 && (section != SEC_LIVE || in_episodes)
+                             ? T("Films and series cannot be favorites yet") : fav_note(r));
+                    film_note_until = now_ms() + 2500;
+                    osd_until_us = now_ms() + 2500;
+                }
                 if (p & SCE_CTRL_TRIANGLE) show_info = !show_info;
                 if (p & SCE_CTRL_SELECT) {                       /* the size menu; one size: on the analysis line */
                     res_menu = 1;
                     res_menu_sel = fs && fs->hls_nv > 0 && !via_proxy && !film ? 0 : 1;
                 }
-                if ((p & SCE_CTRL_SQUARE) && radio_playing()) {   /* radio: screen off, sound and Wi-Fi go on */
-                    screen_off_set(1);
-                    p &= ~(unsigned)SCE_CTRL_SQUARE;
-                }
+                if (radio_playing()) p &= ~(unsigned)SCE_CTRL_SQUARE;   /* (radio: no sizes; 0.4.0: the screen-off that never worked is gone) */
                 if ((p & SCE_CTRL_SQUARE) && film && fs) {
                     /* a film file has one picture size; a smaller one needs the transcoding server, which
                      * converts it to 720p from where it is now */
@@ -2431,6 +3075,7 @@ int main(void)
                         res_name(fs, nx, nm, sizeof nm);
                         plog("player: HLS %s has no picture: %s", was, nm);
                         res_choose(fs, nx, res_manual);
+                        nopic_remember(cur_channel()->url, res_want, res_bw);
                         snprintf(film_note, sizeof film_note, T("No picture in %s: switched to %s"), was, nm);
                         film_note_until = now_ms() + 5000;
                         osd_until_us = now_ms() + 5000;
@@ -2474,8 +3119,9 @@ int main(void)
     }
 
     stop_all();
+    epg_stop();
+    plog("exit: the players are stopped");
     ui_shutdown();
-    if (suspend_locked) sceKernelPowerUnlock(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND);
     player_shutdown();
     channel_list_free(&chans);
     free(vis);
@@ -2484,7 +3130,6 @@ int main(void)
     sceHttpTerm();
     sceNetCtlTerm();
     sceNetTerm();
-    screen_off_set(0);
     sceKernelExitProcess(0);
     return 0;
 }

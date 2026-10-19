@@ -23,6 +23,9 @@
 #define ID_SIMPLEBLOCK  0xA3u
 #define ID_BLOCKGROUP   0xA0u
 #define ID_BLOCK        0xA1u
+#define ID_FLAGDEFAULT  0x88u
+#define ID_LANGUAGE     0x22B59Cu
+#define ID_LANGUAGEIETF 0x22B59Du
 
 #define MAX_ELEMENT  (4u * 1024 * 1024)        /* biggest block we keep */
 #define MAX_TRACKS   8
@@ -34,6 +37,8 @@ typedef struct {
     int priv_len;
     int width, height, channels;
     double rate;
+    char lang[4];                          /* 0.5.0: ISO 639-2 ("" = not given) */
+    int is_default;                        /* FlagDefault (1 when not given) */
 } Track;
 
 struct MkvDemux {
@@ -53,6 +58,8 @@ struct MkvDemux {
     uint8_t *es;                            /* Annex-B output buffer */
     size_t es_cap;
     int bad;
+    int pref_track;                         /* 0.5.0: the audio track wanted (-1 = none) and its language */
+    char pref_lang[4];
 };
 
 static const int AAC_RATES[13] = { 96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350 };
@@ -117,7 +124,8 @@ static int is_wanted_leaf(uint32_t id)
 {
     return id == ID_TIMECODESCALE || id == ID_TRACKNUMBER || id == ID_TRACKTYPE || id == ID_CODECID ||
            id == ID_CODECPRIVATE || id == ID_PIXELWIDTH || id == ID_PIXELHEIGHT || id == ID_SAMPLINGFREQ ||
-           id == ID_CHANNELS || id == ID_TIMECODE || id == ID_SIMPLEBLOCK || id == ID_BLOCK;
+           id == ID_CHANNELS || id == ID_TIMECODE || id == ID_SIMPLEBLOCK || id == ID_BLOCK ||
+           id == ID_FLAGDEFAULT || id == ID_LANGUAGE || id == ID_LANGUAGEIETF;
 }
 
 /* ---------------------------------------------------------------- tracks */
@@ -202,11 +210,24 @@ static void choose_tracks(MkvDemux *d)
         if (c == TS_CODEC_NONE) continue;
         if (d->info.nstreams < TS_MAX_STREAMS) {
             TsStream *s = &d->info.streams[d->info.nstreams++];
-            s->pid = t->number; s->stream_type = t->type; s->codec = c;
+            s->pid = t->number; s->stream_type = t->type; s->codec = c; memcpy(s->lang, t->lang, 4);
         }
         int rank = c == TS_CODEC_H264 ? 3 : c == TS_CODEC_HEVC ? 2 : c == TS_CODEC_AAC ? 3 : 1;
         if (t->type == 1 && rank > vr) { vr = rank; d->vtrack = t->number; d->info.video_codec = c; }
-        if (t->type == 2 && rank > ar) { ar = rank; d->atrack = t->number; d->info.audio_codec = c; }
+        if (t->type == 2) {                                  /* 0.5.0: AAC, then the default track, then the first */
+            rank = rank * 2 + (t->is_default ? 1 : 0);
+            if (rank > ar) { ar = rank; d->atrack = t->number; d->info.audio_codec = c; }
+        }
+    }
+    {   /* 0.5.0: the track asked for (by number or language) when there is such an audio track */
+        TsStream au[TS_MAX_STREAMS];
+        int na = 0;
+        for (int i = 0; i < d->info.nstreams; i++) if (d->info.streams[i].stream_type == 2) au[na++] = d->info.streams[i];
+        if (d->pref_track >= 0 || d->pref_lang[0]) {
+            int k = ts_audio_pick(au, na, d->pref_track, d->pref_lang);
+            int found = k >= 0 && (au[k].pid == d->pref_track || (d->pref_lang[0] && !strcmp(au[k].lang, d->pref_lang)));
+            if (found) { d->atrack = au[k].pid; d->info.audio_codec = au[k].codec; }
+        }
     }
     d->info.program = 1;
     d->info.video_pid = d->vtrack ? d->vtrack : -1;
@@ -378,6 +399,19 @@ static void on_leaf(MkvDemux *d, uint32_t id, const uint8_t *p, size_t n)
     case ID_PIXELHEIGHT:   if (d->cur) d->cur->height = (int)read_uint(p, n); break;
     case ID_SAMPLINGFREQ:  if (d->cur) d->cur->rate = read_float(p, n); break;
     case ID_CHANNELS:      if (d->cur) d->cur->channels = (int)read_uint(p, n); break;
+    case ID_FLAGDEFAULT:   if (d->cur) d->cur->is_default = read_uint(p, n) != 0; break;
+    case ID_LANGUAGE:
+    case ID_LANGUAGEIETF:
+        if (d->cur && (id == ID_LANGUAGEIETF || !d->cur->lang[0])) {   /* (the IETF one wins when both are there) */
+            char tmp[16];
+            size_t k = n < sizeof tmp - 1 ? n : sizeof tmp - 1;
+            memcpy(tmp, p, k);
+            tmp[k] = 0;
+            char l3[4];
+            ts_lang3(tmp, l3);
+            if (l3[0]) memcpy(d->cur->lang, l3, 4);
+        }
+        break;
     case ID_TIMECODE:      d->cluster_tc = read_uint(p, n); break;
     case ID_SIMPLEBLOCK:   on_block(d, p, n, 1); break;
     case ID_BLOCK:         on_block(d, p, n, 0); break;
@@ -420,6 +454,7 @@ static void parse(MkvDemux *d, int final)
             if (id == ID_TRACKENTRY) {
                 d->cur = d->ntracks < MAX_TRACKS ? &d->tracks[d->ntracks++] : NULL;
                 if (d->cur) memset(d->cur, 0, sizeof *d->cur);
+                if (d->cur) d->cur->is_default = 1;          /* (FlagDefault is 1 when the file leaves it out) */
             } else if (id == ID_CLUSTER) {
                 d->cur = NULL;
                 choose_tracks(d);
@@ -466,7 +501,14 @@ MkvDemux *mkv_create(const TsSink *sink)
     d->info.video_pid = d->info.audio_pid = -1;
     d->info.first_video_pts = d->info.min_video_pts = d->info.max_video_pts = -1;
     d->info.first_audio_pts = -1;
+    d->pref_track = -1;
     return d;
+}
+
+void mkv_prefer_audio(MkvDemux *d, int track, const char *lang)
+{
+    d->pref_track = track;
+    ts_lang3(lang, d->pref_lang);
 }
 
 void mkv_destroy(MkvDemux *d)

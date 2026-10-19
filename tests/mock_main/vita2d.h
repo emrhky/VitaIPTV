@@ -3,6 +3,12 @@
 typedef struct vita2d_pgf vita2d_pgf;
 typedef struct vita2d_pvf vita2d_pvf;
 vita2d_pvf *vita2d_load_default_pvf(void);
+/* 0.4.5: system fonts by language */
+enum { SCE_PVF_DEFAULT_LANGUAGE_CODE = 0, SCE_PVF_LANGUAGE_J = 1, SCE_PVF_LANGUAGE_LATIN = 2 };
+typedef int ScePvfLanguageCode;
+typedef struct vita2d_system_pvf_config { ScePvfLanguageCode code; int (*in_font_group)(unsigned int c); } vita2d_system_pvf_config;
+vita2d_pvf *vita2d_load_system_pvf(int numFonts, const vita2d_system_pvf_config *configs);
+
 void vita2d_free_pvf(vita2d_pvf *f);
 int vita2d_pvf_draw_text(vita2d_pvf *f, int x, int y, unsigned int c, float s, const char *t);
 int vita2d_pvf_text_width(vita2d_pvf *f, float s, const char *t);

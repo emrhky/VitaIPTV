@@ -949,7 +949,9 @@ void settings_parse(const char *text, Settings *st)
             trim_inplace(k);
             trim_inplace(v);
             if (!strcmp(k, "proxy")) copy_trunc(st->proxy, sizeof st->proxy, v, strlen(v));
-            else if (!strcmp(k, "auto_proxy")) st->auto_proxy = atoi(v) != 0;
+            else if (!strcmp(k, "auto_proxy")) { st->auto_proxy = atoi(v); if (st->auto_proxy < 0 || st->auto_proxy > 2) st->auto_proxy = 1; }
+            else if (!strcmp(k, "plain_letters")) st->plain_letters = atoi(v) != 0;
+            else if (!strcmp(k, "ac3_test")) st->ac3_test = atoi(v) >= 1 && atoi(v) <= 3 ? atoi(v) : 0;
             else if (!strcmp(k, "lang")) { st->lang = atoi(v); if (st->lang < 0 || st->lang > 2) st->lang = 0; }
             else if (!strcmp(k, "hide_adult")) st->hide_adult = atoi(v) != 0;
             else if (!strcmp(k, "hide_4k")) st->hide_4k = atoi(v) != 0;
@@ -967,17 +969,20 @@ void settings_parse(const char *text, Settings *st)
 
 int settings_format(const Settings *st, char *out, size_t outsz)
 {
-    int w = snprintf(out, outsz, "# Vita IPTV settings\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_4k=%d\nresolution=%d\n",
-                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_4k, st->res_pref);
+    char t3[16] = "";
+    if (st->ac3_test) snprintf(t3, sizeof t3, "ac3_test=%d\n", st->ac3_test);   /* (kept when the settings are saved) */
+    int w = snprintf(out, outsz, "# Vita IPTV settings (auto_proxy: 0 off, 1 when needed, 2 always)\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_4k=%d\nresolution=%d\n%s%s",
+                     st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_4k, st->res_pref,
+                     st->plain_letters ? "plain_letters=1\n" : "", t3);
     return (w < 0 || (size_t)w >= outsz) ? -1 : w;
 }
 
 int proxy_url_at(const Settings *st, const char *url, int start_s, char *out, size_t outsz)
 {
     if (proxy_url(st, url, out, outsz) != 0) return -1;
-    if (start_s <= 0) return 0;
     size_t n = strlen(out);
-    int w = snprintf(out + n, outsz - n, "&start=%d", start_s);
+    /* 0.5.0: film=1 asks the server for the film's length (sent back as X-Content-Duration) */
+    int w = start_s > 0 ? snprintf(out + n, outsz - n, "&film=1&start=%d", start_s) : snprintf(out + n, outsz - n, "&film=1");
     return (w < 0 || (size_t)w >= outsz - n) ? -1 : 0;
 }
 

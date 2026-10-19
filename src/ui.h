@@ -16,16 +16,24 @@
 #define UI_OK      RGBA8(90, 220, 140, 255)
 #define UI_WARN    RGBA8(255, 196, 90, 255)
 #define UI_SHADE   RGBA8(0, 0, 0, 170)
+#define UI_FAV     RGBA8(255, 200, 60, 255)     /* the favourites star */
 
 enum { UI_BTN_CROSS, UI_BTN_CIRCLE, UI_BTN_TRIANGLE, UI_BTN_SQUARE, UI_BTN_L, UI_BTN_R,
-       UI_BTN_START, UI_BTN_SELECT, UI_BTN_DPAD, UI_BTN_UPDOWN, UI_BTN_LR, UI_BTN_LEFTRIGHT };
+       UI_BTN_START, UI_BTN_SELECT, UI_BTN_DPAD, UI_BTN_UPDOWN, UI_BTN_LR, UI_BTN_LEFTRIGHT,
+       UI_BTN_SEP };   /* 0.4.1: in a hint list: the hints after it go to the right end of the bar */
 
 typedef struct { int btn; const char *label; } UiHint;
 
 #define UI_HEADER_H  60
 #define UI_FOOTER_Y  496
 
-void ui_init(vita2d_pgf *pgf);
+/* plain_letters: Turkish letters as g s i c o u (as before 0.4.5) */
+void ui_init(vita2d_pgf *pgf, int plain_letters);
+/* 2 = the Latin system font is used (Turkish letters as they are), 1 = the default font only, 0 = none */
+int  ui_font_state(void);
+/* 0.4.5: a short label with every word starting with a capital ("Liste ekle" -> "Liste Ekle"; Turkish i -> İ),
+ * small joining words left as they are (of, the, ve...). Returns buf. */
+const char *ui_title(const char *s, char *buf, size_t cap);
 void ui_shutdown(void);
 /* Turkish letters as plain Latin ones for drawing (ğ->g, ı->i, ş->s, ç->c, ü->u, ö->o) */
 const char *ui_plain(const char *s, char *buf, size_t cap);
@@ -33,6 +41,16 @@ void ui_text(int x, int y, unsigned col, float scale, const char *s);
 int  ui_text_w(float scale, const char *s);
 void ui_text_fit(int x, int y, unsigned col, float scale, const char *s, int maxw);
 void ui_text_center(int cx, int y, unsigned col, float scale, const char *s);
+/* s copied to buf, ending in "..." if it is wider than maxw */
+void ui_fit_copy(char *buf, size_t cap, float scale, const char *s, int maxw);
+/* 0.5.0: text broken into lines at most maxw wide (the last one ends in "..." if there is more) */
+#define UI_WRAP_LINES 4
+typedef struct { int n; char line[UI_WRAP_LINES][256]; } UiWrap;
+int  ui_wrap(UiWrap *w, float scale, const char *s, int maxw, int maxlines);
+/* draws it: line_h apart, from y down (center: each line centred in x .. x + maxw); returns the lines drawn */
+int  ui_text_wrap(int x, int y, unsigned col, float scale, const char *s, int maxw, int line_h, int maxlines, int center);
+/* 0.5.0: a filled five-pointed star (favourites) */
+void ui_star(float cx, float cy, float r, unsigned col);
 void ui_panel(int x, int y, int w, int h, unsigned fill);
 void ui_header(const char *title, const char *subtitle, const char *right);
 /* hints along the bottom bar; status (if any) is drawn just above it */
