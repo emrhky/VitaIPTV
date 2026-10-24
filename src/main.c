@@ -204,8 +204,10 @@ static int http_get_curl(const char *url, const char *user, const char *pass, Me
     unsigned t0 = now_ms();
     int r = cio_get(&rq, &status, e, sizeof e);
     unsigned ms = now_ms() - t0;
-    plog("http: GET %.5s (own socket) -> status %d, %u KB in %u.%u s, receive buffer %d KB%s%s", url, status,
-         (unsigned)(m->len / 1024), ms / 1000, ms % 1000 / 100, cio_last_rcvbuf() / 1024, r < 0 ? ", " : "", r < 0 ? e : "");
+    plog("http: GET %.5s (own socket) -> status %d, %u KB in %u.%u s, receive buffer %d KB, connect %d ms%s%s", url, status,
+         (unsigned)(m->len / 1024), ms / 1000, ms % 1000 / 100, cio_last_rcvbuf() / 1024, cio_last_connect_ms(), r < 0 ? ", " : "", r < 0 ? e : "");
+    static int noted;
+    if (!noted++ && cio_rcvbuf_note()[0]) plog("http: receive buffer sizes tried: %s", cio_rcvbuf_note());
     if (net_cancel) { snprintf(err, errsz, "Cancelled"); return -1; }
     if (r < 0 && !status && !m->buf && !strncasecmp(url, "http:", 5)) {      /* (0.6.0: plain http: the system HTTP tries) */
         snprintf(err, errsz, "Connection failed (%s)", e);
@@ -1770,6 +1772,14 @@ static void draw_video_texture(vita2d_texture *t, int w, int h, int fields)
     vita2d_draw_texture_part_scale(t, (960.0f - w * s) / 2, (544.0f - h * s) / 2, 0, 0, w, h, s, s);
 }
 
+/* 0.6.0: "mono", "stereo", or "5.1 > stereo" when more channels were mixed down */
+static const char *ch_label(const TspStatus *st)
+{
+    int sc = st->audio_src_ch;
+    if (sc > 2) return sc >= 8 ? "7.1 > stereo" : sc == 6 ? "5.1 > stereo" : sc == 7 ? "6.1 > stereo" : "surround > stereo";
+    return st->audio_ch == 1 ? "mono" : "stereo";
+}
+
 static void fmt_rate(char *b, size_t n, int rate)
 {
     if (rate % 1000) snprintf(b, n, "%.1f kHz", rate / 1000.0);
@@ -1806,7 +1816,7 @@ static void draw_tsp_screen(int osd)
         fmt_rate(kr, sizeof kr, st->audio_rate);
         if (st->audio_msg[0]) snprintf(ai, sizeof ai, "%s", T_msg(st->audio_msg));
         else if (st->audio_frames) snprintf(ai, sizeof ai, "%s   %s   %s", st->audio_ac3 == 2 ? "E-AC-3" : st->audio_ac3 ? "AC-3" :
-                                            st->audio_mpeg ? "MP2" : "AAC", kr, st->audio_ch == 1 ? "mono" : "stereo");
+                                            st->audio_mpeg ? "MP2" : "AAC", kr, ch_label(st));
         else snprintf(ai, sizeof ai, "%s", T("Buffering..."));
         UiHint rh[10];
         int nrh = play_hints(rh, 1, 0, 0, NULL);
@@ -1936,9 +1946,9 @@ static void draw_tsp_screen(int osd)
                 int av;
                 if (st->audio_msg[0]) snprintf(au, sizeof au, "%s", T("off"));
                 else if (!st->audio_frames) snprintf(au, sizeof au, "%s", T("waiting"));
-                else if (st->audio_ac3) snprintf(au, sizeof au, "%s %s %s", st->audio_ac3 == 2 ? "E-AC-3" : "AC-3", kr, st->audio_ch == 1 ? "mono" : "stereo");
-                else if (st->audio_mpeg) snprintf(au, sizeof au, "MP%d %s %s", st->audio_mpeg, kr, st->audio_ch == 1 ? "mono" : "stereo");
-                else snprintf(au, sizeof au, "AAC %s %s", kr, st->audio_ch == 1 ? "mono" : "stereo");
+                else if (st->audio_ac3) snprintf(au, sizeof au, "%s %s %s", st->audio_ac3 == 2 ? "E-AC-3" : "AC-3", kr, ch_label(st));
+                else if (st->audio_mpeg) snprintf(au, sizeof au, "MP%d %s %s", st->audio_mpeg, kr, ch_label(st));
+                else snprintf(au, sizeof au, "AAC %s %s", kr, ch_label(st));
                 if (!st->audio_msg[0] && st->audio_frames && tsp_av_offset(&av)) {
                     av = av >= 0 ? (av + 5) / 10 * 10 : -((-av + 5) / 10 * 10);   /* to 10 ms: the last digit only flickered */
                     snprintf(avs, sizeof avs, "%+d ms", av);
