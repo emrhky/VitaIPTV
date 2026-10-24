@@ -45,7 +45,8 @@
 #ifndef STALL_US
 #define STALL_US     10000000ULL        /* no picture after this long: report why */
 #endif
-#define VQ_PKTS      750                /* compressed video waiting for the decoder (30 s at 25 fps) */
+#define VQ_PKTS      1800               /* compressed video waiting for the decoder (30 s at 60 fps; 0.6.0: was 750, only
+                                         * 12 s at 60 fps; the bytes below and the ~30 s of sound are the usual limit) */
 #define VQ_BYTES     (16 * 1024 * 1024)
 #define AQ_PKTS      1400               /* compressed audio frames waiting (~30 s): rides out network gaps */
 #define AQ_BYTES     (3 * 1024 * 1024)
@@ -279,6 +280,9 @@ typedef struct {
     volatile uint32_t frame_us;         /* estimated picture duration */
     uint64_t last_stats, start_us;
     uint32_t prev_bytes, prev_decoded;  /* stats line: values at the previous line, for rates */
+    uint64_t prev_push_wait;            /* 0.6.0: ... and the reader's waits for room in the queues */
+    unsigned net_free_kbs;              /* 0.6.0: what the network brings while the reader is not waiting for room (0 = unknown) */
+    unsigned net_wait_pct;              /* ... and how much of the last interval it waited (the queues were full) */
     uint32_t hreads, hread_bytes, hread_full;   /* sceHttpReadData calls since the last stats line */
     unsigned read_size;                 /* bytes asked per sceHttpReadData: it fills the whole request before returning */
     volatile uint32_t dcalls, dus_sum, dus_max; /* decoder call time since the last stats line */
@@ -2513,6 +2517,18 @@ static void stats_tick(Tsp *t)
     uint32_t bytes = t->st.bytes, decoded = t->st.decoded;
     unsigned kbs = (unsigned)((uint64_t)(bytes - t->prev_bytes) * 1000 / 1024 / ms);
     t->st.net_kbs = kbs;
+    /* 0.6.0: with full queues the reader takes only what is played: "rates net" then shows the film's rate, not
+     * the network's (it said "slower than the film" on 3 MB/s lines). The time it waited for room is left out. */
+    {
+        uint64_t pw = t->push_wait_us, wus = pw - t->prev_push_wait;
+        t->prev_push_wait = pw;
+        unsigned wms = (unsigned)(wus / 1000);
+        if (wms > ms) wms = ms;
+        t->net_wait_pct = wms * 100 / ms;
+        unsigned act = ms - wms;
+        if (act >= 500) t->net_free_kbs = (unsigned)((uint64_t)(bytes - t->prev_bytes) * 1000 / 1024 / act);
+        t->st.net_read_kbs = t->net_wait_pct >= 5 ? t->net_free_kbs : 0;
+    }
     t->st.fps10 = t->frame_us ? (int)(10000000u / t->frame_us) : 0;
     unsigned dfps10 = (unsigned)((uint64_t)(decoded - t->prev_decoded) * 10000 / ms);   /* fps x10 */
     t->prev_bytes = bytes;
@@ -2544,8 +2560,10 @@ static void stats_tick(Tsp *t)
     if (have_mem)
         snprintf(mem, sizeof mem, ", free main %u MB cdram %u MB phycont %u MB", (unsigned)fm.size_user >> 20,
                  (unsigned)fm.size_cdram >> 20, (unsigned)fm.size_phycont >> 20);
-    plog("tsp: rates net %u KB/s, decode %u.%u fps%s, video queue %d (%u KB), audio queue %d (%d ms)%s%s",
-         kbs, dfps10 / 10, dfps10 % 10, dc, vq_n, (unsigned)(vq_b / 1024), aq_n, aq_ms, mem, rd);
+    char nf[64] = "";
+    if (t->net_wait_pct >= 5) snprintf(nf, sizeof nf, " (queues full %u%% of the time; %u KB/s while reading)", t->net_wait_pct, t->net_free_kbs);
+    plog("tsp: rates net %u KB/s%s, decode %u.%u fps%s, video queue %d (%u KB), audio queue %d (%d ms)%s%s",
+         kbs, nf, dfps10 / 10, dfps10 % 10, dc, vq_n, (unsigned)(vq_b / 1024), aq_n, aq_ms, mem, rd);
     if (!t->internal && t->pub_fed)
         plog("tsp: decoder units in %u, pictures out %u, units with no picture %u (%u of them nothing refers to)",
              (unsigned)t->pub_fed, (unsigned)t->st.decoded, (unsigned)t->pub_nopic, (unsigned)t->pub_nopic_nonref);
@@ -4065,9 +4083,13 @@ static void buffer_check(Tsp *t, uint64_t now)
      * with queues that hold about a minute (0.2.6: 16 MB of video, about 40 s of such a film) */
     /* (only after 8 s of playing: while the film's index is read the speed looks like 1-2 KB/s, and 0.2.9
      * decided "slower than the film" at every start) */
-    int film_slow = t->vod && t->first_show_us && now - t->first_show_us > 8000000ULL &&
-                    t->st.need_kbs && t->st.net_kbs && t->st.net_kbs < t->st.need_kbs * 9 / 10;
-    if (film_slow && !t->big_queues) {
+    /* 0.6.0: "slower" only from an interval in which the reader did not wait for room (a full queue reads only
+     * what is played, which looked like a slow line); and a network at least twice as fast as the film gets the
+     * larger queues too (it fills them in seconds; a longer gap of the server is then ridden out) */
+    int measured = t->vod && t->first_show_us && now - t->first_show_us > 8000000ULL && t->st.need_kbs && t->st.net_kbs;
+    int film_slow = measured && t->net_wait_pct < 10 && t->st.net_kbs < t->st.need_kbs * 9 / 10;
+    int film_fast = measured && t->net_free_kbs >= t->st.need_kbs * 2;
+    if ((film_slow || film_fast) && !t->big_queues) {
         t->big_queues = 1;
         SceKernelFreeMemorySizeInfo fm;
         memset(&fm, 0, sizeof fm);
@@ -4079,9 +4101,13 @@ static void buffer_check(Tsp *t, uint64_t now)
             t->aq.max_bytes = AQ_BYTES_BIG;
             t->aq.max_count = AQ_PKTS_BIG;
             sceKernelUnlockMutex(t->qlock, 1);
-            plog("tsp: the network is slower than the film (%u KB/s, it needs %u KB/s): queues for about a minute (%u MB)",
-                 t->st.net_kbs, t->st.need_kbs, (unsigned)(VQ_BYTES_BIG >> 20));
-        } else plog("tsp: the network is slower than the film, but there is no memory for larger queues");
+            if (film_slow)
+                plog("tsp: the network is slower than the film (%u KB/s, it needs %u KB/s): queues for about a minute (%u MB)",
+                     t->st.net_kbs, t->st.need_kbs, (unsigned)(VQ_BYTES_BIG >> 20));
+            else
+                plog("tsp: the network is fast (%u KB/s, the film needs %u KB/s): queues for about a minute (%u MB)",
+                     t->net_free_kbs, t->st.need_kbs, (unsigned)(VQ_BYTES_BIG >> 20));
+        } else plog("tsp: larger queues wanted (network %s than the film), but there is no memory for them", film_slow ? "slower" : "faster");
     }
     sceKernelLockMutex(t->qlock, 1, NULL);
     int vq = t->vq.count, aq_ms = 0, vq_ms = -1;

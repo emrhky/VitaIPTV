@@ -1955,7 +1955,8 @@ static void draw_tsp_screen(int osd)
                 } else snprintf(avs, sizeof avs, "--");
                 snprintf(rows[1], sizeof rows[1], "%s\v%s\t%s\v%s\t%s\v%u\t%s\v%u / %u", T("Audio"), au, "A/V", avs,
                          T("Waits"), st->rebuffers + st->holds, T("Damaged / errors"), st->damaged, st->errors);
-                if (st->net_kbs) snprintf(net, sizeof net, "%u KB/s", st->net_kbs); else snprintf(net, sizeof net, "--");
+                if (st->net_read_kbs) snprintf(net, sizeof net, "%u KB/s", st->net_read_kbs);   /* (0.6.0: queues full: what the line brings) */
+                else if (st->net_kbs) snprintf(net, sizeof net, "%u KB/s", st->net_kbs); else snprintf(net, sizeof net, "--");
                 if (st->need_kbs) snprintf(need, sizeof need, "%u KB/s", st->need_kbs); else snprintf(need, sizeof need, "--");
                 if (st->bytes >= 10u * 1024 * 1024) snprintf(got, sizeof got, "%u MB", (unsigned)(st->bytes >> 20));
                 else snprintf(got, sizeof got, "%u KB", (unsigned)(st->bytes >> 10));
