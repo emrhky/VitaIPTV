@@ -252,6 +252,9 @@ for f in ("altv", "alttr"):                                  # live copies (no #
 open(f"{T}/alt/altml.m3u8", "w").write("#EXTM3U\n"
     "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"tr\",NAME=\"Turkce\",DEFAULT=YES,URI=\"alttr_l.m3u8\"\n"
     "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,AUDIO=\"a\"\naltv_l.m3u8\n")
+# 0.6.0: a 40 s film for the fast / slow line tests (the queues' sizes)
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 40 "
+   f"-c:v libx264 -g 50 -b:v 600k -pix_fmt yuv420p -c:a aac -ac 2 -f matroska {T}/hls/long.mkv")
 # 0.6.0: 5.1 AAC (the Vita's decoder takes two channels; FFmpeg's aac decoder mixes it down) in TS, MKV, MP4
 for ext, fmt in (("ts", "mpegts"), ("mkv", "matroska"), ("mp4", "mp4")):
     sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 6 "

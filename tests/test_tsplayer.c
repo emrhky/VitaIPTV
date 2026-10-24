@@ -20,6 +20,7 @@
 #include <unistd.h>
 
 static int g_own_http;                      /* 0.6.0: "own socket (http)" was logged */
+static int g_net_slow, g_net_fast;          /* 0.6.0: "the network is slower than the film" / "the network is fast" */
 void plog(const char *fmt, ...)
 {
     char line[1024];
@@ -28,6 +29,8 @@ void plog(const char *fmt, ...)
     vsnprintf(line, sizeof line, fmt, a);
     va_end(a);
     if (strstr(line, "own socket (http)")) g_own_http = 1;
+    if (strstr(line, "network is slower than the film (")) g_net_slow = 1;   /* (the queues line, not "buffering (...: n pictures") */
+    if (strstr(line, "network is fast")) g_net_fast = 1;
     if (getenv("VERBOSE")) puts(line);
 }
 extern int mock_mapped;
@@ -525,6 +528,7 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "limit")) goto limit;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls")) goto hls;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "alt")) goto alt;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "qsize")) goto qsize;
     r = play(argv[1], 10);
     show("720p30", &r);
     assert(r.st.state == TSP_ENDED && r.st.errors == 0);
@@ -1111,6 +1115,28 @@ hls_slow:
         mock_http_reset();
     }
 
+qsize:
+    {   /* 0.6.0: a film on a line 4x faster than it: the reader fills the queues and then waits for room, which
+         * read as "slower than the film" (the rate shown is then what is played); now it says "fast" and takes the
+         * larger queues. On a line slower than the film it still says so. */
+        static char lf[512];
+        snprintf(lf, sizeof lf, "%s/long.mkv", argv[16]);
+        struct stat ls; assert(stat(lf, &ls) == 0);
+        long need = (long)(ls.st_size / 40);                 /* bytes per second (40 s film) */
+        g_net_slow = g_net_fast = 0;
+        mock_http_reset(); mock_http_rate = need * 4;
+        VRun v = play_vod(lf, 0, 16, 0, 0);
+        vshow("film fast line", &v);
+        printf("               said fast %d, said slower %d\n", g_net_fast, g_net_slow);
+        assert(g_net_fast && !g_net_slow && v.r.changes >= 300);
+        g_net_slow = g_net_fast = 0;
+        mock_http_reset(); mock_http_rate = need * 6 / 10;
+        v = play_vod(lf, 0, 26, 0, 0);                       /* (measured from 8 s after the first wait) */
+        vshow("film slow line", &v);
+        printf("               said fast %d, said slower %d\n", g_net_fast, g_net_slow);
+        assert(g_net_slow && !g_net_fast);
+        mock_http_rate = 0; mock_http_reset();
+    }
 alt:
     {   /* 0.6.0: HLS with the sound in playlists of its own (#EXT-X-MEDIA:TYPE=AUDIO,URI=...) */
         static char an[64][32], ap[64][512];

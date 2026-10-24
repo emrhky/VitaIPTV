@@ -51,7 +51,8 @@ int main(int argc, char **argv)
         a52_stats(d, &fr, &er);
         a52_destroy(d);
         printf("aac: %d frames, %d ch in\n", frames, out_src);
-        assert(out_src == (strstr(argv[1], "71") ? 8 : 6) && out_eac3 == 0);
+        const char *bn = strrchr(argv[1], '/') ? strrchr(argv[1], '/') + 1 : argv[1];   /* (the name, not the folder) */
+        assert(out_src == (strstr(bn, "71") ? 8 : 6) && out_eac3 == 0);
         goto reference;
     }
     A52Dec *d = a52_create(); assert(d);
