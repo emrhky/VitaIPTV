@@ -93,6 +93,15 @@ void vita2d_draw_texture_part_scale(const vita2d_texture *t, float x, float y, f
     }
 }
 
+vita2d_texture *vita2d_create_empty_texture(unsigned int w, unsigned int h)
+{
+    vita2d_texture *t = calloc(1, sizeof *t);
+    t->w = (int)w; t->h = (int)h; t->px = calloc((size_t)w * h, 4);
+    return t;
+}
+void *vita2d_texture_get_datap(const vita2d_texture *t) { return t->px; }
+unsigned int vita2d_texture_get_stride(const vita2d_texture *t) { return (unsigned)t->w * 4; }
+
 void vita2d_draw_texture(const vita2d_texture *t, float x, float y) { vita2d_draw_texture_part_scale(t, x, y, 0, 0, t->w, t->h, 1, 1); }
 
 vita2d_pvf *vita2d_load_default_pvf(void) { return NULL; }
