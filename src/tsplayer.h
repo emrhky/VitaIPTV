@@ -58,6 +58,8 @@ typedef struct {
     volatile int hls_no_video;          /* the error: this HLS variant carries no picture (another one may) */
     /* 0.5.0: the audio tracks the player can play (TS / MKV), in the stream's order, and the one playing */
     volatile int audio_ac3;             /* AC-3 (1) / E-AC-3 (2) decoded in software, else 0 */
+    volatile unsigned net_read_kbs;     /* 0.6.0: the network's speed while the reader reads (the queues full part of
+                                         * the time: net_kbs is then what is played), 0 = same as net_kbs */
     volatile int audio_src_ch;          /* 0.6.0: the stream's channels when more than played (5.1 -> stereo: 6) */
     int a_n, a_cur;                     /* a_cur -1 = none */
     int a_id[TSP_MAX_AUDIO];            /* PID / MKV track number (tsp_set_audio) */

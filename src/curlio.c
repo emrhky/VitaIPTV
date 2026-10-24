@@ -71,38 +71,71 @@ static uint64_t now_ms64(void) { struct timespec ts; clock_gettime(CLOCK_MONOTON
 static volatile int g_rcvbuf;            /* the receive buffer the last connection got (bytes) */
 static volatile int g_connect_ms;        /* how long the last connect took (about one round trip) */
 static int g_rcv_pick;                   /* 0.6.0: the size the system accepted (0 = not tried yet, -1 = none) */
-static char g_rcv_note[160];             /* ... and what each try gave, for the log */
+static char g_rcv_note[400];             /* ... and what each try gave, for the log */
 int cio_last_rcvbuf(void) { return g_rcvbuf; }
 int cio_last_connect_ms(void) { return g_connect_ms; }
 const char *cio_rcvbuf_note(void) { return g_rcv_note; }
 
-/* 0.6.0: the biggest receive buffer the system takes. Asking 1 MB always read back 63 KB on the Vita: either
- * the request was refused (too big: the default stays) or 64 KB is the limit. So the sizes are tried from
- * 1 MB down, the first one the system takes is kept for later connections, and each try is noted. */
+/* 0.6.0: the biggest receive buffer the system takes. Asking 1 MB was refused on the Vita (ENOBUFS: the
+ * default 63 KB stayed, so every connection managed at most 64 KB per round trip); 512 KB was taken. At the
+ * first connection the limit is found by halving the gap between a size taken and one refused (to 16 KB),
+ * noted for the log, and the size used is at most 768 KB: the buffers come from the network's memory that the
+ * other connections (EPG, HLS sound, lists) share, so the very limit is left alone. */
+#define RCV_USE_MAX (768 * 1024)
+static int rcv_try(int fd, int v, int *e)
+{
+    int r = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof v);
+    *e = r < 0 ? errno : 0;
+    return r == 0;
+}
+
+static void rcv_note(int *k, const char *fmt, ...)
+{
+    if (*k < 0 || (size_t)*k >= sizeof g_rcv_note) return;
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(g_rcv_note + *k, sizeof g_rcv_note - (size_t)*k, fmt, ap);
+    va_end(ap);
+    if (n > 0) *k += n;
+}
+
 static void set_rcvbuf(int fd)
 {
-    static const int SIZES[] = { 1024 * 1024, 512 * 1024, 256 * 1024, 128 * 1024 };
-    int v = 0;
+    int v = 0, e = 0;
     socklen_t rl = sizeof v;
     if (g_rcv_pick > 0) {
-        v = g_rcv_pick;
-        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof v);
+        /* (refused now, e.g. other connections hold much of the network's memory: smaller ones, down to 128 KB) */
+        for (v = g_rcv_pick; v >= 128 * 1024 && !rcv_try(fd, v, &e); v /= 2) {}
     } else if (g_rcv_pick == 0) {
         int def = 0;
         rl = sizeof def;
         getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &def, &rl);
-        int k = snprintf(g_rcv_note, sizeof g_rcv_note, "default %d KB", def / 1024);
-        g_rcv_pick = -1;
-        for (size_t i = 0; i < sizeof SIZES / sizeof SIZES[0]; i++) {
-            v = SIZES[i];
-            int r = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof v);
-            int e = r < 0 ? errno : 0, got = 0;
-            rl = sizeof got;
-            getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &got, &rl);
-            if (k > 0 && (size_t)k < sizeof g_rcv_note)
-                k += r < 0 ? snprintf(g_rcv_note + k, sizeof g_rcv_note - (size_t)k, "; %d KB: refused (%d) -> %d KB", SIZES[i] / 1024, e, got / 1024)
-                           : snprintf(g_rcv_note + k, sizeof g_rcv_note - (size_t)k, "; %d KB: ok -> %d KB", SIZES[i] / 1024, got / 1024);
-            if (r == 0 && got > def) { g_rcv_pick = SIZES[i]; break; }
+        int k = 0;
+        rcv_note(&k, "default %d KB", def / 1024);
+        int lo = 0, hi = 0;                                  /* biggest taken / smallest refused (bytes) */
+        if (rcv_try(fd, 1024 * 1024, &e)) { lo = 1024 * 1024; rcv_note(&k, "; 1024 KB: ok"); }
+        else {
+            hi = 1024 * 1024;
+            rcv_note(&k, "; 1024 KB: refused (%d)", e);
+            if (rcv_try(fd, 512 * 1024, &e)) { lo = 512 * 1024; rcv_note(&k, "; 512 KB: ok"); }
+            else { hi = 512 * 1024; rcv_note(&k, "; 512 KB: refused (%d)", e); lo = def > 0 ? def : 0; }
+            while (hi - lo > 16 * 1024) {                    /* halve the gap, in steps of 16 KB */
+                int mid = (lo + hi) / 2 / (16 * 1024) * (16 * 1024);
+                if (mid <= lo) break;
+                if (rcv_try(fd, mid, &e)) { lo = mid; rcv_note(&k, "; %d: ok", mid / 1024); }
+                else { hi = mid; rcv_note(&k, "; %d: refused", mid / 1024); }
+            }
+        }
+        if (lo > def) {
+            g_rcv_pick = lo < RCV_USE_MAX ? lo : RCV_USE_MAX;
+            rcv_note(&k, " -> limit %s%d KB, using %d KB", hi ? "" : "at least ", lo / 1024, g_rcv_pick / 1024);
+            v = g_rcv_pick;
+            setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof v);
+        } else {
+            g_rcv_pick = -1;
+            rcv_note(&k, " -> none bigger than the default");
+            v = def;
+            if (def > 0) setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof v);
         }
     }
     int got = 0;
