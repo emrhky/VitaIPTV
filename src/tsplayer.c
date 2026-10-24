@@ -248,6 +248,13 @@ typedef struct {
     uint8_t *asil;                      /* silence for audio pauses */
     MpaDec *mpa;                        /* MPEG audio (MP2/MP3) in software */
     A52Dec *a52;                        /* 0.5.0: AC-3 / E-AC-3 in software (FFmpeg) */
+    A52Dec *aacsw;                      /* 0.6.0: AAC with more than two channels in software (FFmpeg) */
+    int asw_rate, asw_ch;               /* ... the format it was opened for (the stream's channels) */
+    /* 0.6.0: HLS sound from an audio playlist of its own (#EXT-X-MEDIA:TYPE=AUDIO) */
+    TsDemux *adm;                       /* its MPEG-TS segments */
+    int alt_on;                         /* the sound comes from there (the variant's own sound is left out) */
+    int alt_list;                       /* the track list (st.a_*) is the master playlist's, not the stream's */
+    int64_t alt_pts;                    /* packed audio (.aac / .ac3 segments): the next frame's time, -1 unknown */
     uint8_t *a52pcm;
     int a_nstreams;                     /* (the stream list the audio track list was made from) */
     uint8_t *mpcm;
@@ -1365,8 +1372,11 @@ static void log_rcvbuf(Tsp *t)
 {
     if (t->rcvbuf_logged) return;
     t->rcvbuf_logged = 1;
-    int rb = cio_last_rcvbuf();
-    plog("tsp: own socket (%s), receive buffer %d KB", strncasecmp(t->url, "https:", 6) ? "http" : "https", rb / 1024);
+    int rb = cio_last_rcvbuf(), cms = cio_last_connect_ms();
+    plog("tsp: own socket (%s), receive buffer %d KB, connect %d ms (about one round trip: at most %d KB/s with this buffer)",
+         strncasecmp(t->url, "https:", 6) ? "http" : "https", rb / 1024, cms, cms > 0 ? rb / cms : 0);
+    static int noted;
+    if (!noted++ && cio_rcvbuf_note()[0]) plog("tsp: receive buffer sizes tried: %s", cio_rcvbuf_note());
 }
 
 /* A decoder slower than the stream (1080p at 50/60 fps may be): leave out the pictures nothing else needs
@@ -1955,17 +1965,13 @@ static void update_audio_tracks(Tsp *t, const TsInfo *i)
     t->a_nstreams = i->nstreams;
 }
 
-static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
+/* one audio packet (codec: TS_CODEC_*) to the audio thread */
+static void audio_push(Tsp *t, int codec, const uint8_t *data, size_t len, int64_t pts)
 {
-    Tsp *t = ctx;
-    if (stopping(t) || t->audio_off) return;
-    if (!t->first_audio_us) t->first_audio_us = now_us();
-    const TsInfo *i = dmx_info(t);
-    update_audio_tracks(t, i);
-    if (!audio_playable(i->audio_codec)) {
+    if (!audio_playable(codec)) {
         if (!t->audio_warned) {
             t->audio_warned = 1;
-            snprintf(t->st.audio_msg, sizeof t->st.audio_msg, "Audio %s: not supported", ts_codec_name(i->audio_codec));
+            snprintf(t->st.audio_msg, sizeof t->st.audio_msg, "Audio %s: not supported", ts_codec_name((TsCodec)codec));
             plog("tsp: %s", t->st.audio_msg);
         }
         return;
@@ -1975,9 +1981,89 @@ static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
     memset(p, 0, sizeof *p);
     p->pts = pts;
     p->len = len;
-    p->flags = i->audio_codec == TS_CODEC_MPEG_AUDIO ? 1 : i->audio_codec == TS_CODEC_AC3 || i->audio_codec == TS_CODEC_EAC3 ? 2 : 0;   /* 1 MPEG, 2 AC-3 (software) */
+    p->flags = codec == TS_CODEC_MPEG_AUDIO ? 1 : codec == TS_CODEC_AC3 || codec == TS_CODEC_EAC3 ? 2 : 0;   /* 1 MPEG, 2 AC-3 (software) */
     memcpy(p->data, data, len);
     q_push(t, &t->aq, p);
+}
+
+static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
+{
+    Tsp *t = ctx;
+    if (stopping(t) || t->audio_off) return;
+    if (t->alt_on) return;                                  /* 0.6.0: the sound comes from the HLS audio playlist */
+    if (!t->first_audio_us) t->first_audio_us = now_us();
+    const TsInfo *i = dmx_info(t);
+    if (!t->alt_list) update_audio_tracks(t, i);
+    audio_push(t, i->audio_codec, data, len, pts);
+}
+
+/* 0.6.0: the HLS audio playlist's segments: TS (its own demuxer; a picture in them is left out) */
+static void on_alt_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, int64_t dts, int flags)
+{
+    (void)ctx; (void)data; (void)len; (void)pts; (void)dts; (void)flags;
+}
+
+static void alt_codec_seen(Tsp *t, int codec)
+{
+    if (t->alt_list && t->st.a_cur >= 0 && t->st.a_cur < t->st.a_n && t->st.a_codec[t->st.a_cur] != codec) {
+        t->st.a_codec[t->st.a_cur] = codec;
+        plog("tsp: HLS audio playlist: %s", ts_codec_name((TsCodec)codec));
+    }
+}
+
+static void on_alt_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
+{
+    Tsp *t = ctx;
+    if (stopping(t) || t->audio_off || !t->alt_on || !t->adm) return;
+    if (!t->first_audio_us) t->first_audio_us = now_us();
+    int c = ts_info(t->adm)->audio_codec;
+    alt_codec_seen(t, c);
+    audio_push(t, c, data, len, pts);
+}
+
+static const int ADTS_RATES[13];
+
+/* 0.6.0: a packed audio segment (.aac / .ac3: frames one after the other, the time in an ID3 tag at the start,
+ * PRIV "com.apple.streaming.transportStreamTimestamp", 33 bits in 8 bytes) */
+static void alt_feed_packed(Tsp *t, const uint8_t *b, size_t n)
+{
+    static const char OWNER[] = "com.apple.streaming.transportStreamTimestamp";
+    size_t at = 0;
+    while (n - at >= 10 && !memcmp(b + at, "ID3", 3)) {      /* ID3 tags (one or more) */
+        size_t sz = ((size_t)(b[at + 6] & 0x7F) << 21) | ((size_t)(b[at + 7] & 0x7F) << 14) | ((size_t)(b[at + 8] & 0x7F) << 7) | (b[at + 9] & 0x7F);
+        size_t end = at + 10 + sz;
+        if (end > n) end = n;
+        for (size_t k = at + 10; k + 10 + sizeof OWNER + 8 <= end; ) {   /* frames: id(4) size(4) flags(2) */
+            size_t fs = ((size_t)b[k + 4] << 24) | ((size_t)b[k + 5] << 16) | ((size_t)b[k + 6] << 8) | b[k + 7];
+            if (!memcmp(b + k, "PRIV", 4) && fs >= sizeof OWNER + 8 && !memcmp(b + k + 10, OWNER, sizeof OWNER)) {
+                const uint8_t *v = b + k + 10 + sizeof OWNER;
+                t->alt_pts = (int64_t)((((uint64_t)v[3] & 1) << 32) | ((uint64_t)v[4] << 24) | ((uint64_t)v[5] << 16) | ((uint64_t)v[6] << 8) | v[7]);
+            }
+            if (!fs || k + 10 + fs > end) break;
+            k += 10 + fs;
+        }
+        at = end;
+    }
+    if (n - at < 7) return;
+    if (b[at] == 0x47 && t->adm) { ts_feed(t->adm, b + at, n - at); return; }   /* (TS after an ID3 tag) */
+    if (b[at] == 0x0B && b[at + 1] == 0x77) {                /* AC-3 / E-AC-3: the software decoder splits the frames */
+        int c = n - at > 5 && (b[at + 5] >> 3) > 10 ? TS_CODEC_EAC3 : TS_CODEC_AC3;
+        alt_codec_seen(t, c);
+        audio_push(t, c, b + at, n - at, t->alt_pts);
+        t->alt_pts = -1;                                     /* (the next segment's ID3 tag gives the time again) */
+        return;
+    }
+    alt_codec_seen(t, TS_CODEC_AAC);
+    while (n - at >= 7 && !stopping(t)) {                    /* ADTS frames, one packet each */
+        if (b[at] != 0xFF || (b[at + 1] & 0xF6) != 0xF0) { at++; continue; }
+        size_t len = ((size_t)(b[at + 3] & 3) << 11) | ((size_t)b[at + 4] << 3) | (b[at + 5] >> 5);
+        int sfi = (b[at + 2] >> 2) & 15;
+        if (len < 7 || at + len > n || sfi >= 13) break;
+        audio_push(t, TS_CODEC_AAC, b + at, len, t->alt_pts);
+        int frames = (b[at + 6] & 3) + 1;
+        if (t->alt_pts >= 0) t->alt_pts += (int64_t)frames * 1024 * 90000 / ADTS_RATES[sfi];
+        at += len;
+    }
 }
 
 /* ------------------------------------------------------------------ audio */
@@ -1996,6 +2082,7 @@ static void audio_close(Tsp *t)
 {
     if (t->aport >= 0) { sceAudioOutReleasePort(t->aport); t->aport = -1; }
     if (t->adec) { sceAudiodecDeleteDecoder(&t->actrl); t->adec = 0; }
+    if (t->aacsw) { a52_destroy(t->aacsw); t->aacsw = NULL; t->asw_rate = t->asw_ch = 0; }
     free(t->aes);
     free(t->apcm);
     free(t->asil);
@@ -2120,6 +2207,25 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
 }
 
 
+/* 0.6.0: a frame of 5.1 / 7.1 AAC from FFmpeg's decoder, mixed down to stereo */
+static void aacsw_frame(void *ctx, const int16_t *pcm, int samples, int rate, int ch, int src_ch, int eac3, int64_t pts)
+{
+    Tsp *t = ctx;
+    (void)eac3;
+    if (t->audio_off) return;
+    if (samples % 64 || samples > A52_MAX_SAMPLES) { t->st.audio_errors++; return; }
+    if (!t->a52pcm) t->a52pcm = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
+    if (!t->a52pcm) return;
+    memcpy(t->a52pcm, pcm, (size_t)samples * 2u * (size_t)ch);
+    t->st.audio_rate = rate;
+    t->st.audio_ch = ch;
+    t->st.audio_src_ch = src_ch;
+    audio_out(t, t->a52pcm, samples, rate, ch, pts);
+}
+
+/* one ADTS frame's channel configuration that only the software decoder plays (3 .. 7: 3.0 up to 7.1) */
+static int aac_needs_sw(int ch) { return ch >= 3 && ch <= 7; }
+
 /* One ADTS frame. Runs on the audio thread; sceAudioOutOutput blocks in real time. */
 static void audio_packet(Tsp *t, Pkt *p)
 {
@@ -2128,15 +2234,21 @@ static void audio_packet(Tsp *t, Pkt *p)
     int sfi = (d[2] >> 2) & 15, ch = ((d[2] & 1) << 2) | (d[3] >> 6);
     if (sfi >= 13) return;
     int rate = ADTS_RATES[sfi];
-    if (!t->adec || rate != t->arate || ch != t->ach) {
-        int ok = ch >= 1 && ch <= 2 && out_rate_ok(rate);
-        if (t->adec && t->st.audio_frames > 0) {
+    if (t->aacsw && rate == t->asw_rate && ch == t->asw_ch) {           /* 0.6.0: 5.1 / 7.1 in software */
+        t->aparam_new = 0;
+        a52_feed_frame(t->aacsw, d, p->len, p->pts, aacsw_frame, t);
+        return;
+    }
+    if ((!t->adec && !t->aacsw) || t->aacsw || rate != t->arate || ch != t->ach) {
+        int ok = ((ch >= 1 && ch <= 2) || (aac_needs_sw(ch) && a52_aac_available())) && out_rate_ok(rate);
+        if ((t->adec || t->aacsw) && t->st.audio_frames > 0) {
             /* The sound is playing: a frame that says otherwise is usually damaged (a skipped HLS segment left
              * one saying "7 channels" and the sound was switched off for good). Skip such frames; reopen
              * only when the new format lasts (8 frames in a row) and can be played. */
             if (!ok || ++t->aparam_new < 8) {
                 t->st.audio_errors++;
-                if (t->aparam_logs++ < 3) plog("tsp: audio frame says %d Hz %d ch (playing %d Hz %d ch): skipped", rate, ch, t->arate, t->ach);
+                if (t->aparam_logs++ < 3) plog("tsp: audio frame says %d Hz %d ch (playing %d Hz %d ch): skipped", rate, ch,
+                                               t->aacsw ? t->asw_rate : t->arate, t->aacsw ? t->asw_ch : t->ach);
                 return;
             }
             plog("tsp: audio format changed to %d Hz %d ch", rate, ch);
@@ -2145,6 +2257,16 @@ static void audio_packet(Tsp *t, Pkt *p)
         }
         t->aparam_new = 0;
         audio_close(t);
+        if (aac_needs_sw(ch) && out_rate_ok(rate)) {                     /* 0.6.0: the Vita's decoder takes 1-2 channels */
+            t->aacsw = a52_create_aac();
+            if (!t->aacsw) { audio_disable(t, "Audio has %d channels: not supported", ch); return; }
+            t->asw_rate = rate;
+            t->asw_ch = ch;
+            plog("tsp: AAC %d Hz, %s: software decoder (FFmpeg), played as stereo", rate,
+                 ch == 6 ? "5.1" : ch == 7 ? "7.1" : ch == 5 ? "5.0" : ch == 4 ? "4.0" : "3.0");
+            a52_feed_frame(t->aacsw, d, p->len, p->pts, aacsw_frame, t);
+            return;
+        }
         if (ch < 1 || ch > 2) { audio_disable(t, "Audio has %d channels: not supported", ch); return; }
         if (!out_rate_ok(rate)) { audio_disable(t, "Audio rate %d Hz: not supported", rate); return; }
         int r = audio_open(t, rate, ch);
@@ -2203,8 +2325,8 @@ static void mpa_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
 static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int ch, int src_ch, int eac3, int64_t pts)
 {
     Tsp *t = ctx;
-    (void)src_ch;
     if (t->audio_off) return;
+    t->st.audio_src_ch = src_ch;
     if (!t->st.audio_frames && !t->a52pcm) plog("tsp: %s audio, %d Hz, played as %s (software decoder)", eac3 ? "E-AC-3" : "AC-3", rate, ch == 1 ? "mono" : "stereo");
     if (samples % 64) { t->st.audio_errors++; return; }
     if (!t->a52pcm) t->a52pcm = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
@@ -2985,12 +3107,135 @@ static int seg_is_mp4(const char *uri, int len)
 
 static void hls_list_variants(Tsp *t, const HlsVariant *v, int n, int k);
 
+/* ---- 0.6.0: HLS sound from an audio playlist of its own (#EXT-X-MEDIA:TYPE=AUDIO,URI=...) ----
+ * The picture's segments come from the variant, the sound's from the audio playlist, fetched just before the
+ * picture segment of the same time (the times in the segments put them together, as with one stream). */
+#define ALT_SEG_MAX (2u * 1024 * 1024)
+#define ALT_MUXED_ID (0x10000 + 99)              /* the track menu's id for the sound inside the variant */
+typedef struct {
+    char *text;                                 /* the audio playlist */
+    char url[HLS_URL_MAX], base[HLS_URL_MAX];
+    uint8_t *seg;                               /* one audio segment */
+    int64_t next;                               /* the next audio segment, -1 = not chosen yet */
+    int64_t ms;                                 /* sound fetched so far (ms of segments) */
+    int back_ms;                                /* live: where the picture starts, ms before the playlist's end */
+    int end, fails;
+} AltAudio;
+
+static void alt_off(Tsp *t, const char *why)
+{
+    if (!t->alt_on) return;
+    t->alt_on = 0;
+    plog("tsp: HLS audio playlist left out: %s (the variant's own sound, if it has one)", why);
+}
+
+/* the track list from the master playlist (the variant's own sound first when the group names one), and the
+ * one to play; returns the rendition to fetch, -1 for none (the variant's own sound) */
+static int alt_choose(Tsp *t, const HlsRendition *r, int nr, const char *group, int muxed, const char *mux_lang, int vcodec)
+{
+    int codec = vcodec == 3 ? TS_CODEC_EAC3 : vcodec == 2 ? TS_CODEC_AC3 : TS_CODEC_AAC;
+    int n = 0, cur = -1;
+    int want = g_aid >= 0x10000 && g_aid < ALT_MUXED_ID ? g_aid - 0x10000 : -1;
+    int pick = hls_pick_audio(r, nr, group, want, g_alang);
+    if (pick < 0) return -1;
+    if (muxed) {                                             /* the sound inside the variant: kept unless asked otherwise */
+        char l3[4];
+        ts_lang3(mux_lang, l3);
+        int lang_match = g_alang[0] && (pick >= 0 && want < 0);
+        if (lang_match) { char pl[4]; ts_lang3(r[pick].lang, pl); lang_match = pl[0] && !strcmp(pl, g_alang) && strcmp(l3, g_alang); }
+        if (g_aid == ALT_MUXED_ID || (want < 0 && !lang_match)) pick = -1;
+        t->st.a_id[n] = ALT_MUXED_ID;
+        t->st.a_codec[n] = codec;
+        memcpy(t->st.a_lang[n], l3, 4);
+        if (pick < 0) cur = n;
+        n++;
+    }
+    for (int i = 0; i < nr && n < TSP_MAX_AUDIO; i++) {
+        if (group && group[0] && strcmp(r[i].group, group)) continue;
+        t->st.a_id[n] = 0x10000 + i;
+        t->st.a_codec[n] = codec;
+        ts_lang3(r[i].lang, t->st.a_lang[n]);
+        if (i == pick) cur = n;
+        n++;
+    }
+    t->st.a_n = n;
+    t->st.a_cur = cur;
+    t->alt_list = 1;
+    char list[200];
+    size_t o = 0;
+    for (int k = 0; k < n && o + 32 < sizeof list; k++)
+        o += (size_t)snprintf(list + o, sizeof list - o, "%s%s%s%s", k ? ", " : "", t->st.a_lang[k][0] ? t->st.a_lang[k] : "-",
+                              t->st.a_id[k] == ALT_MUXED_ID ? " (in the stream)" : "", k == cur ? " (playing)" : "");
+    plog("tsp: HLS audio playlists: %s", list);
+    return pick;
+}
+
+/* fetches the sound up to until_ms (the end of the picture segment that comes next) */
+static void alt_fill(Tsp *t, AltAudio *A, int64_t until_ms, uint8_t *buf)
+{
+    int refreshed = 0;
+    while (!stopping(t) && t->alt_on && !A->end && A->ms < until_ms) {
+        HlsMedia am;
+        if (hls_parse_media(A->text, &am) < 0) { alt_off(t, "no segments"); return; }
+        if (am.encrypted || am.fmp4 || (am.nseg && seg_is_mp4(am.seg[0].uri, am.seg[0].uri_len))) {
+            hls_media_free(&am);
+            alt_off(t, "encrypted or MP4 segments");
+            return;
+        }
+        if (A->next < 0) {
+            if (am.endlist || am.nseg == 0) A->next = am.first_seq;
+            else {                                           /* live: as far from the end as the picture */
+                int i = am.nseg - 1;
+                int64_t acc = am.seg[i].duration_ms;
+                while (i > 0 && acc < A->back_ms) { i--; acc += am.seg[i].duration_ms; }
+                A->next = am.seg[i].seq;
+            }
+            plog("tsp: HLS audio playlist: %d segments, starting at #%lld", am.nseg, (long long)A->next);
+        }
+        if (am.nseg && A->next < am.seg[0].seq) A->next = am.seg[0].seq;
+        int idx = -1;
+        for (int i = 0; i < am.nseg; i++) if (am.seg[i].seq == A->next) { idx = i; break; }
+        if (idx < 0) {
+            int endlist = am.endlist;
+            hls_media_free(&am);
+            if (endlist) { A->end = 1; return; }
+            if (refreshed) return;                           /* (not listed yet: the next round) */
+            refreshed = 1;
+            if (hls_fetch_text(t, A->url, A->text, "audio playlist update", 1, A->base) < 0) return;
+            continue;
+        }
+        char su[HLS_URL_MAX];
+        hls_resolve(A->base, am.seg[idx].uri, am.seg[idx].uri_len, su, sizeof su);
+        int dur = am.seg[idx].duration_ms;
+        int64_t seq = am.seg[idx].seq;
+        hls_media_free(&am);
+        int status = 0, r = hls_get(t, su, (char *)A->seg, ALT_SEG_MAX, buf, &status);
+        if ((r <= 0 || status >= 400) && !stopping(t)) { hls_wait(t, 300); r = hls_get(t, su, (char *)A->seg, ALT_SEG_MAX, buf, &status); }
+        if (stopping(t)) return;
+        if (r > 0 && status < 400) {
+            t->st.bytes += (uint32_t)r;
+            if (A->seg[0] == 0x47) ts_feed(t->adm, A->seg, (size_t)r);
+            else alt_feed_packed(t, A->seg, (size_t)r);
+            A->fails = 0;
+        } else {
+            char lp[96];
+            plog("tsp: HLS audio segment #%lld failed (0x%08X, status %d, %s)", (long long)seq, (unsigned)r, status, url_path_for_log(su, lp, sizeof lp));
+            if (++A->fails >= 5) { alt_off(t, "its segments do not come"); return; }
+        }
+        A->next = seq + 1;
+        A->ms += dur;
+    }
+}
+
 /* HLS: playlists are read with sceHttp; the MPEG-TS segments go into the demuxer one after the other.
  * Live playlists start three segments from the end and are read again while playing. */
 static void read_hls(Tsp *t, uint8_t *buf)
 {
     char *text = malloc(HLS_TEXT_MAX);
     char url[HLS_URL_MAX], seg_url[HLS_URL_MAX], base[HLS_URL_MAX];
+    AltAudio *alt = NULL;                                    /* 0.6.0: the sound's own playlist */
+    HlsRendition *rend = NULL;
+    int alt_pick = -1;
     if (!text) { set_error(t, "Out of memory"); return; }
     snprintf(url, sizeof url, "%s", t->url);
     plog("tsp: HLS stream");
@@ -3000,6 +3245,8 @@ static void read_hls(Tsp *t, uint8_t *buf)
         HlsVariant *v = malloc(sizeof *v * 32);
         if (!v) { set_error(t, "Out of memory"); goto out; }
         int n = hls_parse_master(text, base, v, 32);
+        rend = malloc(sizeof *rend * HLS_MAX_RENDITIONS);
+        int nrend = rend ? hls_parse_audio(text, base, rend, HLS_MAX_RENDITIONS) : 0;
         int want = !g_hd1080 && g_hls_want > 720 ? 720 : g_hls_want;
         t->st.hls_hd = g_hd1080 && hls_has_variant_above(v, n, 720, 1080);   /* the player offers R: 1080p */
         int k = hls_pick_wanted(v, n, want, g_hls_bw);
@@ -3012,6 +3259,12 @@ static void read_hls(Tsp *t, uint8_t *buf)
             plog("tsp: HLS variant %d: %dx%d, %ld kbit/s%s%s%s", i, v[i].width, v[i].height, v[i].bandwidth / 1000,
                  v[i].hevc ? ", HEVC" : "", v[i].audio_only ? ", audio only" : "", i == k ? "  <- chosen" : "");
         if (k < 0) { free(v); set_error_kind(t, TSP_ERRK_FORMAT, "HLS playlist without a usable stream"); goto out; }
+        if (nrend > 0 && (!v[k].audio_group[0] || hls_pick_audio(rend, nrend, v[k].audio_group, -1, "") >= 0)) {
+            /* 0.6.0: the sound has playlists of its own (chosen now: the master playlist's text is still here) */
+            char ml[16], mn[64];
+            int muxed = hls_audio_muxed(text, v[k].audio_group, ml, sizeof ml, mn, sizeof mn);
+            alt_pick = alt_choose(t, rend, nrend, v[k].audio_group, muxed, ml, v[k].audio_codec);
+        }
         /* a variant that does not answer: try the next best one (up to three) */
         int got = -1;
         for (int tries = 0; tries < 3 && k >= 0 && !stopping(t); tries++) {
@@ -3032,6 +3285,22 @@ static void read_hls(Tsp *t, uint8_t *buf)
         }
         if (hls_is_master(text)) { set_error_kind(t, TSP_ERRK_FORMAT, "HLS playlist inside a playlist: not supported"); goto out; }
     }
+    if (alt_pick >= 0 && rend && !stopping(t)) {             /* 0.6.0: the sound's playlist */
+        alt = calloc(1, sizeof *alt);
+        if (alt) { alt->text = malloc(HLS_TEXT_MAX); alt->seg = malloc(ALT_SEG_MAX); }
+        TsSink as = { on_alt_video, on_alt_audio, t };
+        if (alt && alt->text && alt->seg && (t->adm = ts_create(&as)) != NULL) {
+            snprintf(alt->url, sizeof alt->url, "%s", rend[alt_pick].uri);
+            alt->next = -1;
+            t->alt_pts = -1;
+            t->alt_on = 1;
+            if (hls_fetch_text(t, alt->url, alt->text, "audio playlist", 1, alt->base) < 0) alt_off(t, "it does not answer");
+            else if (hls_is_master(alt->text)) alt_off(t, "a playlist of playlists");
+            else plog("tsp: HLS sound from its own playlist (%s%s%s)", rend[alt_pick].lang[0] ? rend[alt_pick].lang : "-",
+                      rend[alt_pick].name[0] ? ", " : "", rend[alt_pick].name);
+        } else plog("tsp: HLS audio playlist: out of memory");
+    }
+    int64_t v_ms = 0;                                        /* (0.6.0: picture fetched so far, to keep the sound with it) */
     int64_t next = -1;
     uint64_t last_new = now_us();
     int fed = 0, seg_fails = 0;
@@ -3048,6 +3317,11 @@ static void read_hls(Tsp *t, uint8_t *buf)
             int back = m.target_ms >= 8000 ? 2 : 3;           /* long segments: start closer to live */
             next = m.endlist || m.nseg <= back ? m.first_seq : m.seg[m.nseg - back].seq;
             plog("tsp: HLS %s, %d segments of %d ms, starting at #%lld", m.endlist ? "video" : "live", m.nseg, m.target_ms, (long long)next);
+            if (alt) {                                       /* 0.6.0: live: the sound starts as far from the end */
+                int64_t back = 0;
+                for (int i = 0; i < m.nseg; i++) if (m.seg[i].seq >= next) back += m.seg[i].duration_ms;
+                alt->back_ms = (int)back;
+            }
         }
         if (m.nseg && next < m.seg[0].seq) {                /* the playlist moved past us */
             plog("tsp: HLS segments %lld..%lld are gone, continuing at %lld", (long long)next, (long long)m.seg[0].seq - 1, (long long)m.seg[0].seq);
@@ -3059,6 +3333,11 @@ static void read_hls(Tsp *t, uint8_t *buf)
             if (g->seq < next) continue;
             hls_resolve(base, g->uri, g->uri_len, seg_url, sizeof seg_url);
             if (g->discontinuity && fed) plog("tsp: HLS discontinuity at #%lld", (long long)g->seq);
+            if (alt && t->alt_on) {                          /* 0.6.0: the sound of this time first */
+                alt_fill(t, alt, v_ms + g->duration_ms, buf);
+                if (stopping(t)) break;
+            }
+            v_ms += g->duration_ms;
             uint64_t g0 = now_us(), gw0 = t->push_wait_us;
             uint32_t gb0 = t->st.bytes;
             int status = 0, r = hls_get(t, seg_url, NULL, 0, buf, &status);
@@ -3110,6 +3389,10 @@ static void read_hls(Tsp *t, uint8_t *buf)
         if (hls_fetch_text(t, url, text, "playlist update", 0, base) < 0) goto out;
     }
 out:
+    if (alt) { free(alt->text); free(alt->seg); free(alt); }
+    t->alt_on = 0;
+    if (t->adm) { ts_destroy(t->adm); t->adm = NULL; }      /* (only this thread feeds it) */
+    free(rend);
     free(text);
 }
 

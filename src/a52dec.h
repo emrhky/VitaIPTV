@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stddef.h>
 
-#define A52_MAX_SAMPLES 1536            /* per channel and frame (AC-3: 1536; E-AC-3: 256..1536) */
+#define A52_MAX_SAMPLES 2048            /* per channel and frame (AC-3: 1536; E-AC-3: 256..1536; AAC 1024, HE-AAC 2048) */
 
 typedef struct A52Dec A52Dec;
 
@@ -21,6 +21,12 @@ void    a52_destroy(A52Dec *d);
 /* The payload of one packet (frames may be split between packets); pts (90 kHz, -1 if none) belongs to the
  * first frame that starts in it. */
 void    a52_feed(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out out, void *ctx);
+/* 0.6.0: AAC with more than two channels (5.1, 7.1), which the Vita's decoder refuses: FFmpeg's aac decoder,
+ * mixed down to stereo the same way. NULL when FFmpeg was built without it (an older third_party/ffmpeg-vita:
+ * run tools/build_ffmpeg_vita.sh again). Fed one whole ADTS frame at a time with a52_feed_frame. */
+int     a52_aac_available(void);
+A52Dec *a52_create_aac(void);
+void    a52_feed_frame(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out out, void *ctx);
 /* frames decoded, frames that failed */
 void    a52_stats(const A52Dec *d, uint32_t *frames, uint32_t *errors);
 

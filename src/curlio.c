@@ -61,8 +61,54 @@ typedef struct {
 
 #define TICK_MS 500
 
+#ifdef __vita__
+#include <psp2/kernel/processmgr.h>
+static uint64_t now_ms64(void) { return sceKernelGetProcessTimeWide() / 1000; }
+#else
+static uint64_t now_ms64(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000; }
+#endif
+
 static volatile int g_rcvbuf;            /* the receive buffer the last connection got (bytes) */
+static volatile int g_connect_ms;        /* how long the last connect took (about one round trip) */
+static int g_rcv_pick;                   /* 0.6.0: the size the system accepted (0 = not tried yet, -1 = none) */
+static char g_rcv_note[160];             /* ... and what each try gave, for the log */
 int cio_last_rcvbuf(void) { return g_rcvbuf; }
+int cio_last_connect_ms(void) { return g_connect_ms; }
+const char *cio_rcvbuf_note(void) { return g_rcv_note; }
+
+/* 0.6.0: the biggest receive buffer the system takes. Asking 1 MB always read back 63 KB on the Vita: either
+ * the request was refused (too big: the default stays) or 64 KB is the limit. So the sizes are tried from
+ * 1 MB down, the first one the system takes is kept for later connections, and each try is noted. */
+static void set_rcvbuf(int fd)
+{
+    static const int SIZES[] = { 1024 * 1024, 512 * 1024, 256 * 1024, 128 * 1024 };
+    int v = 0;
+    socklen_t rl = sizeof v;
+    if (g_rcv_pick > 0) {
+        v = g_rcv_pick;
+        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof v);
+    } else if (g_rcv_pick == 0) {
+        int def = 0;
+        rl = sizeof def;
+        getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &def, &rl);
+        int k = snprintf(g_rcv_note, sizeof g_rcv_note, "default %d KB", def / 1024);
+        g_rcv_pick = -1;
+        for (size_t i = 0; i < sizeof SIZES / sizeof SIZES[0]; i++) {
+            v = SIZES[i];
+            int r = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof v);
+            int e = r < 0 ? errno : 0, got = 0;
+            rl = sizeof got;
+            getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &got, &rl);
+            if (k > 0 && (size_t)k < sizeof g_rcv_note)
+                k += r < 0 ? snprintf(g_rcv_note + k, sizeof g_rcv_note - (size_t)k, "; %d KB: refused (%d) -> %d KB", SIZES[i] / 1024, e, got / 1024)
+                           : snprintf(g_rcv_note + k, sizeof g_rcv_note - (size_t)k, "; %d KB: ok -> %d KB", SIZES[i] / 1024, got / 1024);
+            if (r == 0 && got > def) { g_rcv_pick = SIZES[i]; break; }
+        }
+    }
+    int got = 0;
+    rl = sizeof got;
+    if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &got, &rl) == 0) g_rcvbuf = got;
+}
 
 static int stopped(const CioRequest *rq) { return rq->stop && rq->stop(rq->ctx); }
 
@@ -141,11 +187,10 @@ static int tcp_connect(const char *host, int port, const CioRequest *rq, char *e
         /* A big receive buffer, set before connecting so TCP can offer a big window: with the small default
          * the speed stops near buffer / round trip (films over https stayed at about 300 KB/s while the
          * Vita's own HTTP reached 800 KB/s). */
-        int rcv = 1024 * 1024;
-        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
-        socklen_t rl = sizeof rcv;                           /* 0.6.0: what the system gave (for the log) */
-        if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, &rl) == 0) g_rcvbuf = rcv;
+        set_rcvbuf(fd);
+        uint64_t t0 = now_ms64();
         st = connect_wait(fd, a->ai_addr, a->ai_addrlen, rq, &why);
+        g_connect_ms = (int)(now_ms64() - t0);
         if (st == 0) break;
         close(fd);
         fd = -1;
@@ -514,6 +559,8 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 
 int cio_available(void) { return 0; }
 int cio_last_rcvbuf(void) { return 0; }
+int cio_last_connect_ms(void) { return 0; }
+const char *cio_rcvbuf_note(void) { return ""; }
 void cio_init(void) {}
 int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 {

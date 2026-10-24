@@ -36,5 +36,9 @@ void cio_init(void);                    /* once, at start-up (curl_global_init) 
 int  cio_get(const CioRequest *rq, int *status, char *err, size_t errsz);
 /* 0.6.0: the receive buffer the last connection got from the system, in bytes (0 = unknown) */
 int  cio_last_rcvbuf(void);
+/* 0.6.0 (diagnosis): how long the last connect took in ms (about one round trip), and the receive buffer
+ * sizes tried at the first connection ("default 63 KB; 1024 KB: refused -> 63 KB; ...") */
+int  cio_last_connect_ms(void);
+const char *cio_rcvbuf_note(void);
 
 #endif
