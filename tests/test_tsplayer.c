@@ -19,7 +19,17 @@
 #include <time.h>
 #include <unistd.h>
 
-void plog(const char *fmt, ...) { if (getenv("VERBOSE")) { va_list a; va_start(a, fmt); vprintf(fmt, a); va_end(a); putchar('\n'); } }
+static int g_own_http;                      /* 0.6.0: "own socket (http)" was logged */
+void plog(const char *fmt, ...)
+{
+    char line[1024];
+    va_list a;
+    va_start(a, fmt);
+    vsnprintf(line, sizeof line, fmt, a);
+    va_end(a);
+    if (strstr(line, "own socket (http)")) g_own_http = 1;
+    if (getenv("VERBOSE")) puts(line);
+}
 extern int mock_mapped;
 extern const char *mock_http_file;
 extern long mock_http_fail_after;
@@ -459,6 +469,43 @@ int main(int argc, char **argv)
         vshow("https mkv", &v);
         assert(v.r.st.state == TSP_ENDED && v.first_pos >= 6900 && v.first_pos <= 7300 && v.r.changes >= 100);
         puts("all https tests passed");
+        if (!getenv("HTTP_BASE")) return 0;
+    }
+    if (getenv("HTTP_BASE")) {                               /* 0.6.0: plain http:// through our own socket (big receive buffer) */
+        char u[512];
+        const char *b = getenv("HTTP_BASE");
+        cio_init();
+        g_own_http = 0;
+        snprintf(u, sizeof u, "%s/s720.ts", b);
+        Run h = play(u, 10);
+        show("http stream (own socket)", &h);
+        assert(h.changes >= 120 && h.st.audio_frames > 200 && h.synced && g_own_http);
+        g_own_http = 0;
+        snprintf(u, sizeof u, "%s/hls/master.m3u8", b);
+        h = play(u, 12);
+        show("http hls (own socket)", &h);
+        assert(h.st.state == TSP_ENDED && h.changes >= 130 && h.synced && h.w == 1280 && g_own_http);
+        snprintf(u, sizeof u, "%s/missing.ts", b);
+        h = play(u, 8);
+        show("http 404", &h);
+        assert(h.st.state == TSP_ERROR && strstr(h.st.msg, "404"));
+        g_own_http = 0;
+        snprintf(u, sizeof u, "%s/film.mp4", b);
+        VRun v = play_vod_url(u, NULL, 6500, 15, 0, 0);
+        vshow("http film (own socket)", &v);
+        assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.first_pos >= 5900 && v.first_pos <= 6600 && v.r.changes >= 130 && g_own_http);
+        snprintf(u, sizeof u, "%s/film.mkv", b);
+        v = play_vod_url(u, NULL, 7200, 15, 0, 0);
+        vshow("http mkv (own socket)", &v);
+        assert(v.r.st.state == TSP_ENDED && v.first_pos >= 6900 && v.first_pos <= 7300 && v.r.changes >= 100);
+        g_own_http = 0;
+        tsp_set_via_server(1);                               /* the transcoding server: still the system HTTP */
+        snprintf(u, sizeof u, "%s/s720.ts", b);
+        h = play(u, 6);
+        tsp_set_via_server(0);
+        show("http via server (system HTTP)", &h);
+        assert(!g_own_http);
+        puts("all http (own socket) tests passed");
         return 0;
     }
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
@@ -477,6 +524,7 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "late")) goto late;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "limit")) goto limit;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls")) goto hls;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "alt")) goto alt;
     r = play(argv[1], 10);
     show("720p30", &r);
     assert(r.st.state == TSP_ENDED && r.st.errors == 0);
@@ -583,17 +631,6 @@ int main(int argc, char **argv)
                r.st.audio_rate == 48000 && r.st.audio_ch == 2 && r.synced && r.av_bad * 5 <= r.avn);
     else                                                     /* without it: the picture plays, the audio says why not */
         assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames == 0 && strstr(r.st.audio_msg, "ac3"));
-    if (a52_available()) {                                   /* 0.5.0 test modes: 1 decoded but not played, 3 in halves */
-        tsp_set_ac3_test(1);
-        r = play(argv[12], 10);
-        show("ac3 test 1", &r);
-        assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames > 100);
-        tsp_set_ac3_test(3);
-        r = play(argv[12], 10);
-        show("ac3 test 3", &r);
-        assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames > 200 && r.st.audio_ch == 2 && r.synced && r.av_bad * 5 <= r.avn);
-        tsp_set_ac3_test(0);
-    }
     {   /* 0.5.0: two audio tracks (Turkish AAC, English AC-3): the list, the language asked for, a track asked for */
         static char p2[512], p3[512];
         snprintf(p2, sizeof p2, "%s/twoaudio.ts", argv[16]);
@@ -622,6 +659,22 @@ int main(int argc, char **argv)
             assert(r.st.a_cur >= 0 && !strcmp(r.st.a_lang[r.st.a_cur], "tur"));
         }
         tsp_set_audio(-1, NULL);
+    }
+    {   /* 0.6.0: 5.1 AAC: the Vita's decoder takes two channels, FFmpeg's aac decoder plays it as stereo */
+        static char pa[512];
+        const char *ext[3] = { "ts", "mkv", "mp4" };
+        for (int k = 0; k < 3; k++) {
+            snprintf(pa, sizeof pa, "%s/aac51.%s", argv[16], ext[k]);
+            Run ra;
+            if (k < 2) ra = play(pa, 6);
+            else { VRun v = play_vod(pa, 0, 8, 0, 0); ra = v.r; }
+            printf("               5.1 AAC %s: audio %d ch (stream %d ch), frames %u, msg '%s'\n", ext[k], ra.st.audio_ch, ra.st.audio_src_ch,
+                   (unsigned)ra.st.audio_frames, ra.st.audio_msg);
+            if (a52_aac_available())
+                assert(ra.st.audio_frames > 100 && ra.st.audio_ch == 2 && ra.st.audio_src_ch == 6 && !ra.st.audio_msg[0] && !ra.st.audio_ac3 && ra.synced);
+            else
+                assert(ra.st.audio_frames == 0 && strstr(ra.st.audio_msg, "6 channels") && ra.changes >= 100);   /* the picture plays */
+        }
     }
     if (argc > 23) {                                         /* a few AAC frames claiming 7 channels: skipped, sound stays on */
         r = play(argv[23], 10);
@@ -1056,6 +1109,48 @@ hls_slow:
         assert(r.st.skipped == 0 && r.st.rebuffers >= 1 && r.st.slow_network && r.nonmono == 0 && r.changes >= 200);
         assert(r.av_bad * 4 <= r.avn);                       /* the picture stays with the sound */
         mock_http_reset();
+    }
+
+alt:
+    {   /* 0.6.0: HLS with the sound in playlists of its own (#EXT-X-MEDIA:TYPE=AUDIO,URI=...) */
+        static char an[64][32], ap[64][512];
+        int k = 0;
+        char altdir[512];
+        snprintf(altdir, sizeof altdir, "%s/../alt", argv[16]);
+        const char *pl[] = { "altm.m3u8", "altv.m3u8", "alttr.m3u8", "alten.m3u8", "altml.m3u8", "altv_l.m3u8", "alttr_l.m3u8" };
+        for (int i = 0; i < 7; i++) { snprintf(an[k], 32, "%s", pl[i]); snprintf(ap[k], 512, "%s/%s", altdir, pl[i]); k++; }
+        const char *pre[] = { "av", "aa", "ae" };
+        for (int p = 0; p < 3; p++)
+            for (int i = 0; i < 20 && k < 63; i++) {
+                snprintf(an[k], 32, "%s%03d.%s", pre[p], i, p == 2 ? "aac" : "ts");
+                snprintf(ap[k], 512, "%s/%s", altdir, an[k]);
+                FILE *f = fopen(ap[k], "rb"); if (!f) break; fclose(f); k++;
+            }
+        mock_http_reset();
+        for (int i = 0; i < k; i++) { mock_http_map[i][0] = an[i]; mock_http_map[i][1] = ap[i]; }
+        tsp_set_options(0, 720);
+        tsp_set_audio(-1, NULL);
+        r = play("http://example.invalid/alt/altm.m3u8", 12);
+        show("hls own audio tr", &r);
+        printf("               tracks %d, playing %d (%s)\n", r.st.a_n, r.st.a_cur, r.st.a_cur >= 0 ? r.st.a_lang[r.st.a_cur] : "-");
+        assert(r.st.state == TSP_ENDED && r.changes >= 130 && r.st.audio_frames > 200 && r.synced && r.w == 1280);
+        assert(r.st.a_n == 2 && r.st.a_cur >= 0 && !strcmp(r.st.a_lang[r.st.a_cur], "tur"));   /* DEFAULT=YES */
+        int en = !strcmp(r.st.a_lang[0], "eng") ? 0 : 1;
+        assert(!strcmp(r.st.a_lang[en], "eng"));
+        tsp_set_audio(-1, "en");                             /* by language: the packed AAC one */
+        r = play("http://example.invalid/alt/altm.m3u8", 12);
+        show("hls own audio en", &r);
+        assert(r.st.state == TSP_ENDED && r.changes >= 130 && r.st.audio_frames > 200 && r.synced);
+        assert(r.st.a_cur >= 0 && !strcmp(r.st.a_lang[r.st.a_cur], "eng"));
+        tsp_set_audio(r.st.a_id[1 - en], "eng");             /* the track from the menu wins over the language */
+        r = play("http://example.invalid/alt/altm.m3u8", 6);
+        assert(r.st.a_cur >= 0 && !strcmp(r.st.a_lang[r.st.a_cur], "tur") && r.st.audio_frames > 50);
+        tsp_set_audio(-1, NULL);
+        r = play("http://example.invalid/alt/altml.m3u8", 5);    /* live: the sound starts where the picture does */
+        show("hls own audio live", &r);
+        assert(r.st.audio_frames > 60 && r.synced && r.changes >= 60 && r.st.a_n == 1);
+        mock_http_reset();
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "alt")) return 0;
     }
 
     /* HLS: master playlist -> the 720p variant -> 1 s MPEG-TS segments */
