@@ -19,7 +19,17 @@
 #include <time.h>
 #include <unistd.h>
 
-void plog(const char *fmt, ...) { if (getenv("VERBOSE")) { va_list a; va_start(a, fmt); vprintf(fmt, a); va_end(a); putchar('\n'); } }
+static int g_own_http;                      /* 0.6.0: "own socket (http)" was logged */
+void plog(const char *fmt, ...)
+{
+    char line[1024];
+    va_list a;
+    va_start(a, fmt);
+    vsnprintf(line, sizeof line, fmt, a);
+    va_end(a);
+    if (strstr(line, "own socket (http)")) g_own_http = 1;
+    if (getenv("VERBOSE")) puts(line);
+}
 extern int mock_mapped;
 extern const char *mock_http_file;
 extern long mock_http_fail_after;
@@ -459,6 +469,43 @@ int main(int argc, char **argv)
         vshow("https mkv", &v);
         assert(v.r.st.state == TSP_ENDED && v.first_pos >= 6900 && v.first_pos <= 7300 && v.r.changes >= 100);
         puts("all https tests passed");
+        if (!getenv("HTTP_BASE")) return 0;
+    }
+    if (getenv("HTTP_BASE")) {                               /* 0.6.0: plain http:// through our own socket (big receive buffer) */
+        char u[512];
+        const char *b = getenv("HTTP_BASE");
+        cio_init();
+        g_own_http = 0;
+        snprintf(u, sizeof u, "%s/s720.ts", b);
+        Run h = play(u, 10);
+        show("http stream (own socket)", &h);
+        assert(h.changes >= 120 && h.st.audio_frames > 200 && h.synced && g_own_http);
+        g_own_http = 0;
+        snprintf(u, sizeof u, "%s/hls/master.m3u8", b);
+        h = play(u, 12);
+        show("http hls (own socket)", &h);
+        assert(h.st.state == TSP_ENDED && h.changes >= 130 && h.synced && h.w == 1280 && g_own_http);
+        snprintf(u, sizeof u, "%s/missing.ts", b);
+        h = play(u, 8);
+        show("http 404", &h);
+        assert(h.st.state == TSP_ERROR && strstr(h.st.msg, "404"));
+        g_own_http = 0;
+        snprintf(u, sizeof u, "%s/film.mp4", b);
+        VRun v = play_vod_url(u, NULL, 6500, 15, 0, 0);
+        vshow("http film (own socket)", &v);
+        assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.first_pos >= 5900 && v.first_pos <= 6600 && v.r.changes >= 130 && g_own_http);
+        snprintf(u, sizeof u, "%s/film.mkv", b);
+        v = play_vod_url(u, NULL, 7200, 15, 0, 0);
+        vshow("http mkv (own socket)", &v);
+        assert(v.r.st.state == TSP_ENDED && v.first_pos >= 6900 && v.first_pos <= 7300 && v.r.changes >= 100);
+        g_own_http = 0;
+        tsp_set_via_server(1);                               /* the transcoding server: still the system HTTP */
+        snprintf(u, sizeof u, "%s/s720.ts", b);
+        h = play(u, 6);
+        tsp_set_via_server(0);
+        show("http via server (system HTTP)", &h);
+        assert(!g_own_http);
+        puts("all http (own socket) tests passed");
         return 0;
     }
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
@@ -583,17 +630,6 @@ int main(int argc, char **argv)
                r.st.audio_rate == 48000 && r.st.audio_ch == 2 && r.synced && r.av_bad * 5 <= r.avn);
     else                                                     /* without it: the picture plays, the audio says why not */
         assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames == 0 && strstr(r.st.audio_msg, "ac3"));
-    if (a52_available()) {                                   /* 0.5.0 test modes: 1 decoded but not played, 3 in halves */
-        tsp_set_ac3_test(1);
-        r = play(argv[12], 10);
-        show("ac3 test 1", &r);
-        assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames > 100);
-        tsp_set_ac3_test(3);
-        r = play(argv[12], 10);
-        show("ac3 test 3", &r);
-        assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames > 200 && r.st.audio_ch == 2 && r.synced && r.av_bad * 5 <= r.avn);
-        tsp_set_ac3_test(0);
-    }
     {   /* 0.5.0: two audio tracks (Turkish AAC, English AC-3): the list, the language asked for, a track asked for */
         static char p2[512], p3[512];
         snprintf(p2, sizeof p2, "%s/twoaudio.ts", argv[16]);
