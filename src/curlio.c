@@ -61,6 +61,9 @@ typedef struct {
 
 #define TICK_MS 500
 
+static volatile int g_rcvbuf;            /* the receive buffer the last connection got (bytes) */
+int cio_last_rcvbuf(void) { return g_rcvbuf; }
+
 static int stopped(const CioRequest *rq) { return rq->stop && rq->stop(rq->ctx); }
 
 /* ---- sockets ---- */
@@ -140,6 +143,8 @@ static int tcp_connect(const char *host, int port, const CioRequest *rq, char *e
          * Vita's own HTTP reached 800 KB/s). */
         int rcv = 1024 * 1024;
         setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
+        socklen_t rl = sizeof rcv;                           /* 0.6.0: what the system gave (for the log) */
+        if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, &rl) == 0) g_rcvbuf = rcv;
         st = connect_wait(fd, a->ai_addr, a->ai_addrlen, rq, &why);
         if (st == 0) break;
         close(fd);
@@ -447,7 +452,8 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
         }
         *eoh = 0;
         int code = 0;
-        if (sscanf((char *)hb, "HTTP/%*d.%*d %d", &code) != 1) {
+        if (sscanf((char *)hb, "HTTP/%*d.%*d %d", &code) != 1 &&
+            sscanf((char *)hb, "ICY %d", &code) != 1) {      /* (0.6.0: radio servers answer "ICY 200 OK") */
             char head[24];
             size_t k = 0;
             for (; k < sizeof head - 1 && hb[k]; k++) head[k] = hb[k] >= 32 && hb[k] < 127 ? (char)hb[k] : '.';
@@ -507,6 +513,7 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 #else   /* built without TLS */
 
 int cio_available(void) { return 0; }
+int cio_last_rcvbuf(void) { return 0; }
 void cio_init(void) {}
 int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 {

@@ -22,6 +22,7 @@ static int list_push(ChannelList *l, const Channel *c)
     l->items[l->count++] = *c;
     return 0;
 }
+int channel_list_push(ChannelList *l, const Channel *c) { return list_push(l, c); }
 
 /* Copies up to dstsz-1 bytes without cutting a UTF-8 sequence in half. */
 static void copy_trunc(char *dst, size_t dstsz, const char *src, size_t n)
@@ -239,6 +240,15 @@ int source_xtream_url(const Source *s, char *out, size_t outsz)
     if (source_xtream_base(s, base, sizeof base)) return -1;
     if (url_encode(u, sizeof u, s->user) || url_encode(p, sizeof p, s->pass)) return -1;
     int n = snprintf(out, outsz, "%s/get.php?username=%s&password=%s&type=m3u_plus&output=ts", base, u, p);
+    return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
+int xtream_movie_url(const Source *s, const char *file, char *out, size_t outsz)
+{
+    char base[IPTV_URL_MAX + 16], u[IPTV_CRED_MAX * 3 + 1], p[IPTV_CRED_MAX * 3 + 1];
+    if (source_xtream_base(s, base, sizeof base)) return -1;
+    if (url_encode(u, sizeof u, s->user) || url_encode(p, sizeof p, s->pass)) return -1;
+    int n = snprintf(out, outsz, "%s/movie/%s/%s/%s", base, u, p, file);
     return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
 }
 
@@ -951,7 +961,6 @@ void settings_parse(const char *text, Settings *st)
             if (!strcmp(k, "proxy")) copy_trunc(st->proxy, sizeof st->proxy, v, strlen(v));
             else if (!strcmp(k, "auto_proxy")) { st->auto_proxy = atoi(v); if (st->auto_proxy < 0 || st->auto_proxy > 2) st->auto_proxy = 1; }
             else if (!strcmp(k, "plain_letters")) st->plain_letters = atoi(v) != 0;
-            else if (!strcmp(k, "ac3_test")) st->ac3_test = atoi(v) >= 1 && atoi(v) <= 3 ? atoi(v) : 0;
             else if (!strcmp(k, "lang")) { st->lang = atoi(v); if (st->lang < 0 || st->lang > 2) st->lang = 0; }
             else if (!strcmp(k, "hide_adult")) st->hide_adult = atoi(v) != 0;
             else if (!strcmp(k, "hide_4k")) st->hide_4k = atoi(v) != 0;
@@ -969,11 +978,9 @@ void settings_parse(const char *text, Settings *st)
 
 int settings_format(const Settings *st, char *out, size_t outsz)
 {
-    char t3[16] = "";
-    if (st->ac3_test) snprintf(t3, sizeof t3, "ac3_test=%d\n", st->ac3_test);   /* (kept when the settings are saved) */
-    int w = snprintf(out, outsz, "# Vita IPTV settings (auto_proxy: 0 off, 1 when needed, 2 always)\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_4k=%d\nresolution=%d\n%s%s",
+    int w = snprintf(out, outsz, "# Vita IPTV settings (auto_proxy: 0 off, 1 when needed, 2 always)\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_4k=%d\nresolution=%d\n%s",
                      st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_4k, st->res_pref,
-                     st->plain_letters ? "plain_letters=1\n" : "", t3);
+                     st->plain_letters ? "plain_letters=1\n" : "");
     return (w < 0 || (size_t)w >= outsz) ? -1 : w;
 }
 

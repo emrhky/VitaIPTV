@@ -49,6 +49,17 @@ void fav_channel_key(const Source *s, const Channel *c, char *out, size_t outsz)
     clean_copy(out, outsz, u);
 }
 
+void fav_vod_key(const Channel *c, char *out, size_t outsz)
+{
+    out[0] = 0;
+    if (c->kind == CH_SERIES) { if (c->url[0]) { char tmp[IPTV_URL_MAX + 8]; snprintf(tmp, sizeof tmp, "series:%s", c->url); clean_copy(out, outsz, tmp); } return; }
+    const char *m = strstr(c->url, "/movie/"), *file = strrchr(c->url, '/');
+    if (c->kind != CH_FILM || !m || !file || !file[1]) return;
+    char tmp[IPTV_URL_MAX + 8];
+    snprintf(tmp, sizeof tmp, "movie:%s", file + 1);
+    clean_copy(out, outsz, tmp);
+}
+
 static int grow(FavList *f)
 {
     if (f->n < f->cap) return 0;
@@ -69,7 +80,7 @@ static int add(FavList *f, char kind, const char *src, const char *ch, const cha
     memset(e, 0, sizeof *e);
     e->kind = kind;
     clean_copy(e->src, sizeof e->src, src);
-    if (kind == FAV_CHANNEL || kind == FAV_RECENT) {
+    if (kind != FAV_LIST) {
         clean_copy(e->ch, sizeof e->ch, ch);
         clean_copy(e->name, sizeof e->name, name);
     }
@@ -97,7 +108,7 @@ int fav_parse(const char *text, FavList *f)
         while (*end && *end != '\n') end++;
         const char *le = end;
         if (le > p && le[-1] == '\r') le--;
-        if ((*p == FAV_LIST || *p == FAV_CHANNEL || *p == FAV_RECENT) && p + 1 < le && p[1] == '\t') {
+        if ((*p == FAV_LIST || *p == FAV_CHANNEL || *p == FAV_RECENT || *p == FAV_FILM || *p == FAV_SERIES) && p + 1 < le && p[1] == '\t') {
             char kind = *p;
             static char src[FAV_SRC_MAX], ch[IPTV_URL_MAX], name[IPTV_NAME_MAX];
             const char *q = field(p + 2, le, src, sizeof src);
@@ -115,7 +126,7 @@ int fav_parse(const char *text, FavList *f)
 
 int fav_format(const FavList *f, char *out, size_t outsz)
 {
-    int n = snprintf(out, outsz, "# Vita IPTV favourites (START adds or removes one). L = playlist, C = channel\n");
+    int n = snprintf(out, outsz, "# Vita IPTV favourites (START adds or removes one). L = playlist, C = channel, R = recently watched, F = film, S = series\n");
     if (n < 0 || (size_t)n >= outsz) return -1;
     size_t o = (size_t)n;
     for (int i = 0; i < f->n; i++) {
@@ -252,7 +263,9 @@ int fav_rank_kind(const FavList *f, char kind, const Source *s, const ChannelLis
         qsort(keys, (size_t)nk, sizeof *keys, cmp_key);
         char ck[IPTV_URL_MAX];
         for (int i = 0; i < l->count; i++) {
-            fav_channel_key(s, &l->items[i], ck, sizeof ck);
+            if (kind == FAV_FILM || kind == FAV_SERIES) fav_vod_key(&l->items[i], ck, sizeof ck);
+            else fav_channel_key(s, &l->items[i], ck, sizeof ck);
+            if (!ck[0]) continue;
             RankKey probe = { hash(ck), 0, 0 };
             RankKey *k = bsearch(&probe, keys, (size_t)nk, sizeof *keys, cmp_key);
             if (!k) continue;

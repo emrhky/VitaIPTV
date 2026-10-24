@@ -13,7 +13,8 @@ static const Pair FIXED[] = {
     /* 0.5.0: favourites */
     { "Favorites", "Favoriler" }, { "Favorite", "Favori" }, { "Added to favorites", "Favorilere eklendi" },
     { "Removed from favorites", "Favorilerden çıkarıldı" }, { "The favorites list is full", "Favori listesi dolu" },
-    { "Films and series cannot be favorites yet", "Film ve diziler henüz favorilere eklenemiyor" },
+    { "Could not add it to the favorites", "Favorilere eklenemedi" },   /* 0.6.0: films and series */
+    { "Series added to favorites", "Dizi favorilere eklendi" }, { "Series removed from favorites", "Dizi favorilerden çıkarıldı" },
     { "Previous channel", "Önceki kanal" },
     /* 0.4.5 */
     { "Fav.", "Fav." }, { "Res.", "Çöz." }, { "P. Channel", "Ö. Kanal" },
