@@ -168,6 +168,8 @@ typedef struct {
     /* decoder (worker thread) */
     int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder, no_two;
     int connect_fails, multi_out, oom_fixed, status_retries;
+    int cio_http_off;                   /* 0.6.0: plain http:// through our own socket failed: the system HTTP from now on */
+    int rcvbuf_logged;
     int no_out, reopen_pending, reopens;  /* decoder that takes units but gives no pictures: restart it */
     int dry_restarts, good_since;       /* restarts that did not bring steady pictures back (each waits longer) */
     int es_full_fails;                  /* HD decoder: "ES buffer full" even after a picture was taken out */
@@ -238,18 +240,6 @@ typedef struct {
     /* 0.4.0: the stream's timing information (VUI HRD / pic_struct, buffering period / picture timing SEI).
      * A 720p25 channel with it gave no picture from either decoder; the second try leaves it out. */
     int hdr_timing, sei_timing, drop_timing, timing_tried, hdr_logged, sei_logged;
-    /* 0.5.0 test builds: the first sound frames of the software decoder, logged together (a52_trace) */
-    struct { int64_t in_pts, pts, clk; uint32_t t_ms, block_us; uint16_t n; } a52tr[300];
-    int a52tr_n, a52tr_done;
-    int64_t a52_in_pts;                     /* the time of the last packet given to the software decoder */
-    uint64_t a52_t0;
-    /* 0.5.0: detail line for the picture / sound timing (stats_tick) */
-    uint64_t pic_last_us, pic_gap_max_us;   /* video thread: time between pictures coming out of the decoder */
-    uint32_t pic_gaps_long, pic_n;          /* ... gaps above 3 picture times, pictures counted */
-    uint64_t aout_max_us, aout_sum_us;      /* audio thread: sceAudioOutOutput blocking time */
-    uint32_t aout_n, aout_min_us;
-    int64_t aclk_prev_pts;                  /* audio clock at the last stats line (90 kHz) */
-    uint64_t aclk_prev_us;
     int hd_fallback;                    /* 0.4.1: the HD decoder (720p above 30 fps) gave nothing: the normal one */
     int hdr_no_restr;                   /* the SPS has no bitstream_restriction (the second try adds it) */
     int64_t late_sum_us;
@@ -1117,13 +1107,6 @@ static void take_picture(Tsp *t, SceAvcdecPicture *p, int si)
         sl->pts = opts;
         sl->seq = t->out_seq++;
         sl->ready_us = now_us();
-        if (t->pic_last_us) {                               /* 0.5.0: detail line: how evenly pictures come out */
-            uint64_t g = sl->ready_us - t->pic_last_us;
-            if (g > t->pic_gap_max_us) t->pic_gap_max_us = g;
-            if (g > 3ULL * (t->frame_us ? t->frame_us : 40000)) t->pic_gaps_long++;
-        }
-        t->pic_last_us = sl->ready_us;
-        t->pic_n++;
         sl->state = SLOT_READY;
         sceKernelUnlockMutex(t->lock, 1);
         t->st.decoded++;
@@ -1355,9 +1338,36 @@ static size_t build_es(Tsp *t, const VInfo *i, const uint8_t *data, size_t len, 
 
 static int audio_now(Tsp *t, uint64_t now, int64_t *apts);
 static int g_via_server;
-static int g_ac3_test;                                      /* 0.5.0 test builds (tsp_set_ac3_test) */
-void tsp_set_ac3_test(int mode) { g_ac3_test = mode; }                                    /* 0.5.0: the next stream comes through the transcoding server */
+/* 0.5.0: the next stream comes through the transcoding server */
 void tsp_set_via_server(int on) { g_via_server = on; }
+
+/* 0.6.0: our own socket (src/curlio.c) for https:// and now plain http:// too: it asks for a 1 MB receive
+ * buffer, the system HTTP keeps a small one, so with a long round trip films and channels came slower.
+ * Not for the transcoding server (on the home network; its X-Content-Duration is read from sceHttp), and
+ * not after our socket failed to reach this server (then the system HTTP as before). */
+static int via_cio(Tsp *t, const char *url)
+{
+    if (!cio_available()) return 0;
+    if (!strncasecmp(url, "https:", 6)) return 1;
+    return !strncasecmp(url, "http:", 5) && !g_via_server && !t->cio_http_off;
+}
+
+/* the http:// connection through our socket failed before any answer: the system HTTP from now on */
+static int cio_http_failed(Tsp *t, const char *url, int status, const char *err)
+{
+    if (status || strncasecmp(url, "http:", 5) || t->cio_http_off) return 0;
+    t->cio_http_off = 1;
+    plog("tsp: own socket could not reach the server (%s): system HTTP from now on", err);
+    return 1;
+}
+
+static void log_rcvbuf(Tsp *t)
+{
+    if (t->rcvbuf_logged) return;
+    t->rcvbuf_logged = 1;
+    int rb = cio_last_rcvbuf();
+    plog("tsp: own socket (%s), receive buffer %d KB", strncasecmp(t->url, "https:", 6) ? "http" : "https", rb / 1024);
+}
 
 /* A decoder slower than the stream (1080p at 50/60 fps may be): leave out the pictures nothing else needs
  * (non-reference pictures, about half in most streams), for a steady lower picture rate in time with the
@@ -2097,15 +2107,7 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
         }
         t->audio_delay_us = 0;
     }
-    {
-        uint64_t o0 = now_us();
-        sceAudioOutOutput(t->aport, pcm);
-        uint32_t od = (uint32_t)(now_us() - o0);           /* 0.5.0: detail line */
-        t->aout_sum_us += od;
-        if (od > t->aout_max_us) t->aout_max_us = od;
-        if (!t->aout_n || od < t->aout_min_us) t->aout_min_us = od;
-        t->aout_n++;
-    }
+    sceAudioOutOutput(t->aport, pcm);
     if (t->st.audio_frames++ == 0) plog("tsp: first audio frame output");
     if (pts >= 0) {                      /* the previous buffer is playing now */
         int64_t dur = (int64_t)samples * 90000 / rate;
@@ -2197,22 +2199,6 @@ static void mpa_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     audio_out(t, t->mpcm, samples, rate, ch, pts);
 }
 
-/* 0.5.0 test builds: the first sound frames of the software decoder in one go (writing a line per frame while
- * playing would disturb what is measured): time since the first frame, the packet's time, the frame's time, its
- * samples, how long the output blocked, and the sound clock right after (all ms; pts from the first frame). */
-static void a52_trace(Tsp *t)
-{
-    t->a52tr_done = 1;
-    int64_t b = t->a52tr_n && t->a52tr[0].pts >= 0 ? t->a52tr[0].pts : 0;
-    plog("tsp: AC-3 trace (%d frames): t_ms packet_ms frame_ms samples block_ms clock_ms", t->a52tr_n);
-    for (int k = 0; k < t->a52tr_n; k++) {
-        #define MS(v) ((v) >= 0 ? (long)(((v) - b) / 90) : -1L)
-        plog("tsp: tr %u %ld %ld %u %u %ld", (unsigned)t->a52tr[k].t_ms, MS(t->a52tr[k].in_pts), MS(t->a52tr[k].pts), (unsigned)t->a52tr[k].n,
-             (unsigned)(t->a52tr[k].block_us / 1000), MS(t->a52tr[k].clk));
-        #undef MS
-    }
-}
-
 /* 0.5.0: an AC-3 / E-AC-3 frame from the software decoder (stereo already) */
 static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int ch, int src_ch, int eac3, int64_t pts)
 {
@@ -2229,42 +2215,12 @@ static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     t->st.audio_rate = rate;
     t->st.audio_ch = ch;
     t->st.audio_ac3 = eac3 ? 2 : 1;
-    uint64_t o0 = now_us();
-    if (!t->a52_t0) t->a52_t0 = o0;
-    if (g_ac3_test == 1) {                                  /* test 1: not played; the time a frame lasts, as the output would */
-        t->st.audio_frames++;
-        uint64_t dur = (uint64_t)samples * 1000000ULL / (uint64_t)rate;
-        sceKernelDelayThread((SceUInt)dur);
-    } else if (g_ac3_test == 3 && samples % 128 == 0 && samples >= 256) {   /* test 3: two halves (768 for AC-3) */
-        int h = samples / 2;
-        audio_out(t, t->a52pcm, h, rate, ch, pts);
-        if (!t->audio_off) audio_out(t, t->a52pcm + (size_t)h * 2u * (size_t)ch, h, rate, ch, pts >= 0 ? pts + (int64_t)h * 90000 / rate : -1);
-    } else {
-        audio_out(t, t->a52pcm, samples, rate, ch, pts);
-    }
-    if (g_ac3_test && !t->a52tr_done && t->a52tr_n < (int)(sizeof t->a52tr / sizeof t->a52tr[0])) {   /* trace (test modes only): kept, logged at once later */
-        uint64_t now = now_us();
-        int k = t->a52tr_n++;
-        t->a52tr[k].in_pts = t->a52_in_pts;
-        t->a52tr[k].pts = pts;
-        t->a52tr[k].n = (uint16_t)samples;
-        t->a52tr[k].t_ms = (uint32_t)((now - t->a52_t0) / 1000);
-        t->a52tr[k].block_us = (uint32_t)(now - o0);
-        int64_t c = -1;
-        if (t->aclock_valid) c = t->aclock_pts + (int64_t)(now - t->aclock_us) * 9 / 100;
-        t->a52tr[k].clk = c;
-    }
-    if (!t->a52tr_done && t->a52tr_n >= (int)(sizeof t->a52tr / sizeof t->a52tr[0])) a52_trace(t);
+    audio_out(t, t->a52pcm, samples, rate, ch, pts);
 }
 
 static void audio_a52(Tsp *t, Pkt *p)
 {
-    if (!t->a52) {
-        if (!(t->a52 = a52_create())) { audio_disable(t, "Audio %s: not supported", "ac3"); return; }
-        if (g_ac3_test) plog("tsp: AC-3 test mode %d (%s)", g_ac3_test, g_ac3_test == 1 ? "decoded, not played" :
-                             g_ac3_test == 2 ? "audio thread at video priority" : "sound in 768-sample parts");
-    }
-    t->a52_in_pts = p->pts;
+    if (!t->a52 && !(t->a52 = a52_create())) { audio_disable(t, "Audio %s: not supported", "ac3"); return; }
     a52_feed(t->a52, p->data, p->len, p->pts, a52_frame, t);
 }
 
@@ -2343,7 +2299,6 @@ static int audio_main(SceSize args, void *argp)
     audio_close(t);
     mpa_destroy(t->mpa);                                    /* only this thread uses it */
     t->mpa = NULL;
-    if (t->a52tr_n && !t->a52tr_done) a52_trace(t);       /* (a short play: what was kept) */
     a52_destroy(t->a52);
     t->a52 = NULL;
     free(t->a52pcm);
@@ -2501,26 +2456,6 @@ static void stats_tick(Tsp *t)
         }
     }
     cpu_line(t, now);
-    {   /* 0.5.0: picture / sound timing in detail (the AC-3 films that stuttered on the HD decoder) */
-        int64_t ap = 0;
-        int have = audio_now(t, now, &ap);
-        int clk = 0;
-        if (have && t->aclk_prev_us && t->aclk_prev_pts >= 0 && !t->paused && !t->buffering)
-            clk = (int)((ap - t->aclk_prev_pts) / 90) - (int)((now - t->aclk_prev_us) / 1000);   /* + = the sound clock ran ahead of real time */
-        t->aclk_prev_pts = have ? ap : -1;
-        t->aclk_prev_us = now;
-        if (t->pic_n || t->aout_n)
-            plog("tsp: detail: pictures %u, longest gap %u ms, gaps over 3 pictures %u; sound output %u calls, blocked min %u avg %u max %u ms; "
-                 "sound clock vs real time %+d ms%s",
-                 (unsigned)t->pic_n, (unsigned)(t->pic_gap_max_us / 1000), (unsigned)t->pic_gaps_long, (unsigned)t->aout_n,
-                 (unsigned)(t->aout_min_us / 1000), t->aout_n ? (unsigned)(t->aout_sum_us / t->aout_n / 1000) : 0u,
-                 (unsigned)(t->aout_max_us / 1000), clk, g_ac3_test ? ", AC-3 test mode" : "");
-        t->pic_n = t->pic_gaps_long = 0;
-        t->pic_gap_max_us = 0;
-        t->aout_n = 0;
-        t->aout_sum_us = t->aout_max_us = 0;
-        t->aout_min_us = 0;
-    }
     if (t->reader_done) return;                             /* (called by the video thread now: no reads to tune) */
 
     /* sceHttpReadData returns only when the request is full: small reads keep radio responsive, larger ones
@@ -2634,6 +2569,7 @@ static int hs_data(void *ctx, const uint8_t *d, size_t n)
         if (hls_is_playlist((const char *)d, n)) { t->is_hls = 1; return 1; }
         if (d[0] == '<') { set_error_kind(t, TSP_ERRK_NET, "The server sent a web page instead of video"); return 1; }
     }
+    if (!h->got) log_rcvbuf(t);
     h->got += (uint32_t)n;
     t->st.bytes += (uint32_t)n;
     dmx_feed(t, d, n);
@@ -2653,9 +2589,11 @@ static int https_session(Tsp *t, uint32_t *got)
     char err[96];
     int r = cio_get(&rq, &status, err, sizeof err);
     *got = h.got;
-    plog("tsp: HTTPS status %d, %u KB%s%s", status, (unsigned)(h.got / 1024), r < 0 && r != -2 ? ", " : "", r < 0 && r != -2 ? err : "");
+    plog("tsp: %s status %d, %u KB%s%s", strncasecmp(t->url, "https:", 6) ? "HTTP (own socket)" : "HTTPS", status,
+         (unsigned)(h.got / 1024), r < 0 && r != -2 ? ", " : "", r < 0 && r != -2 ? err : "");
     if (stopping(t) || t->is_hls) return 0;
     if (status >= 400) return http_refused(t, status);
+    if (r < 0 && !h.got && cio_http_failed(t, t->url, status, err)) return 1;   /* (next try: the system HTTP) */
     if (r < 0) {
         snprintf(t->net_err, sizeof t->net_err, "%s", err);
         if (t->st.bytes || ++t->connect_fails <= 2) return 1;  /* worked before, or first tries: try again */
@@ -2669,7 +2607,7 @@ static int http_session(Tsp *t, uint8_t *buf, uint32_t *got)
 {
     int tpl = -1, conn = -1, req = -1, status = 0, n, retry = 0;
     *got = 0;
-    if (cio_available() && !strncasecmp(t->url, "https:", 6)) return https_session(t, got);
+    if (via_cio(t, t->url)) return https_session(t, got);
     tpl = sceHttpCreateTemplate(t->hdr_ua[0] ? t->hdr_ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { set_error(t, "HTTP init failed"); goto done; }
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
@@ -2938,7 +2876,7 @@ static int hls_get_once(Tsp *t, const char *url, char *out, size_t cap, uint8_t 
 {
     int tpl = -1, conn = -1, req = -1, n, total = -1;
     *status = 0;
-    if (cio_available() && !strncasecmp(url, "https:", 6)) {
+    if (via_cio(t, url)) {
         HgCtx h = { t, out, cap, 0 };
         CioRequest rq = { url, NULL, NULL, 10, 15, hg_data, hg_stop, &h };
         rq.ua = t->hdr_ua; rq.referer = t->hdr_ref;
@@ -2946,9 +2884,12 @@ static int hls_get_once(Tsp *t, const char *url, char *out, size_t cap, uint8_t 
         char err[96];
         int r = cio_get(&rq, status, err, sizeof err);
         if (out) out[h.total] = 0;
+        if (r < 0 && r != -2 && !h.total && cio_http_failed(t, url, *status, err)) goto system_http;
         if (r < 0 && r != -2 && !h.total) { plog("tsp: HTTPS %s", err); snprintf(t->net_err, sizeof t->net_err, "%s", err); return r; }
+        if (h.total && !out) log_rcvbuf(t);
         return h.total;
     }
+system_http:
     tpl = sceHttpCreateTemplate(t->hdr_ua[0] ? t->hdr_ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) return tpl;
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
@@ -3300,7 +3241,7 @@ static void vc_check_total(Tsp *t, uint64_t tot)
 static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, int *status)
 {
     *status = 0;
-    if (cio_available() && !strncasecmp(t->url, "https:", 6)) {
+    if (via_cio(t, t->url)) {
         VgCtx g = { t, fn, ctx, status, off, 0 };
         uint64_t tot = 0;
         CioRequest rq = { t->url, NULL, NULL, 10, (int)(RECV_TIMEOUT_US / 1000000), vg_data, vg_stop, &g,
@@ -3312,9 +3253,12 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
         if (tot && !t->vod_total) t->vod_total = tot;
         else vc_check_total(t, tot);
         if (g.refused) return VG_NO_RANGE;
-        if (r < 0 && r != -2) plog("tsp: VOD HTTPS error: %s", err);
+        if (r < 0 && r != -2 && !g.got && cio_http_failed(t, t->url, *status, err)) goto system_http;
+        if (r < 0 && r != -2) plog("tsp: VOD %s error: %s", strncasecmp(t->url, "https:", 6) ? "HTTP (own socket)" : "HTTPS", err);
+        if (g.got) log_rcvbuf(t);
         return r == -2 ? 0 : r;
     }
+system_http:;
     int tpl = -1, conn = -1, req = -1, n, ret = -1;
     tpl = sceHttpCreateTemplate(t->hdr_ua[0] ? t->hdr_ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) goto done;
@@ -4150,7 +4094,7 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     t->running = 2;
     g_tsp = t;
     /* audio slightly higher priority (0.5.0 test 2: the same as the video thread) */
-    t->athread = start_thread("tsp_audio", audio_main, g_ac3_test == 2 ? 0x10000100 : 0x10000100 - 10, t);
+    t->athread = start_thread("tsp_audio", audio_main, 0x10000100 - 10, t);
     t->vthread = start_thread("tsp_video", video_main, 0x10000100, t);
     t->thread = start_thread("tsp_reader", worker, 0x10000100, t);
     if (t->thread < 0 || t->vthread < 0 || t->athread < 0) {

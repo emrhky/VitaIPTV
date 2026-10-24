@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "lang.h"
+#include "btn_icons.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -7,6 +8,19 @@
 static vita2d_pgf *g_pgf;
 static vita2d_pvf *g_pvf;                   /* the system fonts */
 static int g_turkish;                       /* 0.4.5: Turkish letters drawn as they are (the Latin font is loaded) */
+static vita2d_texture *g_btn_tex;           /* 0.6.0: the button symbols, smooth (src/btn_icons.h) */
+enum { BTN_I_CROSS, BTN_I_CIRCLE, BTN_I_TRIANGLE, BTN_I_SQUARE, BTN_I_DPAD, BTN_I_UPDOWN, BTN_I_LEFTRIGHT };
+
+/* 0.6.0: the symbols into a texture, once (a row of 30 x 30 pictures) */
+static void btn_icons_load(void)
+{
+    const int w = BTN_ICON_SIZE * BTN_ICON_COUNT, h = BTN_ICON_SIZE;
+    g_btn_tex = vita2d_create_empty_texture(w, h);
+    if (!g_btn_tex) return;                                  /* (then drawn from shapes as before) */
+    uint8_t *dst = vita2d_texture_get_datap(g_btn_tex);
+    unsigned stride = vita2d_texture_get_stride(g_btn_tex);
+    for (int y = 0; y < h; y++) memcpy(dst + (size_t)y * stride, BTN_ICONS + (size_t)y * w, (size_t)w * 4);
+}
 
 /* 0.4.5: Latin letters (Turkish ğ ş ı İ included) from the system's Latin font, the one the Vita's own menus
  * use; everything else (Cyrillic, Greek, Japanese...) from the default font as before. vita2d's default font
@@ -28,6 +42,7 @@ void ui_init(vita2d_pgf *pgf, int plain_letters)
     g_pvf = vita2d_load_system_pvf(2, cfg);
     g_turkish = g_pvf != NULL && !plain_letters;
     if (!g_pvf) g_pvf = vita2d_load_default_pvf();          /* (as before 0.4.5) */
+    if (!g_btn_tex) btn_icons_load();
 }
 
 int ui_font_state(void) { return g_turkish ? 2 : g_pvf ? 1 : 0; }
@@ -263,6 +278,14 @@ int ui_button(int x, int cy, int btn)
 {
     const unsigned dark = RGBA8(64, 70, 96, 255);      /* (0.4.0: lighter, the symbols stand out) */
     int cx = x + BR;
+    int ic = btn == UI_BTN_CROSS ? BTN_I_CROSS : btn == UI_BTN_CIRCLE ? BTN_I_CIRCLE : btn == UI_BTN_TRIANGLE ? BTN_I_TRIANGLE :
+             btn == UI_BTN_SQUARE ? BTN_I_SQUARE : btn == UI_BTN_DPAD ? BTN_I_DPAD : btn == UI_BTN_UPDOWN ? BTN_I_UPDOWN :
+             btn == UI_BTN_LEFTRIGHT ? BTN_I_LEFTRIGHT : -1;
+    if (ic >= 0 && g_btn_tex) {                              /* 0.6.0: the smooth symbols, one screen pixel each */
+        vita2d_draw_texture_part_scale(g_btn_tex, (float)x, (float)(cy - BTN_ICON_SIZE / 2), (float)(ic * BTN_ICON_SIZE), 0,
+                                       BTN_ICON_SIZE, BTN_ICON_SIZE, 1.0f, 1.0f);
+        return 2 * BR;
+    }
     switch (btn) {
     case UI_BTN_CROSS: {
         unsigned c = RGBA8(124, 178, 232, 255);

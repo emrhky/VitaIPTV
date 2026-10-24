@@ -10,13 +10,14 @@
 #define FAV_MAX      1000
 #define FAV_SRC_MAX  (IPTV_URL_MAX + IPTV_CRED_MAX + 8)
 
-enum { FAV_LIST = 'L', FAV_CHANNEL = 'C', FAV_RECENT = 'R' };   /* R (0.4.5): recently watched, newest first */
+enum { FAV_LIST = 'L', FAV_CHANNEL = 'C', FAV_RECENT = 'R',      /* R (0.4.5): recently watched, newest first */
+       FAV_FILM = 'F', FAV_SERIES = 'S' };                       /* 0.6.0: Xtream films and series */
 #define FAV_RECENT_MAX 20                                            /* per playlist */
 
 typedef struct {
-    char kind;                          /* FAV_LIST, FAV_CHANNEL or FAV_RECENT */
+    char kind;                          /* FAV_LIST, FAV_CHANNEL, FAV_RECENT, FAV_FILM or FAV_SERIES */
     char src[FAV_SRC_MAX];              /* the playlist's key */
-    char ch[IPTV_URL_MAX];              /* the channel's key (channels only) */
+    char ch[IPTV_URL_MAX];              /* the channel's key (all but playlists); films "movie:ID.ext", series "series:ID" */
     char name[IPTV_NAME_MAX];           /* the channel's name, to make the file readable */
 } FavEntry;
 
@@ -31,6 +32,9 @@ void fav_free(FavList *f);
 /* the key of a playlist / of a channel in it */
 void fav_source_key(const Source *s, char *out, size_t outsz);
 void fav_channel_key(const Source *s, const Channel *c, char *out, size_t outsz);
+/* 0.6.0: the key of an Xtream film ("movie:ID.ext", from .../movie/USER/PASS/ID.ext: a new password keeps it)
+ * or series ("series:ID"); "" if it is neither */
+void fav_vod_key(const Channel *c, char *out, size_t outsz);
 
 /* favorites.txt: read (adds to f, returns the count) and written (length, -1 if it did not fit) */
 int  fav_parse(const char *text, FavList *f);
@@ -45,8 +49,8 @@ int  fav_toggle(FavList *f, char kind, const char *src, const char *ch, const ch
  * Returns how many entries changed. */
 int  fav_rename_source(FavList *f, const char *old_src, const char *new_src);
 
-/* For each channel of l: its place among the playlist's entries of that kind (FAV_CHANNEL: 0 = first in the
- * favourites' order; FAV_RECENT: 0 = watched last), -1 if it is not one. Returns how many channels have one.
+/* For each channel of l: its place among the playlist's entries of that kind (FAV_CHANNEL, FAV_FILM, FAV_SERIES:
+ * 0 = first in the favourites' order; FAV_RECENT: 0 = watched last), -1 if it is not one. Returns how many channels have one.
  * rank must hold l->count ints. */
 int  fav_rank_kind(const FavList *f, char kind, const Source *s, const ChannelList *l, int *rank);
 int  fav_rank_channels(const FavList *f, const Source *s, const ChannelList *l, int *rank);   /* FAV_CHANNEL */

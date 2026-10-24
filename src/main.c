@@ -39,6 +39,7 @@
 #include "epg.h"
 #include <psp2/rtc.h>
 
+#define NET_POOL_SIZE (4 * 1024 * 1024)
 int _newlib_heap_size_user = 96 * 1024 * 1024;
 
 /* Build fix: vita-elf-create puts about 4 KB of import tables right after the code. When the code happens to
@@ -55,7 +56,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define FAV_FILE      DATA_DIR "/favorites.txt"
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v0.5.0"
+#define APP_VERSION   "v0.6.0"
 #endif
 #ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
 #define APP_BUILD     __DATE__ " " __TIME__
@@ -98,8 +99,10 @@ static char series_name[IPTV_NAME_MAX];
 static ResumeEntry resume[MAX_RESUME];      /* where films were left */
 static int nresume;
 static int via_proxy, auto_proxy_tried;     /* current channel goes through the transcoding server */
-/* 0.5.0: favourites. Playlists: shown first (sorder: the screen's order -> sources[]). Live channels: first in
- * their category and in "All", and a "Favorites" category at the top (g_fav, -1 when there are none). */
+/* 0.5.0: favourites. Playlists: shown first (sorder: the screen's order -> sources[]). Live channels: a star
+ * and a "Favorites" category at the top (g_fav, -1 when there are none); 0.6.0: they stay in their place in
+ * their own category and in "All". Films and series (0.6.0): a star and a "Favorites" category before the
+ * categories (g_fav 0; the categories are then vcats[group - 1]), built from favorites.txt alone. */
 static FavList favs;
 static int sorder[MAX_SOURCES];
 static int *fav_rank, fav_rank_n;           /* per channel of chans: its place among the favourites, -1 = not one */
@@ -110,6 +113,10 @@ static int fav_moving, move_ci;             /* 0.4.5: Triangle in "Favorites": t
 static FavEntry *move_saved;                /* ... and the order before, for O */
 static int move_saved_n;
 static int fav_dirty;                       /* changed in the player: the list is sorted again on the way back */
+static int vod_fav_stale;                   /* 0.6.0: a film / series favourite changed in the player or in the episodes */
+static int series_ci_saved = -1;            /* 0.6.0: the series whose episodes are shown (in series_saved) */
+static void leave_episodes(void);
+static void save_favorites(void);
 
 /* ---- helpers ----------------------------------------------------------- */
 static unsigned now_ms(void) { return (unsigned)(sceKernelGetProcessTimeWide() / 1000); }
@@ -194,9 +201,16 @@ static int http_get_curl(const char *url, const char *user, const char *pass, Me
     CioRequest rq = { url, user, pass, 10, 20, mem_data, net_stop_cb, m };
     int status = 0;
     char e[96];
+    unsigned t0 = now_ms();
     int r = cio_get(&rq, &status, e, sizeof e);
-    plog("http: GET %.5s (built-in TLS) -> status %d%s%s", url, status, r < 0 ? ", " : "", r < 0 ? e : "");
+    unsigned ms = now_ms() - t0;
+    plog("http: GET %.5s (own socket) -> status %d, %u KB in %u.%u s, receive buffer %d KB%s%s", url, status,
+         (unsigned)(m->len / 1024), ms / 1000, ms % 1000 / 100, cio_last_rcvbuf() / 1024, r < 0 ? ", " : "", r < 0 ? e : "");
     if (net_cancel) { snprintf(err, errsz, "Cancelled"); return -1; }
+    if (r < 0 && !status && !m->buf && !strncasecmp(url, "http:", 5)) {      /* (0.6.0: plain http: the system HTTP tries) */
+        snprintf(err, errsz, "Connection failed (%s)", e);
+        return 1;
+    }
     if (status >= 400) { snprintf(err, errsz, "Server answered HTTP %d", status); return -1; }
     if (m->overflow) { snprintf(err, errsz, "List is too large (over 24 MB)"); return -1; }
     if (r < 0) { snprintf(err, errsz, "Connection failed (%s)", e); return -1; }
@@ -209,6 +223,13 @@ static int http_get(const char *url, const char *user, const char *pass, Mem *m,
 {
     int rc = -1, tpl = -1, conn = -1, req = -1;
     if (cio_available() && !strncasecmp(url, "https:", 6)) return http_get_curl(url, user, pass, m, err, errsz);
+    /* 0.6.0: plain http:// lists through our own socket too (a big receive buffer: faster on a long round trip);
+     * when it cannot reach the server at all, the system HTTP below as before */
+    if (cio_available() && !strncasecmp(url, "http:", 5)) {
+        int r = http_get_curl(url, user, pass, m, err, errsz);
+        if (r <= 0) return r;
+        plog("http: own socket failed, system HTTP");
+    }
 
     tpl = sceHttpCreateTemplate(NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { snprintf(err, errsz, "HTTP init failed (0x%08X)", (unsigned)tpl); goto done; }
@@ -242,7 +263,7 @@ static int http_get(const char *url, const char *user, const char *pass, Mem *m,
         sceHttpDeleteRequest(req); req = -1;
         sceHttpDeleteConnection(conn); conn = -1;
         sceHttpDeleteTemplate(tpl); tpl = -1;
-        return http_get_curl(url, user, pass, m, err, errsz);
+        return http_get_curl(url, user, pass, m, err, errsz) == 0 ? 0 : -1;   /* (1: it could not connect either) */
     }
     if (net_cancel) { snprintf(err, errsz, "Cancelled"); goto done; }
     if (r < 0) {
@@ -308,7 +329,7 @@ static int read_file(const char *path, Mem *m)
 /* the favourite place of channel i (live TV lists only), -1 if it is not a favourite */
 static int ch_fav(int i)
 {
-    return section == SEC_LIVE && !in_episodes && fav_rank && i >= 0 && i < fav_rank_n && fav_rank_n == chans.count ? fav_rank[i] : -1;
+    return !in_episodes && fav_rank && i >= 0 && i < fav_rank_n && fav_rank_n == chans.count ? fav_rank[i] : -1;
 }
 
 static int *cmp_rank;                       /* (the ranks cmp_fav sorts by) */
@@ -330,17 +351,11 @@ static void rebuild_visible(void)
         sel = scroll = 0;
         return;
     }
-    if (!search_fold[0] && section == SEC_LIVE && nfav_ch > 0 && fav_rank_n == chans.count) {
-        /* 0.5.0: the favourites first, in the order they were added; "Favorites" holds only them */
-        for (int i = 0; i < chans.count; i++) {
-            if (fav_rank[i] < 0) continue;
-            if (cur_group == g_fav || cur_group == g_all || !strcmp(chans.items[i].group, groups[cur_group])) vis[nvis++] = i;
-        }
+    if (!search_fold[0] && section == SEC_LIVE && cur_group == g_fav && g_fav >= 0 && nfav_ch > 0 && fav_rank_n == chans.count) {
+        /* "Favorites": only them, in their order (0.6.0: elsewhere a favourite stays where it is, with its star) */
+        for (int i = 0; i < chans.count; i++) if (fav_rank[i] >= 0) vis[nvis++] = i;
         cmp_rank = fav_rank;
         qsort(vis, (size_t)nvis, sizeof(int), cmp_fav);
-        if (cur_group != g_fav)
-            for (int i = 0; i < chans.count; i++)
-                if (fav_rank[i] < 0 && (cur_group == g_all || !strcmp(chans.items[i].group, groups[cur_group]))) vis[nvis++] = i;
         sel = scroll = 0;
         return;
     }
@@ -360,7 +375,14 @@ static void fav_update_ranks(void)
     free(rec_rank);
     fav_rank = rec_rank = NULL;
     fav_rank_n = nfav_ch = nrec_ch = 0;
-    if (section != SEC_LIVE || in_episodes || !chans.count || cur_src < 0 || cur_src >= nsources) return;
+    if (in_episodes || !chans.count || cur_src < 0 || cur_src >= nsources) return;
+    if (section != SEC_LIVE) {                               /* 0.6.0: films / series: the stars */
+        fav_rank = malloc(sizeof(int) * (size_t)chans.count);
+        if (!fav_rank) return;
+        fav_rank_n = chans.count;
+        nfav_ch = fav_rank_kind(&favs, section == SEC_FILMS ? FAV_FILM : FAV_SERIES, &sources[cur_src], &chans, fav_rank);
+        return;
+    }
     fav_rank = malloc(sizeof(int) * (size_t)chans.count);
     rec_rank = malloc(sizeof(int) * (size_t)chans.count);
     if (!fav_rank || !rec_rank) { free(fav_rank); free(rec_rank); fav_rank = rec_rank = NULL; return; }
@@ -396,7 +418,7 @@ static void build_group_names(void)
 /* a category's name on the screen */
 static const char *group_title(int i)
 {
-    if (section == SEC_LIVE && i == g_fav) return T("Favorites");
+    if (i == g_fav && g_fav >= 0) return T("Favorites");    /* (0.6.0: films / series too) */
     if (section == SEC_LIVE && i == g_all) return T("All");
     if (section == SEC_LIVE && i == g_recent) return T("Recently Watched");
     return i >= 0 && i < ngroups ? groups[i] : "";
@@ -420,6 +442,123 @@ static void build_groups(void)
     rebuild_visible();
 }
 
+/* ---- 0.6.0: films and series as favourites ---- */
+static char vod_fav_kind(void) { return section == SEC_FILMS ? FAV_FILM : FAV_SERIES; }
+
+/* this playlist's favourite films (or series), whether their category is loaded or not */
+static int vod_fav_count(void)
+{
+    if (section == SEC_LIVE || cur_src < 0 || cur_src >= nsources) return 0;
+    char sk[FAV_SRC_MAX];
+    fav_source_key(&sources[cur_src], sk, sizeof sk);
+    int n = 0;
+    for (int i = 0; i < favs.n; i++) if (favs.e[i].kind == vod_fav_kind() && !strcmp(favs.e[i].src, sk)) n++;
+    return n;
+}
+
+/* the category of the left list's row g (films / series): vcats[] index, -1 for "Favorites" */
+static int vod_cat(int g) { return g - (g_fav >= 0 ? 1 : 0); }
+
+/* "Favorites" put before the categories (on) or taken away; the rows after it move by one */
+static void vod_set_fav_group(int on)
+{
+    if (on && g_fav < 0) {
+        if (ngroups >= MAX_GROUPS) ngroups = MAX_GROUPS - 1;
+        memmove(groups[1], groups[0], sizeof groups[0] * (size_t)ngroups);
+        memmove(&gcount[1], &gcount[0], sizeof gcount[0] * (size_t)ngroups);
+        snprintf(groups[0], sizeof groups[0], "Favorites");
+        gcount[0] = vod_fav_count();
+        ngroups++;
+        g_fav = 0;
+        if (cur_group >= 0 && ngroups > 1) cur_group++;
+        if (loaded_group >= 0) loaded_group++;
+    } else if (!on && g_fav == 0) {
+        memmove(groups[0], groups[1], sizeof groups[0] * (size_t)(ngroups - 1));
+        memmove(&gcount[0], &gcount[1], sizeof gcount[0] * (size_t)(ngroups - 1));
+        ngroups--;
+        g_fav = -1;
+        if (loaded_group == 0) {                             /* the favourites were open: nothing is now */
+            loaded_group = -1;
+            channel_list_free(&chans);
+            channel_list_init(&chans);
+            fav_rank_n = nfav_ch = 0;
+            focus = 0;
+        } else if (loaded_group > 0) loaded_group--;
+        if (cur_group > 0) cur_group--;
+    }
+}
+
+/* the right list from favorites.txt: no network (films get this playlist's address and password now) */
+static void vod_open_favorites(void)
+{
+    leave_episodes();
+    channel_list_free(&chans);
+    channel_list_init(&chans);
+    char sk[FAV_SRC_MAX];
+    fav_source_key(&sources[cur_src], sk, sizeof sk);
+    char kind = vod_fav_kind();
+    for (int i = 0; i < favs.n; i++) {
+        const FavEntry *e = &favs.e[i];
+        if (e->kind != kind || strcmp(e->src, sk)) continue;
+        Channel c;
+        memset(&c, 0, sizeof c);
+        snprintf(c.name, sizeof c.name, "%s", e->name[0] ? e->name : e->ch);
+        snprintf(c.group, sizeof c.group, "Favorites");
+        if (kind == FAV_FILM) {
+            if (strncmp(e->ch, "movie:", 6) || xtream_movie_url(&sources[cur_src], e->ch + 6, c.url, sizeof c.url) != 0) continue;
+            c.kind = CH_FILM;
+        } else {
+            if (strncmp(e->ch, "series:", 7) || !e->ch[7]) continue;
+            snprintf(c.url, sizeof c.url, "%s", e->ch + 7);
+            c.kind = CH_SERIES;
+        }
+        if (channel_list_push(&chans, &c) != 0) break;
+    }
+    loaded_group = g_fav;
+    if (g_fav >= 0) gcount[g_fav] = chans.count;
+    fav_update_ranks();
+    rebuild_visible();
+    plog("fav: %d favourite %s", chans.count, kind == FAV_FILM ? "films" : "series");
+}
+
+/* after a film / series favourite changed (not while one plays): the category, its count, the stars */
+static void vod_fav_changed(void)
+{
+    vod_fav_stale = 0;
+    if (section == SEC_LIVE) return;
+    if (in_episodes) { vod_fav_stale = 1; fav_update_ranks(); return; }   /* (when the episodes are left) */
+    int n = vod_fav_count();
+    if (n > 0 && g_fav < 0) vod_set_fav_group(1);
+    if (g_fav >= 0) gcount[g_fav] = n;
+    if (g_fav >= 0 && loaded_group == g_fav) {               /* the favourites are open: again, the same row */
+        int old_sel = sel, old_scroll = scroll;
+        vod_open_favorites();
+        sel = nvis ? (old_sel < nvis ? old_sel : nvis - 1) : 0;
+        scroll = old_scroll <= sel ? old_scroll : sel;
+    }
+    if (n == 0 && g_fav >= 0) { vod_set_fav_group(0); rebuild_visible(); }
+    fav_update_ranks();
+    if (!nvis && focus == 1 && !search_fold[0]) focus = 0;
+}
+
+/* START on a film or series (in the episodes: their series). Returns 1 added, 0 removed, -1 not possible. */
+static int fav_toggle_vod(const Channel *c)
+{
+    if (section == SEC_LIVE || !c || cur_src < 0 || cur_src >= nsources) return -1;
+    char sk[FAV_SRC_MAX], ck[IPTV_URL_MAX];
+    fav_vod_key(c, ck, sizeof ck);
+    if (!ck[0]) return -1;
+    fav_source_key(&sources[cur_src], sk, sizeof sk);
+    int r = fav_toggle(&favs, vod_fav_kind(), sk, ck, c->name);
+    if (r >= 0) {
+        save_favorites();
+        plog("fav: %s \"%s\" %s", c->kind == CH_SERIES ? "series" : "film", c->name, r ? "added" : "removed");
+        vod_fav_stale = 1;
+        fav_update_ranks();                                  /* (the star at once) */
+    }
+    return r;
+}
+
 /* Films / series: the categories become the left list; nothing is loaded until one is opened. */
 static void build_vod_groups(void)
 {
@@ -441,7 +580,8 @@ static void build_vod_groups(void)
     cur_group = 0;
     loaded_group = -1;
     in_episodes = 0;
-    g_fav = g_all = g_recent = -1;                           /* (films / series: no "All", no favourites yet) */
+    g_fav = g_all = g_recent = -1;                           /* (films / series: no "All") */
+    if (vod_fav_count() > 0) { vod_set_fav_group(1); cur_group = 0; }   /* 0.6.0: "Favorites" first, selected */
     focus = 0;
     gscroll = 0;
     rebuild_visible();
@@ -1070,6 +1210,7 @@ static int load_poll(unsigned p)
         if (settings.hide_adult) iptv_remove_adult(&chans);
         loaded_group = cur_group = job.group;
         if (job.group >= 0 && job.group < ngroups) gcount[job.group] = chans.count;
+        fav_update_ranks();                                  /* 0.6.0: the stars of favourite films / series */
         rebuild_visible();
         focus = 1;
         break;
@@ -1394,7 +1535,6 @@ static void play_channel_ex(int vi, int use_proxy)
     tsp_set_options(1, res_effective());                     /* 1080p is always on since v0.2 */
     tsp_set_audio(aud_id, aud_lang);                         /* 0.5.0: the audio track (or language) chosen */
     tsp_set_via_server(use_proxy);
-    tsp_set_ac3_test(settings.ac3_test);                     /* (0.5.0 test builds, settings.txt only) */                           /* (0.5.0: 30 s for the first picture) */
     tsp_set_hls_bw(res_bw);
     via_proxy = 0;
     char purl[IPTV_URL_MAX * 3 + 64];
@@ -1514,7 +1654,7 @@ static int play_hints(UiHint *h, int radio, int film, int paused, const char *sq
 {
     int n = 0;
     int zap = return_state == ST_CHANNELS && nvis > 1;
-    int can_fav = return_state == ST_SOURCES || (section == SEC_LIVE && !in_episodes);
+    int can_fav = return_state == ST_SOURCES || section == SEC_LIVE || section == SEC_FILMS || in_episodes;   /* 0.6.0: films, episodes (their series) */
     if (!radio) h[n++] = (UiHint){ UI_BTN_CROSS, paused ? "Play" : "Pause" };
     if (!radio && square) h[n++] = (UiHint){ UI_BTN_SQUARE, square };
     if (!radio) h[n++] = (UiHint){ UI_BTN_TRIANGLE, "Info" };
@@ -1589,9 +1729,12 @@ static void leave_episodes(void)
     chans = series_saved;
     channel_list_init(&series_saved);
     in_episodes = 0;
+    series_ci_saved = -1;
+    fav_update_ranks();                                      /* 0.6.0: the series' stars again */
     rebuild_visible();
     sel = series_sel_saved < nvis ? series_sel_saved : 0;
     focus = 1;
+    if (vod_fav_stale) vod_fav_changed();                   /* (START in the episodes) */
 }
 
 /* X on the right list: play a channel or a film, or open a series. */
@@ -1605,6 +1748,7 @@ static void activate_item(int vi)
         memcpy(id, c->url, il);
         id[il] = 0;
         sel = vi;
+        series_ci_saved = vis[vi];                           /* 0.6.0: START in the episodes: this series */
         load_begin(&sources[cur_src], LOAD_EPISODES, id, cur_group);
     } else if (c->kind == CH_FILM) {
         open_film(vi);
@@ -1918,7 +2062,7 @@ static void grp_row(int i, ScrRow *r, void *ctx)
     static char cnt[16];
     (void)ctx;
     r->name = group_title(i);
-    r->fav = section == SEC_LIVE && i == g_fav;
+    r->fav = i == g_fav && g_fav >= 0;
     if (gcount[i] >= 0) { snprintf(cnt, sizeof cnt, "%d", gcount[i]); r->right = cnt; }
 }
 
@@ -1938,10 +2082,10 @@ static void draw_channels(void)
     static const UiHint HMV[] = { { UI_BTN_UPDOWN, "Up / down" }, { UI_BTN_TRIANGLE, "Save" }, { UI_BTN_CIRCLE, "Cancel" } };
     static const UiHint HLV[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_CIRCLE, "Back" },
                                   { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
-    static const UiHint HRV[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
-                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
+    static const UiHint HRV[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },   /* (0.6.0: START) */
+                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
     static const UiHint HRS[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
-                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
+                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
     char sub[160], right[48], title[IPTV_NAME_MAX + 32];
     int searching = search_fold[0] != 0, vod = section != SEC_LIVE;
     if (searching) {
@@ -1951,7 +2095,7 @@ static void draw_channels(void)
         snprintf(sub, sizeof sub, "%s", series_name);
         snprintf(right, sizeof right, T("%d episodes"), nvis);
     } else {
-        snprintf(sub, sizeof sub, "%s", vod ? (ngroups ? groups[cur_group] : "") : group_title(cur_group));
+        snprintf(sub, sizeof sub, "%s", ngroups ? group_title(cur_group) : "");
         snprintf(right, sizeof right, T(section == SEC_FILMS ? "%d films" : section == SEC_SERIES ? "%d series" : "%d channels"), nvis);
     }
     snprintf(title, sizeof title, "%s%s%s", sources[cur_src].name, vod ? "  -  " : "",
@@ -2499,7 +2643,9 @@ int main(void)
     clocks_rc[3] = scePowerSetGpuXbarClockFrequency(166);
     sceSysmoduleLoadModule(SCE_SYSMODULE_NET);
     sceSysmoduleLoadModule(SCE_SYSMODULE_HTTPS);
-    SceNetInitParam np = { malloc(1024 * 1024), 1024 * 1024, 0 };
+    /* 0.6.0: 4 MB for the network (was 1 MB): the socket buffers come from it, and a 1 MB receive buffer
+     * (curlio) could not really grow in a 1 MB pool shared with everything else */
+    SceNetInitParam np = { malloc(NET_POOL_SIZE), NET_POOL_SIZE, 0 };
     sceNetInit(&np);
     sceNetCtlInit();
     sceSslInit(300 * 1024);
@@ -2768,8 +2914,11 @@ int main(void)
                     if (g != cur_group) { leave_episodes(); rebuild_visible(); }
                 }
                 if (p & (SCE_CTRL_RIGHT | SCE_CTRL_CROSS)) {
-                    if (vod && cur_group != loaded_group && cur_group < nvcats && (p & SCE_CTRL_CROSS || p & SCE_CTRL_RIGHT))
-                        load_begin(&sources[cur_src], section == SEC_FILMS ? LOAD_FILMS : LOAD_SERIES, vcats[cur_group].id, cur_group);
+                    if (vod && cur_group == g_fav && g_fav >= 0 && cur_group != loaded_group) {   /* 0.6.0: from favorites.txt */
+                        vod_open_favorites();
+                        if (nvis) focus = 1;
+                    } else if (vod && cur_group != loaded_group && vod_cat(cur_group) >= 0 && vod_cat(cur_group) < nvcats)
+                        load_begin(&sources[cur_src], section == SEC_FILMS ? LOAD_FILMS : LOAD_SERIES, vcats[vod_cat(cur_group)].id, cur_group);
                     else if (nvis) focus = 1;
                 }
                 if (p & SCE_CTRL_CIRCLE) { leave_episodes(); state = ST_SOURCES; sel = src_disp(cur_src); scroll = 0; }
@@ -2781,8 +2930,14 @@ int main(void)
                 ime_open("Search channels", search_q, 0, IME_SEARCH, NULL, 0);
             if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SELECT)) { menu_open = 1; menu_sel = 0; }   /* the menu */
             if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_START)) {   /* 0.5.0: favourite channel */
-                if (vod) set_status(0, "Films and series cannot be favorites yet", NULL);
-                else if (nvis && (focus == 1 || searching) && sel < nvis) {
+                if (vod && in_episodes) {                    /* 0.6.0: the series of these episodes */
+                    int r = series_ci_saved >= 0 && series_ci_saved < series_saved.count ? fav_toggle_vod(&series_saved.items[series_ci_saved]) : -1;
+                    set_status(r < 0, r < 0 ? "Could not add it to the favorites" : r ? "Series added to favorites" : "Series removed from favorites", NULL);
+                } else if (vod && nvis && (focus == 1 || searching) && sel < nvis) {   /* 0.6.0: a film or series */
+                    int r = fav_toggle_vod(&chans.items[vis[sel]]);
+                    if (r >= 0) vod_fav_changed();
+                    set_status(r < 0, r < 0 ? "Could not add it to the favorites" : fav_note(r), NULL);
+                } else if (!vod && nvis && (focus == 1 || searching) && sel < nvis) {
                     int ci = vis[sel], r = fav_toggle_channel(ci);
                     if (r >= 0) fav_regroup(ci);
                     set_status(r < 0, fav_note(r), NULL);
@@ -2922,6 +3077,7 @@ int main(void)
                 if (state == ST_CHANNELS) {
                     sel = play_vis; focus = 1;
                     if (fav_dirty && play_vis < nvis) fav_regroup(vis[play_vis]);   /* 0.5.0: changed while playing */
+                    if (vod_fav_stale && section != SEC_LIVE && !in_episodes) vod_fav_changed();   /* 0.6.0 */
                     draw_channels();
                 }
                 else { sel = src_disp(cur_src); draw_sources(); }   /* (a single stream: its row, also after START) */
@@ -3000,8 +3156,12 @@ int main(void)
                     int r = -1;
                     if (return_state == ST_SOURCES) r = fav_toggle_source(cur_src);
                     else if (section == SEC_LIVE && !in_episodes) r = fav_toggle_channel(vis[play_vis]);
-                    snprintf(film_note, sizeof film_note, "%s", r < 0 && (section != SEC_LIVE || in_episodes)
-                             ? T("Films and series cannot be favorites yet") : fav_note(r));
+                    else if (in_episodes) r = series_ci_saved >= 0 && series_ci_saved < series_saved.count
+                                              ? fav_toggle_vod(&series_saved.items[series_ci_saved]) : -1;   /* 0.6.0: its series */
+                    else if (play_vis < nvis) r = fav_toggle_vod(&chans.items[vis[play_vis]]);         /* 0.6.0: the film */
+                    snprintf(film_note, sizeof film_note, "%s", in_episodes && r >= 0
+                             ? T(r ? "Series added to favorites" : "Series removed from favorites")
+                             : r < 0 && section != SEC_LIVE ? T("Could not add it to the favorites") : fav_note(r));
                     film_note_until = now_ms() + 2500;
                     osd_until_us = now_ms() + 2500;
                 }

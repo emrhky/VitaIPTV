@@ -49,12 +49,12 @@ typedef struct {
     int hide_adult;             /* leave adult channels out of the lists */
     int hide_4k;                /* leave channels labelled 4K / UHD / 2160p / 8K out (the Vita cannot play them) */
     int res_pref;               /* HLS picture size: 0 automatic (about 540p, else 720p), 1080/720/540/480, -1 the smallest */
-    int ac3_test;               /* 0.5.0 test builds: 1 AC-3 decoded but not played, 2 audio thread at video priority, 3 sound in 768-sample parts; only in settings.txt */
     int plain_letters;          /* 0.4.5: 1 = Turkish letters drawn as plain ones (g s i c o u) as before; only in settings.txt */
 } Settings;
 
 void channel_list_init(ChannelList *l);
 void channel_list_free(ChannelList *l);
+int  channel_list_push(ChannelList *l, const Channel *c);   /* 0.6.0 (films / series favourites); -1 full */
 
 /* An http(s) link to a film file (.mkv, .mp4, ... or Xtream /movie/ and /series/ links): played as a film. */
 int  iptv_is_film_url(const char *url);
@@ -79,6 +79,8 @@ typedef struct { char id[24]; char name[IPTV_GROUP_MAX]; } XtCategory;
 int  source_xtream_base(const Source *s, char *out, size_t outsz);
 /* .../player_api.php?username=U&password=P&action=<action> (no action: the account information) */
 int  xtream_api_url(const Source *s, const char *action, char *out, size_t outsz);
+/* 0.6.0: .../movie/USER/PASS/<file> (file "ID.ext"), the address of a film saved as a favourite */
+int  xtream_movie_url(const Source *s, const char *file, char *out, size_t outsz);
 /* The account part of player_api.php's answer ("user_info"). Returns -1 if there is none. */
 typedef struct {
     int found, auth;                    /* auth 0: wrong username or password */
