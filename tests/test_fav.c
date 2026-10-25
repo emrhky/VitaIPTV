@@ -177,6 +177,55 @@ int main(void)
         fav_free(&m);
     }
 
+    {   /* 0.6.0: films and series (Xtream) */
+        Channel fm, se, lv;
+        memset(&fm, 0, sizeof fm); memset(&se, 0, sizeof se); memset(&lv, 0, sizeof lv);
+        fm.kind = CH_FILM; strcpy(fm.name, "Film A"); strcpy(fm.url, "http://tv.example:8080/movie/ali/secret/777.mkv");
+        se.kind = CH_SERIES; strcpy(se.name, "Dizi B"); strcpy(se.url, "4242");
+        lv.kind = CH_LIVE; strcpy(lv.url, "http://tv.example:8080/live/ali/secret/5.ts");
+        char kf[IPTV_URL_MAX], ks[IPTV_URL_MAX], kl[IPTV_URL_MAX];
+        fav_vod_key(&fm, kf, sizeof kf); fav_vod_key(&se, ks, sizeof ks); fav_vod_key(&lv, kl, sizeof kl);
+        assert(!strcmp(kf, "movie:777.mkv") && !strstr(kf, "secret") && !strcmp(ks, "series:4242") && !kl[0]);
+        char u[IPTV_URL_MAX];
+        assert(xtream_movie_url(&xt, kf + 6, u, sizeof u) == 0 && !strcmp(u, fm.url));   /* the same address again */
+        FavList v; fav_init(&v);
+        assert(fav_toggle(&v, FAV_FILM, k1, kf, fm.name) == 1 && fav_toggle(&v, FAV_SERIES, k1, ks, se.name) == 1);
+        assert(fav_toggle(&v, FAV_CHANNEL, k1, "id:5", "Kanal") == 1);
+        ChannelList l; channel_list_init(&l);
+        assert(channel_list_push(&l, &lv) == 0 && channel_list_push(&l, &fm) == 0 && channel_list_push(&l, &se) == 0);
+        int rk[3];
+        assert(fav_rank_kind(&v, FAV_FILM, &xt, &l, rk) == 1 && rk[0] < 0 && rk[1] == 0 && rk[2] < 0);
+        assert(fav_rank_kind(&v, FAV_SERIES, &xt, &l, rk) == 1 && rk[2] == 0 && rk[1] < 0);
+        assert(fav_rank_kind(&v, FAV_CHANNEL, &xt, &l, rk) == 1 && rk[0] == 0 && rk[1] < 0);   /* (live keys as before) */
+        assert(fav_rank_kind(&v, FAV_FILM, &other, &l, rk) == 0);   /* another user's playlist: not its favourites */
+        char buf3[4096];
+        assert(fav_format(&v, buf3, sizeof buf3) > 0 && strstr(buf3, "F\tx|http://tv.example:8080|ali\tmovie:777.mkv\tFilm A\n"));
+        FavList v2; fav_init(&v2);
+        assert(fav_parse(buf3, &v2) == 3 && v2.e[0].kind == FAV_FILM && v2.e[1].kind == FAV_SERIES && !strcmp(v2.e[1].name, "Dizi B"));
+        assert(fav_toggle(&v2, FAV_FILM, k1, kf, "x") == 0 && fav_find(&v2, FAV_SERIES, k1, ks) >= 0);   /* removed, the series stays */
+        fav_free(&v2);
+        /* 0.6.0: films / series watched last: newest first, 20 per playlist, kept apart from the channels' list */
+        for (int k = 0; k < 25; k++) {
+            char key[32]; snprintf(key, sizeof key, "movie:%d.mkv", k);
+            assert(fav_push_recent_kind(&v, FAV_RECENT_FILM, k1, key, "F") == 0);
+        }
+        assert(fav_push_recent_kind(&v, FAV_RECENT_SERIES, k1, ks, se.name) == 0);
+        assert(fav_push_recent_kind(&v, FAV_RECENT_FILM, k1, kf, fm.name) == 0);
+        int nm = 0;
+        for (int i = 0; i < v.n; i++) nm += v.e[i].kind == FAV_RECENT_FILM;
+        assert(nm == FAV_RECENT_MAX && fav_find(&v, FAV_RECENT_FILM, k1, "movie:4.mkv") < 0 && fav_find(&v, FAV_RECENT_FILM, k1, "movie:24.mkv") >= 0);
+        assert(fav_rank_kind(&v, FAV_RECENT_FILM, &xt, &l, rk) == 1 && rk[1] == 0);   /* watched last: rank 0 */
+        assert(fav_rank_kind(&v, FAV_RECENT_SERIES, &xt, &l, rk) == 1 && rk[2] == 0);
+        assert(fav_find(&v, FAV_FILM, k1, kf) >= 0);                                   /* (the favourite stays) */
+        char buf4[16384];
+        assert(fav_format(&v, buf4, sizeof buf4) > 0);
+        FavList v3; fav_init(&v3);
+        assert(fav_parse(buf4, &v3) == v.n && fav_find(&v3, FAV_RECENT_SERIES, k1, ks) >= 0);
+        fav_free(&v3);
+        channel_list_free(&l);
+        fav_free(&v);
+    }
+
     /* full */
     FavList big;
     fav_init(&big);

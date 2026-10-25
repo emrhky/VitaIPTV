@@ -21,6 +21,7 @@
 
 static int g_own_http;                      /* 0.6.0: "own socket (http)" was logged */
 static int g_net_slow, g_net_fast;          /* 0.6.0: "the network is slower than the film" / "the network is fast" */
+static int g_asked_again;                   /* 0.6.0: "the film does not come ...: asking the server again" */
 void plog(const char *fmt, ...)
 {
     char line[1024];
@@ -31,6 +32,7 @@ void plog(const char *fmt, ...)
     if (strstr(line, "own socket (http)")) g_own_http = 1;
     if (strstr(line, "network is slower than the film (")) g_net_slow = 1;   /* (the queues line, not "buffering (...: n pictures") */
     if (strstr(line, "network is fast")) g_net_fast = 1;
+    if (strstr(line, "asking the server again")) g_asked_again = 1;
     if (getenv("VERBOSE")) puts(line);
 }
 extern int mock_mapped;
@@ -501,6 +503,15 @@ int main(int argc, char **argv)
         v = play_vod_url(u, NULL, 7200, 15, 0, 0);
         vshow("http mkv (own socket)", &v);
         assert(v.r.st.state == TSP_ENDED && v.first_pos >= 6900 && v.first_pos <= 7300 && v.r.changes >= 100);
+        g_own_http = 0;
+        {   /* 0.6.0: a far server that answers a jump with a little and then nothing: asked again after 8 s */
+            char su[512];
+            snprintf(su, sizeof su, "%s/stall/film.mkv", b);
+            g_asked_again = 0;
+            v = play_vod_url(su, NULL, 7200, 30, 0, 0);
+            vshow("film stalled once", &v);
+            assert(g_asked_again && v.r.st.state == TSP_ENDED && v.first_pos >= 6900 && v.r.changes >= 80);
+        }
         g_own_http = 0;
         tsp_set_via_server(1);                               /* the transcoding server: still the system HTTP */
         snprintf(u, sizeof u, "%s/s720.ts", b);
