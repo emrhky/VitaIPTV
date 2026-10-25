@@ -170,6 +170,57 @@ static void test_ts(const char *path, int64_t len_ms)
     fclose(c.f);
 }
 
+/* 0.8.0: MP4 text subtitles (mov_text / tx3g) */
+typedef struct { int n, id; char first[64], last[64]; int64_t first_pts, first_dur, prev_pts; int order_bad; } SCount;
+static void vnop(void *ctx, const uint8_t *d, size_t n, int64_t pts, int64_t dts, int flags) { (void)ctx; (void)d; (void)n; (void)pts; (void)dts; (void)flags; }
+static void anop(void *ctx, const uint8_t *d, size_t n, int64_t pts) { (void)ctx; (void)d; (void)n; (void)pts; }
+static void scb(void *ctx, int id, const char *text, int64_t pts, int64_t dur)
+{
+    SCount *c = ctx;
+    if (!c->n) { snprintf(c->first, sizeof c->first, "%s", text); c->first_pts = pts; c->first_dur = dur; c->id = id; }
+    else if (pts < c->prev_pts) c->order_bad = 1;
+    snprintf(c->last, sizeof c->last, "%s", text);
+    c->prev_pts = pts;
+    c->n++;
+}
+
+static void test_mp4_subs(const char *path)
+{
+    Fctx c = { fopen(path, "rb"), 0 };
+    assert(c.f);
+    uint64_t total = fsize(c.f);
+    uint8_t *moov; size_t ml;
+    assert(mp4_read_moov(frd, &c, total, &moov, &ml) == 0);
+    for (int pass = 0; pass < 2; pass++) {
+        SCount sc; memset(&sc, 0, sizeof sc);
+        TsSink sink = { vnop, anop, &sc, scb };
+        char err[96];
+        Mp4Demux *d = mp4_create(moov, ml, &sink, err, sizeof err);
+        assert(d);
+        const TsInfo *i = mp4_info(d);
+        assert(i->nsubs == 1 && !strcmp(i->subs[0].lang, "tur"));
+        int64_t at;
+        uint64_t off = mp4_seek(d, pass ? 20000 : 0, &at);
+        uint8_t buf[32768];
+        uint64_t o = off;
+        int n;
+        while (o < total && (n = frd(&c, o, buf, sizeof buf)) > 0) { mp4_feed(d, o, buf, (size_t)n); o += (uint64_t)n; }
+        printf("%s (seek %lld): %d cues, first \"%s\" at %lld ms for %lld ms, last \"%s\"\n", path, (long long)at, sc.n, sc.first,
+               (long long)(sc.first_pts / 90), (long long)(sc.first_dur / 90), sc.last);
+        assert(sc.id == i->subs[0].id && !sc.order_bad);
+        assert(!strcmp(sc.last, "Son satır"));
+        if (!pass) {
+            assert(sc.n == 3 && !strcmp(sc.first, "Merhaba dünya"));
+            assert(llabs(sc.first_pts / 90 - 1000) < 50 && llabs(sc.first_dur / 90 - 2000) < 50);
+        } else {
+            assert(sc.n == 2 && !strcmp(sc.first, "İkinci\nsatır"));   /* the cue at 1 s is before the seek */
+        }
+        mp4_destroy(d);
+    }
+    free(moov);
+    fclose(c.f);
+}
+
 /* damaged indexes must not crash (run under AddressSanitizer) */
 typedef struct { uint8_t *b; size_t n; } Mem;
 static int mrd(void *ctx, uint64_t off, uint8_t *buf, size_t len)
@@ -270,6 +321,7 @@ int main(int argc, char **argv)
     test_mkv_damaged_cues(argv[4], len);
     test_ts(argv[5], len);
     fuzz(argv[2], argv[4]);
+    if (argc >= 7) test_mp4_subs(argv[6]);
     uint64_t tot = 0;
     assert(vod_content_range("HTTP/1.1 206 Partial\r\nContent-Length: 10\r\ncontent-range: bytes 0-9/123456\r\n", &tot) && tot == 123456);
     assert(!vod_content_range("Content-Range: bytes */*\r\n", &tot));
