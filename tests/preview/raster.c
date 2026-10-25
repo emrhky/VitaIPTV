@@ -103,6 +103,9 @@ void *vita2d_texture_get_datap(const vita2d_texture *t) { return t->px; }
 unsigned int vita2d_texture_get_stride(const vita2d_texture *t) { return (unsigned)t->w * 4; }
 
 void vita2d_draw_texture(const vita2d_texture *t, float x, float y) { vita2d_draw_texture_part_scale(t, x, y, 0, 0, t->w, t->h, 1, 1); }
+void vita2d_draw_texture_scale(const vita2d_texture *t, float x, float y, float sx, float sy) { vita2d_draw_texture_part_scale(t, x, y, 0, 0, t->w, t->h, sx, sy); }
+unsigned int vita2d_texture_get_width(const vita2d_texture *t) { return (unsigned)t->w; }
+unsigned int vita2d_texture_get_height(const vita2d_texture *t) { return (unsigned)t->h; }
 
 vita2d_pvf *vita2d_load_default_pvf(void) { return NULL; }
 vita2d_pvf *vita2d_load_system_pvf(int n, const vita2d_system_pvf_config *c) { (void)n; (void)c; return (vita2d_pvf *)1; }   /* (FreeType draws: as the Latin font) */      /* the preview uses its FreeType "PGF" */

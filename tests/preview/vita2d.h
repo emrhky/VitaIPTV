@@ -26,4 +26,7 @@ vita2d_texture *vita2d_create_empty_texture(unsigned int w, unsigned int h);
 void *vita2d_texture_get_datap(const vita2d_texture *t);
 unsigned int vita2d_texture_get_stride(const vita2d_texture *t);
 void vita2d_draw_texture_part_scale(const vita2d_texture *t, float x, float y, float tx, float ty, float tw, float th, float sx, float sy);
+void vita2d_draw_texture_scale(const vita2d_texture *t, float x, float y, float sx, float sy);   /* 0.8.0 */
+unsigned int vita2d_texture_get_width(const vita2d_texture *t);
+unsigned int vita2d_texture_get_height(const vita2d_texture *t);
 #endif
