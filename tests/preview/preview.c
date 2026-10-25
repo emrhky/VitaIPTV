@@ -30,7 +30,8 @@ static const char *ch_names[] = { "TRT 1 HD", "Kanal D HD", "Show TV HD", "Star 
 static const char *ch_groups[] = { "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Haber", "Haber", "Haber", "Haber",
     "Spor", "Çocuk", "Çocuk", "Çocuk", "Spor" };
 static int show_group = 0;
-static void ch_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[i]; r->number = i + 1; r->right = show_group ? ch_groups[i] : NULL; r->fav = fav_demo && i < 3; r->moving = fav_demo == 2 && i == 1; }
+static int check_demo;                                       /* 0.7.0: watched episodes */
+static void ch_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[i]; r->number = i + 1; r->right = show_group ? ch_groups[i] : NULL; r->fav = fav_demo && i < 3; r->moving = fav_demo == 2 && i == 1; r->check = check_demo && i < 3; }
 static int search_idx[] = { 12, 13 };
 static void search_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[search_idx[i]]; r->number = search_idx[i] + 1; r->right = ch_groups[search_idx[i]]; }
 
@@ -155,9 +156,12 @@ int main(int argc, char **argv)
                       { T("Language"), T("Automatic (system)"), SCR_F_CHOICE, 1 }, { T("Hide adult channels"), T("On"), SCR_F_TOGGLE, 1 }, { T("Hide channels named 4K / UHD"), T("Off"), SCR_F_TOGGLE, 1 },
                       { T("Preferred resolution"), T("Automatic"), SCR_F_CHOICE, 1 },
                       { T("Test server"), NULL, SCR_F_BUTTON, 1 }, { T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 },
+                      { T("Clear watched episodes"), NULL, SCR_F_BUTTON, 1 },
                       { T("Save"), NULL, SCR_F_BUTTON, 1 }, { T("Cancel"), NULL, SCR_F_BUTTON, 1 } };
-    preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), fs, 10, 2, hf2, 4, T("Server is running"), 0); shot("d_settings");
-    preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 10, 7, hf2, 4, NULL, 0);
+    preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), fs, 11, 2, hf2, 4, T("Server is running"), 0); shot("d_settings");
+    preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 11, 8, hf2, 4, NULL, 0);
+    scr_confirm(T("Clear watched episodes?"), T("The ticks of watched episodes are removed. Where films stopped is kept.")); shot("d3_clear_watched");
+    preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 11, 7, hf2, 4, NULL, 0);
     scr_confirm(T("Clear recently watched?"), T("The recently watched channels of every playlist are removed. Favorites stay.")); shot("d2_clear_recent");
     {   /* 0.5.0: the Select menu while playing: resolutions, the server line, audio tracks */
         static char a1[80], a2[80];
@@ -247,6 +251,38 @@ int main(int argc, char **argv)
         pe2.group = "Şimdi: Ana Haber Bülteni (19:00-20:30)  ·  Sonra: Kızılcık Şerbeti (20:30)";
         pe2.fav = 1;
         preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pe2); shot("k_epg_player");
+    }
+    /* 0.7.0: the Select menu's tabs, a subtitle, the clock, the next episode, watched episodes */
+    {
+        const char *tabs[] = { T("Picture"), T("Audio"), T("Subtitles"), T("More") };
+        static char sy[64];
+        snprintf(sy, sizeof sy, T("Sync:  < %+d.%d s >"), 1, 5);
+        const char *pic[] = { T("Automatic"), "1920x1080", "1280x720", "720x576", T("Through the Server") };
+        const char *sub[] = { T("Off"), "Türkçe", "English (SDH)", "Türkçe (Zorunlu)", sy };
+        int dim0[] = { 0, 0, 0, 0, 0 };
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f);
+        scr_tabmenu(tabs, 4, 0, pic, dim0, 5, 2, T("L / R: tab   X: choose   O: close")); shot("l_tab_picture");
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f);
+        scr_tabmenu(tabs, 4, 2, sub, dim0, 5, 4, T("Left / Right: earlier / later   X: back to 0   O: close")); shot("l_tab_subs");
+        const char *none[] = { T("No subtitles in this film (MKV text subtitles only)") };
+        int dim1[] = { 1 };
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f);
+        scr_tabmenu(tabs, 4, 2, none, dim1, 1, 0, T("L / R: tab   X: choose   O: close")); shot("l_tab_nosubs");
+        ScrPlayer ps = pl;
+        ps.clock = "21:47"; ps.subtitle = "Bunu sana daha önce söylemiştim.\nAma dinlemedin.";
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&ps); shot("l_player_clock_sub");
+        ps.osd = 0;
+        ps.corner = "Sonraki bölüm 4 sn içinde"; ps.corner2 = T("X: now   O: cancel");
+        if (lang_get() != LANG_TR) ps.corner = "Next episode in 4 s";
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&ps); shot("l_next_episode");
+        static int gs, cs;
+        check_demo = 1; show_group = 1;
+        ScrDual d; memset(&d, 0, sizeof d);
+        d.title = "Ev internet - Xtream"; d.subtitle = "Dizi - Sezon 1"; d.right = "16";
+        d.lcount = 10; d.lsel = 0; d.lscroll = &gs; d.lrow = grp_row_pv;
+        d.rcount = 16; d.rsel = 3; d.rscroll = &cs; d.rrow = ch_row; d.focus = 1;
+        preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot("l_watched");
+        check_demo = 0; show_group = 0;
     }
     /* 0.4.1: the button bars, left and right */
     {
