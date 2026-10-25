@@ -11,6 +11,7 @@
 #include "curlio.h"
 #include "vod.h"
 #include "httpio.h"                     /* plog() */
+#include "memstat.h"
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
@@ -96,6 +97,9 @@ static int g_hls_want = 720;            /* HLS: the variant to choose (see tsp_s
 static long g_hls_bw;                   /* ... with exactly this bit rate (0 = any) */
 static int g_aid = -1;                  /* 0.5.0: the audio track wanted (tsp_set_audio) */
 static char g_alang[4];
+static int g_sid = -1, g_soff = 1;      /* 0.7.0: the subtitle track wanted (tsp_set_sub), or its language, or none */
+static char g_slang[4];
+static volatile int g_sub_delay;        /* ms, + = later */
 #define NO_TS        0xFFFFFFFFu
 
 enum { SLOT_FREE = 0, SLOT_READY, SLOT_SHOWN, SLOT_OFF };   /* OFF: the decoder refused its memory */
@@ -259,6 +263,10 @@ typedef struct {
     int alt_on;                         /* the sound comes from there (the variant's own sound is left out) */
     int alt_list;                       /* the track list (st.a_*) is the master playlist's, not the stream's */
     int64_t alt_pts;                    /* packed audio (.aac / .ac3 segments): the next frame's time, -1 unknown */
+    /* 0.7.0: subtitles (all text tracks kept, so another one shows at once); under qlock */
+    struct SubCue *cues;
+    uint32_t ncues;                     /* cues written (the ring holds the last SUB_CUES) */
+    int sub_tracks_n;                   /* the tracks in st.s_* came from this many */
     uint8_t *a52pcm;
     int a_nstreams;                     /* (the stream list the audio track list was made from) */
     uint8_t *mpcm;
@@ -1907,6 +1915,105 @@ static void video_packet(Tsp *t, Pkt *p)
 }
 
 /* Demuxer callbacks (reader thread): copy the unit into a queue. */
+/* ---- 0.7.0: subtitles (Matroska text tracks) ---- */
+#define SUB_CUES 512
+#define SUB_DEFAULT_MS 4000                 /* a cue without a duration: until the next one, at most this long */
+typedef struct SubCue { int track; int64_t start, dur; char text[240]; } SubCue;
+
+/* the tracks for the menu (once the file's tracks are known); the one to show: the id asked for, else the
+ * language, else none (subtitles are off until chosen) */
+static void update_sub_tracks(Tsp *t)
+{
+    if (!t->mkv) return;
+    const TsInfo *i = mkv_info(t->mkv);
+    if (i->program < 0 || i->nsubs == t->sub_tracks_n) return;
+    int n = i->nsubs < TSP_MAX_SUBS ? i->nsubs : TSP_MAX_SUBS, cur = -1;
+    for (int k = 0; k < n; k++) {
+        t->st.s_id[k] = i->subs[k].id;
+        memcpy(t->st.s_lang[k], i->subs[k].lang, 4);
+        snprintf(t->st.s_name[k], sizeof t->st.s_name[k], "%s", i->subs[k].name);
+        t->st.s_forced[k] = i->subs[k].forced;
+    }
+    if (!g_soff) {
+        for (int k = 0; k < n && cur < 0; k++) if (t->st.s_id[k] == g_sid) cur = k;
+        for (int k = 0; k < n && cur < 0 && g_slang[0]; k++) if (!strcmp(t->st.s_lang[k], g_slang) && !t->st.s_forced[k]) cur = k;
+        for (int k = 0; k < n && cur < 0 && g_slang[0]; k++) if (!strcmp(t->st.s_lang[k], g_slang)) cur = k;
+    }
+    t->st.s_cur = cur;
+    t->st.s_n = n;
+    t->sub_tracks_n = i->nsubs;
+    char list[200];
+    size_t o = 0;
+    for (int k = 0; k < n && o + 40 < sizeof list; k++)
+        o += (size_t)snprintf(list + o, sizeof list - o, "%s%s%s%s%s", k ? ", " : "", t->st.s_lang[k][0] ? t->st.s_lang[k] : "-",
+                              t->st.s_name[k][0] ? " " : "", t->st.s_name[k], k == cur ? " (shown)" : "");
+    if (n) plog("tsp: subtitle tracks: %s", list);
+}
+
+static void on_sub(void *ctx, int id, const char *text, int64_t pts, int64_t dur)
+{
+    Tsp *t = ctx;
+    if (stopping(t) || pts < 0) return;
+    update_sub_tracks(t);
+    if (!t->cues && !(t->cues = calloc(SUB_CUES, sizeof(SubCue)))) return;
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    SubCue *c = &t->cues[t->ncues % SUB_CUES];
+    c->track = id;
+    c->start = pts;
+    c->dur = dur;
+    snprintf(c->text, sizeof c->text, "%s", text);
+    t->ncues++;
+    sceKernelUnlockMutex(t->qlock, 1);
+}
+
+void tsp_set_sub(int id, const char *lang, int off)
+{
+    g_sid = id;
+    ts_lang3(lang ? lang : "", g_slang);
+    g_soff = off;
+}
+
+void tsp_sub_choose(int k)
+{
+    Tsp *t = g_tsp;
+    if (!t) return;
+    if (k < 0 || k >= t->st.s_n) { t->st.s_cur = -1; plog("tsp: subtitles off"); return; }
+    t->st.s_cur = k;
+    plog("tsp: subtitles: track %d (%s)", t->st.s_id[k], t->st.s_lang[k][0] ? t->st.s_lang[k] : "-");
+}
+
+void tsp_set_sub_delay(int ms) { g_sub_delay = ms; }
+
+int tsp_sub_text(char *out, size_t cap)
+{
+    Tsp *t = g_tsp;
+    if (!t || !t->cues || t->st.s_cur < 0 || t->st.s_cur >= t->st.s_n || cap < 2) return 0;
+    int64_t p = -1;
+    sceKernelLockMutex(t->lock, 1, NULL);
+    if (t->shown >= 0) p = t->shown_pts;
+    sceKernelUnlockMutex(t->lock, 1);
+    if (p < 0) return 0;
+    p -= (int64_t)g_sub_delay * 90;                          /* (later subtitles: an earlier point of the film) */
+    int track = t->st.s_id[t->st.s_cur], found = 0;
+    int64_t best = -1;
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    uint32_t n = t->ncues < SUB_CUES ? t->ncues : SUB_CUES;
+    for (uint32_t k = 0; k < n; k++) {
+        const SubCue *c = &t->cues[k];
+        if (c->track != track || c->start > p || c->start < best) continue;
+        int64_t end = c->dur > 0 ? c->start + c->dur : c->start + SUB_DEFAULT_MS * 90;
+        if (c->dur <= 0)                                     /* until the next cue of the track */
+            for (uint32_t j = 0; j < n; j++)
+                if (t->cues[j].track == track && t->cues[j].start > c->start && t->cues[j].start < end) end = t->cues[j].start;
+        if (p >= end) continue;
+        best = c->start;
+        snprintf(out, cap, "%s", c->text);
+        found = 1;
+    }
+    sceKernelUnlockMutex(t->qlock, 1);
+    return found;
+}
+
 static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, int64_t dts, int flags)
 {
     (void)dts;
@@ -2001,6 +2108,7 @@ static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
     if (!t->first_audio_us) t->first_audio_us = now_us();
     const TsInfo *i = dmx_info(t);
     if (!t->alt_list) update_audio_tracks(t, i);
+    update_sub_tracks(t);                                    /* 0.7.0 */
     audio_push(t, i->audio_codec, data, len, pts);
 }
 
@@ -2561,9 +2669,12 @@ static void stats_tick(Tsp *t)
     t->dcalls = t->dus_sum = t->dus_max = 0;
     if (dcalls) snprintf(dc, sizeof dc, ", decoder call avg %u us max %u us, dropped old %u late %u, %d slots",
                          dsum / dcalls, dmax, (unsigned)t->drop_old, (unsigned)t->drop_behind, t->nslots);
-    char mem[64] = "";
-    if (have_mem)
-        snprintf(mem, sizeof mem, ", free main %u MB cdram %u MB phycont %u MB", (unsigned)fm.size_user >> 20,
+    char mem[112] = "";
+    MemStat hm = mem_stat();                                 /* 0.7.0: the app's own memory (lists, queues, caches) */
+    int ml = hm.total_kb ? snprintf(mem, sizeof mem, ", app memory %u of %u MB (peak %u)", hm.used_kb >> 10, hm.total_kb >> 10, hm.peak_kb >> 10)
+                         : snprintf(mem, sizeof mem, ", app memory %u MB (peak %u)", hm.used_kb >> 10, hm.peak_kb >> 10);
+    if (have_mem && ml > 0 && (size_t)ml < sizeof mem)
+        snprintf(mem + ml, sizeof mem - (size_t)ml, ", system free main %u MB cdram %u MB phycont %u MB", (unsigned)fm.size_user >> 20,
                  (unsigned)fm.size_cdram >> 20, (unsigned)fm.size_phycont >> 20);
     char nf[64] = "";
     if (t->net_wait_pct >= 5 && t->net_free_kbs)
@@ -2840,7 +2951,7 @@ static void dmx_feed(Tsp *t, const uint8_t *b, size_t n)
 {
     if (t->net_err[0] && n) t->net_err[0] = 0;              /* data comes: an earlier failure is not the story any more */
     if (!t->mkv && !t->flv && t->st.bytes == n) {
-        TsSink sink = { on_video, on_audio, t };
+        TsSink sink = { on_video, on_audio, t, on_sub };
         if (mkv_probe(b, n)) {
             t->mkv = mkv_create(&sink);
             if (t->mkv) mkv_prefer_audio(t->mkv, g_aid, g_alang);
@@ -3316,7 +3427,7 @@ static void read_hls(Tsp *t, uint8_t *buf)
     if (alt_pick >= 0 && rend && !stopping(t)) {             /* 0.6.0: the sound's playlist */
         alt = calloc(1, sizeof *alt);
         if (alt) { alt->text = malloc(HLS_TEXT_MAX); alt->seg = malloc(ALT_SEG_MAX); }
-        TsSink as = { on_alt_video, on_alt_audio, t };
+        TsSink as = { on_alt_video, on_alt_audio, t, NULL };
         if (alt && alt->text && alt->seg && (t->adm = ts_create(&as)) != NULL) {
             snprintf(alt->url, sizeof alt->url, "%s", rend[alt_pick].uri);
             alt->next = -1;
@@ -3780,7 +3891,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         t->st.dur_ms = (int)L.duration_ms;
         off = L.first_cluster;
         if (start > 0 && mkv_seek(vio_read, &io, t->vod_total, &L, start, &off, &at) != 0) { off = L.first_cluster; at = 0; }
-        TsSink sink = { on_video, on_audio, t };
+        TsSink sink = { on_video, on_audio, t, on_sub };
         t->mkv = mkv_create(&sink);
         if (t->mkv) mkv_prefer_audio(t->mkv, g_aid, g_alang);   /* (0.5.0: the audio track chosen in the menu) */
         if (t->mkv) mkv_feed(t->mkv, L.head, L.head_len);
@@ -3799,7 +3910,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
                                               "MP4 file: the server does not allow reading its index" : "Damaged MP4 file (no index)");
             return;
         }
-        TsSink sink = { on_video, on_audio, t };
+        TsSink sink = { on_video, on_audio, t, on_sub };
         char err[96];
         t->mp4 = mp4_create(moov, ml, &sink, err, sizeof err);
         free(moov);
@@ -3809,7 +3920,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         plog("tsp: MP4: %d s, %u samples, index %u KB, start at %d s (byte %llu)", t->st.dur_ms / 1000, mp4_samples(t->mp4),
              (unsigned)(ml / 1024), (int)(at / 1000), (unsigned long long)off);
     } else if (kind == VOD_FLV) {                           /* no index to jump with: from the start, pause only */
-        TsSink sink = { on_video, on_audio, t };
+        TsSink sink = { on_video, on_audio, t, on_sub };
         if (!(t->flv = flv_create(&sink))) { free(io.win); set_error(t, "Out of memory"); return; }
         t->vod_base = 0;
         if (io.win && io.woff == 0) t->st.dur_ms = (int)flv_meta_duration_ms(io.win, io.wlen);
@@ -4121,10 +4232,11 @@ static void buffer_check(Tsp *t, uint64_t now)
     int film_fast = measured && t->net_free_kbs >= t->st.need_kbs * 2;
     if ((film_slow || film_fast) && !t->big_queues) {
         t->big_queues = 1;
-        SceKernelFreeMemorySizeInfo fm;
-        memset(&fm, 0, sizeof fm);
-        fm.size = sizeof fm;
-        if (sceKernelGetFreeMemorySize(&fm) >= 0 && (unsigned)fm.size_user >= (unsigned)(VQ_BYTES_BIG - VQ_BYTES) + 48u * 1024 * 1024) {
+        /* 0.7.0: room in the app's own memory, where the queues are (it looked at the system's memory outside it,
+         * 122 MB on the device, which always said yes): the larger queues and 24 MB left for everything else */
+        unsigned need_kb = (unsigned)((VQ_BYTES_BIG - VQ_BYTES + AQ_BYTES_BIG - AQ_BYTES) / 1024) + 24u * 1024;
+        unsigned free_kb = mem_free_kb();
+        if (free_kb >= need_kb) {
             sceKernelLockMutex(t->qlock, 1, NULL);
             t->vq.max_bytes = VQ_BYTES_BIG;
             t->vq.max_count = VQ_PKTS_BIG;
@@ -4137,7 +4249,8 @@ static void buffer_check(Tsp *t, uint64_t now)
             else
                 plog("tsp: the network is fast (%u KB/s, the film needs %u KB/s): queues for about a minute (%u MB)",
                      t->net_free_kbs, t->st.need_kbs, (unsigned)(VQ_BYTES_BIG >> 20));
-        } else plog("tsp: larger queues wanted (network %s than the film), but there is no memory for them", film_slow ? "slower" : "faster");
+        } else plog("tsp: larger queues wanted (network %s than the film), but the app's memory has only %u MB free",
+                    film_slow ? "slower" : "faster", free_kb >> 10);
     }
     sceKernelLockMutex(t->qlock, 1, NULL);
     int vq = t->vq.count, aq_ms = 0, vq_ms = -1;
@@ -4421,10 +4534,11 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     if (g_vc.lock < 0) g_vc.lock = sceKernelCreateMutex("tsp_vcache", 0, 0, NULL);   /* before any reader thread uses it */
     t->lock = sceKernelCreateMutex("tsp_lock", 0, 0, NULL);
     t->qlock = sceKernelCreateMutex("tsp_qlock", 0, 0, NULL);
-    TsSink sink = { on_video, on_audio, t };
+    TsSink sink = { on_video, on_audio, t, on_sub };
     t->dmx = ts_create(&sink);
     if (t->dmx) ts_prefer_audio(t->dmx, g_aid, g_alang);    /* 0.5.0: the audio track chosen in the menu */
     t->st.a_cur = -1;
+    t->st.s_cur = -1;
     if (!t->dmx || t->lock < 0 || t->qlock < 0) {
         if (t->dmx) ts_destroy(t->dmx);
         if (t->lock >= 0) sceKernelDeleteMutex(t->lock);
@@ -4532,5 +4646,6 @@ void tsp_stop(void)
     sceKernelDeleteMutex(t->lock);
     sceKernelDeleteMutex(t->qlock);
     plog("tsp: stopped");
+    free(t->cues);
     free(t);
 }

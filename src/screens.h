@@ -15,6 +15,7 @@ typedef struct {
     int number;                         /* shown before the name if > 0 */
     int fav;                            /* 0.5.0: a star before the name (favourite) */
     int moving;                         /* 0.4.5: the row being moved (reordering the favourites) */
+    int check;                          /* 0.7.0: a tick before the name (a watched episode) */
 } ScrRow;
 typedef void (*ScrRowFn)(int i, ScrRow *row, void *ctx);
 
@@ -71,6 +72,10 @@ typedef struct {
     int stats_table;                    /* stats1-3 are rows of cells "label\vvalue" separated by tabs, in fixed columns */
     const char *stats_note;             /* table mode: a plain line above the table (may be NULL) */
     int fav;                            /* 0.5.0: a star before the name (favourite) */
+    const char *clock;                  /* 0.7.0: the time of day, in the middle of the top bar (may be NULL) */
+    const char *corner;                 /* 0.7.0: a note in the upper right corner over the picture ("next episode in 5 s") */
+    const char *corner2;                /* ... its second, dim line (the buttons) */
+    const char *subtitle;               /* 0.7.0: subtitle text over the picture (lines separated by \n; may be NULL) */
 } ScrPlayer;
 void scr_player(const ScrPlayer *p);
 
@@ -83,6 +88,11 @@ void scr_form(const char *title, const char *subtitle, const ScrField *f, int n,
               const UiHint *hints, int nhints, const char *status, int status_err);
 /* small menu box over the current screen */
 void scr_menu(const char *title, const char *const *items, int n, int sel);
+/* 0.7.0: the player's Select menu: tabs on top (L / R), the tab's rows under them, a help line at the bottom;
+ * the box keeps its size (rows scroll). dim[i] = a row that only says something (drawn dim), may be NULL. */
+#define SCR_TAB_ROWS 7
+void scr_tabmenu(const char *const *tabs, int ntabs, int tab, const char *const *items, const int *dim, int n, int sel,
+                 const char *help);
 /* yes/no box over the current screen */
 void scr_confirm(const char *title, const char *line);
 /* start-up screen: picture (may be NULL: drawn logo instead) and a status line */

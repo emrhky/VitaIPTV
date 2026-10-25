@@ -147,6 +147,45 @@ static int note_band(int y, const char *s, unsigned col)
     return y;
 }
 
+/* 0.7.0: subtitle lines at the bottom of the picture (above the bars when they show), white with a dark outline */
+static void subtitle_draw(const char *text, int osd)
+{
+    char lines[4][160];
+    int n = 0;
+    const char *s = text;
+    while (*s && n < 4) {                                   /* the cue's own lines, each wrapped to the width */
+        const char *e = strchr(s, '\n');
+        size_t len = e ? (size_t)(e - s) : strlen(s);
+        char one[320];
+        if (len >= sizeof one) len = sizeof one - 1;
+        memcpy(one, s, len);
+        one[len] = 0;
+        UiWrap w;
+        ui_wrap(&w, 1.3f, one, 900, 2);
+        for (int i = 0; i < w.n && n < 4; i++) snprintf(lines[n++], sizeof lines[0], "%s", w.line[i]);
+        s = e ? e + 1 : s + len;
+    }
+    int lh = 34, y = (osd ? UI_FOOTER_Y - 70 : 530) - (n - 1) * lh;
+    for (int i = 0; i < n; i++, y += lh) {
+        int w = ui_text_w(1.3f, lines[i]), x = 480 - w / 2;
+        vita2d_draw_rectangle(x - 10, y - 27, w + 20, lh, RGBA8(0, 0, 0, 120));   /* a light band: readable on white */
+        for (int dy = -2; dy <= 2; dy += 2)
+            for (int dx = -2; dx <= 2; dx += 2)
+                if (dx || dy) ui_text(x + dx, y + dy, RGBA8(0, 0, 0, 255), 1.3f, lines[i]);
+        ui_text(x, y, RGBA8(255, 255, 255, 255), 1.3f, lines[i]);
+    }
+}
+
+/* 0.7.0: a box in the upper right corner ("Next episode in 5 s", the buttons under it) */
+static void corner_note(const char *line, const char *line2, int osd)
+{
+    int w1 = ui_text_w(1.15f, line), w2 = line2 ? ui_text_w(0.95f, line2) : 0;
+    int w = (w1 > w2 ? w1 : w2) + 36, h = line2 ? 74 : 46, x = 940 - w, y = osd ? 78 : 16;
+    ui_round_rect(x, y, w, h, 12, UI_PANEL);
+    ui_text(x + 18, y + 31, UI_TEXT, 1.15f, line);
+    if (line2) ui_text(x + 18, y + 60, UI_DIM, 0.95f, line2);
+}
+
 void scr_player(const ScrPlayer *p)
 {
     if (p->backdrop) scr_backdrop();
@@ -156,13 +195,22 @@ void scr_player(const ScrPlayer *p)
         vita2d_draw_rectangle(456, 245, 16, 54, UI_TEXT);
         vita2d_draw_rectangle(488, 245, 16, 54, UI_TEXT);
     }
+    if (p->subtitle && p->subtitle[0]) subtitle_draw(p->subtitle, p->osd);   /* 0.7.0 */
+    if (p->corner && p->corner[0]) corner_note(p->corner, p->corner2, p->osd);
     if (!p->osd) return;
     vita2d_draw_rectangle(0, 0, 960, 62, UI_SHADE);
     vita2d_draw_rectangle(0, 62, 960, 2, UI_ACCENT);
     int iw = p->info ? ui_text_w(0.9f, p->info) : 0, nx = 20;
-    if (p->fav) { ui_star(31, 23, 11, UI_FAV); nx = 50; }      /* 0.5.0: a favourite */
-    ui_text_fit(nx, 30, UI_TEXT, 1.25f, p->name, 900 - iw - (nx - 20));
-    ui_text_fit(nx + 1, 30, UI_TEXT, 1.25f, p->name, 900 - iw - (nx - 20));
+    int name_w = 900 - iw - (nx - 20);
+    if (p->clock && p->clock[0]) {                          /* 0.7.0: the time in the middle; the name stops before it */
+        int cw = ui_text_w(1.25f, p->clock);
+        ui_text(480 - cw / 2, 30, UI_TEXT, 1.25f, p->clock);
+        ui_text(481 - cw / 2, 30, UI_TEXT, 1.25f, p->clock);
+        name_w = 480 - cw / 2 - 18 - nx;
+    }
+    if (p->fav) { ui_star(31, 23, 11, UI_FAV); nx = 50; name_w -= 30; }   /* 0.5.0: a favourite */
+    ui_text_fit(nx, 30, UI_TEXT, 1.25f, p->name, name_w);
+    ui_text_fit(nx + 1, 30, UI_TEXT, 1.25f, p->name, name_w);
     if (p->group && p->group[0]) ui_text_fit(20, 52, UI_DIM, 0.9f, p->group, 920);   /* (0.4.5: wider, the EPG line) */
     if (p->info && p->info[0]) ui_text(940 - iw, 30, UI_DIM, 0.9f, p->info);
     int y = UI_FOOTER_Y;
@@ -308,6 +356,41 @@ void scr_menu(const char *title, const char *const *items, int n, int sel)
     }
 }
 
+void scr_tabmenu(const char *const *tabs, int ntabs, int tab, const char *const *items, const int *dim, int n, int sel,
+                 const char *help)
+{
+    char tb[192];
+    const int w = 720, rh = 42, x = (960 - w) / 2;
+    const int h = 70 + SCR_TAB_ROWS * rh + 48, y = (544 - h) / 2 - 6;
+    vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 120));
+    ui_panel(x, y, w, h, RGBA8(24, 28, 42, 245));
+    /* the tabs, as wide as the box allows */
+    int tw = (w - 32) / (ntabs > 0 ? ntabs : 1);
+    for (int i = 0; i < ntabs; i++) {
+        int tx = x + 16 + i * tw;
+        if (i == tab) ui_round_rect(tx + 3, y + 12, tw - 6, 40, 10, UI_ACCENT);
+        else ui_round_rect(tx + 3, y + 12, tw - 6, 40, 10, RGBA8(44, 50, 72, 255));
+        const char *t = ui_title(tabs[i], tb, sizeof tb);
+        float sc = ui_text_w(1.1f, t) <= tw - 16 ? 1.1f : 0.95f;
+        ui_text_center(tx + tw / 2, y + 41, i == tab ? RGBA8(255, 255, 255, 255) : UI_DIM, sc, t);
+    }
+    vita2d_draw_rectangle(x + 16, y + 62, w - 32, 1, UI_LINE);
+    int top = 0;                                             /* the rows: the selected one always in view */
+    if (sel >= SCR_TAB_ROWS) top = sel - SCR_TAB_ROWS + 1;
+    for (int r = 0; r < SCR_TAB_ROWS && top + r < n; r++) {
+        int i = top + r, ry = y + 70 + r * rh;
+        if (i == sel) vita2d_draw_rectangle(x + 14, ry, w - 28, rh - 6, UI_SEL);
+        ui_text_fit(x + 34, ry + (rh - 6) / 2 + 10, dim && dim[i] ? UI_DIM : UI_TEXT, LIST_FS, items[i], w - 68);
+    }
+    if (top > 0) ui_fill_triangle(x + w - 30, y + 80, x + w - 22, y + 70, x + w - 14, y + 80, UI_DIM);   /* more above / below */
+    if (top + SCR_TAB_ROWS < n) {
+        int by = y + 70 + SCR_TAB_ROWS * rh - 14;
+        ui_fill_triangle(x + w - 30, by, x + w - 22, by + 10, x + w - 14, by, UI_DIM);
+    }
+    vita2d_draw_rectangle(x + 16, y + h - 44, w - 32, 1, UI_LINE);
+    if (help && help[0]) ui_text_center(480, y + h - 16, UI_DIM, 0.95f, help);
+}
+
 void scr_confirm(const char *title, const char *line)
 {
     /* 0.4.0: its own box, tall enough for the buttons (they were drawn below the message box) */
@@ -428,6 +511,7 @@ static void list_area(int x0, int w, int count, int sel, int *scroll, ScrRowFn f
             ui_text_fit(x0 + w - 18 - rw, y + 25, is_sel ? RGBA8(200, 210, 240, 255) : UI_DIM, 1.0f, row.right, 170);
         }
         if (row.fav) { ui_star(x + 8, y + ROW_H / 2, 8, UI_FAV); x += 22; }   /* 0.5.0: a favourite */
+        if (row.check) { ui_check(x + 8, y + ROW_H / 2, 8, RGBA8(64, 226, 160, 255)); x += 24; }   /* 0.7.0: watched */
         ui_text_fit(x, y + 26, (focused || is_sel) ? UI_TEXT : RGBA8(190, 194, 210, 255), LIST_FS, row.name, x0 + w - 28 - rw - x);
     }
     ui_scrollbar(x0 + w - 8, LIST_Y + 2, SCR_ROWS * ROW_H - 4, *scroll, SCR_ROWS, count);

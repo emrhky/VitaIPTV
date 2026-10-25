@@ -25,6 +25,7 @@
 #include "tsplayer.h"
 #include "tsdemux.h"
 #include "httpio.h"
+#include "memstat.h"
 #include "ui.h"
 #include "screens.h"
 #include <psp2/ime_dialog.h>
@@ -53,10 +54,11 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define SOURCES_FILE  DATA_DIR "/sources.txt"
 #define SETTINGS_FILE DATA_DIR "/settings.txt"
 #define RESUME_FILE   DATA_DIR "/resume.txt"
+#define WATCH_FILE    DATA_DIR "/watched.txt"     /* 0.7.0: watched episodes */
 #define FAV_FILE      DATA_DIR "/favorites.txt"
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v0.6.0"
+#define APP_VERSION   "v0.7.0"
 #endif
 #ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
 #define APP_BUILD     __DATE__ " " __TIME__
@@ -115,6 +117,8 @@ static int move_saved_n;
 static int fav_dirty;                       /* changed in the player: the list is sorted again on the way back */
 static int vod_fav_stale;                   /* 0.6.0: a film / series favourite changed in the player or in the episodes */
 static int series_ci_saved = -1;            /* 0.6.0: the series whose episodes are shown (in series_saved) */
+static WatchList watched;                   /* 0.7.0: watched episodes (watched.txt) */
+static char cur_series_id[WATCH_ID];        /* 0.7.0: the series whose episodes are shown */
 static void leave_episodes(void);
 static void save_favorites(void);
 
@@ -934,6 +938,70 @@ static void remember_position(const char *url, int pos_ms, int dur_ms)
     free(buf);
 }
 
+/* ---- 0.7.0: watched episodes ------------------------------------------------------------------------ */
+static void load_watched(void)
+{
+    Mem m = {0};
+    watch_free(&watched);
+    if (read_file(WATCH_FILE, &m) == 0) { watch_parse(m.buf, &watched); free(m.buf); }
+}
+
+static void save_watched(void)
+{
+    char *t = watch_format(&watched);
+    if (t) { write_text_file(WATCH_FILE, t); free(t); }
+}
+
+/* the record of the series whose episodes are shown, NULL if none */
+static const WatchEntry *cur_watch(void)
+{
+    if (!in_episodes || !cur_series_id[0] || cur_src < 0 || cur_src >= nsources) return NULL;
+    char sk[FAV_SRC_MAX];
+    fav_source_key(&sources[cur_src], sk, sizeof sk);
+    int i = watch_find(&watched, sk, cur_series_id);
+    return i >= 0 ? &watched.e[i] : NULL;
+}
+
+/* an episode was played up to pos (of dur; ended = to its end): remembered for its series */
+static void mark_watched(const Channel *c, int pos, int dur, int ended)
+{
+    if (!in_episodes || !cur_series_id[0] || cur_src < 0 || cur_src >= nsources || !c) return;
+    char sk[FAV_SRC_MAX], ek[WATCH_ID];
+    fav_source_key(&sources[cur_src], sk, sizeof sk);
+    watch_ep_key(c->url, ek, sizeof ek);
+    int done = ended;
+    if (!done && dur > 0) { int tail = dur / 20 > 60000 ? dur / 20 : 60000; done = pos > dur - tail; }
+    if (!done && pos < 30000) return;                        /* hardly started: nothing to remember */
+    int r = watch_mark(&watched, sk, cur_series_id, ek, done);
+    if (r > 0) { save_watched(); if (done) plog("watched: series %s episode %s to its end", cur_series_id, ek); }
+}
+
+/* the episodes opened: the selection on the half-watched episode, or the one after the finished one */
+static void select_watched_episode(void)
+{
+    const WatchEntry *e = cur_watch();
+    if (!e || nvis <= 0) return;
+    const char **eps = malloc(sizeof(char *) * (size_t)nvis);
+    char (*keys)[WATCH_ID] = malloc(WATCH_ID * (size_t)nvis);
+    if (eps && keys) {
+        for (int i = 0; i < nvis; i++) { watch_ep_key(chans.items[vis[i]].url, keys[i], WATCH_ID); eps[i] = keys[i]; }
+        int k = watch_pick(e, eps, nvis);
+        if (k >= 0) {
+            sel = k;
+            scroll = k > 3 ? k - 3 : 0;                      /* (the list keeps it on screen) */
+        }
+    }
+    free(eps);
+    free(keys);
+}
+
+static int clear_watched(void)
+{
+    int n = watch_clear(&watched);
+    if (n) { save_watched(); plog("watched: %d series cleared", n); }
+    return n;
+}
+
 /* ---- loading a channel list (on its own thread, so the screen keeps moving and O cancels) ---------- */
 enum { LOAD_LIVE, LOAD_FILM_CATS, LOAD_SERIES_CATS, LOAD_FILMS, LOAD_SERIES, LOAD_EPISODES };
 typedef struct {
@@ -980,8 +1048,8 @@ static void set_stage(const char *stage)
 
 static void log_heap(const char *what, size_t bytes)
 {
-    struct mallinfo mi = mallinfo();
-    plog("list: %s %u KB (heap in use %u KB)", what, (unsigned)(bytes / 1024), (unsigned)(mi.uordblks / 1024));
+    MemStat m = mem_stat();                                  /* 0.7.0: of the app's 96 MB, and the most so far */
+    plog("list: %s %u KB (app memory %u KB of %u MB, peak %u KB)", what, (unsigned)(bytes / 1024), m.used_kb, m.total_kb >> 10, m.peak_kb);
 }
 
 /* Xtream: the account first (a wrong password or an expired account is said at once), then the
@@ -1037,6 +1105,7 @@ static int load_xtream(const Source *s, ChannelList *out, char *err, size_t errs
     free(ms.buf);
     free(cats);
     log_heap("channels parsed", (size_t)out->count * sizeof(Channel));
+    if (out->count >= IPTV_MAX_CHANNELS) plog("list: the list has more channels than %d: the rest is left out", IPTV_MAX_CHANNELS);
     {   /* a sample of the raw names (UTF-8 bytes in hex from the first non-ASCII one) */
         int shown = 0;
         for (int i = 0; i < out->count && shown < 12; i += out->count / 12 + 1, shown++) {
@@ -1088,6 +1157,8 @@ static int load_list(const Source *s, ChannelList *out, char *err, size_t errsz,
         iptv_headers_dropped = 0;
         m3u_parse(m.buf, m.len, out);
         if (iptv_headers_dropped) plog("list: %d links too long for their User-Agent/Referer (they play without them)", iptv_headers_dropped);
+        log_heap("channels parsed", (size_t)out->count * sizeof(Channel));   /* (0.7.0: with the download still in memory: the most) */
+        if (out->count >= IPTV_MAX_CHANNELS) plog("list: the list has more channels than %d: the rest is left out", IPTV_MAX_CHANNELS);
     }
     free(m.buf);
     if (out->count == 0) { snprintf(err, errsz, "No channels found in %s", s->name); return -1; }
@@ -1139,6 +1210,7 @@ static int load_vod(LoadJob *j)
                   : xtream_parse_series(m.buf, m.len, s, vcats, nvcats, &j->list);
         if (!n) snprintf(j->err, sizeof j->err, "This category is empty");
     }
+    log_heap("vod list parsed", (size_t)j->list.count * sizeof(Channel));   /* (0.7.0) */
     free(m.buf);
     plog("list: %s: %d items", action, n);
     return n ? 0 : -1;
@@ -1256,6 +1328,7 @@ static int load_poll(unsigned p)
         in_episodes = 1;
         rebuild_visible();
         focus = 1;
+        select_watched_episode();                            /* 0.7.0 */
         break;
     }
     if (job.note[0]) set_status(0, "%s", job.note);
@@ -1290,6 +1363,25 @@ static int64_t now_unix(void)
     memset(&u, 0, sizeof u);
     sceRtcGetCurrentClock(&u, 0);
     return dt_minutes(&u) * 60 + u.second;
+}
+
+/* 0.7.0: the time of day for the player's top bar, 24-hour or 12-hour as the console is set */
+static int time_12h = -1;
+static const char *clock_text(void)
+{
+    static char b[16];
+    if (time_12h < 0) {
+        int f = 1;
+        if (sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_TIME_FORMAT, &f) < 0) f = 1;
+        time_12h = f == SCE_SYSTEM_PARAM_TIME_FORMAT_12HR;
+    }
+    SceDateTime l;
+    memset(&l, 0, sizeof l);
+    if (sceRtcGetCurrentClockLocalTime(&l) < 0) return NULL;
+    int h = l.hour;
+    if (time_12h) snprintf(b, sizeof b, "%d:%02d %s", h % 12 ? h % 12 : 12, l.minute, h < 12 ? "AM" : "PM");
+    else snprintf(b, sizeof b, "%02d:%02d", h, l.minute);
+    return b;
 }
 
 static void epg_time_zone(void)
@@ -1407,6 +1499,20 @@ static int film_start_ms;            /* where the next film starts (resume, jump
 static int seek_target = -1;         /* a jump being chosen, ms (-1 = none) */
 static unsigned seek_due, last_pos_save;
 static int film_end_done;
+static unsigned next_ep_at;                 /* 0.7.0: an episode ended: the next one starts at this time (0 = none) */
+static int next_ep_vi = -1;
+
+/* 0.7.0: the corner note while the next episode waits */
+static void next_ep_note(ScrPlayer *sp)
+{
+    static char line[64];
+    if (!next_ep_at) return;
+    unsigned now = now_ms();
+    int sec = next_ep_at > now ? (int)((next_ep_at - now + 999) / 1000) : 0;
+    snprintf(line, sizeof line, T("Next episode in %d s"), sec);
+    sp->corner = line;
+    sp->corner2 = T("X: now   O: cancel");
+}
 static int film_dur_ms;              /* the film's length, kept while it plays through the server (that cannot tell) */
 static char film_note[200];          /* a short message over the film (e.g. jumping is not possible) */
 static unsigned film_note_until;            /* the end of the film was handled (its resume point dropped) */
@@ -1419,6 +1525,11 @@ static long res_bw;
 static int res_manual;               /* chosen with Select / Square (not by stepping down on a slow line) */
 static int res_menu, res_menu_sel;   /* Select in the player: the picture size menu */
 static int aud_id = -1;              /* 0.5.0: the audio track chosen for this channel (-1 = the best one) */
+static int sub_id = -1, sub_off = 1; /* 0.7.0: the subtitle track chosen (-1 = by language), or none shown */
+static char sub_lang[4];             /* ... its language, kept for the next films */
+static int sub_delay_ms;             /* ... shown this much later (- earlier), kept while the app runs */
+static int menu_tab, menu_fresh;     /* 0.7.0: the Select menu's tab; fresh: put the selection on what plays */
+static unsigned menu_lr_t0, menu_lr_last;   /* (the sync row: left / right held repeats) */
 static char aud_lang[4];             /* ... and its language, kept for the next channels and films */
 static long res_novideo[TSP_MAX_VARIANTS];   /* variants of this channel that sent no picture (by bit rate) */
 static int res_nnovideo;
@@ -1569,12 +1680,15 @@ static void play_channel_ex(int vi, int use_proxy)
     }
     tsp_set_options(1, res_effective());                     /* 1080p is always on since v0.2 */
     tsp_set_audio(aud_id, aud_lang);                         /* 0.5.0: the audio track (or language) chosen */
+    tsp_set_sub(sub_id, sub_lang, sub_off);                  /* 0.7.0: subtitles */
+    tsp_set_sub_delay(sub_delay_ms);
     tsp_set_via_server(use_proxy);
     tsp_set_hls_bw(res_bw);
     via_proxy = 0;
     char purl[IPTV_URL_MAX * 3 + 64];
     int film = chans.items[vis[vi]].kind == CH_FILM;
     if (film) { film_end_done = 0; seek_target = -1; last_pos_save = now_ms(); }
+    next_ep_at = 0;                                          /* 0.7.0 */
     if (use_proxy && film && proxy_url_at(&settings, url, film_start_ms / 1000, purl, sizeof purl) == 0) {
         via_proxy = 1;                                       /* a film converted by the server, from where it was */
         play_mode = 2;
@@ -1629,6 +1743,7 @@ static void play_channel(int vi)
     auto_proxy_tried = 0;
     film_dur_ms = 0;
     aud_id = -1;                                             /* (0.5.0: the language chosen stays, the track number not) */
+    sub_id = -1;                                             /* (0.7.0: the same for subtitles; on or off stays too) */
     res_want = 0;                                            /* every channel opens at the size in the settings */
     res_bw = 0;
     res_manual = 0;
@@ -1667,15 +1782,27 @@ static const UiHint HINTS_PROBE[] = { { UI_BTN_CROSS, "Again" }, { UI_BTN_CIRCLE
 static const Channel *cur_channel(void) { return &chans.items[vis[play_vis]]; }
 
 /* 0.5.0: "Türkçe (AC-3)" for audio track k of the status */
-static void audio_track_name(const TspStatus *st, int k, char *out, size_t cap)
+/* a language code ("tur") as its name in the app's language, NULL if not in the table */
+static const char *lang_name(const char *l)
 {
     static const char *const LANGS[][3] = { { "tur", "Turkish", "Türkçe" }, { "eng", "English", "İngilizce" }, { "deu", "German", "Almanca" },
         { "fra", "French", "Fransızca" }, { "spa", "Spanish", "İspanyolca" }, { "ita", "Italian", "İtalyanca" }, { "ara", "Arabic", "Arapça" },
         { "rus", "Russian", "Rusça" }, { "nld", "Dutch", "Felemenkçe" }, { "por", "Portuguese", "Portekizce" }, { "pol", "Polish", "Lehçe" },
         { "ell", "Greek", "Yunanca" }, { "kur", "Kurdish", "Kürtçe" }, { "fas", "Persian", "Farsça" }, { "aze", "Azerbaijani", "Azerbaycanca" },
-        { "jpn", "Japanese", "Japonca" }, { "kor", "Korean", "Korece" }, { "zho", "Chinese", "Çince" }, { "hin", "Hindi", "Hintçe" } };
-    const char *l = st->a_lang[k], *name = NULL;
-    for (size_t i = 0; i < sizeof LANGS / sizeof LANGS[0]; i++) if (!strcmp(l, LANGS[i][0])) name = LANGS[i][lang_get() == LANG_TR ? 2 : 1];
+        { "jpn", "Japanese", "Japonca" }, { "kor", "Korean", "Korece" }, { "zho", "Chinese", "Çince" }, { "hin", "Hindi", "Hintçe" },
+        { "swe", "Swedish", "İsveççe" }, { "dan", "Danish", "Danca" }, { "nor", "Norwegian", "Norveççe" }, { "fin", "Finnish", "Fince" },
+        { "ron", "Romanian", "Romence" }, { "bul", "Bulgarian", "Bulgarca" }, { "hun", "Hungarian", "Macarca" }, { "ces", "Czech", "Çekçe" },
+        { "heb", "Hebrew", "İbranice" },
+        /* (0.7.0: the bibliographic codes MKV files often carry) */
+        { "ger", "German", "Almanca" }, { "fre", "French", "Fransızca" }, { "dut", "Dutch", "Felemenkçe" }, { "gre", "Greek", "Yunanca" },
+        { "per", "Persian", "Farsça" }, { "rum", "Romanian", "Romence" }, { "cze", "Czech", "Çekçe" }, { "chi", "Chinese", "Çince" } };
+    for (size_t i = 0; i < sizeof LANGS / sizeof LANGS[0]; i++) if (!strcmp(l, LANGS[i][0])) return LANGS[i][lang_get() == LANG_TR ? 2 : 1];
+    return NULL;
+}
+
+static void audio_track_name(const TspStatus *st, int k, char *out, size_t cap)
+{
+    const char *l = st->a_lang[k], *name = lang_name(l);
     int c = st->a_codec[k];
     const char *cn = c == TS_CODEC_AAC ? "AAC" : c == TS_CODEC_MPEG_AUDIO ? "MP2" : c == TS_CODEC_AC3 ? "AC-3" : c == TS_CODEC_EAC3 ? "E-AC-3" : "?";
     char up[4];
@@ -1683,6 +1810,21 @@ static void audio_track_name(const TspStatus *st, int k, char *out, size_t cap)
     if (name) snprintf(out, cap, "%s (%s)", name, cn);
     else if (l[0]) snprintf(out, cap, "%s (%s)", up, cn);
     else snprintf(out, cap, "%d (%s)", k + 1, cn);
+}
+
+/* 0.7.0: "Türkçe", "English (SDH)", "Türkçe (Zorunlu)", "2" */
+static void sub_track_name(const TspStatus *st, int k, char *out, size_t cap)
+{
+    const char *l = st->s_lang[k], *name = lang_name(l);
+    char up[4], base[48];
+    for (int i = 0; i < 4; i++) up[i] = (char)(l[i] >= 'a' && l[i] <= 'z' ? l[i] - 32 : l[i]);
+    if (name) snprintf(base, sizeof base, "%s", name);
+    else if (l[0]) snprintf(base, sizeof base, "%s", up);
+    else snprintf(base, sizeof base, "%s %d", T("Subtitles"), k + 1);
+    const char *extra = st->s_name[k][0] ? st->s_name[k] : st->s_forced[k] ? T("Forced") : NULL;
+    if (extra && name && !strcasecmp(extra, name)) extra = NULL;   /* (a name that is only the language again) */
+    if (extra) snprintf(out, cap, "%s (%s)", base, extra);
+    else snprintf(out, cap, "%s", base);
 }
 
 /* 0.4.1: the player's button bar. Left: X pause, Square (the next picture size / the server / 720p for a film:
@@ -1740,6 +1882,7 @@ static void save_film_position(void)
     if (st->state == TSP_ERROR || (st->decoded == 0 && !st->audio_only)) return;   /* never started: keep the old point */
     if (st->state == TSP_ENDED) pos = dur > 0 ? dur : pos + 3600000;
     remember_position(cur_channel()->url, pos, dur);
+    mark_watched(cur_channel(), pos, dur, st->state == TSP_ENDED);   /* 0.7.0: an episode */
 }
 
 /* X on a film: ask whether to continue where it was left. */
@@ -1757,6 +1900,19 @@ static void open_film(int vi)
     return_state = ST_CHANNELS;
     state = ST_PLAYING;
     film_start_ms = 0;
+    play_channel(vi);
+}
+
+/* 0.7.0: the next episode (after the countdown, or X): where it was left if it was started */
+static void play_next_episode(void)
+{
+    int vi = next_ep_vi;
+    next_ep_at = 0;
+    if (vi < 0 || vi >= nvis) return;
+    int k = resume_find(resume, nresume, chans.items[vis[vi]].url);
+    film_start_ms = k >= 0 && resume_worth(resume[k].pos_ms, resume[k].dur_ms) ? resume[k].pos_ms : 0;
+    seek_target = -1;
+    plog("player: the next episode");
     play_channel(vi);
 }
 
@@ -1788,6 +1944,7 @@ static void activate_item(int vi)
         id[il] = 0;
         sel = vi;
         series_ci_saved = vis[vi];                           /* 0.6.0: START in the episodes: this series */
+        snprintf(cur_series_id, sizeof cur_series_id, "%s", id);   /* 0.7.0: its watched episodes */
         load_begin(&sources[cur_src], LOAD_EPISODES, id, cur_group);
     } else if (c->kind == CH_FILM) {
         open_film(vi);
@@ -1872,6 +2029,10 @@ static void draw_tsp_screen(int osd)
     char info[48] = "";
     memset(&sp, 0, sizeof sp);
     sp.backdrop = !tx;
+    sp.clock = clock_text();                                 /* 0.7.0 */
+    next_ep_note(&sp);
+    static char subt[640];                                   /* 0.7.0: the subtitle for the picture on the screen */
+    if (tx && tsp_sub_text(subt, sizeof subt)) sp.subtitle = subt;
     sp.name = c->name;
     sp.group = c->group;
     {
@@ -2020,6 +2181,8 @@ static void draw_mp4_screen(int osd)
     ScrPlayer sp;
     memset(&sp, 0, sizeof sp);
     sp.backdrop = !got_frame;
+    sp.clock = clock_text();                                 /* 0.7.0 */
+    next_ep_note(&sp);
     sp.name = c->name;
     sp.group = c->group;
     sp.fav = player_fav();
@@ -2091,6 +2254,10 @@ static void ch_row(int i, ScrRow *r, void *ctx)
     if (c->kind == CH_FILM) {                                  /* where it was left */
         int k = resume_find(resume, nresume, c->url);
         if (k >= 0) { fmt_time(left_at, sizeof left_at, resume[k].pos_ms); r->right = left_at; }
+    }
+    if (in_episodes) {                                         /* 0.7.0: a tick on watched episodes */
+        const WatchEntry *w = cur_watch();
+        if (w && w->done) { char ek[WATCH_ID]; watch_ep_key(c->url, ek, sizeof ek); r->check = watch_is_done(w, ek); }
     }
 }
 
@@ -2307,9 +2474,11 @@ static int source_field_enabled(int i)
 }
 
 #define SRC_FIELDS 7                                     /* (+1: "Delete playlist" when editing one) */
-#define SET_FIELDS 10                                    /* (0.5.0: + "Clear Recently Watched") */
+#define SET_FIELDS 11                                    /* (0.5.0: + "Clear Recently Watched"; 0.7.0: + "Clear watched episodes") */
 static int confirm_delete;                               /* the edit form's "Delete playlist?" box */
 static int confirm_clear_recent;                         /* 0.5.0: the settings' "Clear recently watched?" box */
+static int confirm_clear_watched;                        /* 0.7.0: "Clear watched episodes?" */
+static int clear_watched(void);
 static int server_test_pending;                          /* 0.5.0: "Test server" runs after the frame (it draws its own) */
 static int filters_changed;                              /* settings saved: 1 adult on, 2 adult off, 4 4K on, 8 4K off */
 
@@ -2454,7 +2623,8 @@ static void form_activate(void)
         case 5: f_res = (f_res + 1) % RES_N; break;
         case 6: server_test_pending = 1; break;              /* (0.5.0: not inside the frame: it crashed the app) */
         case 7: confirm_clear_recent = 1; break;
-        case 8: save_settings_form(); break;
+        case 8: confirm_clear_watched = 1; break;
+        case 9: save_settings_form(); break;
         default: form_kind = FORM_NONE; status[0] = 0; break;
         }
     }
@@ -2496,10 +2666,12 @@ static void draw_form(void)
         f[5] = (ScrField){ T("Preferred resolution"), T(RES_NAMES[f_res]), SCR_F_CHOICE, 1 };
         f[6] = (ScrField){ T("Test server"), NULL, SCR_F_BUTTON, 1 };
         f[7] = (ScrField){ T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 };
-        f[8] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
-        f[9] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
+        f[8] = (ScrField){ T("Clear watched episodes"), NULL, SCR_F_BUTTON, 1 };
+        f[9] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
+        f[10] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
         scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), f, SET_FIELDS, form_sel, H, NH(H), status, status_err);
         if (confirm_clear_recent) scr_confirm(T("Clear recently watched?"), T("The recently watched channels of every playlist are removed. Favorites stay."));
+        if (confirm_clear_watched) scr_confirm(T("Clear watched episodes?"), T("The ticks of watched episodes are removed. Where films stopped is kept."));
     }
 }
 
@@ -2624,6 +2796,7 @@ static void move_sel(unsigned p, int count)
 static void stop_all(void)
 {
     player_stop();
+    next_ep_at = 0;                                          /* 0.7.0 */
     probe_cancel();
     tsp_stop();
 }
@@ -2672,6 +2845,7 @@ int main(void)
     sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_LANG, &system_lang);
     load_settings();
     load_resume();
+    load_watched();                                          /* 0.7.0 */
     apply_language();
 
     vita2d_init();
@@ -2762,6 +2936,14 @@ int main(void)
                 int n = clear_recent();
                 set_status(0, n ? "Recently watched cleared" : "Nothing to clear", NULL);
             } else if (p & SCE_CTRL_CIRCLE) confirm_clear_recent = 0;
+            draw_form();
+        }
+        else if (form_kind != FORM_NONE && confirm_clear_watched) {   /* 0.7.0: "Clear watched episodes?" */
+            if (p & SCE_CTRL_CROSS) {
+                confirm_clear_watched = 0;
+                int n = clear_watched();
+                set_status(0, n ? "Watched episodes cleared" : "Nothing to clear", NULL);
+            } else if (p & SCE_CTRL_CIRCLE) confirm_clear_watched = 0;
             draw_form();
         }
         else if (form_kind != FORM_NONE && confirm_delete) {      /* "Delete this playlist?" over the edit form */
@@ -3014,58 +3196,117 @@ int main(void)
             const TspStatus *ms = play_mode == 2 ? tsp_status() : NULL;
             if (res_menu && play_mode == 1) res_menu = 0;
             if (res_menu) {
-                /* Select: the picture sizes (HLS, newest first) or the one size it has; 0.5.0: the transcoding server
-                 * (on / off) and the audio tracks; the analysis at the end */
-                enum { MA_NONE, MA_AUTO, MA_VARIANT, MA_SERVER, MA_AUDIO, MA_ANALYSIS };
-                static char names[TSP_MAX_VARIANTS + TSP_MAX_AUDIO + 4][72];
-                const char *items[TSP_MAX_VARIANTS + TSP_MAX_AUDIO + 4];
-                int act[TSP_MAX_VARIANTS + TSP_MAX_AUDIO + 4], arg[TSP_MAX_VARIANTS + TSP_MAX_AUDIO + 4];
-                int n = 0, nv = ms && !via_proxy && !film ? ms->hls_nv : 0;
+                /* Select (0.7.0: in tabs, so it stays short): Picture (the HLS sizes, newest first, or the one size it
+                 * has), Audio (the tracks), Subtitles (off, the tracks, the sync), More (the server, the analysis) */
+                enum { MA_NONE, MA_AUTO, MA_VARIANT, MA_SERVER, MA_AUDIO, MA_ANALYSIS, MA_SUB_OFF, MA_SUB, MA_SUB_SYNC };
+                enum { TAB_PIC, TAB_AUDIO, TAB_SUB, TAB_MORE, NTABS };
+                #define MENU_MAX (TSP_MAX_VARIANTS + TSP_MAX_AUDIO + TSP_MAX_SUBS + 4)
+                static char names[MENU_MAX][96];
+                const char *items[MENU_MAX];
+                int act[MENU_MAX], arg[MENU_MAX], dim[MENU_MAX];
+                int n = 0, cur = -1, nv = ms && !via_proxy && !film ? ms->hls_nv : 0;
                 int radio = ms && ms->audio_only && ms->state != TSP_ERROR;
-                #define MENU_ADD(a_, g_) do { items[n] = names[n]; act[n] = (a_); arg[n] = (g_); n++; } while (0)
-                if (nv > 0) {
-                    if (settings.res_pref) snprintf(names[n], sizeof names[n], "%s%s (%s)", res_want ? "" : "> ", T("Settings"),
-                                                     res_pref_name(settings.res_pref));
-                    else snprintf(names[n], sizeof names[n], "%s%s", res_want ? "" : "> ", T("Automatic"));
-                    MENU_ADD(MA_AUTO, 0);
-                    for (int i = nv - 1; i >= 0; i--) {
-                        char nm[24];
-                        res_name(ms, i, nm, sizeof nm);
-                        int cur = res_want && i == ms->hls_vcur;
-                        if (ms->hls_vh[i] > 0)
-                            snprintf(names[n], sizeof names[n], "%s%s   %dx%d, %ld.%ld Mbit/s", cur ? "> " : "", nm, ms->hls_vw[i], ms->hls_vh[i],
-                                     ms->hls_vbw[i] / 1000000, ms->hls_vbw[i] / 100000 % 10);
-                        else snprintf(names[n], sizeof names[n], "%s%s", cur ? "> " : "", nm);
-                        MENU_ADD(MA_VARIANT, i);
+                const char *tabs[NTABS] = { T("Picture"), T("Audio"), T("Subtitles"), T("More") };
+                if (p & SCE_CTRL_RTRIGGER) { menu_tab = (menu_tab + 1) % NTABS; menu_fresh = 1; }
+                if (p & SCE_CTRL_LTRIGGER) { menu_tab = (menu_tab + NTABS - 1) % NTABS; menu_fresh = 1; }
+                #define MENU_ADD(a_, g_, d_) do { items[n] = names[n]; act[n] = (a_); arg[n] = (g_); dim[n] = (d_); n++; } while (0)
+                if (menu_tab == TAB_PIC) {
+                    if (nv > 0) {
+                        if (settings.res_pref) snprintf(names[n], sizeof names[n], "%s%s (%s)", res_want ? "" : "> ", T("Settings"),
+                                                         res_pref_name(settings.res_pref));
+                        else snprintf(names[n], sizeof names[n], "%s%s", res_want ? "" : "> ", T("Automatic"));
+                        if (!res_want) cur = n;
+                        MENU_ADD(MA_AUTO, 0, 0);
+                        for (int i = nv - 1; i >= 0; i--) {
+                            char nm[24];
+                            res_name(ms, i, nm, sizeof nm);
+                            int c = res_want && i == ms->hls_vcur;
+                            if (c) cur = n;
+                            if (ms->hls_vh[i] > 0)
+                                snprintf(names[n], sizeof names[n], "%s%s   %dx%d, %ld.%ld Mbit/s", c ? "> " : "", nm, ms->hls_vw[i], ms->hls_vh[i],
+                                         ms->hls_vbw[i] / 1000000, ms->hls_vbw[i] / 100000 % 10);
+                            else snprintf(names[n], sizeof names[n], "%s%s", c ? "> " : "", nm);
+                            MENU_ADD(MA_VARIANT, i, 0);
+                        }
+                    } else {                                 /* one size: what it is */
+                        if (radio) snprintf(names[n], sizeof names[n], "%s", T("Sound only (radio)"));
+                        else if (ms && ms->width > 0) snprintf(names[n], sizeof names[n], T("%dx%d (the only size)"), ms->width, ms->height);
+                        else snprintf(names[n], sizeof names[n], "%s", T("Size not known yet"));
+                        MENU_ADD(MA_NONE, 0, 1);
                     }
-                } else {                                     /* one size: what it is (X does nothing there) */
-                    if (radio) snprintf(names[n], sizeof names[n], "%s", T("Sound only (radio)"));
-                    else if (ms && ms->width > 0) snprintf(names[n], sizeof names[n], T("%dx%d (the only size)"), ms->width, ms->height);
-                    else snprintf(names[n], sizeof names[n], "%s", T("Size not known yet"));
-                    MENU_ADD(MA_NONE, 0);
-                }
-                if (settings.proxy[0] && play_mode == 2 && !radio) {   /* 0.5.0: this channel through the server, or back */
-                    snprintf(names[n], sizeof names[n], "%s", T(via_proxy ? "Direct (without the server)" : "Through the Server"));
-                    MENU_ADD(MA_SERVER, 0);
-                }
-                if (ms && !via_proxy && ms->a_n > 1)            /* 0.5.0: the audio tracks */
-                    for (int k = 0; k < ms->a_n && k < TSP_MAX_AUDIO; k++) {
-                        char ln[40];
-                        audio_track_name(ms, k, ln, sizeof ln);
-                        snprintf(names[n], sizeof names[n], "%s%s: %s", k == ms->a_cur ? "> " : "", T("Audio"), ln);
-                        MENU_ADD(MA_AUDIO, k);
+                } else if (menu_tab == TAB_AUDIO) {
+                    if (ms && !via_proxy && ms->a_n > 0)
+                        for (int k = 0; k < ms->a_n && k < TSP_MAX_AUDIO; k++) {
+                            char ln[48];
+                            audio_track_name(ms, k, ln, sizeof ln);
+                            snprintf(names[n], sizeof names[n], "%s%s", k == ms->a_cur ? "> " : "", ln);
+                            if (k == ms->a_cur) cur = n;
+                            MENU_ADD(ms->a_n > 1 ? MA_AUDIO : MA_NONE, k, ms->a_n < 2);
+                        }
+                    else { snprintf(names[n], sizeof names[n], "%s", T(via_proxy ? "Chosen by the server" : "No other sound")); MENU_ADD(MA_NONE, 0, 1); }
+                } else if (menu_tab == TAB_SUB) {
+                    if (ms && ms->s_n > 0) {
+                        snprintf(names[n], sizeof names[n], "%s%s", ms->s_cur < 0 ? "> " : "", T("Off"));
+                        if (ms->s_cur < 0) cur = n;
+                        MENU_ADD(MA_SUB_OFF, 0, 0);
+                        for (int k = 0; k < ms->s_n && k < TSP_MAX_SUBS; k++) {
+                            char ln[64];
+                            sub_track_name(ms, k, ln, sizeof ln);
+                            snprintf(names[n], sizeof names[n], "%s%s", k == ms->s_cur ? "> " : "", ln);
+                            if (k == ms->s_cur) cur = n;
+                            MENU_ADD(MA_SUB, k, 0);
+                        }
+                        snprintf(names[n], sizeof names[n], T("Sync:  < %+d.%d s >"), sub_delay_ms / 1000, abs(sub_delay_ms) / 100 % 10);
+                        if (sub_delay_ms < 0 && sub_delay_ms > -1000) snprintf(names[n], sizeof names[n], T("Sync:  < -0.%d s >"), -sub_delay_ms / 100 % 10);
+                        MENU_ADD(MA_SUB_SYNC, 0, 0);
+                    } else {
+                        snprintf(names[n], sizeof names[n], "%s", T(film && chans.items[vis[play_vis]].kind == CH_FILM ? "No subtitles in this film (MKV text subtitles only)" : "No subtitles"));
+                        MENU_ADD(MA_NONE, 0, 1);
                     }
-                snprintf(names[n], sizeof names[n], "%s", T("Stream analysis"));
-                MENU_ADD(MA_ANALYSIS, 0);
+                } else {
+                    if (settings.proxy[0] && play_mode == 2 && !radio) {   /* this channel through the server, or back */
+                        snprintf(names[n], sizeof names[n], "%s", T(via_proxy ? "Direct (without the server)" : "Through the Server"));
+                        MENU_ADD(MA_SERVER, 0, 0);
+                    }
+                    snprintf(names[n], sizeof names[n], "%s", T("Stream analysis"));
+                    MENU_ADD(MA_ANALYSIS, 0, 0);
+                }
                 #undef MENU_ADD
+                if (menu_fresh) { res_menu_sel = cur >= 0 ? cur : 0; menu_fresh = 0; }
                 if (res_menu_sel >= n) res_menu_sel = n - 1;
+                if (res_menu_sel < 0) res_menu_sel = 0;
+                int on_sync = act[res_menu_sel] == MA_SUB_SYNC;
                 if (p & SCE_CTRL_DOWN) res_menu_sel = (res_menu_sel + 1) % n;
                 if (p & SCE_CTRL_UP) res_menu_sel = (res_menu_sel + n - 1) % n;
-                if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) res_menu = 0;
-                else if (p & SCE_CTRL_CROSS) {
+                if (on_sync) {                               /* left / right: 0.1 s each, repeating while held */
+                    unsigned lr = held & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT), now = now_ms();
+                    int step = 0;
+                    if (p & SCE_CTRL_LEFT) step = -100;
+                    else if (p & SCE_CTRL_RIGHT) step = 100;
+                    if (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) menu_lr_t0 = menu_lr_last = now;
+                    else if (lr && now - menu_lr_t0 > 450 && now - menu_lr_last > 90) { step = lr & SCE_CTRL_LEFT ? -100 : 100; menu_lr_last = now; }
+                    if (step) {
+                        sub_delay_ms += step;
+                        if (sub_delay_ms > 60000) sub_delay_ms = 60000;
+                        if (sub_delay_ms < -60000) sub_delay_ms = -60000;
+                        tsp_set_sub_delay(sub_delay_ms);
+                    }
+                } else if (p & SCE_CTRL_RIGHT) { menu_tab = (menu_tab + 1) % NTABS; menu_fresh = 1; }
+                else if (p & SCE_CTRL_LEFT) { menu_tab = (menu_tab + NTABS - 1) % NTABS; menu_fresh = 1; }
+                if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) {
                     res_menu = 0;
+                    if (sub_delay_ms) plog("player: subtitles %+d ms", sub_delay_ms);
+                } else if (p & SCE_CTRL_CROSS) {
                     int a = act[res_menu_sel], g = arg[res_menu_sel];
-                    if (a == MA_ANALYSIS) {
+                    if (a != MA_NONE && a != MA_SUB_SYNC) res_menu = 0;
+                    if (a == MA_SUB_SYNC) { sub_delay_ms = 0; tsp_set_sub_delay(0); }   /* X: back to 0 */
+                    else if (a == MA_SUB_OFF || a == MA_SUB) {   /* at once, and for the next films */
+                        tsp_sub_choose(a == MA_SUB ? g : -1);
+                        sub_off = a == MA_SUB_OFF;
+                        sub_id = a == MA_SUB ? ms->s_id[g] : -1;
+                        if (a == MA_SUB) snprintf(sub_lang, sizeof sub_lang, "%s", ms->s_lang[g]);
+                        plog("player: subtitles %s (menu)", sub_off ? "off" : sub_lang[0] ? sub_lang : "on");
+                    } else if (a == MA_ANALYSIS) {
                         if (film) {
                             int pos = 0, dur = 0;
                             tsp_vod_pos(&pos, &dur);
@@ -3105,8 +3346,14 @@ int main(void)
                 if (play_mode == 1) draw_probe_screen();
                 else {
                     if (play_mode == 0) draw_mp4_screen(1); else draw_tsp_screen(1);
-                    if (res_menu) scr_menu(T(nv > 0 ? "Resolution" : radio ? "Stream" : "Resolution"), items, n, res_menu_sel);
+                    if (res_menu) {
+                        on_sync = act[res_menu_sel] == MA_SUB_SYNC;
+                        scr_tabmenu(tabs, NTABS, menu_tab, items, dim, n, res_menu_sel,
+                                    T(on_sync ? "Left / Right: earlier / later   X: back to 0   O: close"
+                                              : "L / R: tab   X: choose   O: close"));
+                    }
                 }
+                #undef MENU_MAX
             } else if (play_mode == 1) {                     /* stream analysis: O (or Select) back to the picture */
                 if (p & SCE_CTRL_CROSS) start_probe();
                 else if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) {   /* (a film where it was) */
@@ -3114,7 +3361,7 @@ int main(void)
                     else play_channel(play_vis);
                 }
                 draw_probe_screen();
-            } else if (p & SCE_CTRL_CIRCLE) {
+            } else if ((p & SCE_CTRL_CIRCLE) && !next_ep_at) {
                 if (film) save_film_position();
                 seek_target = -1;
                 film_scrub = 0;
@@ -3130,6 +3377,12 @@ int main(void)
                 }
                 else { sel = src_disp(cur_src); draw_sources(); }   /* (a single stream: its row, also after START) */
             } else {
+                if (next_ep_at && (p & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE))) {   /* 0.7.0: X the next episode now, O stays */
+                    if (p & SCE_CTRL_CROSS) play_next_episode();
+                    else { next_ep_at = 0; plog("player: the next episode cancelled"); }
+                    p &= ~(unsigned)(SCE_CTRL_CROSS | SCE_CTRL_CIRCLE);
+                    film = film_playing();
+                }
                 const TspStatus *fs = play_mode == 2 ? tsp_status() : NULL;
                 int pos = 0, dur = 0;
                 if (film) { tsp_vod_pos(&pos, &dur); dur = film_length(); }
@@ -3216,7 +3469,9 @@ int main(void)
                 if (p & SCE_CTRL_TRIANGLE) show_info = !show_info;
                 if (p & SCE_CTRL_SELECT) {                       /* the size menu; one size: on the analysis line */
                     res_menu = 1;
-                    res_menu_sel = fs && fs->hls_nv > 0 && !via_proxy && !film ? 0 : 1;
+                    res_menu_sel = 0;
+                    menu_tab = 0;                            /* 0.7.0: the picture tab, on what plays */
+                    menu_fresh = 1;
                 }
                 if (radio_playing()) p &= ~(unsigned)SCE_CTRL_SQUARE;   /* (radio: no sizes; 0.4.0: the screen-off that never worked is gone) */
                 if ((p & SCE_CTRL_SQUARE) && film && fs) {
@@ -3307,7 +3562,21 @@ int main(void)
                 if (film) {
                     if (now_ms() - last_pos_save > 60000) { save_film_position(); last_pos_save = now_ms(); }
                     fs = tsp_status();
-                    if (fs && fs->state == TSP_ENDED && !film_end_done) { film_end_done = 1; save_film_position(); }
+                    if (fs && fs->state == TSP_ENDED && !film_end_done) {
+                        film_end_done = 1;
+                        save_film_position();
+                        if (in_episodes && return_state == ST_CHANNELS && play_vis + 1 < nvis &&
+                            chans.items[vis[play_vis + 1]].kind == CH_FILM) {   /* 0.7.0: the next episode in 5 s */
+                            next_ep_vi = play_vis + 1;
+                            next_ep_at = now_ms() + 5000;
+                            plog("player: the episode ended, the next one in 5 s");
+                        }
+                    }
+                    if (next_ep_at && now_ms() >= next_ep_at) {
+                        play_next_episode();
+                        film = film_playing();
+                        fs = play_mode == 2 ? tsp_status() : NULL;
+                    }
                 } else {
                     auto_proxy_check();
                 }

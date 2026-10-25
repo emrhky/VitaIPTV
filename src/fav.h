@@ -68,4 +68,35 @@ int  fav_push_recent_kind(FavList *f, char kind, const char *src, const char *ch
 /* 0.6.0: a key kind that names a film or series (fav_vod_key), not a channel */
 int  fav_is_vod_kind(char kind);
 
+/* ---- 0.7.0: watched episodes (ux0:data/VitaIPTV/watched.txt) ----
+ * Per playlist and series (newest first): the episode played last, whether it was watched to its end, and the
+ * episodes watched to their end (the ticks). An episode is known by its file name without the extension (the
+ * Xtream episode id). */
+#define WATCH_MAX   300                 /* series kept */
+#define WATCH_ID    32
+typedef struct {
+    char src[FAV_SRC_MAX];              /* fav_source_key */
+    char series[WATCH_ID];              /* the series id */
+    char last[WATCH_ID];                /* the episode played last */
+    int last_done;                      /* ... watched to the end */
+    char *done;                         /* the episodes watched to the end: ",id,id,...," (malloc), NULL = none */
+} WatchEntry;
+typedef struct { WatchEntry *e; int n, cap; } WatchList;
+
+void  watch_free(WatchList *w);                                     /* (and empty) */
+int   watch_parse(const char *text, WatchList *w);                  /* adds to w; returns the count */
+char *watch_format(const WatchList *w);                             /* malloc'd text, NULL = no memory */
+int   watch_find(const WatchList *w, const char *src, const char *series);   /* index, -1 = none */
+/* An episode of the series was played (done = to its end): it becomes the last one and, when done, gets its tick;
+ * the series goes to the front. Returns 1 if anything changed, 0 if not, -1 no memory. */
+int   watch_mark(WatchList *w, const char *src, const char *series, const char *ep, int done);
+int   watch_is_done(const WatchEntry *e, const char *ep);
+int   watch_clear(WatchList *w);                                    /* returns how many series were removed */
+/* the episode key of an episode's link: the file name without its extension ("" if there is none) */
+void  watch_ep_key(const char *url, char *out, size_t outsz);
+/* Where to put the selection when a series' episodes open: eps are the n episode keys in the list's order.
+ * The last episode if it was not finished, else the one after it (the last one if it was the final episode);
+ * -1 when the series has no record or its last episode is not in the list. */
+int   watch_pick(const WatchEntry *e, const char *const *eps, int n);
+
 #endif
