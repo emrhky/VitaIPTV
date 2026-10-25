@@ -259,6 +259,14 @@ sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavf
 for ext, fmt in (("ts", "mpegts"), ("mkv", "matroska"), ("mp4", "mp4")):
     sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 6 "
        f"-c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -ac 6 -b:a 256k -f {fmt} {T}/hls/aac51.{ext}")
+# 0.7.0: a film with two text subtitle tracks (Turkish SRT, English ASS "SDH")
+open(f"{T}/hls/subs_tr.srt", "w").write("1\n00:00:01,000 --> 00:00:02,000\nBir\n\n2\n00:00:03,000 --> 00:00:04,000\nİki\n\n")
+open(f"{T}/hls/subs_en.ass", "w").write("[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+    "Style: Default,Arial,16,&Hffffff,&Hffffff,&H0,&H0,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,0\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\i1}One{\\i0}\\Nline two\nDialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,Two\n")
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -i {T}/hls/subs_tr.srt -i {T}/hls/subs_en.ass "
+   f"-map 0 -map 1 -map 2 -map 3 -t 5 -c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -c:s:0 srt -c:s:1 ass "
+   f"-metadata:s:s:0 language=tur -metadata:s:s:1 language=eng -metadata:s:s:1 title=SDH {T}/hls/subs.mkv")
 M = f"{ROOT}/tests/mock_rt"
 # with FFMPEG_PREFIX (an FFmpeg with the ac3/eac3 decoders, see run_a52_test.py) the AC-3 audio is decoded too
 FP = os.environ.get("FFMPEG_PREFIX", "")

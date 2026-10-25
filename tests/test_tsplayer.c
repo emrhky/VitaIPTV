@@ -373,6 +373,43 @@ static void show(const char *name, const Run *r)
 }
 
 
+/* 0.7.0: the subtitles seen while a film plays: each text once, with the picture time it first showed under */
+typedef struct { char text[8][64]; int64_t at[8]; int n; TspStatus st; } SubRun;
+static SubRun sub_play(const char *path, int64_t choose_at, int choose_k)
+{
+    SubRun r; memset(&r, 0, sizeof r);
+    assert(tsp_start(path) == 0);
+    double t0 = now_s(), end_seen = 0;
+    int64_t last_pts = -1;
+    while (now_s() - t0 < 10) {
+        int w = 0, h = 0;
+        vita2d_texture *tx = tsp_frame(&w, &h);
+        if (tx) memcpy(&last_pts, tx->gxm_tex.data, 8);
+        if (choose_at >= 0 && last_pts >= choose_at) { tsp_sub_choose(choose_k); choose_at = -1; }
+        char b[640];
+        if (tsp_sub_text(b, sizeof b)) {
+            int k = 0;
+            while (k < r.n && strcmp(r.text[k], b)) k++;
+            if (k == r.n && r.n < 8) { snprintf(r.text[r.n], sizeof r.text[0], "%s", b); r.at[r.n++] = last_pts; }
+        }
+        const TspStatus *s = tsp_status();
+        if (s->state == TSP_ERROR) break;
+        if (s->state == TSP_ENDED) { if (!end_seen) end_seen = now_s(); else if (now_s() - end_seen > 0.6) break; }
+        usleep(8000);
+    }
+    r.st = *tsp_status();
+    tsp_stop();
+    printf("               subtitles: tracks %d, shown %d:", r.st.s_n, r.st.s_cur);
+    for (int k = 0; k < r.n; k++) printf(" '%s' at %.2f s", r.text[k], r.at[k] / 90000.0);
+    printf("\n");
+    return r;
+}
+static int64_t sub_at(const SubRun *r, const char *text)
+{
+    for (int k = 0; k < r->n; k++) if (!strcmp(r->text[k], text)) return r->at[k];
+    return -1;
+}
+
 /* ---- films: start at a time, pause, read position ---- */
 extern int mock_http_no_ranges, mock_http_range_requests;
 typedef struct { Run r; int first_pos, last_pos, dur, pos_during_pause_a, pos_during_pause_b, froze; } VRun;
@@ -540,6 +577,7 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls")) goto hls;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "alt")) goto alt;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "qsize")) goto qsize;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "subs")) goto subs;
     r = play(argv[1], 10);
     show("720p30", &r);
     assert(r.st.state == TSP_ENDED && r.st.errors == 0);
@@ -690,6 +728,35 @@ int main(int argc, char **argv)
             else
                 assert(ra.st.audio_frames == 0 && strstr(ra.st.audio_msg, "6 channels") && ra.changes >= 100);   /* the picture plays */
         }
+    }
+subs:
+    {   /* 0.7.0: MKV text subtitles: the track by language, switching while playing, off, later / earlier */
+        static char ps[512];
+        snprintf(ps, sizeof ps, "%s/subs.mkv", argv[16]);
+        tsp_set_sub(-1, "en", 0); tsp_set_sub_delay(0);
+        SubRun s = sub_play(ps, -1, 0);
+        assert(s.st.state == TSP_ENDED && s.st.s_n == 2 && s.st.s_cur >= 0 && !strcmp(s.st.s_lang[s.st.s_cur], "eng"));
+        int tur = !strcmp(s.st.s_lang[0], "tur") ? 0 : 1;
+        assert(!strcmp(s.st.s_lang[tur], "tur") && !strcmp(s.st.s_name[1 - tur], "SDH"));
+        int64_t one = sub_at(&s, "One\nline two"), two = sub_at(&s, "Two");
+        assert(s.n == 2 && one >= 90000 && one <= 90000 + 3 * 3600 && two >= 270000 && two <= 270000 + 3 * 3600);
+        tsp_set_sub(-1, "en", 0);
+        s = sub_play(ps, 225000, tur);                       /* Turkish from 2.5 s on */
+        assert(s.n == 2 && sub_at(&s, "One\nline two") >= 0 && sub_at(&s, "İki") >= 270000 && sub_at(&s, "Two") < 0 && sub_at(&s, "Bir") < 0);
+        tsp_set_sub(s.st.s_id[tur], "en", 0);               /* the track wins over the language */
+        s = sub_play(ps, -1, 0);
+        assert(s.st.s_cur == tur && sub_at(&s, "Bir") >= 90000 && sub_at(&s, "İki") >= 270000 && s.n == 2);
+        tsp_set_sub(-1, "tr", 1);                            /* off */
+        s = sub_play(ps, -1, 0);
+        assert(s.st.s_n == 2 && s.st.s_cur == -1 && s.n == 0);
+        tsp_set_sub(-1, "tr", 0); tsp_set_sub_delay(1500);   /* 1.5 s later */
+        s = sub_play(ps, -1, 0);
+        assert(sub_at(&s, "Bir") >= 225000 && sub_at(&s, "Bir") <= 225000 + 3 * 3600);
+        tsp_set_sub_delay(-700);                             /* 0.7 s earlier */
+        s = sub_play(ps, -1, 0);
+        assert(sub_at(&s, "İki") >= 207000 && sub_at(&s, "İki") <= 207000 + 3 * 3600);
+        tsp_set_sub_delay(0); tsp_set_sub(-1, NULL, 1);
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "subs")) { puts("subtitle tests passed"); return 0; }
     }
     if (argc > 23) {                                         /* a few AAC frames claiming 7 channels: skipped, sound stays on */
         r = play(argv[23], 10);
