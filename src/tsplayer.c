@@ -170,6 +170,9 @@ typedef struct {
     int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder, no_two;
     int connect_fails, multi_out, oom_fixed, status_retries;
     int cio_http_off;                   /* 0.6.0: plain http:// through our own socket failed: the system HTTP from now on */
+    volatile int vod_kick, vod_kicked;  /* 0.6.0: the film's first data did not come: the request is made again (once) */
+    uint32_t film_bytes0;               /* ... the bytes before the film itself (header, index) */
+    int film_phase;                     /* ... the film itself is being read (not its header or index) */
     int rcvbuf_logged;
     int no_out, reopen_pending, reopens;  /* decoder that takes units but gives no pictures: restart it */
     int dry_restarts, good_since;       /* restarts that did not bring steady pictures back (each waits longer) */
@@ -1379,8 +1382,8 @@ static void log_rcvbuf(Tsp *t)
     int rb = cio_last_rcvbuf(), cms = cio_last_connect_ms();
     plog("tsp: own socket (%s), receive buffer %d KB, connect %d ms (about one round trip: at most %d KB/s with this buffer)",
          strncasecmp(t->url, "https:", 6) ? "http" : "https", rb / 1024, cms, cms > 0 ? rb / cms : 0);
-    static int noted;
-    if (!noted++ && cio_rcvbuf_note()[0]) plog("tsp: receive buffer sizes tried: %s", cio_rcvbuf_note());
+    const char *rn = cio_rcvbuf_note();                     /* (once, and again when a size was refused) */
+    if (rn[0]) plog("tsp: receive buffer: %s", rn);
 }
 
 /* A decoder slower than the stream (1080p at 50/60 fps may be): leave out the pictures nothing else needs
@@ -2526,7 +2529,9 @@ static void stats_tick(Tsp *t)
         if (wms > ms) wms = ms;
         t->net_wait_pct = wms * 100 / ms;
         unsigned act = ms - wms;
-        if (act >= 500) t->net_free_kbs = (unsigned)((uint64_t)(bytes - t->prev_bytes) * 1000 / 1024 / act);
+        /* (only from an interval in which it read most of the time: with the queues nearly always full the few
+         * reads in between come from the socket's buffer at once, and the same old value stood for minutes) */
+        if (act >= 1000 && t->net_wait_pct < 50) t->net_free_kbs = (unsigned)((uint64_t)(bytes - t->prev_bytes) * 1000 / 1024 / act);
         t->st.net_read_kbs = t->net_wait_pct >= 5 ? t->net_free_kbs : 0;
     }
     t->st.fps10 = t->frame_us ? (int)(10000000u / t->frame_us) : 0;
@@ -2561,7 +2566,10 @@ static void stats_tick(Tsp *t)
         snprintf(mem, sizeof mem, ", free main %u MB cdram %u MB phycont %u MB", (unsigned)fm.size_user >> 20,
                  (unsigned)fm.size_cdram >> 20, (unsigned)fm.size_phycont >> 20);
     char nf[64] = "";
-    if (t->net_wait_pct >= 5) snprintf(nf, sizeof nf, " (queues full %u%% of the time; %u KB/s while reading)", t->net_wait_pct, t->net_free_kbs);
+    if (t->net_wait_pct >= 5 && t->net_free_kbs)
+        snprintf(nf, sizeof nf, " (queues full %u%% of the time; the line %s %u KB/s)", t->net_wait_pct,
+                 t->net_wait_pct < 50 ? "brings" : "last brought", t->net_free_kbs);
+    else if (t->net_wait_pct >= 5) snprintf(nf, sizeof nf, " (queues full %u%% of the time)", t->net_wait_pct);
     plog("tsp: rates net %u KB/s%s, decode %u.%u fps%s, video queue %d (%u KB), audio queue %d (%d ms)%s%s",
          kbs, nf, dfps10 / 10, dfps10 % 10, dc, vq_n, (unsigned)(vq_b / 1024), aq_n, aq_ms, mem, rd);
     if (!t->internal && t->pub_fed)
@@ -2672,7 +2680,9 @@ static void check_stall(Tsp *t)
     }
     /* 0.5.0: a film through the server from the middle: the server first finds the place and starts converting
      * (more than 10 s on a phone; "No video data" / "No usable keyframe" before) */
-    uint64_t stall = t->vod_stream || g_via_server ? 3 * STALL_US : STALL_US;   /* (also live channels through the server) */
+    /* 0.6.0: a film directly: 20 s (a far server answered a jump with 14 KB in 10 s and nothing more; it is asked
+     * again after 8 s, see vod_first_data) */
+    uint64_t stall = t->vod_stream || g_via_server ? 3 * STALL_US : t->vod ? 2 * STALL_US : STALL_US;   /* (also live channels through the server) */
     if (t->st.decoded || t->st.audio_only || t->st.state == TSP_ERROR || now_us() - t->start_us < stall) return;
     explain_no_picture(t);
 }
@@ -3425,6 +3435,8 @@ typedef int (*VodData)(Tsp *t, void *ctx, const uint8_t *d, size_t n);
 #define VOD_NORANGE_HEAD (16 * 1024)
 typedef struct { Tsp *t; VodData fn; void *ctx; int *status; uint64_t off; int refused; size_t got; } VgCtx;
 
+static int vod_first_data(Tsp *t);
+
 static int vg_data(void *c, const uint8_t *d, size_t n)
 {
     VgCtx *g = c;
@@ -3432,11 +3444,25 @@ static int vg_data(void *c, const uint8_t *d, size_t n)
     if (*g->status == 200 && g->off > 0) { g->refused = 1; return 1; }
     int r = g->fn(g->t, g->ctx, d, n);
     g->got += n;
+    if (vod_first_data(g->t)) return 1;
     if (*g->status == 200 && g->got >= VOD_NORANGE_HEAD) return 1;
     return r;
 }
 
-static int vg_stop(void *c) { return stopping(((VgCtx *)c)->t); }
+/* 0.6.0: the film's request answered but the film itself does not come (8 s, under 64 KB, no picture): stop it,
+ * the film's loop asks again from the same place (once) */
+static int vod_first_data(Tsp *t)
+{
+    if (t->vod_kick) return 1;
+    if (!t->vod || t->vod_stream || !t->film_phase || t->vod_kicked || t->st.decoded || t->st.state == TSP_ERROR) return 0;
+    if (now_us() - t->start_us < 2 * STALL_US * 2 / 5 || t->st.bytes - t->film_bytes0 >= 64 * 1024) return 0;   /* (8 s of the 20) */
+    t->vod_kicked = t->vod_kick = 1;
+    plog("tsp: the film does not come (%u KB in %u s): asking the server again", (unsigned)((t->st.bytes - t->film_bytes0) / 1024),
+         (unsigned)((now_us() - t->start_us) / 1000000));
+    return 1;
+}
+
+static int vg_stop(void *c) { Tsp *t = ((VgCtx *)c)->t; return stopping(t) || vod_first_data(t); }
 
 /* ---- film index cache ----
  * Every jump in a film starts the player again, and it read the film's index again each time: an MP4
@@ -3617,6 +3643,7 @@ system_http:;
         if (n == 0) break;
         got += (uint64_t)n;
         if (fn(t, ctx, t->rbuf, (size_t)n)) break;
+        if (vod_first_data(t)) break;                       /* (0.6.0: a trickle: ask again) */
     }
 done:
     set_cur_req(t, -1);                                    /* before the request is deleted: no abort of a gone id */
@@ -3815,6 +3842,8 @@ static void read_vod(Tsp *t, uint8_t *buf)
 
     /* the film itself, from off to the end; a lost connection goes on where it stopped */
     t->start_us = now_us();                                 /* "no picture yet" counts from here, not from the header reads */
+    t->film_bytes0 = t->st.bytes;
+    t->film_phase = 1;
     uint64_t pos = off;
     int fails = 0;
     while (!stopping(t)) {
@@ -3822,6 +3851,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         if (t->mp4 && mp4_finished(t->mp4)) break;
         uint64_t before = pos;
         int st = 0;
+        t->vod_kick = 0;
         int r = vod_get(t, pos, 0, vod_feed_cb, &pos, &st);
         if (stopping(t)) break;
         if (st >= 400) { if (!http_refused(t, st)) break; continue; }
@@ -4143,7 +4173,10 @@ static void buffer_check(Tsp *t, uint64_t now)
             t->buf_bytes0 = t->st.bytes;
             t->st.buffering = 1;
             t->st.buf_pct = 0;
-            if (film_dry) plog("tsp: buffering (the network is slower than the film: %d pictures, %d ms of sound left)", vq, aq_ms);
+            /* (0.6.0: in the first seconds the film is only starting to come: not a slow line, as it said) */
+            if (film_dry && (!t->first_show_us || now - t->first_show_us < 5000000ULL))
+                plog("tsp: buffering at the start (the film's first seconds are still coming: %d pictures, %d ms of sound)", vq, aq_ms);
+            else if (film_dry) plog("tsp: buffering (the network is slower than the film: %d pictures, %d ms of sound left)", vq, aq_ms);
             else plog("tsp: buffering (live: the video that came reaches %d ms beyond the sound; %d pictures, %d ms of sound waiting)",
                       ahead_ms, vq, aq_ms);
         }

@@ -11,11 +11,12 @@
 #define FAV_SRC_MAX  (IPTV_URL_MAX + IPTV_CRED_MAX + 8)
 
 enum { FAV_LIST = 'L', FAV_CHANNEL = 'C', FAV_RECENT = 'R',      /* R (0.4.5): recently watched, newest first */
-       FAV_FILM = 'F', FAV_SERIES = 'S' };                       /* 0.6.0: Xtream films and series */
+       FAV_FILM = 'F', FAV_SERIES = 'S',                         /* 0.6.0: Xtream films and series */
+       FAV_RECENT_FILM = 'M', FAV_RECENT_SERIES = 'N' };          /* 0.6.0: films / series watched last, newest first */
 #define FAV_RECENT_MAX 20                                            /* per playlist */
 
 typedef struct {
-    char kind;                          /* FAV_LIST, FAV_CHANNEL, FAV_RECENT, FAV_FILM or FAV_SERIES */
+    char kind;                          /* FAV_LIST, FAV_CHANNEL, FAV_RECENT, FAV_FILM, FAV_SERIES, FAV_RECENT_FILM, FAV_RECENT_SERIES */
     char src[FAV_SRC_MAX];              /* the playlist's key */
     char ch[IPTV_URL_MAX];              /* the channel's key (all but playlists); films "movie:ID.ext", series "series:ID" */
     char name[IPTV_NAME_MAX];           /* the channel's name, to make the file readable */
@@ -62,5 +63,9 @@ int  fav_move(FavList *f, const char *src, const char *ch, int dir);
 /* 0.4.5: a channel was watched: it goes to the front of its playlist's recent list (kept to FAV_RECENT_MAX).
  * Returns 0, -1 if the list is full. */
 int  fav_push_recent(FavList *f, const char *src, const char *ch, const char *name);
+/* 0.6.0: the same for another recent list (FAV_RECENT_FILM, FAV_RECENT_SERIES: ch is fav_vod_key's key) */
+int  fav_push_recent_kind(FavList *f, char kind, const char *src, const char *ch, const char *name);
+/* 0.6.0: a key kind that names a film or series (fav_vod_key), not a channel */
+int  fav_is_vod_kind(char kind);
 
 #endif

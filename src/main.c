@@ -206,8 +206,8 @@ static int http_get_curl(const char *url, const char *user, const char *pass, Me
     unsigned ms = now_ms() - t0;
     plog("http: GET %.5s (own socket) -> status %d, %u KB in %u.%u s, receive buffer %d KB, connect %d ms%s%s", url, status,
          (unsigned)(m->len / 1024), ms / 1000, ms % 1000 / 100, cio_last_rcvbuf() / 1024, cio_last_connect_ms(), r < 0 ? ", " : "", r < 0 ? e : "");
-    static int noted;
-    if (!noted++ && cio_rcvbuf_note()[0]) plog("http: receive buffer sizes tried: %s", cio_rcvbuf_note());
+    const char *rn = cio_rcvbuf_note();                     /* (once, and again when a size was refused) */
+    if (rn[0]) plog("http: receive buffer: %s", rn);
     if (net_cancel) { snprintf(err, errsz, "Cancelled"); return -1; }
     if (r < 0 && !status && !m->buf && !strncasecmp(url, "http:", 5)) {      /* (0.6.0: plain http: the system HTTP tries) */
         snprintf(err, errsz, "Connection failed (%s)", e);
@@ -422,7 +422,7 @@ static const char *group_title(int i)
 {
     if (i == g_fav && g_fav >= 0) return T("Favorites");    /* (0.6.0: films / series too) */
     if (section == SEC_LIVE && i == g_all) return T("All");
-    if (section == SEC_LIVE && i == g_recent) return T("Recently Watched");
+    if (i == g_recent && g_recent >= 0) return T("Recently Watched");   /* (0.6.0: films / series too) */
     return i >= 0 && i < ngroups ? groups[i] : "";
 }
 
@@ -444,69 +444,86 @@ static void build_groups(void)
     rebuild_visible();
 }
 
-/* ---- 0.6.0: films and series as favourites ---- */
-static char vod_fav_kind(void) { return section == SEC_FILMS ? FAV_FILM : FAV_SERIES; }
+/* ---- 0.6.0: films and series: "Favorites" and "Recently Watched" before the categories ----
+ * Both are built from favorites.txt alone (no loading). The left list is then: Favorites (g_fav, when there are
+ * some), Recently Watched (g_recent, when there are some), then the categories: vcats[row - vod_nspecial()]. */
+static char vod_kind(int recent)
+{
+    return section == SEC_FILMS ? (recent ? FAV_RECENT_FILM : FAV_FILM) : (recent ? FAV_RECENT_SERIES : FAV_SERIES);
+}
+static char vod_fav_kind(void) { return vod_kind(0); }
 
-/* this playlist's favourite films (or series), whether their category is loaded or not */
-static int vod_fav_count(void)
+/* this playlist's entries of that kind (favourite / watched films or series), loaded category or not */
+static int vod_count(char kind)
 {
     if (section == SEC_LIVE || cur_src < 0 || cur_src >= nsources) return 0;
     char sk[FAV_SRC_MAX];
     fav_source_key(&sources[cur_src], sk, sizeof sk);
     int n = 0;
-    for (int i = 0; i < favs.n; i++) if (favs.e[i].kind == vod_fav_kind() && !strcmp(favs.e[i].src, sk)) n++;
+    for (int i = 0; i < favs.n; i++) if (favs.e[i].kind == kind && !strcmp(favs.e[i].src, sk)) n++;
     return n;
 }
 
-/* the category of the left list's row g (films / series): vcats[] index, -1 for "Favorites" */
-static int vod_cat(int g) { return g - (g_fav >= 0 ? 1 : 0); }
-
-/* "Favorites" put before the categories (on) or taken away; the rows after it move by one */
-static void vod_set_fav_group(int on)
+static int vod_nspecial(void) { return (g_fav >= 0) + (g_recent >= 0); }
+/* the category of the left list's row g (vcats[] index), negative for Favorites / Recently Watched */
+static int vod_cat(int g) { return g - vod_nspecial(); }
+/* a row as something that stays the same when the rows move: -1 Favorites, -2 Recently Watched, the category, -3 none */
+static int vod_gid(int g)
 {
-    if (on && g_fav < 0) {
-        if (ngroups >= MAX_GROUPS) ngroups = MAX_GROUPS - 1;
-        memmove(groups[1], groups[0], sizeof groups[0] * (size_t)ngroups);
-        memmove(&gcount[1], &gcount[0], sizeof gcount[0] * (size_t)ngroups);
-        snprintf(groups[0], sizeof groups[0], "Favorites");
-        gcount[0] = vod_fav_count();
-        ngroups++;
-        g_fav = 0;
-        if (cur_group >= 0 && ngroups > 1) cur_group++;
-        if (loaded_group >= 0) loaded_group++;
-    } else if (!on && g_fav == 0) {
-        memmove(groups[0], groups[1], sizeof groups[0] * (size_t)(ngroups - 1));
-        memmove(&gcount[0], &gcount[1], sizeof gcount[0] * (size_t)(ngroups - 1));
-        ngroups--;
-        g_fav = -1;
-        if (loaded_group == 0) {                             /* the favourites were open: nothing is now */
-            loaded_group = -1;
-            channel_list_free(&chans);
-            channel_list_init(&chans);
-            fav_rank_n = nfav_ch = 0;
-            focus = 0;
-        } else if (loaded_group > 0) loaded_group--;
-        if (cur_group > 0) cur_group--;
+    if (g < 0 || g >= ngroups) return -3;
+    if (g == g_fav) return -1;
+    if (g == g_recent) return -2;
+    return vod_cat(g);
+}
+static int vod_gindex(int id) { return id == -1 ? g_fav : id == -2 ? g_recent : id >= 0 ? id + vod_nspecial() : -1; }
+
+/* the left list again (after a favourite or a watched film changed): the rows that are there now, the same
+ * category selected and open; an open Favorites / Recently Watched that is gone leaves the right list empty */
+static void vod_regroup(void)
+{
+    static int ccount[MAX_GROUPS];
+    int cur_id = vod_gid(cur_group), load_id = vod_gid(loaded_group), ns = vod_nspecial();
+    for (int k = 0; k < nvcats && k < MAX_GROUPS; k++) ccount[k] = k + ns < ngroups ? gcount[k + ns] : -1;
+    int nf = vod_count(vod_kind(0)), nr = vod_count(vod_kind(1));
+    ngroups = 0;
+    g_fav = g_recent = -1;
+    if (nf > 0) { g_fav = ngroups; snprintf(groups[ngroups], sizeof groups[0], "Favorites"); gcount[ngroups++] = nf; }
+    if (nr > 0) { g_recent = ngroups; snprintf(groups[ngroups], sizeof groups[0], "Recently Watched"); gcount[ngroups++] = nr; }
+    for (int k = 0; k < nvcats && ngroups < MAX_GROUPS; k++) {
+        snprintf(groups[ngroups], sizeof groups[0], "%s", vcats[k].name[0] ? vcats[k].name : vcats[k].id);
+        gcount[ngroups++] = ccount[k];
     }
+    int lg = vod_gindex(load_id);
+    if (load_id < 0 && load_id != -3 && lg < 0) {           /* the open list is gone */
+        loaded_group = -1;
+        channel_list_free(&chans);
+        channel_list_init(&chans);
+        fav_rank_n = nfav_ch = 0;
+        focus = 0;
+    } else loaded_group = load_id == -3 ? -1 : lg;
+    int cg = vod_gindex(cur_id);
+    cur_group = cg >= 0 ? cg : ngroups ? (cur_id >= 0 ? 0 : (g_fav >= 0 ? g_fav : g_recent >= 0 ? g_recent : 0)) : 0;
 }
 
-/* the right list from favorites.txt: no network (films get this playlist's address and password now) */
-static void vod_open_favorites(void)
+/* the right list from favorites.txt: Favorites (in the order added) or Recently Watched (newest first); no
+ * network (films get this playlist's address and password now) */
+static void vod_open_list(int recent)
 {
     leave_episodes();
     channel_list_free(&chans);
     channel_list_init(&chans);
     char sk[FAV_SRC_MAX];
     fav_source_key(&sources[cur_src], sk, sizeof sk);
-    char kind = vod_fav_kind();
+    char kind = vod_kind(recent);
+    int films = section == SEC_FILMS;
     for (int i = 0; i < favs.n; i++) {
         const FavEntry *e = &favs.e[i];
         if (e->kind != kind || strcmp(e->src, sk)) continue;
         Channel c;
         memset(&c, 0, sizeof c);
         snprintf(c.name, sizeof c.name, "%s", e->name[0] ? e->name : e->ch);
-        snprintf(c.group, sizeof c.group, "Favorites");
-        if (kind == FAV_FILM) {
+        snprintf(c.group, sizeof c.group, "%s", recent ? "Recently Watched" : "Favorites");
+        if (films) {
             if (strncmp(e->ch, "movie:", 6) || xtream_movie_url(&sources[cur_src], e->ch + 6, c.url, sizeof c.url) != 0) continue;
             c.kind = CH_FILM;
         } else {
@@ -516,31 +533,45 @@ static void vod_open_favorites(void)
         }
         if (channel_list_push(&chans, &c) != 0) break;
     }
-    loaded_group = g_fav;
-    if (g_fav >= 0) gcount[g_fav] = chans.count;
+    loaded_group = recent ? g_recent : g_fav;
+    if (loaded_group >= 0) gcount[loaded_group] = chans.count;
     fav_update_ranks();
     rebuild_visible();
-    plog("fav: %d favourite %s", chans.count, kind == FAV_FILM ? "films" : "series");
+    plog("fav: %d %s %s", chans.count, recent ? "watched" : "favourite", films ? "films" : "series");
 }
+static void vod_open_favorites(void) { vod_open_list(0); }
 
-/* after a film / series favourite changed (not while one plays): the category, its count, the stars */
+/* after a film / series favourite or a watched one changed (not while one plays): the rows, their counts, the
+ * stars; an open Favorites / Recently Watched is made again on the same row */
 static void vod_fav_changed(void)
 {
     vod_fav_stale = 0;
     if (section == SEC_LIVE) return;
     if (in_episodes) { vod_fav_stale = 1; fav_update_ranks(); return; }   /* (when the episodes are left) */
-    int n = vod_fav_count();
-    if (n > 0 && g_fav < 0) vod_set_fav_group(1);
-    if (g_fav >= 0) gcount[g_fav] = n;
-    if (g_fav >= 0 && loaded_group == g_fav) {               /* the favourites are open: again, the same row */
+    int open_id = vod_gid(loaded_group);
+    vod_regroup();
+    if ((open_id == -1 || open_id == -2) && loaded_group >= 0) {
         int old_sel = sel, old_scroll = scroll;
-        vod_open_favorites();
+        vod_open_list(open_id == -2);
         sel = nvis ? (old_sel < nvis ? old_sel : nvis - 1) : 0;
         scroll = old_scroll <= sel ? old_scroll : sel;
-    }
-    if (n == 0 && g_fav >= 0) { vod_set_fav_group(0); rebuild_visible(); }
+    } else if (open_id == -1 || open_id == -2) rebuild_visible();   /* (it is gone: empty) */
     fav_update_ranks();
     if (!nvis && focus == 1 && !search_fold[0]) focus = 0;
+}
+
+/* 0.6.0: a film began, or an episode (its series): to the front of Recently Watched */
+static void vod_watched(const Channel *c)
+{
+    if (section == SEC_LIVE || !c || cur_src < 0 || cur_src >= nsources) return;
+    char sk[FAV_SRC_MAX], ck[IPTV_URL_MAX];
+    fav_vod_key(c, ck, sizeof ck);
+    if (!ck[0]) return;
+    fav_source_key(&sources[cur_src], sk, sizeof sk);
+    if (fav_push_recent_kind(&favs, vod_kind(1), sk, ck, c->name) == 0) {
+        save_favorites();
+        vod_fav_stale = 1;                                   /* (the rows again on the way back) */
+    }
 }
 
 /* START on a film or series (in the episodes: their series). Returns 1 added, 0 removed, -1 not possible. */
@@ -583,7 +614,8 @@ static void build_vod_groups(void)
     loaded_group = -1;
     in_episodes = 0;
     g_fav = g_all = g_recent = -1;                           /* (films / series: no "All") */
-    if (vod_fav_count() > 0) { vod_set_fav_group(1); cur_group = 0; }   /* 0.6.0: "Favorites" first, selected */
+    vod_regroup();                                           /* 0.6.0: Favorites and Recently Watched first */
+    cur_group = 0;                                           /* (the first row selected) */
     focus = 0;
     gscroll = 0;
     rebuild_visible();
@@ -798,7 +830,7 @@ static int clear_recent(void)
 {
     int k = 0, removed = 0;
     for (int i = 0; i < favs.n; i++) {
-        if (favs.e[i].kind == FAV_RECENT) { removed++; continue; }
+        if (favs.e[i].kind == FAV_RECENT || favs.e[i].kind == FAV_RECENT_FILM || favs.e[i].kind == FAV_RECENT_SERIES) { removed++; continue; }   /* (0.6.0: films, series) */
         if (k != i) favs.e[k] = favs.e[i];
         k++;
     }
@@ -807,7 +839,8 @@ static int clear_recent(void)
         save_favorites();
         plog("fav: %d recently watched cleared", removed);
         fav_dirty = 1;
-        if (state == ST_CHANNELS) fav_regroup(nvis && sel < nvis ? vis[sel] : -1);
+        if (state == ST_CHANNELS && section == SEC_LIVE) fav_regroup(nvis && sel < nvis ? vis[sel] : -1);
+        else if (state == ST_CHANNELS) vod_fav_changed();   /* (0.6.0: films / series) */
     }
     return removed;
 }
@@ -1588,6 +1621,10 @@ static void play_channel(int vi)
         fav_source_key(&sources[cur_src], sk, sizeof sk);
         fav_channel_key(&sources[cur_src], &chans.items[ci], ck, sizeof ck);
         if (fav_push_recent(&favs, sk, ck, chans.items[ci].name) == 0) { save_favorites(); fav_dirty = 1; }
+    }
+    if (return_state == ST_CHANNELS && section != SEC_LIVE) {   /* 0.6.0: films / series watched last */
+        if (in_episodes) { if (series_ci_saved >= 0 && series_ci_saved < series_saved.count) vod_watched(&series_saved.items[series_ci_saved]); }
+        else if (chans.items[ci].kind == CH_FILM) vod_watched(&chans.items[ci]);
     }
     auto_proxy_tried = 0;
     film_dur_ms = 0;
@@ -2925,8 +2962,8 @@ int main(void)
                     if (g != cur_group) { leave_episodes(); rebuild_visible(); }
                 }
                 if (p & (SCE_CTRL_RIGHT | SCE_CTRL_CROSS)) {
-                    if (vod && cur_group == g_fav && g_fav >= 0 && cur_group != loaded_group) {   /* 0.6.0: from favorites.txt */
-                        vod_open_favorites();
+                    if (vod && cur_group >= 0 && (cur_group == g_fav || cur_group == g_recent) && cur_group != loaded_group) {
+                        vod_open_list(cur_group == g_recent);  /* 0.6.0: from favorites.txt */
                         if (nvis) focus = 1;
                     } else if (vod && cur_group != loaded_group && vod_cat(cur_group) >= 0 && vod_cat(cur_group) < nvcats)
                         load_begin(&sources[cur_src], section == SEC_FILMS ? LOAD_FILMS : LOAD_SERIES, vcats[vod_cat(cur_group)].id, cur_group);
