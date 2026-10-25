@@ -38,6 +38,9 @@
 #include "lang.h"
 #include "fav.h"
 #include "epg.h"
+#include "guide.h"
+#include "catchup.h"
+#include "poster.h"
 #include <psp2/rtc.h>
 
 #define NET_POOL_SIZE (4 * 1024 * 1024)
@@ -58,7 +61,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define FAV_FILE      DATA_DIR "/favorites.txt"
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v0.7.0"
+#define APP_VERSION   "v0.8.0"
 #endif
 #ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
 #define APP_BUILD     __DATE__ " " __TIME__
@@ -121,6 +124,25 @@ static WatchList watched;                   /* 0.7.0: watched episodes (watched.
 static char cur_series_id[WATCH_ID];        /* 0.7.0: the series whose episodes are shown */
 static void leave_episodes(void);
 static void save_favorites(void);
+static void guide_setup(void);                      /* 0.8.0 */
+static void guide_reset(void);
+static void poster_drop(void);
+static char seasons[40][IPTV_GROUP_MAX];            /* 0.8.0: the open series' seasons (episode groups), the one shown */
+static int nseasons, cur_season;
+static VodInfo series_info;                         /* ... and its details (get_series_info) */
+static int series_info_ok;
+static void arch_step(int dir);
+static void seasons_build(void);
+static void season_of(int ci);
+static void vod_card_of(const ChannelList *l, const Channel *c, ScrVodCard *k, int want_info);
+static void draw_series(void);
+static void clock_of(int64_t t, char *b, size_t n);
+static void day_label(int64_t t, char *b, size_t n);
+static int prog_find(int ci, int64_t start);
+static int info_ovl;                                /* 0.8.0: Triangle on a film: its details over the picture */
+static void draw_info_overlay(void);
+static long xt_srv_off;                             /* 0.8.0: the Xtream server's local time - UTC (catch-up addresses) */
+static int xt_srv_known;
 
 /* ---- helpers ----------------------------------------------------------- */
 static unsigned now_ms(void) { return (unsigned)(sceKernelGetProcessTimeWide() / 1000); }
@@ -368,7 +390,10 @@ static void rebuild_visible(void)
     for (int i = 0; i < chans.count; i++) {
         const Channel *c = &chans.items[i];
         if (search_fold[0]) { if (iptv_match(c->name, search_fold)) vis[nvis++] = i; }   /* search: all groups */
-        else if (section != SEC_LIVE) { if (in_episodes || cur_group == loaded_group) vis[nvis++] = i; }
+        else if (section != SEC_LIVE) {
+            if (in_episodes) { if (nseasons < 2 || !strcmp(c->group, seasons[cur_season])) vis[nvis++] = i; }   /* 0.8.0: one season */
+            else if (cur_group == loaded_group) vis[nvis++] = i;
+        }
         else if (cur_group == g_all || (cur_group != g_fav && cur_group != g_recent && !strcmp(c->group, groups[cur_group]))) vis[nvis++] = i;
     }
     sel = scroll = 0;
@@ -859,7 +884,7 @@ static void fav_move_begin(int ci)
     move_saved_n = favs.n;
     fav_moving = 1;
     move_ci = ci;
-    set_status(0, "Up / down moves the channel, Triangle saves the order", NULL);
+    set_status(0, "Up / down moves the channel, X saves the order", NULL);
 }
 
 static void select_ci(int ci)
@@ -980,16 +1005,19 @@ static void mark_watched(const Channel *c, int pos, int dur, int ended)
 static void select_watched_episode(void)
 {
     const WatchEntry *e = cur_watch();
-    if (!e || nvis <= 0) return;
-    const char **eps = malloc(sizeof(char *) * (size_t)nvis);
-    char (*keys)[WATCH_ID] = malloc(WATCH_ID * (size_t)nvis);
+    int n = chans.count;
+    if (!e || n <= 0) return;
+    const char **eps = malloc(sizeof(char *) * (size_t)n);  /* (0.8.0: over every season, in their order) */
+    char (*keys)[WATCH_ID] = malloc(WATCH_ID * (size_t)n);
     if (eps && keys) {
-        for (int i = 0; i < nvis; i++) { watch_ep_key(chans.items[vis[i]].url, keys[i], WATCH_ID); eps[i] = keys[i]; }
-        int k = watch_pick(e, eps, nvis);
+        for (int i = 0; i < n; i++) { watch_ep_key(chans.items[i].url, keys[i], WATCH_ID); eps[i] = keys[i]; }
+        int k = watch_pick(e, eps, n);
         if (k >= 0) {
-            sel = k;
-            scroll = k > 3 ? k - 3 : 0;                      /* (the list keeps it on screen) */
+            season_of(k);                                    /* its season shown */
+            for (int i = 0; i < nvis; i++) if (vis[i] == k) { sel = i; scroll = i > 3 ? i - 3 : 0; break; }
         }
+        plog("watched: series %s opened on episode %d of %d (%s, last %s%s)", cur_series_id, k + 1, n, k >= 0 ? chans.items[k].group : "-",
+             e->last, e->last_done ? ", finished" : "");
     }
     free(eps);
     free(keys);
@@ -1003,7 +1031,7 @@ static int clear_watched(void)
 }
 
 /* ---- loading a channel list (on its own thread, so the screen keeps moving and O cancels) ---------- */
-enum { LOAD_LIVE, LOAD_FILM_CATS, LOAD_SERIES_CATS, LOAD_FILMS, LOAD_SERIES, LOAD_EPISODES };
+enum { LOAD_LIVE, LOAD_FILM_CATS, LOAD_SERIES_CATS, LOAD_FILMS, LOAD_SERIES, LOAD_EPISODES, LOAD_SEARCH };   /* 0.8.0: search */
 typedef struct {
     Source src;
     int what;                           /* LOAD_... */
@@ -1015,6 +1043,10 @@ typedef struct {
     int rc;
     char err[160];
     char note[160];                     /* shown after a successful load (e.g. the account is in use) */
+    VodInfo vi;                         /* 0.8.0: LOAD_EPISODES: the series' details */
+    int vi_ok;
+    char query[96], folded[192];        /* 0.8.0: LOAD_SEARCH: what is searched for */
+    int series;
 } LoadJob;
 static LoadJob job;
 static int frames_after_load = 99;          /* diagnostic: the first frames of a new list are logged */
@@ -1063,8 +1095,10 @@ static int check_account(const Source *s, char *err, size_t errsz, char *note, s
     if (http_get(url, NULL, NULL, &ma, err, errsz) != 0) { free(ma.buf); return -1; }   /* not reachable: stop here */
     XtAccount a;
     if (xtream_parse_account(ma.buf, ma.len, &a) == 0) {
-        plog("xtream: account auth %d, status %s, expires %ld, connections %d of %d", a.auth, a.status[0] ? a.status : "?",
-             a.exp, a.active, a.max);
+        plog("xtream: account auth %d, status %s, expires %ld, connections %d of %d, server clock %s%+ld s", a.auth, a.status[0] ? a.status : "?",
+             a.exp, a.active, a.max, a.srv_known ? "" : "unknown ", a.srv_off);
+        xt_srv_off = a.srv_off;                              /* 0.8.0 */
+        xt_srv_known = a.srv_known;
         if (!a.auth) { free(ma.buf); snprintf(err, errsz, "Wrong username or password"); return -1; }
         if (a.status[0] && strcasecmp(a.status, "Active")) { free(ma.buf); snprintf(err, errsz, "Account %s", a.status); return -1; }
         if (a.max > 0 && a.active >= a.max)
@@ -1188,6 +1222,10 @@ static int load_vod(LoadJob *j)
         set_stage("Loading series...");
         snprintf(action, sizeof action, "get_series&category_id=%s", j->arg);
         break;
+    case LOAD_SEARCH:                                        /* 0.8.0: every film / series, only the matching ones kept */
+        set_stage(j->series ? "Searching every series..." : "Searching every film...");
+        snprintf(action, sizeof action, "%s", j->series ? "get_series" : "get_vod_streams");
+        break;
     default:
         set_stage("Loading episodes...");
         snprintf(action, sizeof action, "get_series_info&series_id=%s", j->arg);
@@ -1202,9 +1240,14 @@ static int load_vod(LoadJob *j)
         j->cats = malloc(sizeof(XtCategory) * XT_MAX_CATS);
         if (j->cats) n = j->ncats = xtream_parse_categories(m.buf, m.len, j->cats, XT_MAX_CATS);
         if (!n) snprintf(j->err, sizeof j->err, "%s", films ? "No films on this account" : "No series on this account");
+    } else if (j->what == LOAD_SEARCH) {
+        n = xtream_parse_vod_match(m.buf, m.len, s, vcats, nvcats, &j->list, j->series, j->folded, 500);
+        if (settings.hide_adult) n -= iptv_remove_adult(&j->list);
+        if (n <= 0) { n = 0; snprintf(j->err, sizeof j->err, "Nothing found"); }
     } else if (j->what == LOAD_EPISODES) {
         n = xtream_parse_episodes(m.buf, m.len, s, &j->list);
         if (!n) snprintf(j->err, sizeof j->err, "No episodes found");
+        j->vi_ok = xtream_parse_vodinfo(m.buf, m.len, &j->vi) == 0;   /* 0.8.0 */
     } else {
         n = films ? xtream_parse_vod(m.buf, m.len, s, vcats, nvcats, &j->list)
                   : xtream_parse_series(m.buf, m.len, s, vcats, nvcats, &j->list);
@@ -1247,13 +1290,15 @@ static void load_begin(const Source *s, int what, const char *arg, int group)
 {
     if (s->type != SRC_M3U_FILE && net_offline(s->url)) { set_status(1, NO_NET_MSG, NULL); return; }
     if (what != LOAD_EPISODES) {
+        guide_reset();                                       /* 0.8.0 (the guide belongs to the old list) */
+        poster_drop();
         /* the old list is not shown while loading: free it first, so the new one has the memory */
         leave_episodes();
         channel_list_free(&chans);
         channel_list_init(&chans);
         nvis = 0;
         fav_rank_n = nfav_ch = 0;                            /* (they belonged to the old list) */
-        if (what == LOAD_FILMS || what == LOAD_SERIES) loaded_group = -1;
+        if (what == LOAD_FILMS || what == LOAD_SERIES || what == LOAD_SEARCH) loaded_group = -1;
     }
     memset(&job, 0, sizeof job);
     job.src = *s;
@@ -1287,7 +1332,8 @@ static int load_poll(unsigned p)
     if (job.rc != 0) {
         channel_list_free(&job.list);
         free(job.cats);
-        if (job.what == LOAD_FILMS || job.what == LOAD_SERIES) rebuild_visible();
+        if (job.what == LOAD_FILMS || job.what == LOAD_SERIES || job.what == LOAD_SEARCH) rebuild_visible();
+        if (job.what == LOAD_SEARCH && !strcmp(job.err, "Nothing found")) { set_status(0, "Nothing found", NULL); focus = 0; frames_after_fail = 0; return 0; }
         set_status(1, "Failed: %s", job.err);
         frames_after_fail = 0;
         return 0;
@@ -1299,6 +1345,7 @@ static int load_poll(unsigned p)
         chans = job.list;
         section = SEC_LIVE;
         build_groups();
+        guide_setup();                                       /* 0.8.0 */
         break;
     case LOAD_FILM_CATS:
     case LOAD_SERIES_CATS:
@@ -1321,11 +1368,25 @@ static int load_poll(unsigned p)
         rebuild_visible();
         focus = 1;
         break;
+    case LOAD_SEARCH:                                        /* 0.8.0: the results, like a category */
+        channel_list_free(&chans);
+        chans = job.list;
+        loaded_group = -4;
+        snprintf(search_q, sizeof search_q, "%s", job.query);
+        snprintf(search_fold, sizeof search_fold, "%s", job.folded);
+        fav_update_ranks();
+        rebuild_visible();
+        focus = 1;
+        plog("search: \"%s\": %d %s", job.query, chans.count, job.series ? "series" : "films");
+        break;
     default:                                                /* episodes: the series list waits behind them */
         series_saved = chans;
         series_sel_saved = sel;
         chans = job.list;
         in_episodes = 1;
+        series_info = job.vi;                                /* 0.8.0: its details, its seasons */
+        series_info_ok = job.vi_ok;
+        seasons_build();
         rebuild_visible();
         focus = 1;
         select_watched_episode();                            /* 0.7.0 */
@@ -1397,10 +1458,110 @@ static void epg_time_zone(void)
 
 static int epg_stop_cb(void *ctx) { (void)ctx; return epg_quit; }
 
+/* ---- 0.8.0: background jobs. Quick ones on the "epg" thread, one at a time: an Xtream channel's guide table, a
+ * film's details, a poster (decoded there, small). The XMLTV guide of an M3U list on its own thread ("xmltv"),
+ * only while nothing plays. The results are taken over by the main thread (guide_tick). ---- */
+enum { QJ_XT_TABLE = 1, QJ_VODINFO, QJ_POSTER };
+#define POSTER_BOX_W 240
+#define POSTER_BOX_H 360
+typedef struct {
+    volatile int state;                 /* 0 free, 1 asked (the thread works), 2 answered */
+    int kind, ch, gen;
+    char key[IPTV_URL_MAX];             /* what was asked: the poster's address, the film's id */
+    char url[IPTV_URL_MAX + 200];
+    Mem m;
+    int ok, http;
+    uint32_t *px;                       /* a poster, decoded */
+    int pw, ph;
+} QJob;
+static QJob qjob;
+
+typedef struct {
+    volatile int state;                 /* 0 free, 1 asked, 2 done */
+    volatile int cancel;
+    volatile unsigned bytes;            /* downloaded so far */
+    int gen;                            /* the list it belongs to (guide_gen) */
+    char url[IPTV_URL_MAX];
+    char cache[96];
+    uint32_t tag;
+    Guide g;
+    GuideMap *map;
+    char **keys;                        /* per channel: "id" or "#name key" (the cache's keys) */
+    int nkeys;
+    int64_t from, to, made;
+    int ok, kept, http;
+    char err[96];
+} XJob;
+static XJob xjob;
+static volatile int xmltv_quit;
+static SceUID xmltv_tid = -1;
+
+static void run_qjob(QJob *j)
+{
+    Mem m = {0};
+    CioRequest rq = { j->url, NULL, NULL, 8, 15, mem_data, epg_stop_cb, &m };
+    int st = 0;
+    char e[96];
+    int r = cio_get(&rq, &st, e, sizeof e);
+    j->http = st;
+    j->ok = r >= 0 && st < 400 && m.buf != NULL;
+    j->px = NULL;
+    if (j->kind == QJ_POSTER) {
+        if (j->ok) j->ok = poster_decode((const uint8_t *)m.buf, m.len, POSTER_BOX_W, POSTER_BOX_H, &j->px, &j->pw, &j->ph) == 0;
+        free(m.buf);
+        memset(&j->m, 0, sizeof j->m);
+    } else j->m = m;
+    static int logged;
+    if (!j->ok && logged++ < 8) plog("job %d: HTTP %d%s%s", j->kind, st, r < 0 ? ", " : "", r < 0 ? e : "");
+}
+
+static int xmltv_data(void *ctx, const uint8_t *d, size_t n)
+{
+    XmltvParser *x = ctx;
+    xjob.bytes += (unsigned)n;
+    return xjob.cancel || xmltv_feed(x, d, n) != 0;           /* (full or bad: stop the download) */
+}
+static int xmltv_stop(void *ctx) { (void)ctx; return xjob.cancel || xmltv_quit; }
+static const char *xjob_key(int ch, void *ctx) { (void)ctx; return ch >= 0 && ch < xjob.nkeys ? xjob.keys[ch] : NULL; }
+
+static int xmltv_thread(SceSize args, void *argp)
+{
+    (void)args; (void)argp;
+    while (!xmltv_quit) {
+        if (xjob.state == 1) {
+            xjob.ok = 0;
+            xjob.err[0] = 0;
+            if (guide_init(&xjob.g, xjob.nkeys, 6 * 1024 * 1024) == 0) {
+                XmltvParser *x = xmltv_new(&xjob.g, xjob.map, xjob.from, xjob.to);
+                if (x) {
+                    CioRequest rq = { xjob.url, NULL, NULL, 15, 30, xmltv_data, xmltv_stop, x };
+                    int st = 0;
+                    int r = cio_get(&rq, &st, xjob.err, sizeof xjob.err);
+                    xjob.http = st;
+                    xjob.kept = xmltv_finish(x);
+                    xmltv_free(x);
+                    xjob.ok = !xjob.cancel && (r >= 0 || xjob.g.full) && st < 400 && xjob.kept > 0;
+                    if (xjob.ok && guide_save(&xjob.g, xjob.cache, xjob.tag, xjob.made, xjob_key, NULL) != 0)
+                        plog("epg: could not write %s", xjob.cache);
+                }
+            }
+            __sync_synchronize();
+            xjob.state = 2;
+        }
+        sceKernelDelayThread(50000);
+    }
+    return 0;
+}
+
 static int epg_thread(SceSize args, void *argp)
 {
     (void)args; (void)argp;
     while (!epg_quit) {
+        if (epg_job != 1 && qjob.state == 1) {                /* 0.8.0 */
+            run_qjob(&qjob);
+            __sync_synchronize();
+            qjob.state = 2;
+        }
         if (epg_job == 1) {
             Mem m = {0};
             CioRequest rq = { epg_job_url, NULL, NULL, 8, 10, mem_data, epg_stop_cb, &m };
@@ -1427,11 +1588,21 @@ static void epg_start(void)
     epg_time_zone();
     epg_tid = sceKernelCreateThread("epg", epg_thread, 0x10000110, 256 * 1024, 0, 0, NULL);
     if (epg_tid >= 0) sceKernelStartThread(epg_tid, 0, NULL);
-    plog("epg: thread 0x%08X, time zone %+d min", (unsigned)epg_tid, tz_min);
+    xmltv_tid = sceKernelCreateThread("xmltv", xmltv_thread, 0x10000118, 256 * 1024, 0, 0, NULL);   /* 0.8.0 (lower) */
+    if (xmltv_tid >= 0) sceKernelStartThread(xmltv_tid, 0, NULL);
+    plog("epg: thread 0x%08X, xmltv 0x%08X, time zone %+d min", (unsigned)epg_tid, (unsigned)xmltv_tid, tz_min);
 }
 
 static void epg_stop(void)
 {
+    if (xmltv_tid >= 0) {
+        xmltv_quit = 1;
+        xjob.cancel = 1;
+        SceUInt to = 3000000;
+        sceKernelWaitThreadEnd(xmltv_tid, NULL, &to);
+        sceKernelDeleteThread(xmltv_tid);
+        xmltv_tid = -1;
+    }
     if (epg_tid < 0) return;
     epg_quit = 1;
     SceUInt to = 3000000;
@@ -1488,6 +1659,293 @@ static const char *epg_for(const Channel *c, int ask)
     return epg_line(&e, tz_min, T("Now"), T("Next"), line, sizeof line) ? line : NULL;
 }
 
+/* ---- 0.8.0: the programme guide of the open live list --------------------------------------------------------
+ * guide holds a row per channel of chans (live TV). Xtream: each channel's table when it shows in the guide (one
+ * request at a time). M3U with an EPG address: the XMLTV file once (only while nothing plays), kept as a cache
+ * file for 12 hours. */
+#define GUIDE_LIMIT (6 * 1024 * 1024)
+static Guide guide;
+static int guide_on;                        /* guide has chans.count rows of this list */
+static int guide_gen;                       /* changes with every list (late answers are dropped) */
+enum { GX_NONE, GX_WANTED, GX_READING, GX_DONE, GX_FAILED };
+static int guide_xmltv;                     /* the XMLTV file of an M3U list */
+static unsigned guide_xmltv_retry;
+static int gwant[16], ngwant;               /* Xtream channels the screen wants (asked for in guide_tick) */
+
+static uint32_t str_key(const char *u)
+{
+    uint32_t h = 2166136261u;                                /* FNV-1a */
+    while (*u) { h ^= (uint8_t)*u++; h *= 16777619u; }
+    return h ? h : 1;
+}
+
+static void guide_cache_path(char *out, size_t cap, uint32_t tag) { snprintf(out, cap, "%s/epg_%08x.bin", DATA_DIR, (unsigned)tag); }
+
+/* how far back the XMLTV guide keeps programmes: the list's catch-up days (at most 3) and a few hours */
+static int64_t guide_back(void)
+{
+    int days = 0;
+    for (int i = 0; i < chans.count; i++) if (chans.items[i].archive > days) days = chans.items[i].archive;
+    if (days > 3) days = 3;
+    return (int64_t)days * 86400 + 6 * 3600;
+}
+
+/* the XMLTV keys of the channels: their tvg-id, and their names (for the file's display names) */
+static GuideMap *guide_map_build(char ***keys_out)
+{
+    GuideMap *m = guide_map_new(chans.count);
+    char **keys = keys_out ? calloc((size_t)(chans.count ? chans.count : 1), sizeof(char *)) : NULL;
+    if (!m) { free(keys); return NULL; }
+    for (int i = 0; i < chans.count; i++) {
+        const Channel *c = &chans.items[i];
+        const char *id = channel_extra(&chans, c, CX_TVG_ID), *tn = channel_extra(&chans, c, CX_TVG_NAME);
+        if (id && id[0]) guide_map_add_id(m, id, i);
+        guide_map_add_name(m, c->name, i);
+        if (tn) guide_map_add_name(m, tn, i);
+        if (keys) {
+            char k[140];
+            if (id && id[0]) { size_t o = 0; for (const char *q = id; *q && o + 1 < sizeof k; q++) k[o++] = (char)tolower((unsigned char)*q); k[o] = 0; }
+            else { k[0] = '#'; guide_name_key(c->name, k + 1, sizeof k - 1); }
+            keys[i] = strdup(k);
+        }
+    }
+    if (keys_out) *keys_out = keys;
+    return m;
+}
+
+static void xjob_release(void)
+{
+    guide_map_free(xjob.map);
+    xjob.map = NULL;
+    for (int i = 0; i < xjob.nkeys; i++) free(xjob.keys ? xjob.keys[i] : NULL);
+    free(xjob.keys);
+    xjob.keys = NULL;
+    xjob.nkeys = 0;
+}
+
+static void guide_reset(void)
+{
+    if (xjob.state == 1) xjob.cancel = 1;                    /* (its result is dropped when it comes) */
+    if (guide_on) guide_free(&guide);
+    guide_on = 0;
+    guide_xmltv = GX_NONE;
+    ngwant = 0;
+    guide_gen++;
+}
+
+/* after a live list was loaded (or filtered again): an empty guide for its channels; M3U: the cache, else the
+ * XMLTV file is read soon (guide_tick) */
+static void guide_setup(void)
+{
+    guide_reset();
+    if (section != SEC_LIVE || in_episodes || chans.count < 1 || cur_src < 0 || cur_src >= nsources) return;
+    if (guide_init(&guide, chans.count, GUIDE_LIMIT) != 0) return;
+    guide_on = 1;
+    if (sources[cur_src].type == SRC_XTREAM || !chans.tvg_url[0] || !cio_available()) return;
+    int64_t now = now_unix();
+    uint32_t tag = str_key(chans.tvg_url);
+    char path[96];
+    guide_cache_path(path, sizeof path, tag);
+    GuideMap *m = guide_map_build(NULL);
+    int got = m ? guide_load(&guide, path, tag, now, 12 * 3600, m, now - guide_back(), now + 30 * 3600) : -1;
+    guide_map_free(m);
+    if (got > 0) {
+        guide_xmltv = GX_DONE;
+        MemStat ms = mem_stat();
+        plog("epg: guide from the cache: %d programmes, %u KB (app memory %u KB)", got, (unsigned)(guide_bytes(&guide) / 1024), ms.used_kb);
+    } else {
+        guide_xmltv = GX_WANTED;
+        guide_xmltv_retry = 0;
+    }
+}
+
+/* the screen wants channel ci's programmes (Xtream: asked for in guide_tick) */
+static void guide_want(int ci)
+{
+    if (!guide_on || ci < 0 || ci >= guide.nch || ngwant >= (int)(sizeof gwant / sizeof gwant[0])) return;
+    if (sources[cur_src].type != SRC_XTREAM) return;
+    const GChan *g = &guide.ch[ci];
+    uint32_t now = (uint32_t)now_unix();
+    if (g->state == GC_ASKED || ((g->state == GC_OK || g->state == GC_EMPTY) && now - g->used < (g->state == GC_OK ? 3600u : 600u))) return;
+    for (int i = 0; i < ngwant; i++) if (gwant[i] == ci) return;
+    gwant[ngwant++] = ci;
+}
+
+/* ---- 0.8.0: posters and film details (filled in by guide_tick) ---- */
+static vita2d_texture *poster_tex;          /* the poster on the screen (one at a time) */
+static char poster_have[IPTV_URL_MAX];      /* ... its address */
+static char poster_want[IPTV_URL_MAX], poster_failed[IPTV_URL_MAX];
+static unsigned poster_want_ms;
+#define VI_CACHE 16
+static struct { char id[24]; int state; VodInfo vi; } vicache[VI_CACHE];   /* state 1 asked, 2 ok, 3 none */
+static int vi_ring;
+static char vi_want[24];
+static unsigned vi_want_ms;
+
+static void poster_request(const char *url)
+{
+    if (!url) url = "";
+    if (strcmp(url, poster_want)) { snprintf(poster_want, sizeof poster_want, "%s", url); poster_want_ms = now_ms(); }
+}
+
+static int poster_loading(void) { return poster_want[0] && strcmp(poster_want, poster_have) && strcmp(poster_want, poster_failed); }
+static const vita2d_texture *poster_now(void) { return poster_want[0] && !strcmp(poster_want, poster_have) ? poster_tex : NULL; }
+
+/* film id -> its details (NULL while they are asked for, or when there are none) */
+static const VodInfo *vodinfo_get(const char *id)
+{
+    if (!id || !id[0]) return NULL;
+    for (int i = 0; i < VI_CACHE; i++) if (!strcmp(vicache[i].id, id)) return vicache[i].state == 2 ? &vicache[i].vi : NULL;
+    if (strcmp(vi_want, id)) { snprintf(vi_want, sizeof vi_want, "%s", id); vi_want_ms = now_ms(); }
+    return NULL;
+}
+
+static void poster_take(QJob *j)
+{
+    if (!j->ok || !j->px) { snprintf(poster_failed, sizeof poster_failed, "%s", j->key); free(j->px); j->px = NULL; return; }
+    if (strcmp(j->key, poster_want)) { free(j->px); j->px = NULL; return; }   /* (the screen moved on) */
+    vita2d_texture *t = vita2d_create_empty_texture((unsigned)j->pw, (unsigned)j->ph);
+    if (t) {
+        uint8_t *dst = vita2d_texture_get_datap(t);
+        unsigned stride = vita2d_texture_get_stride(t);
+        for (int y = 0; y < j->ph; y++) memcpy(dst + (size_t)y * stride, j->px + (size_t)y * j->pw, (size_t)j->pw * 4);
+        if (poster_tex) vita2d_free_texture(poster_tex);     /* (the frame before is done: guide_tick runs first in a frame) */
+        poster_tex = t;
+        snprintf(poster_have, sizeof poster_have, "%s", j->key);
+    } else snprintf(poster_failed, sizeof poster_failed, "%s", j->key);
+    free(j->px);
+    j->px = NULL;
+}
+
+static void poster_drop(void)
+{
+    if (poster_tex) { vita2d_wait_rendering_done(); vita2d_free_texture(poster_tex); poster_tex = NULL; }
+    poster_have[0] = poster_want[0] = 0;
+}
+
+/* every frame, before drawing: answers taken over, the next request started */
+static void guide_tick(int playing)
+{
+    int64_t now = now_unix();
+    if (qjob.state == 2) {
+        if (qjob.kind == QJ_XT_TABLE) {
+            int c = qjob.ch;
+            if (qjob.gen == guide_gen && guide_on && c >= 0 && c < guide.nch) {
+                int n = qjob.ok ? guide_add_xtream(&guide, c, qjob.m.buf, qjob.m.len, now - (int64_t)(chans.items[c].archive ? chans.items[c].archive : 1) * 86400 - 3600, now + 3 * 86400) : -1;
+                if (!qjob.ok) guide.ch[c].state = GC_EMPTY;
+                guide.ch[c].used = (uint32_t)now;
+                static int logged;
+                if (logged++ < 4) plog("epg: table of channel %d: %d programmes, guide %u KB", c, n, (unsigned)(guide_bytes(&guide) / 1024));
+            }
+        } else if (qjob.kind == QJ_VODINFO) {
+            int i = 0;
+            while (i < VI_CACHE && strcmp(vicache[i].id, qjob.key)) i++;
+            if (i < VI_CACHE) vicache[i].state = qjob.ok && xtream_parse_vodinfo(qjob.m.buf, qjob.m.len, &vicache[i].vi) == 0 ? 2 : 3;
+        } else if (qjob.kind == QJ_POSTER) poster_take(&qjob);
+        free(qjob.m.buf);
+        memset(&qjob.m, 0, sizeof qjob.m);
+        __sync_synchronize();
+        qjob.state = 0;
+    }
+    if (qjob.state == 0 && epg_tid >= 0 && cur_src >= 0 && cur_src < nsources) {   /* the next request */
+        unsigned nm = now_ms();
+        if (poster_loading() && nm - poster_want_ms > 300) {
+            qjob.kind = QJ_POSTER;
+            snprintf(qjob.key, sizeof qjob.key, "%s", poster_want);
+            snprintf(qjob.url, sizeof qjob.url, "%s", poster_want);
+            qjob.state = 1;
+        } else if (vi_want[0] && nm - vi_want_ms > 300 && sources[cur_src].type == SRC_XTREAM) {
+            char action[64];
+            snprintf(action, sizeof action, "get_vod_info&vod_id=%s", vi_want);
+            int i = 0;
+            while (i < VI_CACHE && strcmp(vicache[i].id, vi_want)) i++;
+            if (i == VI_CACHE) { i = vi_ring; vi_ring = (vi_ring + 1) % VI_CACHE; snprintf(vicache[i].id, sizeof vicache[i].id, "%s", vi_want); }
+            vicache[i].state = 1;
+            if (xtream_api_url(&sources[cur_src], action, qjob.url, sizeof qjob.url) == 0) {
+                qjob.kind = QJ_VODINFO;
+                snprintf(qjob.key, sizeof qjob.key, "%s", vi_want);
+                qjob.state = 1;
+            } else vicache[i].state = 3;
+            vi_want[0] = 0;
+        } else if (ngwant > 0 && guide_on) {
+            int c = gwant[0];
+            memmove(gwant, gwant + 1, sizeof(int) * (size_t)--ngwant);
+            char id[16], action[80];
+            if (c >= 0 && c < guide.nch && epg_stream_id(chans.items[c].url, id, sizeof id)) {
+                snprintf(action, sizeof action, "get_simple_data_table&stream_id=%s", id);
+                if (xtream_api_url(&sources[cur_src], action, qjob.url, sizeof qjob.url) == 0) {
+                    if (guide_bytes(&guide) > GUIDE_LIMIT * 4 / 5) {   /* room: only the channels on the screen stay */
+                        int keep[17], nk = 0;
+                        for (int k = 0; k < ngwant; k++) keep[nk++] = gwant[k];
+                        keep[nk++] = c;
+                        guide_keep_only(&guide, keep, nk);
+                        plog("epg: guide trimmed to the channels on the screen (%u KB)", (unsigned)(guide_bytes(&guide) / 1024));
+                    }
+                    guide.ch[c].state = GC_ASKED;
+                    qjob.kind = QJ_XT_TABLE;
+                    qjob.ch = c;
+                    qjob.gen = guide_gen;
+                    qjob.state = 1;
+                }
+            } else if (c >= 0 && c < guide.nch) guide.ch[c].state = GC_EMPTY;
+        }
+    }
+    ngwant = 0;                                               /* (the screen says again what it wants) */
+    /* M3U: the XMLTV file */
+    if (xjob.state == 2) {
+        if (xjob.gen == guide_gen && guide_on && xjob.ok) {
+            guide_free(&guide);
+            guide = xjob.g;
+            guide_xmltv = GX_DONE;
+            MemStat ms = mem_stat();
+            plog("epg: XMLTV read: %u KB, %d programmes, %u KB kept%s (app memory %u KB, peak %u KB)", xjob.bytes / 1024, xjob.kept,
+                 (unsigned)(guide_bytes(&guide) / 1024), guide.full ? " (memory limit reached: the rest left out)" : "", ms.used_kb, ms.peak_kb);
+        } else {
+            guide_free(&xjob.g);
+            if (xjob.gen == guide_gen && guide_on) {
+                if (xjob.cancel) { guide_xmltv = GX_WANTED; guide_xmltv_retry = now_ms() + 20000; plog("epg: XMLTV stopped (playing): again later"); }
+                else { guide_xmltv = GX_FAILED; plog("epg: XMLTV failed: HTTP %d, %u KB, %d programmes%s%s", xjob.http, xjob.bytes / 1024, xjob.kept, xjob.err[0] ? ", " : "", xjob.err); }
+            }
+        }
+        xjob_release();
+        __sync_synchronize();
+        xjob.state = 0;
+    }
+    if (xjob.state == 1 && playing) xjob.cancel = 1;         /* (nothing competes with a channel or film) */
+    if (guide_on && guide_xmltv == GX_WANTED && !playing && xjob.state == 0 && xmltv_tid >= 0 && now_ms() >= guide_xmltv_retry &&
+        !job_active && !job_pending) {
+        memset(&xjob.g, 0, sizeof xjob.g);
+        snprintf(xjob.url, sizeof xjob.url, "%s", chans.tvg_url);
+        xjob.tag = str_key(chans.tvg_url);
+        guide_cache_path(xjob.cache, sizeof xjob.cache, xjob.tag);
+        xjob.map = guide_map_build(&xjob.keys);
+        xjob.nkeys = xjob.keys ? chans.count : 0;
+        xjob.made = now;
+        xjob.from = now - guide_back();
+        xjob.to = now + 30 * 3600;
+        xjob.gen = guide_gen;
+        xjob.cancel = 0;
+        xjob.bytes = 0;
+        if (xjob.map && xjob.keys) {
+            guide_xmltv = GX_READING;
+            plog("epg: reading the XMLTV guide (%s)", xmltv_gzip_supported() ? "gzip ok" : "no gzip");
+            __sync_synchronize();
+            xjob.state = 1;
+        } else { xjob_release(); guide_xmltv = GX_FAILED; }
+    }
+}
+
+/* the programme on now on channel ci from the guide, NULL if none */
+static const char *guide_now_title(int ci)
+{
+    if (!guide_on || ci < 0 || ci >= guide.nch) return NULL;
+    int i = guide_at(&guide, ci, now_unix());
+    if (i < 0) return NULL;
+    int n;
+    const GProg *p = guide_progs(&guide, ci, &n);
+    return guide_str(&guide, p[i].title);
+}
+
 /* ---- playback ---------------------------------------------------------- */
 static unsigned play_started_us, osd_until_us;
 static int got_frame;
@@ -1500,20 +1958,39 @@ static int seek_target = -1;         /* a jump being chosen, ms (-1 = none) */
 static unsigned seek_due, last_pos_save;
 static int film_end_done;
 static unsigned next_ep_at;                 /* 0.7.0: an episode ended: the next one starts at this time (0 = none) */
-static int next_ep_vi = -1;
+static int next_ep_ci = -1;                 /* 0.8.0: ... chans[] index (it may be in the next season); -2 = the next archived programme */
+
+/* 0.8.0: the sleep timer (Select > More): playback stops at sleep_at (0 = off) */
+static unsigned sleep_at;
+static int sleep_idx;
+static const int SLEEP_MIN[] = { 0, 15, 30, 45, 60, 90, 120 };
+#define SLEEP_N 7
+static int sleep_warning(void) { return sleep_at && sleep_at - now_ms() < 60000 && (int)(sleep_at - now_ms()) > 0; }
 
 /* 0.7.0: the corner note while the next episode waits */
 static void next_ep_note(ScrPlayer *sp)
 {
-    static char line[64];
+    static char line[64], sl[64];
+    if (!next_ep_at && sleep_warning()) {                    /* 0.8.0: the last minute of the sleep timer */
+        snprintf(sl, sizeof sl, T("Sleep timer: stops in %d s"), (int)((sleep_at - now_ms() + 999) / 1000));
+        sp->corner = sl;
+        sp->corner2 = T("X: 15 more minutes");
+        return;
+    }
     if (!next_ep_at) return;
     unsigned now = now_ms();
     int sec = next_ep_at > now ? (int)((next_ep_at - now + 999) / 1000) : 0;
-    snprintf(line, sizeof line, T("Next episode in %d s"), sec);
+    snprintf(line, sizeof line, T(next_ep_ci == -2 ? "Next programme in %d s" : "Next episode in %d s"), sec);
     sp->corner = line;
     sp->corner2 = T("X: now   O: cancel");
 }
 static int film_dur_ms;              /* the film's length, kept while it plays through the server (that cannot tell) */
+/* 0.8.0: catch-up: an earlier programme of the live channel vis[play_vis] plays like a film through the server's
+ * archive (pause, jumps: the archive is asked again from there) */
+static int arch_on;
+static int64_t arch_start, arch_end;        /* the programme, UTC */
+static char arch_title[160];
+static int arch_return;                     /* O goes back to: 0 the list, 1 the guide, 2 the channel's schedule */
 static char film_note[200];          /* a short message over the film (e.g. jumping is not possible) */
 static unsigned film_note_until;            /* the end of the film was handled (its resume point dropped) */
 static int resume_ask, resume_vi, resume_pos, resume_sel;   /* "Continue from 12:34?" box on the channel screen */
@@ -1661,6 +2138,31 @@ static int is_mp4_url(const char *u)
     return !strncasecmp(u + n - 4, ".mp4", 4) || !strncasecmp(u + n - 4, ".m4v", 4) || !strncasecmp(u + n - 4, ".mov", 4);
 }
 
+/* 0.8.0: the server's local time - UTC for channel ci (Xtream: from its guide, else the account; else this Vita's) */
+static int srv_offset(int ci)
+{
+    if (guide_on && ci >= 0 && ci < guide.nch && guide.ch[ci].has_srv) return guide.ch[ci].srv_off;
+    if (sources[cur_src].type == SRC_XTREAM && xt_srv_known) return (int)xt_srv_off;
+    return tz_min * 60;
+}
+
+/* the archive address of the programme being watched, off_ms into it; *real_off_ms: where it really starts
+ * (Xtream archives start on a whole minute) */
+static int arch_url(int off_ms, char *out, size_t cap, int *real_off_ms)
+{
+    if (!nvis || play_vis >= nvis) return -1;
+    int ci = vis[play_vis];
+    const Channel *c = &chans.items[ci];
+    int64_t now = now_unix(), st = arch_start + off_ms / 1000;
+    if (st > arch_end - 30) st = arch_end - 30;
+    if (st < arch_start) st = arch_start;
+    if (c->cu_mode == CU_XC) { int64_t m = (st + srv_offset(ci)) / 60 * 60 - srv_offset(ci); st = m < arch_start - 59 ? arch_start : m; }
+    int dur = (int)(arch_end - st);
+    if (dur < 60) dur = 60;
+    *real_off_ms = st > arch_start ? (int)(st - arch_start) * 1000 : 0;   /* (a minute earlier: counted as the start) */
+    return catchup_url(c->cu_mode, c->url, channel_catchup_src(&chans, c), st, dur, now, srv_offset(ci), out, cap);
+}
+
 static void play_channel_ex(int vi, int use_proxy)
 {
     play_vis = vi;
@@ -1685,6 +2187,30 @@ static void play_channel_ex(int vi, int use_proxy)
     tsp_set_via_server(use_proxy);
     tsp_set_hls_bw(res_bw);
     via_proxy = 0;
+    if (arch_on) {                                           /* 0.8.0: catch-up, from film_start_ms into the programme */
+        char au[IPTV_URL_MAX * 2];
+        int off = 0;
+        play_mode = 2;
+        film_end_done = 0;
+        seek_target = -1;
+        last_pos_save = now_ms();
+        next_ep_at = 0;
+        if (arch_url(film_start_ms, au, sizeof au, &off) != 0) snprintf(play_err, sizeof play_err, "%s", "This channel's archive address could not be made");
+        else {
+            const char *tail = strchr(au, '?');              /* (the time part only: the path may hold the password) */
+            if (!tail) {
+                const char *q = au + strlen(au), *last = NULL;
+                int slashes = 0;
+                while (q > au && slashes < 2) { q--; if (*q == '/') { slashes++; last = q; } }
+                tail = last ? last : "";
+            }
+            plog("player: catch-up from %d s of a %d min programme (mode %d, server time %+d min, ...%.80s)", off / 1000,
+                 (int)((arch_end - arch_start) / 60), chans.items[vis[play_vis]].cu_mode, srv_offset(vis[play_vis]) / 60, tail);
+            if (tsp_start_vod_stream(au, off) != 0) snprintf(play_err, sizeof play_err, "Cannot start the TS player");
+        }
+        film_start_ms = 0;
+        return;
+    }
     char purl[IPTV_URL_MAX * 3 + 64];
     int film = chans.items[vis[vi]].kind == CH_FILM;
     if (film) { film_end_done = 0; seek_target = -1; last_pos_save = now_ms(); }
@@ -1724,6 +2250,8 @@ static int proxy_always(const char *url)
 
 static void play_channel(int vi)
 {
+    arch_on = 0;                                             /* 0.8.0: a channel or film, not catch-up */
+    info_ovl = 0;
     int ci = vis[vi];                                        /* L in the player: the channel before */
     if (last_chan >= 0 && last_chan != ci && last_chan < chans.count && url_key(chans.items[last_chan].url) == last_key) {
         prev_chan = last_chan; prev_key = last_key;
@@ -1821,9 +2349,26 @@ static void sub_track_name(const TspStatus *st, int k, char *out, size_t cap)
     if (name) snprintf(base, sizeof base, "%s", name);
     else if (l[0]) snprintf(base, sizeof base, "%s", up);
     else snprintf(base, sizeof base, "%s %d", T("Subtitles"), k + 1);
-    const char *extra = st->s_name[k][0] ? st->s_name[k] : st->s_forced[k] ? T("Forced") : NULL;
-    if (extra && name && !strcasecmp(extra, name)) extra = NULL;   /* (a name that is only the language again) */
-    if (extra) snprintf(out, cap, "%s (%s)", base, extra);
+    /* 0.8.0: the track's name only when it says something more: "SDH" / "Forced" are kept as words, a name that
+     * is a site's address or the language again (in any language) is left out */
+    const char *nm = st->s_name[k], *extra = NULL;
+    char low[40];
+    size_t i = 0;
+    for (; nm[i] && i + 1 < sizeof low; i++) low[i] = (char)tolower((unsigned char)nm[i]);
+    low[i] = 0;
+    int forced = st->s_forced[k] || strstr(low, "forced") || strstr(low, "zorunlu");
+    int sdh = strstr(low, "sdh") || strstr(low, "hearing") || strstr(low, "cc") == low;
+    static const char *const LANGWORDS[] = { "turk", "türk", "engl", "ingiliz", "deutsch", "german", "alman", "fran", "espa", "span", "ital",
+                                             "rus", "arab", "greek", "ελλη", "dansk", "dan", "čeština", "czech", "polsk", "portug", "nederl", "svensk" };
+    int site = strstr(low, "www.") || strstr(low, ".org") || strstr(low, ".com") || strstr(low, ".net") || strstr(low, ".fi") ||
+               strstr(low, ".tv") || strstr(low, ".to") || strstr(low, "http");
+    int langword = 0;
+    for (size_t j = 0; j < sizeof LANGWORDS / sizeof LANGWORDS[0]; j++) if (strstr(low, LANGWORDS[j])) langword = 1;
+    if (sdh) extra = "SDH";
+    else if (forced) extra = T("Forced");
+    else if (nm[0] && !site && !langword && !(name && !strcasecmp(nm, name))) extra = nm;
+    if (sdh && forced) snprintf(out, cap, "%s (SDH, %s)", base, T("Forced"));
+    else if (extra) snprintf(out, cap, "%s (%s)", base, extra);
     else snprintf(out, cap, "%s", base);
 }
 
@@ -1836,20 +2381,25 @@ static int play_hints(UiHint *h, int radio, int film, int paused, const char *sq
     int n = 0;
     int zap = return_state == ST_CHANNELS && nvis > 1;
     int can_fav = return_state == ST_SOURCES || section == SEC_LIVE || section == SEC_FILMS || in_episodes;   /* 0.6.0: films, episodes (their series) */
+    int live_guide = return_state == ST_CHANNELS && section == SEC_LIVE && guide_on;
     if (!radio) h[n++] = (UiHint){ UI_BTN_CROSS, paused ? "Play" : "Pause" };
     if (!radio && square) h[n++] = (UiHint){ UI_BTN_SQUARE, square };
-    if (!radio) h[n++] = (UiHint){ UI_BTN_TRIANGLE, "Info" };
+    /* 0.8.0: Triangle: the guide (a film: its details; catch-up: the channel's schedule); R: the information */
+    if (arch_on) h[n++] = (UiHint){ UI_BTN_TRIANGLE, "Schedule" };
+    else if (film) h[n++] = (UiHint){ UI_BTN_TRIANGLE, "Details" };
+    else if (live_guide) h[n++] = (UiHint){ UI_BTN_TRIANGLE, "Guide" };
     h[n++] = (UiHint){ UI_BTN_CIRCLE, "Back" };
     h[n++] = (UiHint){ UI_BTN_SEP, "" };
     if (film) h[n++] = (UiHint){ UI_BTN_LEFTRIGHT, "Seek" };
     if (zap) h[n++] = (UiHint){ UI_BTN_L, "P. Channel" };          /* (0.4.5: short words, the bar is full) */
+    if (!radio) h[n++] = (UiHint){ UI_BTN_R, "Info" };
     h[n++] = (UiHint){ UI_BTN_SELECT, radio ? "Analyze" : "Res." };
     if (can_fav) h[n++] = (UiHint){ UI_BTN_START, "Fav." };
     return n;
 }
 
 /* a film or episode is playing in the TS player (pause, jumps, resume point) */
-static int film_playing(void) { return play_mode == 2 && nvis && cur_channel()->kind == CH_FILM && tsp_status(); }
+static int film_playing(void) { return play_mode == 2 && nvis && (cur_channel()->kind == CH_FILM || arch_on) && tsp_status(); }
 
 static int film_scrub;               /* a stick is held sideways: the jump point moves */
 static unsigned scrub_t0, scrub_last;
@@ -1857,6 +2407,7 @@ static int probe_return_ms;          /* a film goes on here after the stream ana
 
 static int film_length(void)
 {
+    if (arch_on) return (int)(arch_end - arch_start) * 1000;   /* 0.8.0: the programme's length */
     const TspStatus *st = tsp_status();
     if (st && st->dur_ms > 0) film_dur_ms = st->dur_ms;
     if (!film_dur_ms && nvis) {                              /* 0.5.0: through the server: the length kept with the resume point */
@@ -1877,7 +2428,7 @@ static void fmt_time(char *b, size_t n, int ms)
 static void save_film_position(void)
 {
     int pos, dur;
-    if (!film_playing() || !tsp_vod_pos(&pos, &dur)) return;
+    if (arch_on || !film_playing() || !tsp_vod_pos(&pos, &dur)) return;   /* (0.8.0: catch-up keeps no resume point) */
     const TspStatus *st = tsp_status();
     if (st->state == TSP_ERROR || (st->decoded == 0 && !st->audio_only)) return;   /* never started: keep the old point */
     if (st->state == TSP_ENDED) pos = dur > 0 ? dur : pos + 3600000;
@@ -1906,9 +2457,13 @@ static void open_film(int vi)
 /* 0.7.0: the next episode (after the countdown, or X): where it was left if it was started */
 static void play_next_episode(void)
 {
-    int vi = next_ep_vi;
     next_ep_at = 0;
-    if (vi < 0 || vi >= nvis) return;
+    if (next_ep_ci == -2) { arch_step(1); return; }          /* 0.8.0: catch-up goes on with the next programme */
+    int ci = next_ep_ci, vi = -1;
+    if (ci < 0 || ci >= chans.count) return;
+    season_of(ci);                                           /* 0.8.0: (the next season's first episode) */
+    for (int i = 0; i < nvis; i++) if (vis[i] == ci) { vi = i; break; }
+    if (vi < 0) return;
     int k = resume_find(resume, nresume, chans.items[vis[vi]].url);
     film_start_ms = k >= 0 && resume_worth(resume[k].pos_ms, resume[k].dur_ms) ? resume[k].pos_ms : 0;
     seek_target = -1;
@@ -1925,6 +2480,8 @@ static void leave_episodes(void)
     channel_list_init(&series_saved);
     in_episodes = 0;
     series_ci_saved = -1;
+    nseasons = cur_season = 0;                               /* 0.8.0 */
+    series_info_ok = 0;
     fav_update_ranks();                                      /* 0.6.0: the series' stars again */
     rebuild_visible();
     sel = series_sel_saved < nvis ? series_sel_saved : 0;
@@ -2046,7 +2603,7 @@ static void draw_tsp_screen(int osd)
     int sq_next = st && !via_proxy ? res_square_next(st) : -1;
     /* Square: the next picture size; else the server (or back from it); a film: 720p through the server */
     const char *square = sq_next >= 0 ? res_name(st, sq_next, sq_label, sizeof sq_label) : settings.proxy[0] ? "Server" : NULL;
-    if (film_playing()) square = via_proxy ? "Original" : "720p";
+    if (film_playing()) square = arch_on ? "Live" : via_proxy ? "Original" : "720p";
     int nh = play_hints(hints, 0, film_playing(), st && st->paused, square);
     if (film_playing()) {                                    /* films: pause, jumps, time line */
         int pos = 0, dur = 0;
@@ -2058,6 +2615,31 @@ static void draw_tsp_screen(int osd)
         sp.seek_ms = seek_target;
         sp.paused = st->paused;
         if (st->paused || seek_target >= 0) osd = 1;
+        if (arch_on) {                                       /* 0.8.0: catch-up: clock times, the programme's name */
+            static char gl[240], tl[16], tr[16], nl[64], nr[200];
+            char a[16], b[16], dl[24];
+            clock_of(arch_start, a, sizeof a);
+            clock_of(arch_end, b, sizeof b);
+            day_label(arch_start, dl, sizeof dl);
+            snprintf(gl, sizeof gl, "%s  \xC2\xB7  %s %s - %s", arch_title, dl, a, b);
+            sp.group = gl;
+            sp.badge = T("ARCHIVE");
+            clock_of(arch_start + (seek_target >= 0 ? seek_target : pos) / 1000, tl, sizeof tl);
+            snprintf(tr, sizeof tr, "%s", b);
+            sp.time_l = tl;
+            sp.time_r = tr;
+            int watched = pos / 60000, left = dur > pos ? (dur - pos + 59999) / 60000 : 0;
+            snprintf(nl, sizeof nl, T("%d min watched  \xC2\xB7  %d min left"), watched, left);
+            sp.time_note_l = nl;
+            int ci = vis[play_vis], n, k = prog_find(ci, arch_start);
+            const GProg *gp = guide_progs(&guide, ci, &n);
+            if (k >= 0 && k + 1 < n) {
+                char c2[16];
+                clock_of(gp[k + 1].start, c2, sizeof c2);
+                snprintf(nr, sizeof nr, T("Next: %s (%s)"), guide_str(&guide, gp[k + 1].title), c2);
+                sp.time_note_r = nr;
+            }
+        }
     }
     if (now_ms() < film_note_until) { sp.stats1 = film_note; osd = 1; }   /* a short note (live TV too) */
     static char buf_line[96];
@@ -2170,7 +2752,9 @@ static void draw_tsp_screen(int osd)
             sp.osd = 1;
         }
     }
+    if (info_ovl) { sp.osd = 0; sp.subtitle = NULL; }
     scr_player(&sp);
+    if (info_ovl) draw_info_overlay();                       /* 0.8.0 */
 }
 
 static void draw_mp4_screen(int osd)
@@ -2251,6 +2835,7 @@ static void ch_row(int i, ScrRow *r, void *ctx)
     r->fav = ch_fav(vis[i]) >= 0;
     r->moving = fav_moving && vis[i] == move_ci;
     if (search_fold[0] || in_episodes) r->right = c->group;   /* the category is on the left otherwise */
+    else if (section == SEC_LIVE) r->right = guide_now_title(vis[i]);   /* 0.8.0: what is on now (when the guide knows) */
     if (c->kind == CH_FILM) {                                  /* where it was left */
         int k = resume_find(resume, nresume, c->url);
         if (k >= 0) { fmt_time(left_at, sizeof left_at, resume[k].pos_ms); r->right = left_at; }
@@ -2285,20 +2870,19 @@ static void draw_channels(void)
 {
     if (frames_after_load < 4)
         plog("ui: channel screen frame %d (%d groups, %d channels, focus %d)", frames_after_load++, ngroups, nvis, focus);
+    if (in_episodes && !search_fold[0]) { draw_series(); return; }   /* 0.8.0: the series screen */
     /* 0.4.1: X, Square, O on the left; L/R page, Select (and START on channels) on the right */
     static const UiHint HL[] = { { UI_BTN_CROSS, "Channels" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
-    static const UiHint HR[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
+    static const UiHint HR[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_TRIANGLE, "Guide" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
     static const UiHint HS[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "New search" }, { UI_BTN_CIRCLE, "Back" },
                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
-    static const UiHint HRF[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_TRIANGLE, "Reorder" }, { UI_BTN_CIRCLE, "Back" },
-                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
-    static const UiHint HMV[] = { { UI_BTN_UPDOWN, "Up / down" }, { UI_BTN_TRIANGLE, "Save" }, { UI_BTN_CIRCLE, "Cancel" } };
+    static const UiHint HMV[] = { { UI_BTN_UPDOWN, "Up / down" }, { UI_BTN_CROSS, "Save" }, { UI_BTN_CIRCLE, "Cancel" } };   /* (0.8.0: X saves) */
     static const UiHint HLV[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_CIRCLE, "Back" },
                                   { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
-    static const UiHint HRV[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },   /* (0.6.0: START) */
-                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+    static const UiHint HRV[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_TRIANGLE, "Details" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },   /* (0.6.0: START) */
+                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_START, "Fav." } };
     static const UiHint HRS[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
                                   { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
     char sub[160], right[48], title[IPTV_NAME_MAX + 32];
@@ -2327,13 +2911,20 @@ static void draw_channels(void)
     d.rempty = T(searching ? "Nothing found" : vod && cur_group != loaded_group && !in_episodes ? "Press X to open this category"
                                              : "No channels");
     const UiHint *hr = vod ? (section == SEC_SERIES && !in_episodes ? HRS : HRV) : HR;
-    int nhr = vod ? NH(HRV) : NH(HR);
-    if (!vod && cur_group == g_fav && g_fav >= 0 && nvis > 1) { hr = HRF; nhr = NH(HRF); }   /* 0.4.5: Triangle moves */
+    int nhr = vod ? (section == SEC_SERIES && !in_episodes ? NH(HRS) : NH(HRV)) : NH(HR);
     if (fav_moving) { hr = HMV; nhr = NH(HMV); }
     d.hints = searching ? HS : focus == 0 ? (vod ? HLV : HL) : hr;
     d.nhints = searching ? NH(HS) : focus == 0 ? (vod ? NH(HLV) : NH(HL)) : nhr;
     d.status = status;
     d.status_err = status_err;
+    static ScrVodCard card;                                  /* 0.8.0: films / series: the chosen one's card beside the list */
+    if (vod && !in_episodes && focus == 1 && !searching && nvis && sel < nvis && !fav_moving) {
+        vod_card_of(&chans, &chans.items[vis[sel]], &card, section == SEC_FILMS);
+        d.preview = &card;
+    } else if (vod && !in_episodes && focus == 1 && searching && nvis && sel < nvis) {
+        vod_card_of(&chans, &chans.items[vis[sel]], &card, section == SEC_FILMS);
+        d.preview = &card;
+    }
     {   /* 0.4.5: the selected channel's now / next on the status line, after half a second on it */
         static int last_ci = -1;
         static unsigned since;
@@ -2348,7 +2939,7 @@ static void draw_channels(void)
 }
 
 /* ---- on-screen keyboard -------------------------------------------------- */
-enum { IME_SEARCH, IME_FIELD };
+enum { IME_SEARCH, IME_FIELD, IME_PIN, IME_NEWPIN, IME_ZAP };   /* 0.8.0: PIN check, a new PIN, a channel number */
 static SceWChar16 ime_title[64], ime_init[520], ime_buf[520];
 static int ime_active, ime_purpose;
 static char *ime_target;
@@ -2363,11 +2954,12 @@ static void ime_open(const char *title, const char *initial, int password, int p
     memset(ime_buf, 0, sizeof ime_buf);
     p.supportedLanguages = SCE_IME_LANGUAGE_ENGLISH;
     p.languagesForced = SCE_FALSE;
-    p.type = SCE_IME_TYPE_DEFAULT;
+    int num = purpose == IME_PIN || purpose == IME_NEWPIN || purpose == IME_ZAP;   /* 0.8.0: digits */
+    p.type = num ? SCE_IME_TYPE_NUMBER : SCE_IME_TYPE_DEFAULT;
     p.option = 0;
     p.textBoxMode = password ? SCE_IME_DIALOG_TEXTBOX_MODE_PASSWORD : SCE_IME_DIALOG_TEXTBOX_MODE_WITH_CLEAR;
     p.title = ime_title;
-    p.maxTextLength = purpose == IME_SEARCH ? 64 : 500;
+    p.maxTextLength = num ? (purpose == IME_ZAP ? 5 : 6) : purpose == IME_SEARCH ? 64 : 500;
     p.initialText = ime_init;
     p.inputTextBuffer = ime_buf;
     ime_purpose = purpose;
@@ -2381,8 +2973,106 @@ static void ime_open(const char *title, const char *initial, int password, int p
 
 static void clear_search(void)
 {
+    int was_vod_search = search_fold[0] && section != SEC_LIVE && loaded_group == -4;
     search_q[0] = search_fold[0] = 0;
+    if (was_vod_search) {                                    /* 0.8.0: the results go; the category is opened again with X */
+        channel_list_free(&chans);
+        channel_list_init(&chans);
+        loaded_group = -1;
+        fav_rank_n = nfav_ch = 0;
+        focus = 0;
+    }
     rebuild_visible();
+}
+
+/* ---- 0.8.0: parental lock (PIN), the channel number, searching every film ---- */
+static char f_pin[8];                       /* the settings form's PIN */
+static int f_adult;                         /* (the settings form's, below) */
+static void stop_all(void);
+static int pin_ok;                          /* the PIN was given since the app started */
+enum { PA_NONE, PA_ACTIVATE, PA_ZAP, PA_GUIDE_PLAY, PA_OPEN_CAT, PA_EDIT_PIN, PA_ADULT_OFF, PA_ARCH };
+static int pin_action, pin_arg;
+static GProg pin_prog;
+static void activate_item(int vi);
+static void arch_play(int vi, const GProg *p, int off_ms, int from);
+static void open_vod_category(int g);
+
+/* this needs the PIN first: an adult channel / film / category while the lock is on */
+static int adult_locked_text(const char *name, const char *group)
+{
+    if (!settings.pin[0] || pin_ok || settings.hide_adult) return 0;
+    Channel tmp;
+    memset(&tmp, 0, sizeof tmp);
+    snprintf(tmp.name, sizeof tmp.name, "%s", name ? name : "");
+    snprintf(tmp.group, sizeof tmp.group, "%s", group ? group : "");
+    return iptv_is_adult(&tmp);
+}
+static int adult_locked(const Channel *c) { return c && settings.pin[0] && !pin_ok && !settings.hide_adult && (iptv_is_adult(c) || adult_locked_text(c->name, c->group)); }
+
+static void pin_ask(int action, int arg)
+{
+    pin_action = action;
+    pin_arg = arg;
+    ime_open("PIN", "", 1, IME_PIN, NULL, 0);
+}
+
+static void pin_answer(const char *b)
+{
+    int act = pin_action;
+    pin_action = PA_NONE;
+    if (strcmp(b, settings.pin)) { set_status(1, "Wrong PIN", NULL); plog("pin: wrong"); return; }
+    pin_ok = 1;
+    plog("pin: unlocked until the app is closed");
+    switch (act) {
+    case PA_ACTIVATE: if (pin_arg >= 0 && pin_arg < nvis) activate_item(pin_arg); break;
+    case PA_ZAP: if (pin_arg >= 0 && pin_arg < nvis) { return_state = ST_CHANNELS; state = ST_PLAYING; play_channel(pin_arg); } break;
+    case PA_OPEN_CAT: open_vod_category(pin_arg); break;
+    case PA_EDIT_PIN: ime_open("New PIN (4-6 digits, empty: no lock)", "", 1, IME_NEWPIN, NULL, 0); break;
+    case PA_ADULT_OFF: f_adult = 0; break;
+    case PA_ARCH: if (pin_arg >= 0 && pin_arg < nvis) arch_play(pin_arg, &pin_prog, 0, 0); break;
+    default: break;
+    }
+}
+
+/* channel number n (its place in the list, as shown): played; another category: "All" */
+static void zap_number(int n)
+{
+    if (section != SEC_LIVE || in_episodes || n < 1 || n > chans.count) { set_status(1, "No channel with that number", NULL); return; }
+    int ci = n - 1, vi = -1;
+    for (int i = 0; i < nvis; i++) if (vis[i] == ci) { vi = i; break; }
+    if (vi < 0) {
+        if (state == ST_PLAYING) stop_all();                 /* (play_vis changes with the list) */
+        search_q[0] = search_fold[0] = 0;
+        cur_group = g_all >= 0 ? g_all : 0;
+        rebuild_visible();
+        for (int i = 0; i < nvis; i++) if (vis[i] == ci) { vi = i; break; }
+    }
+    if (vi < 0) { set_status(1, "No channel with that number", NULL); return; }
+    sel = vi;
+    focus = 1;
+    plog("player: channel number %d", n);
+    if (adult_locked(&chans.items[ci])) { pin_ask(PA_ZAP, vi); return; }
+    return_state = ST_CHANNELS;
+    state = ST_PLAYING;
+    play_channel(vi);
+}
+
+/* films / series: a search through every category (the server sends them all; only the matches are kept) */
+static void vod_search(const char *q)
+{
+    if (cur_src < 0 || cur_src >= nsources || sources[cur_src].type != SRC_XTREAM) return;
+    int series = section == SEC_SERIES;
+    load_begin(&sources[cur_src], LOAD_SEARCH, NULL, cur_group);
+    if (!job_active) return;
+    snprintf(job.query, sizeof job.query, "%s", q);
+    iptv_fold(q, job.folded, sizeof job.folded);
+    job.series = series;
+}
+
+static void open_vod_category(int g)
+{
+    if (g < 0 || g >= ngroups || vod_cat(g) < 0 || vod_cat(g) >= nvcats) return;
+    load_begin(&sources[cur_src], section == SEC_FILMS ? LOAD_FILMS : LOAD_SERIES, vcats[vod_cat(g)].id, g);
 }
 
 static void ime_poll(void)
@@ -2405,6 +3095,19 @@ static void ime_poll(void)
         source_clean_field(ime_target);
         return;
     }
+    if (ime_purpose == IME_PIN) { pin_answer(b); return; }  /* 0.8.0 */
+    if (ime_purpose == IME_NEWPIN) {
+        size_t o = 0;
+        for (const char *q = b; *q && o + 1 < sizeof f_pin; q++) if (*q >= '0' && *q <= '9') f_pin[o++] = *q;
+        f_pin[o] = 0;
+        if (o && o < 4) { f_pin[0] = 0; set_status(1, "The PIN needs 4 to 6 digits", NULL); }
+        return;
+    }
+    if (ime_purpose == IME_ZAP) { zap_number(atoi(b)); return; }
+    int digits = b[0] != 0;                                  /* 0.8.0: a number in a live list: that channel */
+    for (const char *q = b; *q; q++) if (*q < '0' || *q > '9') digits = 0;
+    if (digits && section == SEC_LIVE && !in_episodes && strlen(b) <= 5) { clear_search(); zap_number(atoi(b)); return; }
+    if (section != SEC_LIVE && !in_episodes && b[0]) { vod_search(b); return; }   /* 0.8.0: films / series: every category */
     snprintf(search_q, sizeof search_q, "%s", b);
     if (!search_q[0]) { clear_search(); return; }
     iptv_fold(search_q, search_fold, sizeof search_fold);
@@ -2456,6 +3159,7 @@ static void open_settings_form(void)
     f_lang = settings.lang;
     f_adult = settings.hide_adult;
     f_hd = settings.hide_4k;
+    snprintf(f_pin, sizeof f_pin, "%s", settings.pin);      /* 0.8.0 */
     f_res = 0;
     for (int i = 0; i < RES_N; i++) if (RES_VALUES[i] == settings.res_pref) f_res = i;
 }
@@ -2474,7 +3178,7 @@ static int source_field_enabled(int i)
 }
 
 #define SRC_FIELDS 7                                     /* (+1: "Delete playlist" when editing one) */
-#define SET_FIELDS 11                                    /* (0.5.0: + "Clear Recently Watched"; 0.7.0: + "Clear watched episodes") */
+#define SET_FIELDS 12                                    /* (0.5.0: + "Clear Recently Watched"; 0.7.0: + "Clear watched episodes"; 0.8.0: + PIN) */
 static int confirm_delete;                               /* the edit form's "Delete playlist?" box */
 static int confirm_clear_recent;                         /* 0.5.0: the settings' "Clear recently watched?" box */
 static int confirm_clear_watched;                        /* 0.7.0: "Clear watched episodes?" */
@@ -2583,6 +3287,8 @@ static void save_settings_form(void)
     settings.lang = f_lang;
     settings.hide_adult = f_adult;
     settings.hide_4k = f_hd;
+    if (strcmp(settings.pin, f_pin)) { plog("pin: %s", f_pin[0] ? "set" : "removed"); pin_ok = f_pin[0] != 0; }   /* (who set it knows it) */
+    snprintf(settings.pin, sizeof settings.pin, "%s", f_pin);
     settings.res_pref = RES_VALUES[f_res];
     save_settings();
     apply_language();
@@ -2618,13 +3324,20 @@ static void form_activate(void)
         case 0: ime_open("Transcoding server (e.g. http://192.168.1.20:8090)", f_proxy, 0, IME_FIELD, f_proxy, sizeof f_proxy); break;
         case 1: f_auto = (f_auto + 1) % 3; break;
         case 2: f_lang = (f_lang + 1) % 3; break;
-        case 3: f_adult = !f_adult; break;
-        case 4: f_hd = !f_hd; break;
-        case 5: f_res = (f_res + 1) % RES_N; break;
-        case 6: server_test_pending = 1; break;              /* (0.5.0: not inside the frame: it crashed the app) */
-        case 7: confirm_clear_recent = 1; break;
-        case 8: confirm_clear_watched = 1; break;
-        case 9: save_settings_form(); break;
+        case 3:                                              /* (0.8.0: off only with the PIN) */
+            if (f_adult && settings.pin[0] && !pin_ok) pin_ask(PA_ADULT_OFF, 0);
+            else f_adult = !f_adult;
+            break;
+        case 4:                                              /* 0.8.0: the parental lock's PIN */
+            if (settings.pin[0] && !pin_ok) pin_ask(PA_EDIT_PIN, 0);
+            else ime_open("New PIN (4-6 digits, empty: no lock)", "", 1, IME_NEWPIN, NULL, 0);
+            break;
+        case 5: f_hd = !f_hd; break;
+        case 6: f_res = (f_res + 1) % RES_N; break;
+        case 7: server_test_pending = 1; break;              /* (0.5.0: not inside the frame: it crashed the app) */
+        case 8: confirm_clear_recent = 1; break;
+        case 9: confirm_clear_watched = 1; break;
+        case 10: save_settings_form(); break;
         default: form_kind = FORM_NONE; status[0] = 0; break;
         }
     }
@@ -2662,13 +3375,14 @@ static void draw_form(void)
         f[1] = (ScrField){ T("Use automatically"), T(AUTO_NAMES[f_auto]), SCR_F_CHOICE, 1 };   /* 0.4.5: off / when needed / always */
         f[2] = (ScrField){ T("Language"), T(LANG_NAMES[f_lang]), SCR_F_CHOICE, 1 };
         f[3] = (ScrField){ T("Hide adult channels"), T(f_adult ? "On" : "Off"), SCR_F_TOGGLE, 1 };
-        f[4] = (ScrField){ T("Hide channels named 4K / UHD"), T(f_hd ? "On" : "Off"), SCR_F_TOGGLE, 1 };
-        f[5] = (ScrField){ T("Preferred resolution"), T(RES_NAMES[f_res]), SCR_F_CHOICE, 1 };
-        f[6] = (ScrField){ T("Test server"), NULL, SCR_F_BUTTON, 1 };
-        f[7] = (ScrField){ T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 };
-        f[8] = (ScrField){ T("Clear watched episodes"), NULL, SCR_F_BUTTON, 1 };
-        f[9] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
-        f[10] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
+        f[4] = (ScrField){ T("Parental lock (PIN)"), f_pin[0] ? "****" : T("Off"), SCR_F_TEXT, 1 };   /* 0.8.0 */
+        f[5] = (ScrField){ T("Hide channels named 4K / UHD"), T(f_hd ? "On" : "Off"), SCR_F_TOGGLE, 1 };
+        f[6] = (ScrField){ T("Preferred resolution"), T(RES_NAMES[f_res]), SCR_F_CHOICE, 1 };
+        f[7] = (ScrField){ T("Test server"), NULL, SCR_F_BUTTON, 1 };
+        f[8] = (ScrField){ T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 };
+        f[9] = (ScrField){ T("Clear watched episodes"), NULL, SCR_F_BUTTON, 1 };
+        f[10] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
+        f[11] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
         scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), f, SET_FIELDS, form_sel, H, NH(H), status, status_err);
         if (confirm_clear_recent) scr_confirm(T("Clear recently watched?"), T("The recently watched channels of every playlist are removed. Favorites stay."));
         if (confirm_clear_watched) scr_confirm(T("Clear watched episodes?"), T("The ticks of watched episodes are removed. Where films stopped is kept."));
@@ -2693,6 +3407,7 @@ static void apply_filters_now(void)
     if (nvis && sel < nvis) snprintf(cname, sizeof cname, "%s", chans.items[vis[sel]].name);
     int was_focus = focus, before = chans.count;
     build_groups();
+    guide_setup();                                           /* 0.8.0 (the channels moved) */
     group_restore();
     rebuild_visible();
     for (int i = 0; i < nvis; i++) if (!strcmp(chans.items[vis[i]].name, cname)) { sel = i; break; }
@@ -2799,6 +3514,770 @@ static void stop_all(void)
     next_ep_at = 0;                                          /* 0.7.0 */
     probe_cancel();
     tsp_stop();
+}
+
+/* ===== 0.8.0: the guide, a channel's schedule, catch-up, film details, the series screen ======================== */
+static const char *const WDAY[2][7] = { { "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat" }, { "Paz", "Pzt", "Sal", "\xC3\x87" "ar", "Per", "Cum", "Cmt" } };
+static const char *const MON[2][12] = { { "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec" },
+                                        { "Oca", "\xC5\x9E" "ub", "Mar", "Nis", "May", "Haz", "Tem", "A\xC4\x9Fu", "Eyl", "Eki", "Kas", "Ara" } };
+static int64_t local_day(int64_t t) { int64_t l = t + tz_min * 60; return l >= 0 ? l / 86400 : -((-l + 86399) / 86400); }
+
+static void day_ymd(int64_t days, int *y, int *m, int *d)
+{
+    int64_t z = days + 719468, era = (z >= 0 ? z : z - 146096) / 146097, doe = z - era * 146097;
+    int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365, doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    int64_t mp = (5 * doy + 2) / 153;
+    *d = (int)(doy - (153 * mp + 2) / 5 + 1);
+    *m = (int)(mp < 10 ? mp + 3 : mp - 9);
+    *y = (int)(yoe + era * 400 + (*m <= 2));
+}
+
+/* a time of day as the console shows it */
+static void clock_of(int64_t t, char *b, size_t n)
+{
+    int64_t mins = (t / 60 + tz_min) % 1440;
+    if (mins < 0) mins += 1440;
+    int h = (int)(mins / 60), mi = (int)(mins % 60);
+    if (time_12h > 0) snprintf(b, n, "%d:%02d %s", h % 12 ? h % 12 : 12, mi, h < 12 ? "AM" : "PM");
+    else snprintf(b, n, "%02d:%02d", h, mi);
+}
+
+/* "Today", "Tomorrow", "Yesterday", "Wed 22" */
+static void day_label(int64_t t, char *b, size_t n)
+{
+    int64_t d = local_day(t), diff = d - local_day(now_unix());
+    int y, m, dd, tr = lang_get() == LANG_TR;
+    day_ymd(d, &y, &m, &dd);
+    if (diff == 0) snprintf(b, n, "%s", T("Today"));
+    else if (diff == 1) snprintf(b, n, "%s", T("Tomorrow"));
+    else if (diff == -1) snprintf(b, n, "%s", T("Yesterday"));
+    else snprintf(b, n, "%s %d", WDAY[tr][((d % 7) + 11) % 7], dd);
+}
+
+/* "Sun 25 Oct  18:28" */
+static void now_label(char *b, size_t n)
+{
+    int64_t now = now_unix(), d = local_day(now);
+    int y, m, dd, tr = lang_get() == LANG_TR;
+    char c[16];
+    day_ymd(d, &y, &m, &dd);
+    clock_of(now, c, sizeof c);
+    snprintf(b, n, "%s %d %s  %s", WDAY[tr][((d % 7) + 11) % 7], dd, MON[tr][m - 1], c);
+}
+
+/* the programme can be watched from the archive (begun, within the channel's days; Xtream: the server says so) */
+static int prog_archived(int ci, const GProg *p, int64_t now)
+{
+    if (ci < 0 || ci >= chans.count) return 0;
+    const Channel *c = &chans.items[ci];
+    if (!c->archive || c->cu_mode == CU_NONE) return 0;
+    if ((int64_t)p->start > now - 60 || (int64_t)p->start < now - (int64_t)c->archive * 86400) return 0;
+    if ((int64_t)p->end > now) return 1;                     /* on now: from its start */
+    return sources[cur_src].type == SRC_XTREAM ? (p->flags & GP_ARCHIVE) != 0 : 1;
+}
+
+/* the programme of channel ci that starts at `start` (index in guide_progs), -1 if gone */
+static int prog_find(int ci, int64_t start)
+{
+    int n;
+    const GProg *p = guide_progs(&guide, ci, &n);
+    for (int i = 0; i < n; i++) if ((int64_t)p[i].start == start) return i;
+    return -1;
+}
+
+/* catch-up: programme p of the channel vis[vi], off_ms into it */
+static void arch_play(int vi, const GProg *p, int off_ms, int from)
+{
+    if (vi < 0 || vi >= nvis) return;
+    if (adult_locked(&chans.items[vis[vi]])) { pin_prog = *p; pin_ask(PA_ARCH, vi); return; }   /* 0.8.0: parental lock */
+    arch_on = 1;
+    arch_start = p->start;
+    arch_end = p->end;
+    snprintf(arch_title, sizeof arch_title, "%s", guide_str(&guide, p->title));
+    arch_return = from;
+    int ci = vis[vi];
+    if (last_chan != ci) { prev_chan = last_chan; prev_key = last_key; }
+    last_chan = ci;
+    last_key = url_key(chans.items[ci].url);
+    aud_id = -1;
+    sub_id = -1;
+    res_want = 0; res_bw = 0; res_manual = 0; res_menu = 0; res_nnovideo = 0;
+    auto_proxy_tried = 1;                                    /* (the server cannot convert an archive) */
+    film_start_ms = off_ms;
+    film_dur_ms = (int)(arch_end - arch_start) * 1000;
+    return_state = ST_CHANNELS;
+    state = ST_PLAYING;
+    plog("player: catch-up \"%s\" (%d min ago)", arch_title, (int)((now_unix() - arch_start) / 60));
+    play_channel_ex(vi, 0);
+}
+
+/* the programme after (dir 1) or before (-1) the one in the archive: archived ones play, the one on now goes live */
+static void arch_step(int dir)
+{
+    int ci = vis[play_vis], n, i = prog_find(ci, arch_start);
+    const GProg *p = guide_progs(&guide, ci, &n);
+    int64_t now = now_unix();
+    if (i < 0 || i + dir < 0 || i + dir >= n) {
+        snprintf(film_note, sizeof film_note, "%s", T(dir > 0 ? "No later programme in the guide" : "No earlier programme in the archive"));
+        film_note_until = now_ms() + 3000;
+        osd_until_us = now_ms() + 3000;
+        return;
+    }
+    const GProg *q = &p[i + dir];
+    if (dir > 0 && (int64_t)q->end > now) { arch_on = 0; plog("player: catch-up reached now: live"); play_channel(play_vis); return; }
+    if (!prog_archived(ci, q, now)) {
+        snprintf(film_note, sizeof film_note, "%s", T("That programme is not in the archive"));
+        film_note_until = now_ms() + 3000;
+        osd_until_us = now_ms() + 3000;
+        return;
+    }
+    GProg copy = *q;
+    arch_play(play_vis, &copy, 0, arch_return);
+}
+
+/* ---- the guide ---- */
+static int guide_open;                      /* 1 over the channel list, 2 over the player */
+static int gd_row, gd_first, gd_return;     /* the selected row (in vis), the first shown; gd_return: O in the player comes back here */
+static int64_t gd_t0, gd_time;              /* the left edge (on a half hour) and the selected moment */
+static int gd_drawer, gd_dsel, gd_dscroll;
+static int gd_popup, gd_popup_sel;
+static GProg gd_popup_prog;
+static unsigned gd_lr_t0, gd_lr_last;
+#define GD_SPAN 150
+
+static int gd_rows(void) { return guide_open == 2 ? SCR_GUIDE_ROWS_PLAYER : SCR_GUIDE_ROWS_LIST; }
+static int64_t half_hour(int64_t t) { int64_t l = t + tz_min * 60; return (l - ((l % 1800) + 1800) % 1800) - tz_min * 60; }
+
+static void guide_show(int mode, int row)
+{
+    if (!guide_on || !nvis) { set_status(0, "No programme guide for this list", NULL); return; }
+    guide_open = mode;
+    gd_row = row >= 0 && row < nvis ? row : 0;
+    gd_first = gd_row > 1 ? gd_row - 1 : 0;
+    gd_time = now_unix();
+    gd_t0 = half_hour(gd_time - 1800);
+    gd_drawer = gd_popup = 0;
+    if (mode == 2) osd_until_us = 0;
+    plog("epg: guide opened (%s, %d channels, %u KB)", mode == 2 ? "player" : "list", nvis, (unsigned)(guide_bytes(&guide) / 1024));
+}
+
+/* the programme of row r at moment t (NULL if none), its index in *idx */
+static const GProg *gd_prog(int r, int64_t t, int *idx)
+{
+    if (r < 0 || r >= nvis) return NULL;
+    int i = guide_at(&guide, vis[r], t), n;
+    const GProg *p = guide_progs(&guide, vis[r], &n);
+    if (idx) *idx = i;
+    return i >= 0 ? &p[i] : NULL;
+}
+
+static void gd_row_fn(int i, ScrGuideRow *r, void *ctx)
+{
+    (void)ctx;
+    int ci = vis[i];
+    const Channel *c = &chans.items[ci];
+    int64_t now = now_unix(), t1 = gd_t0 + GD_SPAN * 60;
+    r->name = c->name;
+    r->number = ci + 1;
+    r->archive = c->archive > 0 && c->cu_mode != CU_NONE;
+    r->playing = guide_open == 2 && i == play_vis;
+    r->sel = i == gd_row;
+    guide_want(ci);
+    r->loading = guide.ch[ci].state == GC_ASKED || (guide.ch[ci].state == GC_NONE && sources[cur_src].type == SRC_XTREAM) || guide_xmltv == GX_READING;
+    int n, k = guide_from(&guide, ci, gd_t0);
+    const GProg *p = guide_progs(&guide, ci, &n);
+    for (; k >= 0 && k < n && (int64_t)p[k].start < t1 && r->nprogs < SCR_GUIDE_PROGS; k++) {
+        ScrProg *sp = &r->progs[r->nprogs++];
+        sp->start = p[k].start;
+        sp->end = p[k].end;
+        sp->title = guide_str(&guide, p[k].title);
+        sp->flags = ((int64_t)p[k].end <= now ? SCR_PROG_DIM : 0) | ((int64_t)p[k].start <= now && now < (int64_t)p[k].end ? SCR_PROG_LIVE : 0) |
+                    (prog_archived(ci, &p[k], now) ? SCR_PROG_ARCHIVE : 0) |
+                    (i == gd_row && (int64_t)p[k].start <= gd_time && gd_time < (int64_t)p[k].end ? SCR_PROG_SEL : 0);
+    }
+}
+
+static void gd_cat_row(int i, ScrRow *r, void *ctx)
+{
+    static char cnt[16];
+    (void)ctx;
+    r->name = group_title(i);
+    r->fav = i == g_fav && g_fav >= 0;
+    if (gcount[i] >= 0) { snprintf(cnt, sizeof cnt, "%d", gcount[i]); r->right = cnt; }
+}
+
+static void draw_guide(void)
+{
+    static char right[48], day[24], line[200], left[48], plabel[IPTV_NAME_MAX + 24];
+    int64_t now = now_unix();
+    ScrGuide g;
+    memset(&g, 0, sizeof g);
+    g.title = T("Guide");
+    g.subtitle = ngroups ? group_title(cur_group) : NULL;
+    now_label(right, sizeof right);
+    g.right = right;
+    g.t0 = gd_t0;
+    g.now = now;
+    g.span_min = GD_SPAN;
+    g.tz_min = tz_min;
+    day_label(gd_time, day, sizeof day);
+    g.day = day;
+    g.count = nvis;
+    if (gd_row < gd_first) gd_first = gd_row;
+    if (gd_row >= gd_first + gd_rows()) gd_first = gd_row - gd_rows() + 1;
+    g.first = gd_first;
+    g.row = gd_row_fn;
+    int idx;
+    const GProg *p = gd_prog(gd_row, gd_time, &idx);
+    if (p) {
+        char a[16], b[16];
+        clock_of(p->start, a, sizeof a);
+        clock_of(p->end, b, sizeof b);
+        g.sel_title = guide_str(&guide, p->title);
+        snprintf(line, sizeof line, T("%s  \xC2\xB7  %s - %s  \xC2\xB7  %d min"), chans.items[vis[gd_row]].name, a, b, (int)((p->end - p->start) / 60));
+        g.sel_line = line;
+        g.sel_desc = guide_str(&guide, p->desc);
+        g.sel_live = (int64_t)p->start <= now && now < (int64_t)p->end;
+        g.sel_archive = prog_archived(vis[gd_row], p, now);
+        g.sel_note = T(g.sel_live ? "X: watch from the start (archive) or live" : "In the archive: X watches it from the start");
+        if (g.sel_live) {
+            g.sel_progress = (float)(now - p->start) / (float)(p->end - p->start);
+            snprintf(left, sizeof left, T("%d min left"), (int)((p->end - now + 59) / 60));
+            g.sel_left = left;
+        }
+    } else if (nvis) {
+        g.sel_title = chans.items[vis[gd_row]].name;
+        g.sel_line = T(guide_xmltv == GX_READING ? "Loading the guide..." : "No programme information at this time");
+    }
+    if (guide_open == 2 && play_mode == 2) {
+        int w = 0, h = 0;
+        vita2d_texture *tx = tsp_frame(&w, &h);
+        const TspStatus *st = tsp_status();
+        if (tx && w > 0 && h > 0) {
+            g.pic = tx; g.pic_w = w; g.pic_h = h; g.pic_fields = st && st->fields;
+            snprintf(plabel, sizeof plabel, T("%s  \xC2\xB7  playing"), cur_channel()->name);
+            g.pic_label = plabel;
+        }
+    }
+    g.empty = T("No channels");
+    static const UiHint HL[] = { { UI_BTN_CROSS, "Watch" }, { UI_BTN_LEFTRIGHT, "Time" }, { UI_BTN_LR, "Day" }, { UI_BTN_SQUARE, "Schedule" },
+                                 { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Category" } };
+    static const UiHint HP[] = { { UI_BTN_CROSS, "Watch" }, { UI_BTN_LEFTRIGHT, "Time" }, { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_SQUARE, "Schedule" },
+                                 { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_LR, "Day" } };
+    static const UiHint HD[] = { { UI_BTN_CROSS, "Choose" }, { UI_BTN_UPDOWN, "Category" }, { UI_BTN_CIRCLE, "Close" } };
+    static const UiHint HPOP[] = { { UI_BTN_CROSS, "Choose" }, { UI_BTN_CIRCLE, "Cancel" } };
+    g.hints = gd_popup ? HPOP : gd_drawer ? HD : guide_open == 2 ? HP : HL;
+    g.nhints = gd_popup ? NH(HPOP) : gd_drawer ? NH(HD) : guide_open == 2 ? NH(HP) : NH(HL);
+    if (guide_open == 2 && !g.pic) { g.hints = HP; g.nhints = NH(HP); }
+    g.drawer = gd_drawer;
+    g.dcount = ngroups; g.dsel = gd_dsel; g.dscroll = &gd_dscroll; g.drow = gd_cat_row;
+    if (gd_popup) {
+        static char pl[120];
+        char a[16], b[16], dl[24];
+        clock_of(gd_popup_prog.start, a, sizeof a);
+        clock_of(gd_popup_prog.end, b, sizeof b);
+        day_label(gd_popup_prog.start, dl, sizeof dl);
+        g.popup = 1;
+        g.popup_title = guide_str(&guide, gd_popup_prog.title);
+        snprintf(pl, sizeof pl, "%s  \xC2\xB7  %s %s - %s", chans.items[vis[gd_row]].name, dl, a, b);
+        g.popup_line = pl;
+        g.popup_a = T("Watch from the start (archive)");
+        g.popup_b = T((int64_t)gd_popup_prog.end > now ? "Watch live" : "Go to the live channel");
+        g.popup_sel = gd_popup_sel;
+    }
+    scr_guide(&g);
+}
+
+static void chan_guide_show(int vi, int from);
+
+/* X in the guide on row r at moment gd_time */
+static void guide_watch(void)
+{
+    int64_t now = now_unix();
+    const GProg *p = gd_prog(gd_row, gd_time, NULL);
+    if (p && prog_archived(vis[gd_row], p, now)) { gd_popup = 1; gd_popup_sel = 0; gd_popup_prog = *p; return; }
+    if (p && (int64_t)p->end <= now) {
+        set_status(0, "That programme is not in the archive", NULL);
+        snprintf(film_note, sizeof film_note, "%s", T("That programme is not in the archive"));
+        film_note_until = now_ms() + 2500;
+        return;
+    }
+    /* on now, later, or nothing known: the channel live */
+    int was = guide_open;
+    guide_open = 0;
+    if (was == 2 && gd_row == play_vis && !arch_on) return;  /* (already on) */
+    if (adult_locked(&chans.items[vis[gd_row]])) { pin_ask(PA_ZAP, gd_row); return; }
+    arch_on = 0;
+    gd_return = was == 1;
+    return_state = ST_CHANNELS;
+    state = ST_PLAYING;
+    play_channel(gd_row);
+}
+
+static void guide_input(unsigned p)
+{
+    unsigned held = prev_btn;
+    if (gd_popup) {
+        if (p & (SCE_CTRL_UP | SCE_CTRL_DOWN)) gd_popup_sel = !gd_popup_sel;
+        if (p & SCE_CTRL_CIRCLE) gd_popup = 0;
+        else if (p & SCE_CTRL_CROSS) {
+            gd_popup = 0;
+            int was = guide_open;
+            guide_open = 0;
+            if (gd_popup_sel == 0) arch_play(gd_row, &gd_popup_prog, 0, was == 1 ? 1 : 0);
+            else if (!(was == 2 && gd_row == play_vis && !arch_on)) {
+                if (adult_locked(&chans.items[vis[gd_row]])) { pin_ask(PA_ZAP, gd_row); return; }
+                arch_on = 0;
+                gd_return = was == 1;
+                return_state = ST_CHANNELS;
+                state = ST_PLAYING;
+                play_channel(gd_row);
+            }
+        }
+        return;
+    }
+    if (gd_drawer) {
+        if (p & SCE_CTRL_DOWN) gd_dsel = (gd_dsel + 1) % ngroups;
+        if (p & SCE_CTRL_UP) gd_dsel = (gd_dsel + ngroups - 1) % ngroups;
+        if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) gd_drawer = 0;
+        else if (p & SCE_CTRL_CROSS) {
+            gd_drawer = 0;
+            if (gd_dsel != cur_group) {
+                cur_group = gd_dsel;
+                search_q[0] = search_fold[0] = 0;
+                rebuild_visible();
+                gd_row = gd_first = 0;
+            }
+        }
+        return;
+    }
+    if (p & SCE_CTRL_DOWN) { if (gd_row + 1 < nvis) gd_row++; }
+    if (p & SCE_CTRL_UP) { if (gd_row > 0) gd_row--; }
+    if (rstick_ud > 0 && gd_row + 1 < nvis) gd_row++;
+    if (rstick_ud < 0 && gd_row > 0) gd_row--;
+    int dir = 0;                                             /* left / right, repeating while held */
+    unsigned now = now_ms();
+    if (p & SCE_CTRL_RIGHT) { dir = 1; gd_lr_t0 = gd_lr_last = now; }
+    else if (p & SCE_CTRL_LEFT) { dir = -1; gd_lr_t0 = gd_lr_last = now; }
+    else if ((held & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)) && now - gd_lr_t0 > 400 && now - gd_lr_last > 110) {
+        dir = held & SCE_CTRL_RIGHT ? 1 : -1;
+        gd_lr_last = now;
+    }
+    int64_t tnow = now_unix();
+    if (dir) {
+        const GProg *cur = gd_prog(gd_row, gd_time, NULL);
+        if (dir > 0) gd_time = cur ? (int64_t)cur->end : gd_time + 1800;
+        else gd_time = cur ? (int64_t)cur->start - 1 : gd_time - 1800;
+        const GProg *q = gd_prog(gd_row, gd_time, NULL);       /* (on a programme: its middle shows it) */
+        if (!q && dir < 0) {
+            int n, k = guide_from(&guide, vis[gd_row], gd_time - 6 * 3600);
+            const GProg *pp = guide_progs(&guide, vis[gd_row], &n);
+            for (; k >= 0 && k < n && (int64_t)pp[k].end <= gd_time; k++) q = &pp[k];
+            if (q && gd_time - (int64_t)q->end < 3600) gd_time = q->start;
+        }
+    }
+    if (p & SCE_CTRL_RTRIGGER) gd_time += 86400;
+    if (p & SCE_CTRL_LTRIGGER) gd_time -= 86400;
+    if (gd_time < tnow - 8 * 86400) gd_time = tnow - 8 * 86400;
+    if (gd_time > tnow + 4 * 86400) gd_time = tnow + 4 * 86400;
+    if (gd_time < gd_t0 + 60) gd_t0 = half_hour(gd_time - 600);               /* the moment stays on the screen */
+    if (gd_time > gd_t0 + GD_SPAN * 60 - 900) gd_t0 = half_hour(gd_time - (GD_SPAN - 60) * 60);
+    if (p & SCE_CTRL_CROSS) guide_watch();
+    else if (p & SCE_CTRL_SQUARE) chan_guide_show(gd_row, 1);
+    else if ((p & SCE_CTRL_SELECT) && guide_open == 1 && ngroups > 1) { gd_drawer = 1; gd_dsel = cur_group; gd_dscroll = 0; }
+    else if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_TRIANGLE)) {
+        int was = guide_open;
+        guide_open = 0;
+        if (was == 1) { sel = gd_row < nvis ? gd_row : 0; focus = 1; }
+    }
+}
+
+/* ---- one channel's schedule, day by day ---- */
+static int cg_open;                         /* 1 from the guide / list, 2 from the player */
+static int cg_vi, cg_day, cg_ndays, cg_back, cg_sel, cg_scroll;
+static int cg_idx[512], cg_n;               /* the day's programmes (indexes in guide_progs) */
+
+static void cg_fill(void)
+{
+    cg_n = 0;
+    if (cg_vi < 0 || cg_vi >= nvis) return;
+    int ci = vis[cg_vi], n;
+    const GProg *p = guide_progs(&guide, ci, &n);
+    int64_t day = local_day(now_unix()) + (cg_day - cg_back);
+    for (int i = 0; i < n && cg_n < (int)(sizeof cg_idx / sizeof cg_idx[0]); i++)
+        if (local_day(p[i].start) == day) cg_idx[cg_n++] = i;
+}
+
+static void chan_guide_show(int vi, int from)
+{
+    if (!guide_on || vi < 0 || vi >= nvis) return;
+    const Channel *c = &chans.items[vis[vi]];
+    cg_open = from;
+    cg_vi = vi;
+    cg_back = c->archive > 0 && c->cu_mode != CU_NONE ? (c->archive > 7 ? 7 : c->archive) : 1;
+    cg_ndays = cg_back + 2;
+    cg_day = cg_back;
+    cg_fill();
+    int64_t now = now_unix(), at = arch_on && from == 2 ? arch_start : now;
+    if (arch_on && from == 2) cg_day = cg_back + (int)(local_day(arch_start) - local_day(now)), cg_fill();
+    cg_sel = cg_scroll = 0;
+    int n;
+    const GProg *p = guide_progs(&guide, vis[vi], &n);
+    for (int k = 0; k < cg_n; k++) if ((int64_t)p[cg_idx[k]].start <= at && at < (int64_t)p[cg_idx[k]].end) { cg_sel = k; break; }
+    cg_scroll = cg_sel > 3 ? cg_sel - 3 : 0;
+}
+
+static void cg_row(int i, ScrCGRow *r, void *ctx)
+{
+    static char tm[SCR_CG_ROWS][16];
+    (void)ctx;
+    int n;
+    const GProg *p = guide_progs(&guide, vis[cg_vi], &n);
+    if (i < 0 || i >= cg_n) return;
+    const GProg *q = &p[cg_idx[i]];
+    int64_t now = now_unix();
+    char *b = tm[i % SCR_CG_ROWS];
+    clock_of(q->start, b, 16);
+    r->time = b;
+    r->title = guide_str(&guide, q->title);
+    r->live = (int64_t)q->start <= now && now < (int64_t)q->end;
+    r->archive = prog_archived(vis[cg_vi], q, now);
+    if (r->live) r->progress = (float)(now - q->start) / (float)(q->end - q->start);
+}
+
+static void draw_chan_guide(void)
+{
+    static char dayn[10][24], d1[96], d2[96], right[48];
+    const char *days[10];
+    int64_t now = now_unix();
+    for (int k = 0; k < cg_ndays && k < 10; k++) { day_label(now + (int64_t)(k - cg_back) * 86400, dayn[k], sizeof dayn[k]); days[k] = dayn[k]; }
+    const Channel *c = &chans.items[vis[cg_vi]];
+    guide_want(vis[cg_vi]);
+    ScrChanGuide g;
+    memset(&g, 0, sizeof g);
+    g.title = c->name;
+    g.subtitle = T("Schedule");
+    if (c->archive && c->cu_mode != CU_NONE) { snprintf(right, sizeof right, T("archive %d days"), c->archive); g.right = right; }
+    g.days = days;
+    g.ndays = cg_ndays > 10 ? 10 : cg_ndays;
+    g.day = cg_day;
+    g.count = cg_n;
+    g.sel = cg_sel;
+    g.scroll = &cg_scroll;
+    g.row = cg_row;
+    g.empty = T(guide.ch[vis[cg_vi]].state == GC_ASKED || guide_xmltv == GX_READING ? "Loading..." : "No programme information for this day");
+    if (cg_sel < cg_n) {
+        int n;
+        const GProg *p = guide_progs(&guide, vis[cg_vi], &n);
+        const GProg *q = &p[cg_idx[cg_sel]];
+        char a[16], b[16], dl[24];
+        clock_of(q->start, a, sizeof a);
+        clock_of(q->end, b, sizeof b);
+        day_label(q->start, dl, sizeof dl);
+        g.d_title = guide_str(&guide, q->title);
+        snprintf(d1, sizeof d1, T("%s %s - %s  \xC2\xB7  %d min"), dl, a, b, (int)((q->end - q->start) / 60));
+        g.d_line1 = d1;
+        if ((int64_t)q->start <= now && now < (int64_t)q->end) { snprintf(d2, sizeof d2, T("%d min left"), (int)((q->end - now + 59) / 60)); g.d_line2 = d2; }
+        g.d_archive = prog_archived(vis[cg_vi], q, now);
+        g.d_desc = guide_str(&guide, q->desc);
+    }
+    static const UiHint H[] = { { UI_BTN_CROSS, "Watch" }, { UI_BTN_LR, "Day" }, { UI_BTN_UPDOWN, "Programme" }, { UI_BTN_CIRCLE, "Back" } };
+    g.hints = H;
+    g.nhints = NH(H);
+    scr_chan_guide(&g);
+}
+
+static void chan_guide_input(unsigned p)
+{
+    int day = cg_day;
+    if ((p & SCE_CTRL_RTRIGGER) || ((p & SCE_CTRL_RIGHT))) { if (cg_day + 1 < cg_ndays) cg_day++; }
+    if ((p & SCE_CTRL_LTRIGGER) || ((p & SCE_CTRL_LEFT))) { if (cg_day > 0) cg_day--; }
+    if (day != cg_day) { cg_fill(); cg_sel = cg_scroll = 0; }
+    if (cg_n == 0) cg_fill();                                /* (the guide may have come meanwhile) */
+    if ((p & SCE_CTRL_DOWN) && cg_sel + 1 < cg_n) cg_sel++;
+    if ((p & SCE_CTRL_UP) && cg_sel > 0) cg_sel--;
+    if (rstick_ud > 0 && cg_sel + 1 < cg_n) cg_sel++;
+    if (rstick_ud < 0 && cg_sel > 0) cg_sel--;
+    if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_TRIANGLE)) { cg_open = 0; return; }
+    if ((p & SCE_CTRL_CROSS) && cg_sel < cg_n) {
+        int n, ci = vis[cg_vi];
+        const GProg *pp = guide_progs(&guide, ci, &n);
+        GProg q = pp[cg_idx[cg_sel]];
+        int64_t now = now_unix();
+        int from = cg_open == 2 ? arch_return : 2;
+        if (prog_archived(ci, &q, now)) { cg_open = 0; guide_open = 0; arch_play(cg_vi, &q, 0, from); }
+        else if ((int64_t)q.start <= now && now < (int64_t)q.end) {
+            cg_open = 0; guide_open = 0;
+            if (!(state == ST_PLAYING && cg_vi == play_vis && !arch_on)) {
+                if (adult_locked(&chans.items[vis[cg_vi]])) { pin_ask(PA_ZAP, cg_vi); return; }
+                arch_on = 0; return_state = ST_CHANNELS; state = ST_PLAYING; play_channel(cg_vi);
+            }
+        } else set_status(0, (int64_t)q.start > now ? "Not on yet" : "That programme is not in the archive", NULL);
+    }
+}
+
+/* ---- film / series cards ---- */
+static char card_line[96], card_rating_s[16];
+
+/* a film id from its link (.../movie/U/P/ID.ext) */
+static void film_id(const Channel *c, char *out, size_t cap)
+{
+    out[0] = 0;
+    if (c && strstr(c->url, "/movie/")) watch_ep_key(c->url, out, cap);
+}
+
+static void fmt_minutes(int sec, char *b, size_t n)
+{
+    int m = (sec + 30) / 60;
+    if (m >= 60) snprintf(b, n, T("%d h %d min"), m / 60, m % 60);
+    else snprintf(b, n, T("%d min"), m);
+}
+
+/* the card of film / series c (list fields, the film's details when they came, the poster) */
+static void vod_card_of(const ChannelList *l, const Channel *c, ScrVodCard *k, int want_info)
+{
+    memset(k, 0, sizeof *k);
+    k->rating = -1;
+    if (!c) return;
+    char id[24];
+    film_id(c, id, sizeof id);
+    const VodInfo *vi = want_info && id[0] ? vodinfo_get(id) : NULL;
+    const char *poster = channel_extra(l, c, CX_POSTER), *year = channel_extra(l, c, CX_YEAR), *rating = channel_extra(l, c, CX_RATING);
+    k->title = c->name;
+    k->genre = channel_extra(l, c, CX_GENRE);
+    k->director = channel_extra(l, c, CX_DIRECTOR);
+    k->cast = channel_extra(l, c, CX_CAST);
+    k->plot = channel_extra(l, c, CX_PLOT);
+    int dur = 0;
+    if (vi) {
+        if (vi->poster[0]) poster = vi->poster;
+        if (vi->year[0]) year = vi->year;
+        if (vi->rating[0]) rating = vi->rating;
+        if (vi->genre[0]) k->genre = vi->genre;
+        if (vi->director[0]) k->director = vi->director;
+        if (vi->cast[0]) k->cast = vi->cast;
+        if (vi->plot[0]) k->plot = vi->plot;
+        dur = vi->dur_s;
+    }
+    char ds[32] = "";
+    if (dur > 0) fmt_minutes(dur, ds, sizeof ds);
+    snprintf(card_line, sizeof card_line, "%s%s%s", year ? year : "", year && ds[0] ? "  \xC2\xB7  " : "", ds);
+    k->line = card_line;
+    if (rating && atof(rating) > 0) {
+        float r = (float)atof(rating);
+        if (r > 10.0f) r = 10.0f;
+        k->rating = r;
+        snprintf(card_rating_s, sizeof card_rating_s, "%s", rating);
+    }
+    poster_request(poster);
+    k->poster = poster_now();
+    k->loading = poster_loading();
+}
+
+/* ---- film details (Triangle on a film) ---- */
+static int det_open, det_sel;
+
+static void det_buttons(const Channel *c, const char **b, int *nb, int *resume_ms)
+{
+    static char cont[48];
+    int k = resume_find(resume, nresume, c->url);
+    *resume_ms = k >= 0 && resume_worth(resume[k].pos_ms, resume[k].dur_ms) ? resume[k].pos_ms : -1;
+    *nb = 0;
+    if (*resume_ms >= 0) {
+        char w[24];
+        fmt_time(w, sizeof w, *resume_ms);
+        snprintf(cont, sizeof cont, T("Continue (%s)"), w);
+        b[(*nb)++] = cont;
+        b[(*nb)++] = T("From the start");
+    } else b[(*nb)++] = T("Play");
+    b[(*nb)++] = T("Favourite");
+}
+
+static void draw_film_detail(void)
+{
+    if (!nvis || sel >= nvis) { det_open = 0; return; }
+    const Channel *c = &chans.items[vis[sel]];
+    ScrVodDetail d;
+    memset(&d, 0, sizeof d);
+    d.header = T("Films");
+    d.header_sub = ngroups && loaded_group >= 0 ? group_title(loaded_group) : NULL;
+    vod_card_of(&chans, c, &d.card, 1);
+    const char *b[3];
+    int nb, rm;
+    det_buttons(c, b, &nb, &rm);
+    d.buttons = b;
+    d.nbuttons = nb;
+    if (det_sel >= nb) det_sel = nb - 1;
+    d.sel = det_sel;
+    d.progress = -1;
+    if (rm >= 0) {
+        int k = resume_find(resume, nresume, c->url);
+        if (k >= 0 && resume[k].dur_ms > 0) d.progress = (float)resume[k].pos_ms / (float)resume[k].dur_ms;
+    }
+    d.fav = ch_fav(vis[sel]) >= 0;
+    d.note = T("Details and poster come from the provider; without them only the name shows.");
+    static const UiHint H[] = { { UI_BTN_CROSS, "Choose" }, { UI_BTN_LEFTRIGHT, "Button" }, { UI_BTN_UPDOWN, "Previous / next" },
+                                { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_START, "Fav." } };
+    d.hints = H;
+    d.nhints = NH(H);
+    scr_vod_detail(&d);
+}
+
+static void film_detail_input(unsigned p)
+{
+    if (!nvis) { det_open = 0; return; }
+    const Channel *c = &chans.items[vis[sel]];
+    const char *b[3];
+    int nb, rm;
+    det_buttons(c, b, &nb, &rm);
+    if ((p & SCE_CTRL_RIGHT) && det_sel + 1 < nb) det_sel++;
+    if ((p & SCE_CTRL_LEFT) && det_sel > 0) det_sel--;
+    if ((p & SCE_CTRL_DOWN) && sel + 1 < nvis) { sel++; det_sel = 0; }
+    if ((p & SCE_CTRL_UP) && sel > 0) { sel--; det_sel = 0; }
+    if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_TRIANGLE)) { det_open = 0; return; }
+    int fav_btn = nb - 1;
+    if ((p & SCE_CTRL_START) || ((p & SCE_CTRL_CROSS) && det_sel == fav_btn)) {
+        int r = fav_toggle_vod(&chans.items[vis[sel]]);
+        set_status(r < 0, r < 0 ? "Could not add it to the favorites" : fav_note(r), NULL);
+        return;
+    }
+    if (p & SCE_CTRL_CROSS) {
+        det_open = 0;
+        if (adult_locked(&chans.items[vis[sel]])) { pin_ask(PA_ACTIVATE, sel); return; }
+        return_state = ST_CHANNELS;
+        state = ST_PLAYING;
+        film_start_ms = rm >= 0 && det_sel == 0 ? rm : 0;
+        play_channel(sel);
+    }
+}
+
+/* ---- the series screen (its episodes): seasons as tabs ---- */
+static int ep_scroll;
+
+static void seasons_build(void)
+{
+    nseasons = 0;
+    for (int i = 0; i < chans.count && nseasons < (int)(sizeof seasons / sizeof seasons[0]); i++) {
+        const char *g = chans.items[i].group;
+        int found = 0;
+        for (int k = 0; k < nseasons; k++) if (!strcmp(seasons[k], g)) { found = 1; break; }
+        if (!found) snprintf(seasons[nseasons++], sizeof seasons[0], "%s", g);
+    }
+    cur_season = 0;
+}
+
+/* the season of chans[ci] chosen (vis rebuilt) */
+static void season_of(int ci)
+{
+    if (ci < 0 || ci >= chans.count || nseasons < 2) return;
+    for (int k = 0; k < nseasons; k++)
+        if (!strcmp(seasons[k], chans.items[ci].group)) {
+            if (k != cur_season) { cur_season = k; rebuild_visible(); }
+            break;
+        }
+}
+
+static const char *season_title(int k, char *buf, size_t cap)
+{
+    int n;
+    if (sscanf(seasons[k], "Season %d", &n) == 1) snprintf(buf, cap, T("Season %d"), n);
+    else snprintf(buf, cap, "%s", seasons[k][0] ? seasons[k] : T("Episodes"));
+    return buf;
+}
+
+static void ep_row(int i, ScrEpRow *r, void *ctx)
+{
+    static char right[SCR_EP_ROWS][24];
+    (void)ctx;
+    const Channel *c = &chans.items[vis[i]];
+    r->name = c->name;
+    const char *d = channel_extra(&chans, c, CX_DURATION);
+    int secs = 0;
+    if (d) { int h, m, s2; secs = sscanf(d, "%d:%d:%d", &h, &m, &s2) == 3 ? h * 3600 + m * 60 + s2 : atoi(d); }
+    if (secs > 0) { fmt_minutes(secs, right[i % SCR_EP_ROWS], sizeof right[0]); r->right = right[i % SCR_EP_ROWS]; }
+    const WatchEntry *w = cur_watch();
+    if (w && w->done) { char ek[WATCH_ID]; watch_ep_key(c->url, ek, sizeof ek); r->check = watch_is_done(w, ek); }
+    int k = resume_find(resume, nresume, c->url);
+    if (k >= 0 && resume_worth(resume[k].pos_ms, resume[k].dur_ms) && resume[k].dur_ms > 0) r->progress = (float)resume[k].pos_ms / (float)resume[k].dur_ms;
+}
+
+static void draw_series(void)
+{
+    static char sn[40][48], line[96];
+    const char *names[40];
+    for (int k = 0; k < nseasons; k++) names[k] = season_title(k, sn[k], sizeof sn[k]);
+    ScrSeries s;
+    memset(&s, 0, sizeof s);
+    s.header = T("Series");
+    s.header_sub = series_name;
+    const Channel *sc = series_ci_saved >= 0 && series_ci_saved < series_saved.count ? &series_saved.items[series_ci_saved] : NULL;
+    if (sc) vod_card_of(&series_saved, sc, &s.card, 0);
+    else { memset(&s.card, 0, sizeof s.card); s.card.rating = -1; }
+    s.card.title = series_name;
+    if (series_info_ok) {
+        if (series_info.plot[0]) s.card.plot = series_info.plot;
+        if (series_info.rating[0] && atof(series_info.rating) > 0) s.card.rating = (float)atof(series_info.rating) > 10 ? 10 : (float)atof(series_info.rating);
+        if (series_info.poster[0] && !(sc && channel_extra(&series_saved, sc, CX_POSTER))) { poster_request(series_info.poster); s.card.poster = poster_now(); s.card.loading = poster_loading(); }
+    }
+    const char *year = series_info_ok && series_info.year[0] ? series_info.year : sc ? channel_extra(&series_saved, sc, CX_YEAR) : NULL;
+    const char *genre = series_info_ok && series_info.genre[0] ? series_info.genre : sc ? channel_extra(&series_saved, sc, CX_GENRE) : NULL;
+    char ns[32];
+    snprintf(ns, sizeof ns, T(nseasons == 1 ? "%d season" : "%d seasons"), nseasons);
+    snprintf(line, sizeof line, "%s%s%s%s%s", year ? year : "", year ? "  \xC2\xB7  " : "", genre ? genre : "", genre ? "  \xC2\xB7  " : "", ns);
+    s.card.line = line;
+    s.seasons = names;
+    s.nseasons = nseasons;
+    s.season = cur_season;
+    s.count = nvis;
+    s.sel = sel;
+    s.scroll = &ep_scroll;
+    s.row = ep_row;
+    static const UiHint H[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_LR, "Season" }, { UI_BTN_UPDOWN, "Episode" }, { UI_BTN_CIRCLE, "Back" },
+                                { UI_BTN_SEP, "" }, { UI_BTN_START, "Fav." } };
+    static const UiHint H1[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_UPDOWN, "Episode" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_START, "Fav." } };
+    s.hints = nseasons > 1 ? H : H1;
+    s.nhints = nseasons > 1 ? NH(H) : NH(H1);
+    s.status = status;
+    scr_series(&s);
+}
+
+/* ---- Triangle while a film plays: its details over the picture ---- */
+
+static void draw_info_overlay(void)
+{
+    const Channel *c = cur_channel();
+    ScrVodDetail d;
+    memset(&d, 0, sizeof d);
+    if (in_episodes) {                                       /* an episode: its series' card with the episode's plot */
+        const Channel *sc = series_ci_saved >= 0 && series_ci_saved < series_saved.count ? &series_saved.items[series_ci_saved] : NULL;
+        if (sc) vod_card_of(&series_saved, sc, &d.card, 0); else d.card.rating = -1;
+        d.card.title = c->name;
+        const char *pl = channel_extra(&chans, c, CX_PLOT);
+        if (pl) d.card.plot = pl;
+        else if (series_info_ok && series_info.plot[0]) d.card.plot = series_info.plot;
+        d.card.line = series_name;
+    } else vod_card_of(&chans, c, &d.card, 1);
+    d.overlay = 1;
+    static const UiHint H[] = { { UI_BTN_TRIANGLE, "Close" }, { UI_BTN_CIRCLE, "Close" } };
+    d.hints = H;
+    d.nhints = NH(H);
+    scr_vod_detail(&d);
+}
+
+/* what is on the screen when an overlay closes */
+static void draw_current(void)
+{
+    if (state == ST_PLAYING) { if (play_mode == 0) draw_mp4_screen(1); else if (play_mode == 1) draw_probe_screen(); else draw_tsp_screen(1); }
+    else if (state == ST_CHANNELS) draw_channels();
+    else draw_sources();
+}
+
+/* the player keeps taking its pictures while something covers it */
+static void player_keep_going(void)
+{
+    if (state != ST_PLAYING) return;
+    if (play_mode == 2) { int w, h; tsp_frame(&w, &h); }
+    else if (play_mode == 0) player_poll();
 }
 
 /* ---- start-up -------------------------------------------------------------- */
@@ -2923,6 +4402,21 @@ int main(void)
             p = 0;
         }
         frame_begin();
+        guide_tick(state == ST_PLAYING);                     /* 0.8.0: background answers (before anything is drawn) */
+        if (state == ST_PLAYING && sleep_at && (int)(now_ms() - sleep_at) >= 0) {   /* 0.8.0: the sleep timer ran out */
+            sleep_at = 0;
+            sleep_idx = 0;
+            if (film_playing()) save_film_position();
+            stop_all();
+            tsp_vod_cache_clear();
+            arch_on = 0; info_ovl = 0; guide_open = 0; cg_open = 0; res_menu = 0;
+            state = return_state;
+            if (state == ST_CHANNELS) { sel = play_vis < nvis ? play_vis : 0; focus = 1; }
+            else sel = src_disp(cur_src);
+            set_status(0, "Sleep timer: playback stopped", NULL);
+            plog("player: sleep timer: stopped");
+            p = 0;
+        }
 
         if (job_active) {                                    /* a channel list is loading: O cancels */
             if (load_poll(p)) state = ST_CHANNELS;
@@ -2958,9 +4452,12 @@ int main(void)
                 set_form_type((f_type + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3);
             if (form_kind == FORM_SETTINGS && form_sel == 1 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
                 f_auto = (f_auto + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3;
-            if (form_kind == FORM_SETTINGS && form_sel == 3 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_adult = !f_adult;
-            if (form_kind == FORM_SETTINGS && form_sel == 4 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_hd = !f_hd;
-            if (form_kind == FORM_SETTINGS && form_sel == 5 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
+            if (form_kind == FORM_SETTINGS && form_sel == 3 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {
+                if (f_adult && settings.pin[0] && !pin_ok) pin_ask(PA_ADULT_OFF, 0);   /* 0.8.0 */
+                else f_adult = !f_adult;
+            }
+            if (form_kind == FORM_SETTINGS && form_sel == 5 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_hd = !f_hd;
+            if (form_kind == FORM_SETTINGS && form_sel == 6 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
                 f_res = (f_res + ((p & SCE_CTRL_LEFT) ? RES_N - 1 : 1)) % RES_N;
             if (form_kind == FORM_SETTINGS && form_sel == 2 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
                 f_lang = (f_lang + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3;
@@ -2975,14 +4472,25 @@ int main(void)
             }
         }
         else if (about_open || menu_open) {                  /* Select's menu over the playlists or the channels */
+            /* 0.8.0: in the live "Favorites" category the menu starts with "Reorder favourites" (was Triangle) */
+            int mx = state == ST_CHANNELS && section == SEC_LIVE && !in_episodes && cur_group == g_fav && g_fav >= 0 && nvis > 1 && !search_fold[0];
+            int mn = MENU_N + mx;
             if (about_open) {
                 if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_CROSS)) about_open = 0;
             } else {
-                if (p & SCE_CTRL_DOWN) menu_sel = (menu_sel + 1) % MENU_N;
-                if (p & SCE_CTRL_UP) menu_sel = (menu_sel + MENU_N - 1) % MENU_N;
+                if (p & SCE_CTRL_DOWN) menu_sel = (menu_sel + 1) % mn;
+                if (p & SCE_CTRL_UP) menu_sel = (menu_sel + mn - 1) % mn;
+                if (menu_sel >= mn) menu_sel = 0;
                 if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) menu_open = 0;
+                else if ((p & SCE_CTRL_CROSS) && mx && menu_sel == 0) {
+                    menu_open = 0;
+                    focus = 1;
+                    if (sel >= nvis) sel = 0;
+                    fav_move_begin(vis[sel]);
+                }
                 else if (p & SCE_CTRL_CROSS) {
                     menu_open = 0;
+                    menu_sel -= mx;
                     /* adding a playlist and reading them again happen on the playlists screen */
                     if (state == ST_CHANNELS && (menu_sel == MENU_ADD || menu_sel == MENU_RELOAD)) {
                         leave_episodes();
@@ -3001,9 +4509,11 @@ int main(void)
             else {
                 if (state == ST_CHANNELS) draw_channels(); else draw_sources();
                 if (menu_open) {
-                    const char *items[MENU_N];
-                    for (int k = 0; k < MENU_N; k++) items[k] = T(MENU_ITEMS[k]);
-                    scr_menu(T("Menu"), items, MENU_N, menu_sel);
+                    const char *items[MENU_N + 1];
+                    int k0 = 0;
+                    if (mx) items[k0++] = T("Reorder favourites");
+                    for (int k = 0; k < MENU_N; k++) items[k0 + k] = T(MENU_ITEMS[k]);
+                    scr_menu(T("Menu"), items, mn, menu_sel);
                 }
                 if (about_open) {                            /* 0.4.5: with the build time (which build is running) */
                     char ab[96];
@@ -3011,6 +4521,25 @@ int main(void)
                     scr_about(ab);
                 }
             }
+        }
+        else if (cg_open) {                                  /* 0.8.0: a channel's schedule */
+            player_keep_going();
+            chan_guide_input(p);
+            if (cg_open) draw_chan_guide();
+            else if (guide_open) draw_guide();
+            else draw_current();
+        }
+        else if (guide_open) {                               /* 0.8.0: the guide (over the list or the player) */
+            if (state == ST_PLAYING && play_mode == 0) player_poll();
+            guide_input(p);
+            if (cg_open) draw_chan_guide();
+            else if (guide_open) draw_guide();
+            else draw_current();
+        }
+        else if (det_open && state == ST_CHANNELS) {         /* 0.8.0: a film's details */
+            film_detail_input(p);
+            if (det_open) draw_film_detail();
+            else draw_current();
         }
         else if (state == ST_SOURCES) {
             if (section_menu) {                       /* Xtream: live TV, films or series */
@@ -3095,10 +4624,10 @@ int main(void)
                 p = 0;
                 rstick_ud = lstick_ud = 0;
             }
-            if (fav_moving) {                                /* 0.4.5: moving a favourite: only up / down, Triangle, O */
+            if (fav_moving) {                                /* 0.4.5: moving a favourite: only up / down, X (0.8.0; was Triangle), O */
                 int dir = (p & SCE_CTRL_DOWN) || rstick_ud > 0 ? 1 : (p & SCE_CTRL_UP) || rstick_ud < 0 ? -1 : 0;
                 if (dir) fav_move_step(dir);
-                if (p & SCE_CTRL_TRIANGLE) fav_move_end(1);
+                if (p & (SCE_CTRL_CROSS | SCE_CTRL_TRIANGLE)) fav_move_end(1);
                 else if (p & SCE_CTRL_CIRCLE) fav_move_end(0);
                 p = 0;
                 rstick_ud = lstick_ud = 0;
@@ -3121,13 +4650,21 @@ int main(void)
             } else if (searching || focus == 1) {            /* channel list */
                 if (chan_p & SCE_CTRL_DOWN) sel = nvis ? (sel + 1) % nvis : 0;
                 if (chan_p & SCE_CTRL_UP) sel = nvis ? (sel + nvis - 1) % nvis : 0;
+                if (in_episodes && nseasons > 1 && !searching && (p & (SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER))) {   /* 0.8.0: seasons */
+                    int ns = cur_season + ((p & SCE_CTRL_RTRIGGER) ? 1 : -1);
+                    if (ns >= 0 && ns < nseasons) { cur_season = ns; rebuild_visible(); }
+                    p &= ~(unsigned)(SCE_CTRL_LTRIGGER | SCE_CTRL_RTRIGGER);
+                }
                 if (p & SCE_CTRL_RTRIGGER) { sel += SCR_ROWS; if (sel >= nvis) sel = nvis ? nvis - 1 : 0; }
                 if (p & SCE_CTRL_LTRIGGER) { sel -= SCR_ROWS; if (sel < 0) sel = 0; }
                 if ((p & SCE_CTRL_LEFT) && (ngroups > 1 || in_episodes)) {
                     if (searching) clear_search();
                     if (in_episodes) leave_episodes(); else focus = 0;
                 }
-                if ((p & SCE_CTRL_CROSS) && nvis) activate_item(sel);
+                if ((p & SCE_CTRL_CROSS) && nvis) {
+                    if (adult_locked(&chans.items[vis[sel]])) pin_ask(PA_ACTIVATE, sel);   /* 0.8.0: parental lock */
+                    else activate_item(sel);
+                }
                 else if (p & SCE_CTRL_CIRCLE) {
                     if (searching) clear_search();          /* first O leaves the search */
                     else if (in_episodes) leave_episodes();
@@ -3147,17 +4684,24 @@ int main(void)
                     if (vod && cur_group >= 0 && (cur_group == g_fav || cur_group == g_recent) && cur_group != loaded_group) {
                         vod_open_list(cur_group == g_recent);  /* 0.6.0: from favorites.txt */
                         if (nvis) focus = 1;
-                    } else if (vod && cur_group != loaded_group && vod_cat(cur_group) >= 0 && vod_cat(cur_group) < nvcats)
-                        load_begin(&sources[cur_src], section == SEC_FILMS ? LOAD_FILMS : LOAD_SERIES, vcats[vod_cat(cur_group)].id, cur_group);
+                    } else if (vod && cur_group != loaded_group && vod_cat(cur_group) >= 0 && vod_cat(cur_group) < nvcats) {
+                        if (adult_locked_text(NULL, vcats[vod_cat(cur_group)].name)) pin_ask(PA_OPEN_CAT, cur_group);   /* 0.8.0 */
+                        else open_vod_category(cur_group);
+                    }
                     else if (nvis) focus = 1;
                 }
                 if (p & SCE_CTRL_CIRCLE) { leave_episodes(); state = ST_SOURCES; sel = src_disp(cur_src); scroll = 0; }
             }
-            if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_TRIANGLE) && !vod && !searching && focus == 1 &&
-                cur_group == g_fav && g_fav >= 0 && nvis > 1 && sel < nvis)
-                fav_move_begin(vis[sel]);                    /* 0.4.5: reorder the favourites */
-            if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SQUARE) && (!vod || nvis || searching))
-                ime_open("Search channels", search_q, 0, IME_SEARCH, NULL, 0);
+            if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_TRIANGLE)) {   /* 0.8.0: the guide; films: details */
+                if (!vod) guide_show(1, focus == 1 || searching ? sel : 0);
+                else if (!in_episodes && nvis && sel < nvis && (focus == 1 || searching)) {
+                    if (chans.items[vis[sel]].kind == CH_SERIES) activate_item(sel);
+                    else { det_open = 1; det_sel = 0; }
+                }
+            }
+            if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SQUARE) && (!vod || !in_episodes || nvis || searching))   /* 0.8.0: films everywhere */
+                ime_open(!vod || in_episodes ? "Search channels" : section == SEC_FILMS ? "Search every film" : "Search every series",
+                         search_q, 0, IME_SEARCH, NULL, 0);
             if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SELECT)) { menu_open = 1; menu_sel = 0; }   /* the menu */
             if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_START)) {   /* 0.5.0: favourite channel */
                 if (vod && in_episodes) {                    /* 0.6.0: the series of these episodes */
@@ -3189,7 +4733,12 @@ int main(void)
         else { /* ST_PLAYING */
             /* One set of buttons for live TV and films: X pause, left / right and the left stick move through a
              * film (hold, let go to jump there), up / down the previous / next channel or film, Triangle
-             * information, Square the next picture size, Select the size menu with the analysis, O back. */
+             * the guide (0.8.0; a film: its details), R the information, Square the next picture size, Select the
+             * size menu with the analysis, O back. */
+            if (info_ovl) {                                  /* 0.8.0: the film's details over the picture: Triangle / O close */
+                if (p & (SCE_CTRL_TRIANGLE | SCE_CTRL_CIRCLE)) info_ovl = 0;
+                p = 0;
+            }
             if (p) osd_until_us = now_ms() + 4000;            /* any button shows the bars again */
             int film = film_playing();
             unsigned held = prev_btn;
@@ -3198,7 +4747,7 @@ int main(void)
             if (res_menu) {
                 /* Select (0.7.0: in tabs, so it stays short): Picture (the HLS sizes, newest first, or the one size it
                  * has), Audio (the tracks), Subtitles (off, the tracks, the sync), More (the server, the analysis) */
-                enum { MA_NONE, MA_AUTO, MA_VARIANT, MA_SERVER, MA_AUDIO, MA_ANALYSIS, MA_SUB_OFF, MA_SUB, MA_SUB_SYNC };
+                enum { MA_NONE, MA_AUTO, MA_VARIANT, MA_SERVER, MA_AUDIO, MA_ANALYSIS, MA_SUB_OFF, MA_SUB, MA_SUB_SYNC, MA_SLEEP, MA_ZAP };
                 enum { TAB_PIC, TAB_AUDIO, TAB_SUB, TAB_MORE, NTABS };
                 #define MENU_MAX (TSP_MAX_VARIANTS + TSP_MAX_AUDIO + TSP_MAX_SUBS + 4)
                 static char names[MENU_MAX][96];
@@ -3260,7 +4809,7 @@ int main(void)
                         if (sub_delay_ms < 0 && sub_delay_ms > -1000) snprintf(names[n], sizeof names[n], T("Sync:  < -0.%d s >"), -sub_delay_ms / 100 % 10);
                         MENU_ADD(MA_SUB_SYNC, 0, 0);
                     } else {
-                        snprintf(names[n], sizeof names[n], "%s", T(film && chans.items[vis[play_vis]].kind == CH_FILM ? "No subtitles in this film (MKV text subtitles only)" : "No subtitles"));
+                        snprintf(names[n], sizeof names[n], "%s", T(film && chans.items[vis[play_vis]].kind == CH_FILM ? "No subtitles in this film (MKV / MP4 text subtitles only)" : "No subtitles"));
                         MENU_ADD(MA_NONE, 0, 1);
                     }
                 } else {
@@ -3270,14 +4819,29 @@ int main(void)
                     }
                     snprintf(names[n], sizeof names[n], "%s", T("Stream analysis"));
                     MENU_ADD(MA_ANALYSIS, 0, 0);
+                    /* 0.8.0: the sleep timer, the channel number */
+                    if (sleep_at) snprintf(names[n], sizeof names[n], T("Sleep timer:  < %d min >   (%d min left)"), SLEEP_MIN[sleep_idx],
+                                           (int)((sleep_at - now_ms() + 59999) / 60000));
+                    else snprintf(names[n], sizeof names[n], "%s", T("Sleep timer:  < Off >"));
+                    MENU_ADD(MA_SLEEP, 0, 0);
+                    if (return_state == ST_CHANNELS && section == SEC_LIVE && !in_episodes && chans.count > 1) {
+                        snprintf(names[n], sizeof names[n], "%s", T("Channel number..."));
+                        MENU_ADD(MA_ZAP, 0, 0);
+                    }
                 }
                 #undef MENU_ADD
                 if (menu_fresh) { res_menu_sel = cur >= 0 ? cur : 0; menu_fresh = 0; }
                 if (res_menu_sel >= n) res_menu_sel = n - 1;
                 if (res_menu_sel < 0) res_menu_sel = 0;
-                int on_sync = act[res_menu_sel] == MA_SUB_SYNC;
+                int on_sync = act[res_menu_sel] == MA_SUB_SYNC, on_sleep = act[res_menu_sel] == MA_SLEEP;
                 if (p & SCE_CTRL_DOWN) res_menu_sel = (res_menu_sel + 1) % n;
                 if (p & SCE_CTRL_UP) res_menu_sel = (res_menu_sel + n - 1) % n;
+                if (on_sleep && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {   /* 0.8.0: the sleep timer */
+                    sleep_idx = (sleep_idx + ((p & SCE_CTRL_RIGHT) ? 1 : SLEEP_N - 1)) % SLEEP_N;
+                    sleep_at = sleep_idx ? now_ms() + (unsigned)SLEEP_MIN[sleep_idx] * 60000u : 0;
+                    p &= ~(unsigned)(SCE_CTRL_LEFT | SCE_CTRL_RIGHT);
+                    plog("player: sleep timer %d min", SLEEP_MIN[sleep_idx]);
+                }
                 if (on_sync) {                               /* left / right: 0.1 s each, repeating while held */
                     unsigned lr = held & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT), now = now_ms();
                     int step = 0;
@@ -3293,13 +4857,20 @@ int main(void)
                     }
                 } else if (p & SCE_CTRL_RIGHT) { menu_tab = (menu_tab + 1) % NTABS; menu_fresh = 1; }
                 else if (p & SCE_CTRL_LEFT) { menu_tab = (menu_tab + NTABS - 1) % NTABS; menu_fresh = 1; }
+                (void)on_sleep;
                 if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) {
                     res_menu = 0;
                     if (sub_delay_ms) plog("player: subtitles %+d ms", sub_delay_ms);
                 } else if (p & SCE_CTRL_CROSS) {
                     int a = act[res_menu_sel], g = arg[res_menu_sel];
-                    if (a != MA_NONE && a != MA_SUB_SYNC) res_menu = 0;
+                    if (a != MA_NONE && a != MA_SUB_SYNC && a != MA_SLEEP) res_menu = 0;
                     if (a == MA_SUB_SYNC) { sub_delay_ms = 0; tsp_set_sub_delay(0); }   /* X: back to 0 */
+                    else if (a == MA_SLEEP) {                    /* 0.8.0: X: the next value */
+                        sleep_idx = (sleep_idx + 1) % SLEEP_N;
+                        sleep_at = sleep_idx ? now_ms() + (unsigned)SLEEP_MIN[sleep_idx] * 60000u : 0;
+                        plog("player: sleep timer %d min", SLEEP_MIN[sleep_idx]);
+                    }
+                    else if (a == MA_ZAP) ime_open("Channel number", "", 0, IME_ZAP, NULL, 0);   /* 0.8.0 */
                     else if (a == MA_SUB_OFF || a == MA_SUB) {   /* at once, and for the next films */
                         tsp_sub_choose(a == MA_SUB ? g : -1);
                         sub_off = a == MA_SUB_OFF;
@@ -3348,9 +4919,10 @@ int main(void)
                     if (play_mode == 0) draw_mp4_screen(1); else draw_tsp_screen(1);
                     if (res_menu) {
                         on_sync = act[res_menu_sel] == MA_SUB_SYNC;
+                        on_sleep = act[res_menu_sel] == MA_SLEEP;
                         scr_tabmenu(tabs, NTABS, menu_tab, items, dim, n, res_menu_sel,
                                     T(on_sync ? "Left / Right: earlier / later   X: back to 0   O: close"
-                                              : "L / R: tab   X: choose   O: close"));
+                                              : on_sleep ? "Left / Right / X: change   O: close" : "L / R: tab   X: choose   O: close"));
                     }
                 }
                 #undef MENU_MAX
@@ -3369,14 +4941,25 @@ int main(void)
                 stop_all();
                 tsp_vod_cache_clear();                       /* the film's index was kept for jumps */
                 state = return_state;
+                int back_to = arch_on ? arch_return : gd_return;   /* 0.8.0: back to the guide / the schedule it came from */
+                arch_on = 0;
+                gd_return = 0;
+                info_ovl = 0;
                 if (state == ST_CHANNELS) {
                     sel = play_vis; focus = 1;
                     if (fav_dirty && play_vis < nvis) fav_regroup(vis[play_vis]);   /* 0.5.0: changed while playing */
                     if (vod_fav_stale && section != SEC_LIVE && !in_episodes) vod_fav_changed();   /* 0.6.0 */
+                    if (back_to >= 1 && section == SEC_LIVE) guide_show(1, play_vis < nvis ? play_vis : 0);
+                    if (back_to == 2 && section == SEC_LIVE) chan_guide_show(play_vis < nvis ? play_vis : 0, 1);
                     draw_channels();
                 }
                 else { sel = src_disp(cur_src); draw_sources(); }   /* (a single stream: its row, also after START) */
             } else {
+                if (!next_ep_at && sleep_warning() && (p & SCE_CTRL_CROSS)) {   /* 0.8.0: the sleep timer's last minute: 15 more */
+                    sleep_at += 15 * 60000u;
+                    p &= ~(unsigned)SCE_CTRL_CROSS;
+                    plog("player: sleep timer +15 min");
+                }
                 if (next_ep_at && (p & (SCE_CTRL_CROSS | SCE_CTRL_CIRCLE))) {   /* 0.7.0: X the next episode now, O stays */
                     if (p & SCE_CTRL_CROSS) play_next_episode();
                     else { next_ep_at = 0; plog("player: the next episode cancelled"); }
@@ -3386,7 +4969,7 @@ int main(void)
                 const TspStatus *fs = play_mode == 2 ? tsp_status() : NULL;
                 int pos = 0, dur = 0;
                 if (film) { tsp_vod_pos(&pos, &dur); dur = film_length(); }
-                int can_jump = film && fs && (fs->seekable || via_proxy);   /* through the server: it starts again there */
+                int can_jump = film && fs && (fs->seekable || via_proxy || arch_on);   /* through the server / the archive: it starts again there */
                 /* moving through the film: the left stick sideways (further = faster), or left / right held */
                 float d = 0;
                 int ax = abs(stick_x);
@@ -3402,6 +4985,7 @@ int main(void)
                     seek_target += (d > 0 ? 1 : -1) * (int)(rate * (float)(now - scrub_last));
                     scrub_last = now;
                     if (dur > 0 && seek_target > dur - 3000) seek_target = dur - 3000;
+                    if (arch_on) { int lim = (int)(now_unix() - arch_start - 20) * 1000; if (seek_target > lim) seek_target = lim; }   /* (not past now) */
                     if (seek_target < 0) seek_target = 0;
                     seek_due = now + 3600000;                       /* not while it is held */
                     osd_until_us = now + 4000;
@@ -3422,7 +5006,7 @@ int main(void)
                     int target = seek_target;
                     seek_target = -1;
                     plog("player: jump to %d s", target / 1000);
-                    remember_position(cur_channel()->url, target, dur);
+                    if (!arch_on) remember_position(cur_channel()->url, target, dur);
                     film_start_ms = target;
                     play_channel_ex(play_vis, via_proxy);
                     fs = tsp_status();
@@ -3430,6 +5014,7 @@ int main(void)
                 /* previous / next channel, or film / episode in the list */
                 int zap = return_state == ST_CHANNELS && nvis > 1;
                 int next = (p & SCE_CTRL_DOWN) ? 1 : (p & SCE_CTRL_UP) ? -1 : 0;
+                if (arch_on && next) { arch_step(next); next = 0; film = film_playing(); fs = play_mode == 2 ? tsp_status() : NULL; }   /* 0.8.0: programmes */
                 int target = next && zap ? (play_vis + nvis + next) % nvis : -1;
                 if ((p & SCE_CTRL_LTRIGGER) && zap) {         /* 0.4.0: L goes back to the channel before */
                     target = prev_visible();
@@ -3438,6 +5023,11 @@ int main(void)
                         film_note_until = now_ms() + 2500;
                         osd_until_us = now_ms() + 2500;
                     }
+                }
+                if (target >= 0 && adult_locked(&chans.items[vis[target]])) {   /* 0.8.0: parental lock */
+                    if (film) save_film_position();
+                    pin_ask(PA_ZAP, target);
+                    target = -1;
                 }
                 if (target >= 0) {
                     if (film) save_film_position();
@@ -3466,7 +5056,17 @@ int main(void)
                     film_note_until = now_ms() + 2500;
                     osd_until_us = now_ms() + 2500;
                 }
-                if (p & SCE_CTRL_TRIANGLE) show_info = !show_info;
+                if (p & SCE_CTRL_RTRIGGER) show_info = !show_info;   /* 0.8.0: R (Triangle is the guide) */
+                if (p & SCE_CTRL_TRIANGLE) {
+                    if (arch_on) chan_guide_show(play_vis, 2);
+                    else if (film) info_ovl = 1;
+                    else if (return_state == ST_CHANNELS && section == SEC_LIVE && guide_on) guide_show(2, play_vis);
+                    else {
+                        snprintf(film_note, sizeof film_note, "%s", T("No programme guide for this channel"));
+                        film_note_until = now_ms() + 2500;
+                        osd_until_us = now_ms() + 2500;
+                    }
+                }
                 if (p & SCE_CTRL_SELECT) {                       /* the size menu; one size: on the analysis line */
                     res_menu = 1;
                     res_menu_sel = 0;
@@ -3474,6 +5074,14 @@ int main(void)
                     menu_fresh = 1;
                 }
                 if (radio_playing()) p &= ~(unsigned)SCE_CTRL_SQUARE;   /* (radio: no sizes; 0.4.0: the screen-off that never worked is gone) */
+                if ((p & SCE_CTRL_SQUARE) && arch_on) {         /* 0.8.0: catch-up: back to the channel live */
+                    p &= ~(unsigned)SCE_CTRL_SQUARE;
+                    arch_on = 0;
+                    plog("player: catch-up left: live");
+                    play_channel(play_vis);
+                    film = film_playing();
+                    fs = play_mode == 2 ? tsp_status() : NULL;
+                }
                 if ((p & SCE_CTRL_SQUARE) && film && fs) {
                     /* a film file has one picture size; a smaller one needs the transcoding server, which
                      * converts it to 720p from where it is now */
@@ -3565,11 +5173,15 @@ int main(void)
                     if (fs && fs->state == TSP_ENDED && !film_end_done) {
                         film_end_done = 1;
                         save_film_position();
-                        if (in_episodes && return_state == ST_CHANNELS && play_vis + 1 < nvis &&
-                            chans.items[vis[play_vis + 1]].kind == CH_FILM) {   /* 0.7.0: the next episode in 5 s */
-                            next_ep_vi = play_vis + 1;
+                        int nci = vis[play_vis] + 1;            /* (0.8.0: in chans' order: over to the next season) */
+                        if (in_episodes && return_state == ST_CHANNELS && nci < chans.count && chans.items[nci].kind == CH_FILM) {   /* 0.7.0: the next episode in 5 s */
+                            next_ep_ci = nci;
                             next_ep_at = now_ms() + 5000;
                             plog("player: the episode ended, the next one in 5 s");
+                        } else if (arch_on) {                   /* 0.8.0: the programme ended: the next one */
+                            next_ep_ci = -2;
+                            next_ep_at = now_ms() + 5000;
+                            plog("player: the programme ended, the next one in 5 s");
                         }
                     }
                     if (next_ep_at && now_ms() >= next_ep_at) {

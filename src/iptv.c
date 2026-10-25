@@ -6,8 +6,70 @@
 #include <strings.h>
 #include <ctype.h>
 
-void channel_list_init(ChannelList *l) { l->items = NULL; l->count = 0; l->cap = 0; }
-void channel_list_free(ChannelList *l) { free(l->items); channel_list_init(l); }
+void channel_list_init(ChannelList *l) { memset(l, 0, sizeof *l); }
+void channel_list_free(ChannelList *l) { free(l->items); free(l->pool); channel_list_init(l); }
+
+/* ---- 0.8.0: the channels' extra fields: in one pool per list, "<tag>value\0...\0" (offset 0 = none) ---- */
+typedef struct { char buf[2048]; size_t n; } ExtraBuf;
+
+static void xb_add(ExtraBuf *b, char tag, const char *v, size_t maxlen)
+{
+    if (!v || !v[0]) return;
+    size_t l = strlen(v);
+    if (l > maxlen) {                                       /* (not in the middle of a UTF-8 letter) */
+        l = maxlen;
+        while (l > 0 && ((unsigned char)v[l] & 0xC0) == 0x80) l--;
+    }
+    if (b->n + l + 3 > sizeof b->buf) return;
+    b->buf[b->n++] = tag;
+    memcpy(b->buf + b->n, v, l);
+    b->n += l;
+    b->buf[b->n++] = 0;
+}
+
+static unsigned xb_commit(ChannelList *l, ExtraBuf *b)
+{
+    if (!b->n) return 0;
+    size_t need = b->n + 1;
+    if (!l->pool) {
+        l->pool = malloc(65536);
+        if (!l->pool) return 0;
+        l->pool_cap = 65536;
+        l->pool[0] = 0;
+        l->pool_len = 1;                                    /* (offset 0 means none) */
+    }
+    if (l->pool_len + need > l->pool_cap) {
+        size_t nc = l->pool_cap + l->pool_cap / 2;
+        if (nc < l->pool_len + need) nc = l->pool_len + need;
+        if (nc > IPTV_POOL_MAX) return 0;
+        char *np = realloc(l->pool, nc);
+        if (!np) return 0;
+        l->pool = np;
+        l->pool_cap = (unsigned)nc;
+    }
+    unsigned off = l->pool_len;
+    memcpy(l->pool + off, b->buf, b->n);
+    l->pool[off + b->n] = 0;                                /* the end of this channel's fields */
+    l->pool_len += (unsigned)need;
+    return off;
+}
+
+const char *channel_extra(const ChannelList *l, const Channel *c, char tag)
+{
+    if (!l || !c || !c->extra || !l->pool || c->extra >= l->pool_len) return NULL;
+    const char *p = l->pool + c->extra, *end = l->pool + l->pool_len;
+    while (p < end && *p) {
+        if (*p == tag) return p + 1;
+        p += strlen(p) + 1;
+    }
+    return NULL;
+}
+
+const char *channel_catchup_src(const ChannelList *l, const Channel *c)
+{
+    const char *s = channel_extra(l, c, CX_CATCHUP);
+    return s ? s : l ? l->cu_src : "";
+}
 
 static int list_push(ChannelList *l, const Channel *c)
 {
@@ -22,7 +84,12 @@ static int list_push(ChannelList *l, const Channel *c)
     l->items[l->count++] = *c;
     return 0;
 }
-int channel_list_push(ChannelList *l, const Channel *c) { return list_push(l, c); }
+int channel_list_push(ChannelList *l, const Channel *c)
+{
+    if (list_push(l, c) != 0) return -1;
+    l->items[l->count - 1].extra = 0;                       /* (an offset into another list's pool) */
+    return 0;
+}
 
 /* Copies up to dstsz-1 bytes without cutting a UTF-8 sequence in half. */
 static void copy_trunc(char *dst, size_t dstsz, const char *src, size_t n)
@@ -116,9 +183,35 @@ static void json_value(const char *buf, const char *key, char *out, size_t outsz
 
 int iptv_headers_dropped;
 
+/* 0.8.0: an M3U catchup="..." value */
+static int cu_mode_of(const char *v)
+{
+    if (!v || !v[0]) return CU_NONE;
+    if (!strcasecmp(v, "default") || !strcasecmp(v, "vod")) return CU_DEFAULT;
+    if (!strcasecmp(v, "append")) return CU_APPEND;
+    if (!strcasecmp(v, "shift") || !strcasecmp(v, "timeshift")) return CU_SHIFT;
+    if (!strncasecmp(v, "flussonic", 9) || !strcasecmp(v, "fs")) return CU_FLUSSONIC;
+    if (!strcasecmp(v, "xc")) return CU_XC;
+    return CU_NONE;
+}
+
+/* catch-up days from catchup-days / timeshift / tvg-rec (0 = not given) */
+static int cu_days_of(const char *line)
+{
+    char v[16];
+    int d = 0;
+    if (get_attr(line, "catchup-days", v, sizeof v) || get_attr(line, "timeshift", v, sizeof v) || get_attr(line, "tvg-rec", v, sizeof v))
+        d = atoi(v);
+    return d < 0 ? 0 : d > 255 ? 255 : d;
+}
+
 int m3u_parse(const char *text, size_t len, ChannelList *out)
 {
     Channel pending;
+    ExtraBuf *xb = malloc(sizeof *xb);                      /* 0.8.0: the pending channel's extra fields */
+    int hdr_mode = CU_NONE, hdr_days = 0;                   /* 0.8.0: #EXTM3U catchup="..." catchup-days="..." */
+    if (!xb) return 0;
+    xb->n = 0;
     int have = 0;
     char ua[512] = "", ref[512] = "";                       /* #EXTVLCOPT / #EXTHTTP for the next link */
     char grp[IPTV_GROUP_MAX] = "";
@@ -141,15 +234,43 @@ int m3u_parse(const char *text, size_t len, ChannelList *out)
         size_t n = e - s;
 
         if (line[0] == '#') {
-            if (n > 8 && strncasecmp(line, "#EXTINF:", 8) == 0) {
-                char buf[2048], tmp[IPTV_NAME_MAX];
+            if (n > 7 && strncasecmp(line, "#EXTM3U", 7) == 0) {   /* 0.8.0: the list's EPG address and catch-up */
+                char buf[2048], v[IPTV_URL_MAX];
+                copy_trunc(buf, sizeof buf, line, n);
+                if (get_attr(buf, "url-tvg", v, sizeof v) || get_attr(buf, "x-tvg-url", v, sizeof v) || get_attr(buf, "tvg-url", v, sizeof v)) {
+                    char *comma = strchr(v, ',');            /* (several addresses: the first one) */
+                    if (comma) *comma = 0;
+                    trim_inplace(v);
+                    copy_trunc(out->tvg_url, sizeof out->tvg_url, v, strlen(v));
+                }
+                if (get_attr(buf, "catchup", v, sizeof v)) hdr_mode = cu_mode_of(v);
+                hdr_days = cu_days_of(buf);
+                if (get_attr(buf, "catchup-source", v, sizeof v)) copy_trunc(out->cu_src, sizeof out->cu_src, v, strlen(v));
+            } else if (n > 8 && strncasecmp(line, "#EXTINF:", 8) == 0) {
+                char buf[2048], tmp[IPTV_URL_MAX];
                 copy_trunc(buf, sizeof buf, line, n);
                 memset(&pending, 0, sizeof pending);
+                xb->n = 0;
                 get_display_name(buf, pending.name, sizeof pending.name);
-                if (!pending.name[0] && get_attr(buf, "tvg-name", tmp, sizeof tmp))
-                    copy_trunc(pending.name, sizeof pending.name, tmp, strlen(tmp));
+                if (get_attr(buf, "tvg-name", tmp, sizeof tmp)) {
+                    if (!pending.name[0]) copy_trunc(pending.name, sizeof pending.name, tmp, strlen(tmp));
+                    else if (strcmp(tmp, pending.name)) xb_add(xb, CX_TVG_NAME, tmp, 95);
+                }
                 if (!get_attr(buf, "group-title", pending.group, sizeof pending.group))
                     copy_trunc(pending.group, sizeof pending.group, grp, strlen(grp));
+                if (get_attr(buf, "tvg-id", tmp, sizeof tmp)) { trim_inplace(tmp); xb_add(xb, CX_TVG_ID, tmp, 95); }
+                {                                            /* 0.8.0: catch-up */
+                    int mode = get_attr(buf, "catchup", tmp, sizeof tmp) ? cu_mode_of(tmp) : hdr_mode;
+                    int days = cu_days_of(buf);
+                    if (!days) days = hdr_days;
+                    if (get_attr(buf, "catchup-source", tmp, sizeof tmp) && strcmp(tmp, out->cu_src)) {
+                        xb_add(xb, CX_CATCHUP, tmp, IPTV_URL_MAX - 1);
+                        if (mode == CU_NONE) mode = CU_DEFAULT;
+                    }
+                    if (mode == CU_NONE && days > 0 && (get_attr(buf, "timeshift", tmp, sizeof tmp) || get_attr(buf, "tvg-rec", tmp, sizeof tmp)))
+                        mode = CU_XC;                        /* (an Xtream list's own attribute: its live links) */
+                    if (mode != CU_NONE) { pending.cu_mode = (unsigned char)mode; pending.archive = (unsigned char)(days ? days : 3); }
+                }
                 have = 1;
             } else if (n > 11 && strncasecmp(line, "#EXTVLCOPT:", 11) == 0) {   /* VLC options: the HTTP ones */
                 char buf[600];
@@ -184,7 +305,7 @@ int m3u_parse(const char *text, size_t len, ChannelList *out)
 
         Channel c;
         memset(&c, 0, sizeof c);
-        if (have) c = pending;
+        if (have) { c = pending; c.extra = xb_commit(out, xb); xb->n = 0; }
         else copy_trunc(c.name, sizeof c.name, url, strlen(url));
         if (!c.name[0]) copy_trunc(c.name, sizeof c.name, url, strlen(url));
         memcpy(c.url, url, n + 1);
@@ -193,10 +314,12 @@ int m3u_parse(const char *text, size_t len, ChannelList *out)
         ua[0] = ref[0] = 0;
         if (iptv_is_film_url(c.url)) c.kind = CH_FILM;      /* films in M3U lists: pause, jumps, resume */
 
+        if (iptv_is_film_url(c.url)) c.archive = c.cu_mode = 0;
         if (list_push(out, &c) != 0) break;
         added++;
         have = 0;
     }
+    free(xb);
     return added;
 }
 
@@ -289,6 +412,17 @@ static int json_field(const char *text, size_t len, const char *key, char *out, 
     return -1;
 }
 
+/* days since 1970-01-01 (proleptic Gregorian) */
+static long long civil_days(int y, int m, int d)
+{
+    y -= m <= 2;
+    long long era = (y >= 0 ? y : y - 399) / 400;
+    long long yoe = y - era * 400;
+    long long doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    long long doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    return era * 146097 + doe - 719468;
+}
+
 int xtream_parse_account(const char *json, size_t len, XtAccount *a)
 {
     memset(a, 0, sizeof *a);
@@ -303,6 +437,17 @@ int xtream_parse_account(const char *json, size_t len, XtAccount *a)
     if (json_field(ui, n, "exp_date", v, sizeof v) == 0) a->exp = atol(v);
     if (json_field(ui, n, "active_cons", v, sizeof v) == 0) a->active = atoi(v);
     if (json_field(ui, n, "max_connections", v, sizeof v) == 0) a->max = atoi(v);
+    {   /* 0.8.0: "server_info": "timestamp_now" (UTC) and "time_now" (its local time): their difference */
+        char tn[40], ts[24];
+        int Y, M, D, h, m, sec = 0;
+        if (json_field(json, len, "time_now", tn, sizeof tn) == 0 && json_field(json, len, "timestamp_now", ts, sizeof ts) == 0 &&
+            sscanf(tn, "%d-%d-%d %d:%d:%d", &Y, &M, &D, &h, &m, &sec) >= 5 && atol(ts) > 0) {
+            long long local = civil_days(Y, M, D) * 86400LL + h * 3600 + m * 60 + sec;
+            long long off = local - atoll(ts);
+            off = (off + (off >= 0 ? 450 : -450)) / 900 * 900;    /* (to a quarter of an hour: the two were read at different moments) */
+            if (off > -14 * 3600 && off < 14 * 3600) { a->srv_off = (long)off; a->srv_known = 1; }
+        }
+    }
     return 0;
 }
 
@@ -439,12 +584,25 @@ typedef struct {
     char ext[12];                       /* container_extension */
     char title[IPTV_NAME_MAX];          /* episode title */
     char epnum[12], season[12];
+    /* 0.8.0 */
+    char icon[IPTV_URL_MAX];            /* stream_icon / cover / movie_image */
+    char rating[16], release[24], dur[16], durs[16];
+    char genre[96], director[96], cast[192];
+    char plot[600];
+    char arch[8], arch_days[8];         /* tv_archive, tv_archive_duration */
 } XtObj;
 
-/* p points at '{'. Returns position after the matching '}', or NULL on malformed input. */
+/* p points at '{'. Returns position after the matching '}', or NULL on malformed input. An "info" object inside
+ * (episodes, get_vod_info) fills the fields that are still empty (0.8.0). */
+static const char *xt_fill(const char *p, const char *end, XtObj *o, int depth);
 static const char *xt_object(const char *p, const char *end, XtObj *o)
 {
     memset(o, 0, sizeof *o);
+    return xt_fill(p, end, o, 0);
+}
+
+static const char *xt_fill(const char *p, const char *end, XtObj *o, int depth)
+{
     p++;
     for (;;) {
         p = skip_ws(p, end);
@@ -453,7 +611,7 @@ static const char *xt_object(const char *p, const char *end, XtObj *o)
         if (*p == ',') { p++; continue; }
         if (*p != '"') return NULL;
 
-        char key[24];
+        char key[32];
         p = json_string(p, end, key, sizeof key);
         if (!p) return NULL;
         p = skip_ws(p, end);
@@ -474,6 +632,24 @@ static const char *xt_object(const char *p, const char *end, XtObj *o)
         else if (!strcmp(key, "title"))         { dst = o->title; dsz = sizeof o->title; }
         else if (!strcmp(key, "episode_num"))   { dst = o->epnum; dsz = sizeof o->epnum; }
         else if (!strcmp(key, "season"))        { dst = o->season; dsz = sizeof o->season; }
+        else if (!strcmp(key, "stream_icon") || !strcmp(key, "cover") || !strcmp(key, "movie_image") || !strcmp(key, "cover_big"))
+                                                { dst = o->icon[0] ? NULL : o->icon; dsz = sizeof o->icon; }
+        else if (!strcmp(key, "rating"))        { dst = o->rating; dsz = sizeof o->rating; }
+        else if (!strcmp(key, "releaseDate") || !strcmp(key, "releasedate") || !strcmp(key, "release_date") || !strcmp(key, "year"))
+                                                { dst = o->release[0] ? NULL : o->release; dsz = sizeof o->release; }
+        else if (!strcmp(key, "duration"))      { dst = o->dur; dsz = sizeof o->dur; }
+        else if (!strcmp(key, "duration_secs")) { dst = o->durs; dsz = sizeof o->durs; }
+        else if (!strcmp(key, "genre"))         { dst = o->genre; dsz = sizeof o->genre; }
+        else if (!strcmp(key, "director"))      { dst = o->director; dsz = sizeof o->director; }
+        else if (!strcmp(key, "cast") || !strcmp(key, "actors")) { dst = o->cast[0] ? NULL : o->cast; dsz = sizeof o->cast; }
+        else if (!strcmp(key, "plot") || !strcmp(key, "description")) { dst = o->plot[0] ? NULL : o->plot; dsz = sizeof o->plot; }
+        else if (!strcmp(key, "tv_archive"))    { dst = o->arch; dsz = sizeof o->arch; }
+        else if (!strcmp(key, "tv_archive_duration")) { dst = o->arch_days; dsz = sizeof o->arch_days; }
+        else if (!strcmp(key, "info") && *p == '{' && depth < 2) {   /* 0.8.0: an episode's / film's details */
+            p = xt_fill(p, end, o, depth + 1);
+            if (!p) return NULL;
+            continue;
+        }
 
         if (!dst) {
             p = json_skip_value(p, end);
@@ -540,6 +716,9 @@ typedef struct {
     int ncats, added;
     int mode;                           /* 0 live, 1 films, 2 series */
     char base[IPTV_URL_MAX + 16], eu[IPTV_CRED_MAX * 3 + 1], ep[IPTV_CRED_MAX * 3 + 1];
+    ExtraBuf xb;                        /* 0.8.0 */
+    const char *match;                  /* 0.8.0: only names matching this folded query */
+    int max;
 } LiveCtx;
 
 static int id_ok(const char *id)
@@ -563,6 +742,8 @@ static int live_cb(const XtObj *o, void *vctx)
     LiveCtx *c = vctx;
     const char *id = c->mode == 2 ? o->sid : o->id;
     if (!id_ok(id)) return 0;
+    if (c->match && !iptv_match(o->name, c->match)) return 0;   /* 0.8.0: a search */
+    if (c->max > 0 && c->added >= c->max) return -1;
 
     Channel ch;
     memset(&ch, 0, sizeof ch);
@@ -584,6 +765,24 @@ static int live_cb(const XtObj *o, void *vctx)
         n = snprintf(ch.url, sizeof ch.url, "%s/live/%s/%s/%s.ts", c->base, c->eu, c->ep, id);
     }
     if (n < 0 || (size_t)n >= sizeof ch.url) return 0;
+    if (c->mode == 0) {                                      /* 0.8.0: catch-up */
+        int days = atoi(o->arch_days);
+        if ((o->arch[0] == '1' || !strcmp(o->arch, "true")) && days > 0) { ch.archive = (unsigned char)(days > 255 ? 255 : days); ch.cu_mode = CU_XC; }
+    } else {                                                 /* 0.8.0: what the list already says about a film / series */
+        ExtraBuf *xb = &c->xb;
+        xb->n = 0;
+        xb_add(xb, CX_POSTER, o->icon, IPTV_URL_MAX - 1);
+        if (o->rating[0] && strcmp(o->rating, "0") && strcmp(o->rating, "0.0")) xb_add(xb, CX_RATING, o->rating, 8);
+        char y[8];
+        vod_year(o->release, y, sizeof y);
+        if (!y[0]) vod_year(o->name, y, sizeof y);
+        xb_add(xb, CX_YEAR, y, 7);
+        xb_add(xb, CX_GENRE, o->genre, 80);
+        xb_add(xb, CX_PLOT, o->plot, 420);
+        xb_add(xb, CX_CAST, o->cast, 160);
+        xb_add(xb, CX_DIRECTOR, o->director, 80);
+        ch.extra = xb_commit(c->out, xb);
+    }
     if (list_push(c->out, &ch) != 0) return -1;
     c->added++;
     return 0;
@@ -595,6 +794,7 @@ static int parse_list(const char *json, size_t len, const Source *s,
     LiveCtx *c = malloc(sizeof *c);
     if (!c) return 0;
     c->out = out; c->cats = cats; c->ncats = ncats; c->added = 0; c->mode = mode;
+    c->match = NULL; c->max = 0;
     /* room for all channels at once: growing by doubling needs twice the memory while copying */
     int want = 0;
     const char *key = mode == 2 ? "\"series_id\"" : "\"stream_id\"";
@@ -626,6 +826,21 @@ int xtream_parse_vod(const char *json, size_t len, const Source *s, const XtCate
 int xtream_parse_series(const char *json, size_t len, const Source *s, const XtCategory *cats, int ncats, ChannelList *out)
 { return parse_list(json, len, s, cats, ncats, out, 2); }
 
+int xtream_parse_vod_match(const char *json, size_t len, const Source *s, const XtCategory *cats, int ncats,
+                           ChannelList *out, int series, const char *folded_query, int max)
+{
+    LiveCtx *c = malloc(sizeof *c);
+    if (!c) return 0;
+    memset(c, 0, sizeof *c);
+    c->out = out; c->cats = cats; c->ncats = ncats; c->mode = series ? 2 : 1;
+    c->match = folded_query; c->max = max;
+    if (source_xtream_base(s, c->base, sizeof c->base) || url_encode(c->eu, sizeof c->eu, s->user) || url_encode(c->ep, sizeof c->ep, s->pass)) { free(c); return 0; }
+    xt_each(json, len, live_cb, c);
+    int n = c->added;
+    free(c);
+    return n;
+}
+
 /* get_series_info: "episodes" is an object of seasons ({"1": [...], "2": [...]}) or an array of them. */
 typedef struct { ChannelList *out; LiveCtx *c; int added; } EpCtx;
 
@@ -642,6 +857,13 @@ static void add_episode(EpCtx *e, const XtObj *o)
     ch.episode = (unsigned short)(ep > 0 && ep < 65536 ? ep : 0);
     int n = snprintf(ch.url, sizeof ch.url, "%s/series/%s/%s/%s.%s", e->c->base, e->c->eu, e->c->ep, o->eid, ext_or(o->ext, "mkv"));
     if (n < 0 || (size_t)n >= sizeof ch.url) return;
+    ExtraBuf *xb = &e->c->xb;                                /* 0.8.0: the episode's picture, plot and length */
+    xb->n = 0;
+    xb_add(xb, CX_POSTER, o->icon, IPTV_URL_MAX - 1);
+    xb_add(xb, CX_PLOT, o->plot, 420);
+    xb_add(xb, CX_DURATION, o->durs[0] && strcmp(o->durs, "0") ? o->durs : o->dur, 15);
+    if (o->rating[0] && strcmp(o->rating, "0") && strcmp(o->rating, "0.0")) xb_add(xb, CX_RATING, o->rating, 8);
+    ch.extra = xb_commit(e->out, xb);
     if (list_push(e->out, &ch) == 0) e->added++;
 }
 
@@ -705,6 +927,61 @@ int xtream_parse_episodes(const char *json, size_t len, const Source *s, Channel
     }
     free(c);
     return e.added;
+}
+
+/* ---- 0.8.0: a film's / series' details ---- */
+void vod_year(const char *date, char *out, size_t outsz)
+{
+    out[0] = 0;
+    if (!date) return;
+    const char *p = date;
+    if (strlen(date) >= 6) {                                 /* a name ending in "(2023)" */
+        const char *e = date + strlen(date);
+        while (e > date && (e[-1] == ' ')) e--;
+        if (e - date >= 6 && e[-1] == ')' && e[-6] == '(') p = e - 5;
+        else if (!isdigit((unsigned char)date[0]) || (date[4] != '-' && date[4] != '.' && date[4] != '/')) return;   /* (a date only) */
+    }
+    if (isdigit((unsigned char)p[0]) && isdigit((unsigned char)p[1]) && isdigit((unsigned char)p[2]) && isdigit((unsigned char)p[3])) {
+        int y = (p[0] - '0') * 1000 + (p[1] - '0') * 100 + (p[2] - '0') * 10 + (p[3] - '0');
+        if (y >= 1890 && y <= 2100) snprintf(out, outsz, "%d", y);
+    }
+}
+
+/* "02:08:12", "128 min", "7692" (seconds) -> seconds */
+static int dur_seconds(const char *d, const char *secs)
+{
+    if (secs && secs[0] && atoi(secs) > 0) return atoi(secs);
+    if (!d || !d[0]) return 0;
+    int h = 0, m = 0, s = 0;
+    if (sscanf(d, "%d:%d:%d", &h, &m, &s) == 3) return h * 3600 + m * 60 + s;
+    if (strstr(d, "min")) return atoi(d) * 60;
+    return 0;
+}
+
+int xtream_parse_vodinfo(const char *json, size_t len, VodInfo *out)
+{
+    memset(out, 0, sizeof *out);
+    const char *end = json + len, *p = NULL;
+    for (const char *q = json; q + 6 < end; q++)
+        if (!memcmp(q, "\"info\"", 6)) {
+            const char *v = skip_ws(q + 6, end);
+            if (v < end && *v == ':') { v = skip_ws(v + 1, end); if (v < end && *v == '{') { p = v; break; } }
+        }
+    if (!p) return -1;
+    XtObj *o = malloc(sizeof *o);
+    if (!o) return -1;
+    if (!xt_object(p, end, o)) { free(o); return -1; }
+    snprintf(out->name, sizeof out->name, "%s", o->name[0] ? o->name : o->title);
+    snprintf(out->poster, sizeof out->poster, "%s", o->icon);
+    vod_year(o->release, out->year, sizeof out->year);
+    snprintf(out->genre, sizeof out->genre, "%s", o->genre);
+    if (o->rating[0] && strcmp(o->rating, "0") && strcmp(o->rating, "0.0")) snprintf(out->rating, sizeof out->rating, "%s", o->rating);
+    snprintf(out->plot, sizeof out->plot, "%s", o->plot);
+    snprintf(out->cast, sizeof out->cast, "%s", o->cast);
+    snprintf(out->director, sizeof out->director, "%s", o->director);
+    out->dur_s = dur_seconds(o->dur, o->durs);
+    free(o);
+    return 0;
 }
 
 /* sources.txt:  Name | type | arg1 | arg2 | arg3
@@ -964,6 +1241,11 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "lang")) { st->lang = atoi(v); if (st->lang < 0 || st->lang > 2) st->lang = 0; }
             else if (!strcmp(k, "hide_adult")) st->hide_adult = atoi(v) != 0;
             else if (!strcmp(k, "hide_4k")) st->hide_4k = atoi(v) != 0;
+            else if (!strcmp(k, "pin")) {                    /* 0.8.0: digits only */
+                size_t o = 0;
+                for (const char *q = v; *q && o + 1 < sizeof st->pin; q++) if (*q >= '0' && *q <= '9') st->pin[o++] = *q;
+                st->pin[o] = 0;
+            }
             /* hide_1080p= (before v0.4.0): that filter is gone, the 4K one starts off */
             else if (!strcmp(k, "resolution")) {
                 int r = atoi(v);
@@ -978,9 +1260,9 @@ void settings_parse(const char *text, Settings *st)
 
 int settings_format(const Settings *st, char *out, size_t outsz)
 {
-    int w = snprintf(out, outsz, "# Vita IPTV settings (auto_proxy: 0 off, 1 when needed, 2 always)\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_4k=%d\nresolution=%d\n%s",
+    int w = snprintf(out, outsz, "# Vita IPTV settings (auto_proxy: 0 off, 1 when needed, 2 always)\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_4k=%d\nresolution=%d\n%s%s%s%s",
                      st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_4k, st->res_pref,
-                     st->plain_letters ? "plain_letters=1\n" : "");
+                     st->plain_letters ? "plain_letters=1\n" : "", st->pin[0] ? "pin=" : "", st->pin, st->pin[0] ? "\n" : "");
     return (w < 0 || (size_t)w >= outsz) ? -1 : w;
 }
 
