@@ -1,6 +1,11 @@
 #include "mkvdemux.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__vita__) || defined(MKV_ZLIB)
+#include <zlib.h>                                      /* 0.7.0: subtitles that mkvmerge packed with zlib */
+#define HAVE_MKV_ZLIB 1
+#endif
 
 #define ID_EBML         0x1A45DFA3u
 #define ID_SEGMENT      0x18538067u
@@ -26,12 +31,21 @@
 #define ID_FLAGDEFAULT  0x88u
 #define ID_LANGUAGE     0x22B59Cu
 #define ID_LANGUAGEIETF 0x22B59Du
+#define ID_FLAGFORCED   0x55AAu                /* 0.7.0: subtitles */
+#define ID_NAME         0x536Eu
+#define ID_BLOCKDURATION 0x9Bu
+#define ID_CONTENTENCODINGS 0x6D80u
+#define ID_CONTENTENCODING  0x6240u
+#define ID_CONTENTCOMPRESSION 0x5034u
+#define ID_CONTENTCOMPALGO  0x4254u
+#define ID_CONTENTCOMPSETTINGS 0x4255u
+#define SUB_TEXT_MAX 1024                      /* longest subtitle kept (bytes, after unpacking) */
 
 #define MAX_ELEMENT  (4u * 1024 * 1024)        /* biggest block we keep */
-#define MAX_TRACKS   8
+#define MAX_TRACKS   16
 
 typedef struct {
-    int number, type;                      /* type 1 video, 2 audio */
+    int number, type;                      /* type 1 video, 2 audio, 17 subtitles */
     char codec[32];
     uint8_t priv[512];
     int priv_len;
@@ -39,6 +53,11 @@ typedef struct {
     double rate;
     char lang[4];                          /* 0.5.0: ISO 639-2 ("" = not given) */
     int is_default;                        /* FlagDefault (1 when not given) */
+    int forced;                            /* 0.7.0: FlagForced */
+    char name[32];                         /* 0.7.0: Name ("SDH", "Forced"...) */
+    int comp, comp_algo;                   /* 0.7.0: ContentCompression: 0 zlib, 3 header stripping */
+    uint8_t comp_hdr[16];                  /* ... the stripped bytes (algorithm 3) */
+    int comp_hdr_len;
 } Track;
 
 struct MkvDemux {
@@ -60,6 +79,11 @@ struct MkvDemux {
     int bad;
     int pref_track;                         /* 0.5.0: the audio track wanted (-1 = none) and its language */
     char pref_lang[4];
+    /* 0.7.0: a subtitle block waits for its BlockDuration (which comes after the Block in a BlockGroup) */
+    int sp_on, sp_track;
+    int64_t sp_pts;
+    uint8_t *sp_data;
+    size_t sp_len;
 };
 
 static const int AAC_RATES[13] = { 96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350 };
@@ -117,7 +141,8 @@ static double read_float(const uint8_t *p, size_t n)
 static int is_container(uint32_t id)
 {
     return id == ID_EBML || id == ID_SEGMENT || id == ID_INFO || id == ID_TRACKS || id == ID_TRACKENTRY ||
-           id == ID_VIDEO || id == ID_AUDIO || id == ID_CLUSTER || id == ID_BLOCKGROUP;
+           id == ID_VIDEO || id == ID_AUDIO || id == ID_CLUSTER || id == ID_BLOCKGROUP ||
+           id == ID_CONTENTENCODINGS || id == ID_CONTENTENCODING || id == ID_CONTENTCOMPRESSION;
 }
 
 static int is_wanted_leaf(uint32_t id)
@@ -125,7 +150,8 @@ static int is_wanted_leaf(uint32_t id)
     return id == ID_TIMECODESCALE || id == ID_TRACKNUMBER || id == ID_TRACKTYPE || id == ID_CODECID ||
            id == ID_CODECPRIVATE || id == ID_PIXELWIDTH || id == ID_PIXELHEIGHT || id == ID_SAMPLINGFREQ ||
            id == ID_CHANNELS || id == ID_TIMECODE || id == ID_SIMPLEBLOCK || id == ID_BLOCK ||
-           id == ID_FLAGDEFAULT || id == ID_LANGUAGE || id == ID_LANGUAGEIETF;
+           id == ID_FLAGDEFAULT || id == ID_LANGUAGE || id == ID_LANGUAGEIETF ||
+           id == ID_FLAGFORCED || id == ID_NAME || id == ID_BLOCKDURATION || id == ID_CONTENTCOMPALGO || id == ID_CONTENTCOMPSETTINGS;
 }
 
 /* ---------------------------------------------------------------- tracks */
@@ -145,6 +171,20 @@ static TsCodec audio_codec(const char *c)
     if (!strcmp(c, "A_AC3")) return TS_CODEC_AC3;
     if (!strcmp(c, "A_EAC3")) return TS_CODEC_EAC3;
     return TS_CODEC_OTHER;
+}
+
+/* 0.7.0: a text subtitle track: 1 SRT-like text, 2 ASS / SSA, 0 none we can show (PGS, VobSub...) */
+static int sub_kind(const char *c)
+{
+    if (!strcmp(c, "S_TEXT/UTF8") || !strcmp(c, "S_TEXT/ASCII")) return 1;
+    if (!strcmp(c, "S_TEXT/ASS") || !strcmp(c, "S_TEXT/SSA") || !strcmp(c, "S_ASS") || !strcmp(c, "S_SSA")) return 2;
+    return 0;
+}
+
+static Track *track_by_number(MkvDemux *d, int number)
+{
+    for (int i = 0; i < d->ntracks; i++) if (d->tracks[i].number == number) return &d->tracks[i];
+    return NULL;
 }
 
 /* Reads the SPS/PPS from avcC and parses the SPS. */
@@ -228,6 +268,23 @@ static void choose_tracks(MkvDemux *d)
             int found = k >= 0 && (au[k].pid == d->pref_track || (d->pref_lang[0] && !strcmp(au[k].lang, d->pref_lang)));
             if (found) { d->atrack = au[k].pid; d->info.audio_codec = au[k].codec; }
         }
+    }
+    d->info.nsubs = 0;                                       /* 0.7.0: the text subtitle tracks */
+    for (int i = 0; i < d->ntracks && d->info.nsubs < TS_MAX_SUBS; i++) {
+        Track *t = &d->tracks[i];
+        int k = t->type == 17 ? sub_kind(t->codec) : 0;
+        if (!k || (t->comp && t->comp_algo != 3
+#ifdef HAVE_MKV_ZLIB
+                   && t->comp_algo != 0
+#endif
+                   )) continue;
+        int n = d->info.nsubs++;
+        d->info.subs[n].id = t->number;
+        memcpy(d->info.subs[n].lang, t->lang, 4);
+        snprintf(d->info.subs[n].name, sizeof d->info.subs[n].name, "%s", t->name);
+        d->info.subs[n].ass = k == 2;
+        d->info.subs[n].forced = t->forced;
+        d->info.subs[n].is_default = t->is_default;
     }
     d->info.program = 1;
     d->info.video_pid = d->vtrack ? d->vtrack : -1;
@@ -317,6 +374,87 @@ static void emit_audio(MkvDemux *d, const uint8_t *p, size_t n, int64_t pts)
     if (d->sink.audio) d->sink.audio(d->sink.ctx, h, fl, pts);
 }
 
+/* 0.7.0: the text of a subtitle block, made plain: ASS keeps only its last field (after 8 commas: ReadOrder,
+ * Layer, Style, Name, MarginL, MarginR, MarginV, Effect) without {\...} tags; \N is a new line. SRT loses
+ * its <i> <b> <font> tags. Drawing commands ({\p1} ... {\p0}) are left out. */
+static size_t sub_clean(const uint8_t *in, size_t n, int ass, char *out, size_t cap)
+{
+    size_t i = 0, o = 0;
+    if (ass) {
+        int commas = 0;
+        while (i < n && commas < 8) if (in[i++] == ',') commas++;
+        if (commas < 8) i = 0;                              /* (not the usual layout: all of it) */
+    }
+    int drawing = 0;
+    while (i < n && o + 2 < cap) {
+        uint8_t c = in[i];
+        if (ass && c == '{') {                              /* override tags */
+            size_t e = i + 1;
+            while (e < n && in[e] != '}') e++;
+            for (size_t k = i + 1; k + 2 < e; k++)
+                if (in[k] == '\\' && in[k + 1] == 'p' && in[k + 2] >= '0' && in[k + 2] <= '9') drawing = in[k + 2] != '0';
+            i = e < n ? e + 1 : n;
+            continue;
+        }
+        if (!ass && c == '<') {                             /* html-like tags */
+            size_t e = i + 1;
+            while (e < n && in[e] != '>' && e - i < 40) e++;
+            if (e < n && in[e] == '>') { i = e + 1; continue; }
+        }
+        if (c == '\\' && i + 1 < n && (in[i + 1] == 'N' || in[i + 1] == 'n')) { if (!drawing) out[o++] = '\n'; i += 2; continue; }
+        if (c == '\\' && i + 1 < n && in[i + 1] == 'h') { if (!drawing) out[o++] = ' '; i += 2; continue; }
+        if (c == '\r') { i++; continue; }
+        if (!drawing) out[o++] = (char)c;
+        i++;
+    }
+    while (o && (out[o - 1] == '\n' || out[o - 1] == ' ')) o--;
+    out[o] = 0;
+    size_t s = 0;                                           /* (and no blank lines in front) */
+    while (s < o && (out[s] == '\n' || out[s] == ' ')) s++;
+    if (s) { memmove(out, out + s, o - s + 1); o -= s; }
+    return o;
+}
+
+/* the waiting subtitle block goes out, for dur ticks (0 = not given) */
+static void sub_flush(MkvDemux *d, int64_t dur_ticks)
+{
+    if (!d->sp_on) return;
+    d->sp_on = 0;
+    Track *t = track_by_number(d, d->sp_track);
+    if (!t || !d->sink.sub) return;
+    static uint8_t un[SUB_TEXT_MAX];
+    const uint8_t *src = d->sp_data;
+    size_t len = d->sp_len;
+    if (t->comp && t->comp_algo == 3) {                     /* header stripping: the bytes go back in front */
+        size_t h = (size_t)t->comp_hdr_len;
+        if (h + len > sizeof un) len = sizeof un - h;
+        memcpy(un, t->comp_hdr, h);
+        memcpy(un + h, src, len);
+        src = un;
+        len += h;
+    }
+#ifdef HAVE_MKV_ZLIB
+    else if (t->comp && t->comp_algo == 0) {                /* zlib */
+        z_stream z;
+        memset(&z, 0, sizeof z);
+        if (inflateInit(&z) != Z_OK) return;
+        z.next_in = (Bytef *)src;
+        z.avail_in = (uInt)len;
+        z.next_out = un;
+        z.avail_out = sizeof un;
+        int r = inflate(&z, Z_FINISH);
+        len = sizeof un - z.avail_out;
+        inflateEnd(&z);
+        if (r != Z_STREAM_END && r != Z_BUF_ERROR && r != Z_OK) return;
+        src = un;
+    }
+#endif
+    char text[SUB_TEXT_MAX];
+    if (!sub_clean(src, len, sub_kind(t->codec) == 2, text, sizeof text)) return;
+    int64_t dur = dur_ticks > 0 ? (int64_t)((uint64_t)dur_ticks * d->scale * 9 / 100000ULL) : 0;
+    d->sink.sub(d->sink.ctx, t->number, text, d->sp_pts, dur);
+}
+
 static void on_block(MkvDemux *d, const uint8_t *p, size_t n, int simple)
 {
     uint64_t track;
@@ -326,10 +464,28 @@ static void on_block(MkvDemux *d, const uint8_t *p, size_t n, int simple)
     uint8_t flags = p[l + 2];
     size_t pos = (size_t)l + 3;
     choose_tracks(d);
+    sub_flush(d, 0);                                         /* (a subtitle before it had no BlockDuration) */
     int vid = (int)track == d->vtrack, aud = (int)track == d->atrack;
-    if (!vid && !aud) return;
     int64_t tick = (int64_t)d->cluster_tc + rel;
     int64_t pts = tick < 0 ? 0 : (int64_t)((uint64_t)tick * d->scale * 9 / 100000ULL);   /* ticks of scale ns -> 90 kHz */
+    if (!vid && !aud) {                                      /* 0.7.0: a text subtitle: kept until its BlockDuration */
+        if (!d->sink.sub || ((flags >> 1) & 3)) return;
+        for (int i = 0; i < d->info.nsubs; i++)
+            if (d->info.subs[i].id == (int)track) {
+                size_t len = n - pos;
+                if (len > SUB_TEXT_MAX) len = SUB_TEXT_MAX;
+                if (!d->sp_data) d->sp_data = malloc(SUB_TEXT_MAX);
+                if (!d->sp_data) return;
+                memcpy(d->sp_data, p + pos, len);
+                d->sp_len = len;
+                d->sp_track = (int)track;
+                d->sp_pts = pts;
+                d->sp_on = 1;
+                if (simple) sub_flush(d, 0);                 /* (a SimpleBlock has no duration) */
+                break;
+            }
+        return;
+    }
     int key = simple && (flags & 0x80);
 
     int lacing = (flags >> 1) & 3;
@@ -400,6 +556,15 @@ static void on_leaf(MkvDemux *d, uint32_t id, const uint8_t *p, size_t n)
     case ID_SAMPLINGFREQ:  if (d->cur) d->cur->rate = read_float(p, n); break;
     case ID_CHANNELS:      if (d->cur) d->cur->channels = (int)read_uint(p, n); break;
     case ID_FLAGDEFAULT:   if (d->cur) d->cur->is_default = read_uint(p, n) != 0; break;
+    case ID_FLAGFORCED:    if (d->cur) d->cur->forced = read_uint(p, n) != 0; break;   /* 0.7.0 */
+    case ID_NAME:
+        if (d->cur) { size_t k = n < sizeof d->cur->name - 1 ? n : sizeof d->cur->name - 1; memcpy(d->cur->name, p, k); d->cur->name[k] = 0; }
+        break;
+    case ID_CONTENTCOMPALGO: if (d->cur) d->cur->comp_algo = (int)read_uint(p, n); break;
+    case ID_CONTENTCOMPSETTINGS:
+        if (d->cur && n <= sizeof d->cur->comp_hdr) { memcpy(d->cur->comp_hdr, p, n); d->cur->comp_hdr_len = (int)n; }
+        break;
+    case ID_BLOCKDURATION: sub_flush(d, (int64_t)read_uint(p, n)); break;
     case ID_LANGUAGE:
     case ID_LANGUAGEIETF:
         if (d->cur && (id == ID_LANGUAGEIETF || !d->cur->lang[0])) {   /* (the IETF one wins when both are there) */
@@ -456,8 +621,14 @@ static void parse(MkvDemux *d, int final)
                 if (d->cur) memset(d->cur, 0, sizeof *d->cur);
                 if (d->cur) d->cur->is_default = 1;          /* (FlagDefault is 1 when the file leaves it out) */
             } else if (id == ID_CLUSTER) {
+                sub_flush(d, 0);
                 d->cur = NULL;
                 choose_tracks(d);
+            } else if (id == ID_BLOCKGROUP) {
+                sub_flush(d, 0);                             /* 0.7.0: (the one before had no BlockDuration) */
+            } else if (id == ID_CONTENTCOMPRESSION && d->cur) {
+                d->cur->comp = 1;                            /* (ContentCompAlgo 0, zlib, when not given) */
+                d->cur->comp_algo = 0;
             }
             pos += hdr;                                     /* step into it; unknown sizes are fine */
             continue;
@@ -516,6 +687,7 @@ void mkv_destroy(MkvDemux *d)
     if (!d) return;
     free(d->buf);
     free(d->es);
+    free(d->sp_data);
     free(d);
 }
 
@@ -543,4 +715,5 @@ void mkv_flush(MkvDemux *d)
 {
     parse(d, 1);
     choose_tracks(d);
+    sub_flush(d, 0);
 }

@@ -51,6 +51,8 @@ int  ui_wrap(UiWrap *w, float scale, const char *s, int maxw, int maxlines);
 int  ui_text_wrap(int x, int y, unsigned col, float scale, const char *s, int maxw, int line_h, int maxlines, int center);
 /* 0.5.0: a filled five-pointed star (favourites) */
 void ui_star(float cx, float cy, float r, unsigned col);
+/* 0.7.0: a tick (a watched episode), about 2*r wide, centred on cx, cy */
+void ui_check(float cx, float cy, float r, unsigned col);
 void ui_panel(int x, int y, int w, int h, unsigned fill);
 void ui_header(const char *title, const char *subtitle, const char *right);
 /* hints along the bottom bar; status (if any) is drawn just above it */

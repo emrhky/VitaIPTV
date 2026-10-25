@@ -24,6 +24,18 @@ static const Pair FIXED[] = {
     { "Up / down", "Yukarı / aşağı" },
     { "built", "derleme" },
     { "Now", "Şimdi" }, { "Next", "Sonra" },
+    /* 0.7.0 */
+    { "Picture", "Görüntü" }, { "Subtitles", "Altyazı" }, { "More", "Diğer" }, { "Forced", "Zorunlu" },
+    { "Sync:  < %+d.%d s >", "Senkron:  < %+d.%d sn >" }, { "Sync:  < -0.%d s >", "Senkron:  < -0.%d sn >" },
+    { "No subtitles in this film (MKV text subtitles only)", "Bu filmde altyazı yok (yalnız MKV metin altyazıları)" },
+    { "No subtitles", "Altyazı yok" }, { "Chosen by the server", "Sunucu seçiyor" }, { "No other sound", "Başka ses yok" },
+    { "Left / Right: earlier / later   X: back to 0   O: close", "Sol / Sağ: erken / geç   X: sıfırla   O: kapat" },
+    { "L / R: tab   X: choose   O: close", "L / R: sekme   X: seç   O: kapat" },
+    { "Next episode in %d s", "Sonraki bölüm %d sn içinde" }, { "X: now   O: cancel", "X: hemen   O: iptal" },
+    { "Clear watched episodes", "İzlenme Kayıtlarını Temizle" }, { "Clear watched episodes?", "İzlenme kayıtları temizlensin mi?" },
+    { "The ticks of watched episodes are removed. Where films stopped is kept.",
+      "İzlenen bölümlerin işaretleri silinir. Filmlerin kaldığı yerler korunur." },
+    { "Watched episodes cleared", "İzlenme kayıtları temizlendi" },
     /* 0.5.0 */
     { "Through the Server", "Sunucu Üzerinden" }, { "Direct (without the server)", "Doğrudan (sunucusuz)" },
     { "Clear Recently Watched", "Son İzlenenleri Temizle" }, { "Clear recently watched?", "Son izlenenler temizlensin mi?" },

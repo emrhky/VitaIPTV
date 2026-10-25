@@ -505,6 +505,16 @@ void ui_message(const char *title, const char *line, unsigned title_col, int spi
     for (int i = 0; i < lw.n; i++) ui_text_center(480, ty + 32 + i * 26, UI_DIM, 1.0f, lw.line[i]);
 }
 
+void ui_check(float cx, float cy, float r, unsigned col)
+{
+    /* two strokes, about 3 pixels thick: down to the bottom point, then up to the right */
+    float ax = cx - r, ay = cy, bx = cx - r * 0.3f, by = cy + r * 0.7f, ex = cx + r, ey = cy - r * 0.8f;
+    for (float o = -1.5f; o <= 1.5f; o += 0.5f) {
+        vita2d_draw_line(ax, ay + o, bx, by + o, col);
+        vita2d_draw_line(bx, by + o, ex, ey + o, col);
+    }
+}
+
 void ui_star(float cx, float cy, float r, unsigned col)
 {
     float px[10], py[10];
