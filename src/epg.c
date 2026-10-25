@@ -83,10 +83,14 @@ static int json_val(const char *obj, size_t n, const char *key, char *out, size_
 }
 
 /* a title as it should be shown: base64 decoded when it is base64, JSON escapes for the plain ones */
-static void title_of(const char *raw, char *out, size_t cap)
+static void title_of(const char *raw, char *out, size_t cap) { epg_text(raw, out, cap); }
+
+void epg_text(const char *raw, char *out, size_t cap)
 {
-    char tmp[sizeof ((EpgProg *)0)->title * 2];
-    int n = epg_b64(raw, strlen(raw), tmp, sizeof tmp);
+    size_t tcap = strlen(raw) + 4;                           /* (0.8.0: any length: descriptions too) */
+    char sbuf[512], *tmp = tcap <= sizeof sbuf ? sbuf : malloc(tcap);
+    if (!tmp) { out[0] = 0; return; }
+    int n = epg_b64(raw, strlen(raw), tmp, tcap);
     const char *src = raw;
     if (n > 0 && good_text(tmp)) src = tmp;
     size_t o = 0;
@@ -112,6 +116,15 @@ static void title_of(const char *raw, char *out, size_t cap)
     }
     out[o] = 0;
     while (o && out[o - 1] == ' ') out[--o] = 0;
+    while (o && ((unsigned char)out[o - 1] & 0xC0) == 0x80) {   /* (cut short in the middle of a letter) */
+        size_t k = o - 1;
+        while (k && ((unsigned char)out[k] & 0xC0) == 0x80) k--;
+        unsigned char lead = (unsigned char)out[k];
+        size_t need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 1;
+        if (o - k >= need) break;
+        out[k] = 0; o = k;
+    }
+    if (tmp != sbuf) free(tmp);
 }
 
 int epg_parse_short(const char *json, size_t len, int64_t now, EpgInfo *out)

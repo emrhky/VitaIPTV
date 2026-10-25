@@ -19,5 +19,7 @@ int  epg_stream_id(const char *url, char *out, size_t cap);
 int64_t epg_days(int y, int m, int d);
 /* base64 to bytes; returns the length, -1 if it is not valid base64 */
 int  epg_b64(const char *in, size_t n, char *out, size_t cap);
+/* 0.8.0: a title / description as the Xtream API sends it (base64, or plain with JSON escapes) as text */
+void epg_text(const char *raw, char *out, size_t cap);
 
 #endif

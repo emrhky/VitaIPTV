@@ -1924,8 +1924,8 @@ typedef struct SubCue { int track; int64_t start, dur; char text[240]; } SubCue;
  * language, else none (subtitles are off until chosen) */
 static void update_sub_tracks(Tsp *t)
 {
-    if (!t->mkv) return;
-    const TsInfo *i = mkv_info(t->mkv);
+    if (!t->mkv && !t->mp4) return;                          /* (0.8.0: MP4 text tracks too) */
+    const TsInfo *i = dmx_info(t);
     if (i->program < 0 || i->nsubs == t->sub_tracks_n) return;
     int n = i->nsubs < TSP_MAX_SUBS ? i->nsubs : TSP_MAX_SUBS, cur = -1;
     for (int k = 0; k < n; k++) {

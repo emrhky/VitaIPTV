@@ -521,8 +521,10 @@ int mp4_read_moov(VodRead rd, void *ctx, uint64_t total, uint8_t **moov, size_t 
 
 typedef struct { uint64_t off; uint32_t size; int32_t pts; } Mp4Sample;   /* size: KEY_BIT = sync sample */
 
+#define MP4_TRACKS (2 + TS_MAX_SUBS)   /* video, audio, 0.8.0: text subtitles (tx3g) */
 typedef struct {
-    int id, kind;                       /* kind 1 video, 2 audio */
+    int id, kind;                       /* kind 1 video, 2 audio, 3 text (0.8.0) */
+    char lang[4];
     TsCodec codec;
     uint32_t timescale;
     int64_t shift;                      /* edit list: media time of the first shown sample */
@@ -539,8 +541,9 @@ typedef struct {
 struct Mp4Demux {
     TsInfo info;
     TsSink sink;
-    Mp4Track tr[2];                     /* [0] video, [1] audio */
-    int has[2];
+    Mp4Track tr[MP4_TRACKS];            /* [0] video, [1] audio, [2...] text subtitles */
+    int has[MP4_TRACKS];
+    int ntr;                            /* tracks in use: 2 + the text ones */
     uint32_t movie_ts;
     int64_t duration_ms;
     int nal_len, aac_obj, aac_sfi, aac_ch;
@@ -632,6 +635,7 @@ static void parse_stsd(Mp4Track *t, const Box *stsd)
     const uint8_t *fmt = e + 4;
     const uint8_t *body = e + 8;
     size_t bn = esz - 8;
+    if (t->kind == 3) { t->codec = !memcmp(fmt, "tx3g", 4) ? TS_CODEC_OTHER : TS_CODEC_NONE; return; }   /* 0.8.0 */
     if (t->kind == 1) {
         if (!memcmp(fmt, "avc1", 4) || !memcmp(fmt, "avc3", 4)) t->codec = TS_CODEC_H264;
         else if (!memcmp(fmt, "hvc1", 4) || !memcmp(fmt, "hev1", 4)) t->codec = TS_CODEC_HEVC;
@@ -826,6 +830,7 @@ Mp4Demux *mp4_create(const uint8_t *moov, size_t len, const TsSink *sink, char *
     Mp4Demux *d = calloc(1, sizeof *d);
     if (!d) { snprintf(err, errsz, "Out of memory"); return NULL; }
     d->sink = *sink;
+    d->ntr = 2;
     d->nal_len = 4;
     d->info.program = -1;
     d->info.video_pid = d->info.audio_pid = -1;
@@ -849,6 +854,31 @@ Mp4Demux *mp4_create(const uint8_t *moov, size_t len, const TsSink *sink, char *
             if (box_path(&trak, "mdia/hdlr", &hdlr) && hdlr.n >= 12 && box_path(&trak, "mdia/mdhd", &mdhd) && mdhd.n >= 20 &&
                 box_path(&trak, "mdia/minf/stbl", &stbl) && box_find(&stbl, "stsd", &stsd)) {
                 int kind = !memcmp(hdlr.p + 8, "vide", 4) ? 1 : !memcmp(hdlr.p + 8, "soun", 4) ? 2 : 0;
+                if ((!memcmp(hdlr.p + 8, "text", 4) || !memcmp(hdlr.p + 8, "sbtl", 4)) && d->ntr < MP4_TRACKS) {   /* 0.8.0: tx3g subtitles */
+                    Mp4Track tmp;
+                    memset(&tmp, 0, sizeof tmp);
+                    tmp.kind = 3;
+                    tmp.timescale = mdhd.p[0] == 1 ? (mdhd.n >= 24 ? be32(mdhd.p + 20) : 0) : be32(mdhd.p + 12);
+                    size_t lo = mdhd.p[0] == 1 ? 32 : 20;
+                    if (mdhd.n >= lo + 2) {                  /* ISO 639-2 in three 5-bit letters */
+                        unsigned l = be16(mdhd.p + lo);
+                        char c1 = (char)(((l >> 10) & 31) + 0x60), c2 = (char)(((l >> 5) & 31) + 0x60), c3 = (char)((l & 31) + 0x60);
+                        if (c1 >= 'a' && c1 <= 'z' && c2 >= 'a' && c2 <= 'z' && c3 >= 'a' && c3 <= 'z' && memcmp((char[]){ c1, c2, c3 }, "und", 3)) {
+                            tmp.lang[0] = c1; tmp.lang[1] = c2; tmp.lang[2] = c3; tmp.lang[3] = 0;
+                        }
+                    }
+                    if (box_find(&trak, "tkhd", &tkhd) && tkhd.n >= 24) tmp.id = (int)(tkhd.p[0] == 1 ? be32(tkhd.p + 20) : be32(tkhd.p + 12));
+                    parse_stsd(&tmp, &stsd);
+                    parse_edits(&tmp, &trak, d->movie_ts);
+                    char e3[8];
+                    if (tmp.codec == TS_CODEC_OTHER && tmp.timescale && build_samples(&tmp, &stbl, e3, sizeof e3) == 0 && tmp.n) {
+                        if (!tmp.id) tmp.id = 100 + d->ntr;
+                        d->tr[d->ntr] = tmp;
+                        d->has[d->ntr] = 1;
+                        d->ntr++;
+                    } else free(tmp.s);
+                    kind = 0;
+                }
                 if (kind && !d->has[kind - 1]) {
                     Mp4Track tmp;
                     memset(&tmp, 0, sizeof tmp);
@@ -910,11 +940,16 @@ Mp4Demux *mp4_create(const uint8_t *moov, size_t len, const TsSink *sink, char *
         if (a->codec == TS_CODEC_AAC) use_asc(d, a);
         i->streams[i->nstreams].pid = i->audio_pid; i->streams[i->nstreams].stream_type = 2; i->streams[i->nstreams++].codec = a->codec;
     }
+    for (int k = 2; k < d->ntr && i->nsubs < TS_MAX_SUBS; k++) {   /* 0.8.0: the text tracks for the menu */
+        i->subs[i->nsubs].id = d->tr[k].id;
+        memcpy(i->subs[i->nsubs].lang, d->tr[k].lang, 4);
+        i->nsubs++;
+    }
     {   /* timestamps below zero (negative composition offsets) would read as "no timestamp": move all up */
         int64_t lo = 0;
         for (int k = 0; k < 2; k++)
             for (uint32_t j = 0; d->has[k] && j < d->tr[k].n && j < 512; j++) if (d->tr[k].s[j].pts < lo) lo = d->tr[k].s[j].pts;
-        for (int k = 0; lo < 0 && k < 2; k++)
+        for (int k = 0; lo < 0 && k < d->ntr; k++)
             for (uint32_t j = 0; d->has[k] && j < d->tr[k].n; j++) d->tr[k].s[j].pts = (int32_t)(d->tr[k].s[j].pts - lo);
     }
     if (d->duration_ms <= 0 && d->has[0] && d->tr[0].n)
@@ -926,8 +961,7 @@ Mp4Demux *mp4_create(const uint8_t *moov, size_t len, const TsSink *sink, char *
 void mp4_destroy(Mp4Demux *d)
 {
     if (!d) return;
-    free(d->tr[0].s);
-    free(d->tr[1].s);
+    for (int k = 0; k < MP4_TRACKS; k++) free(d->tr[k].s);
     free(d->sbuf);
     free(d->es);
     free(d);
@@ -958,6 +992,12 @@ uint64_t mp4_seek(Mp4Demux *d, int64_t target_ms, int64_t *at_ms)
         while (k < a->n && a->s[k].pts < start90) k++;
         if (target_ms <= 0) k = 0;
         a->cur = k;
+    }
+    for (int j = 2; j < d->ntr; j++) {                        /* 0.8.0: subtitles from the start on (they do not move where reading starts) */
+        Mp4Track *t = &d->tr[j];
+        uint32_t k = 0;
+        while (k < t->n && t->s[k].pts < start90) k++;
+        t->cur = target_ms <= 0 ? 0 : k;
     }
     uint64_t off = UINT64_MAX;
     for (int k = 0; k < 2; k++)
@@ -1043,11 +1083,28 @@ static void emit_audio(Mp4Demux *d, const uint8_t *p, size_t n, int64_t pts)
     if (d->sink.audio) d->sink.audio(d->sink.ctx, h, fl, pts);
 }
 
-/* The track whose next sample comes first in the file; -1 when both are done. */
+/* 0.8.0: a tx3g sample: 16-bit length, UTF-8 text (style boxes after it are left out); shown until the next one */
+static void emit_text(Mp4Demux *d, const Mp4Track *t, const uint8_t *p, size_t n, int64_t pts)
+{
+    if (!d->sink.sub || n < 2) return;
+    size_t l = (size_t)be16(p);
+    if (l == 0 || l + 2 > n) return;                         /* (an empty sample clears the screen: the length does that) */
+    char text[512];
+    if (l >= sizeof text) l = sizeof text - 1;
+    memcpy(text, p + 2, l);
+    text[l] = 0;
+    if ((unsigned char)text[0] == 0xFE || (unsigned char)text[0] == 0xFF) return;   /* (UTF-16: not shown) */
+    for (char *q = text; *q; q++) if (*q == '\r') *q = ' ';
+    int64_t dur = t->cur < t->n ? (int64_t)t->s[t->cur].pts - pts : 0;
+    if (dur < 0 || dur > 30 * 90000) dur = 0;
+    d->sink.sub(d->sink.ctx, t->id, text, pts, dur);
+}
+
+/* The track whose next sample comes first in the file; -1 when all are done. */
 static int next_track(const Mp4Demux *d)
 {
     int best = -1;
-    for (int k = 0; k < 2; k++) {
+    for (int k = 0; k < d->ntr; k++) {
         if (!d->has[k] || d->tr[k].cur >= d->tr[k].n) continue;
         if (best < 0 || d->tr[k].s[d->tr[k].cur].off < d->tr[best].s[d->tr[best].cur].off) best = k;
     }
@@ -1101,7 +1158,8 @@ void mp4_feed(Mp4Demux *d, uint64_t off, const uint8_t *data, size_t len)
             d->shave = 0;
             t->cur++;
             if (k == 0) emit_video(d, d->sbuf, size, s->pts, (s->size & KEY_BIT) != 0);
-            else emit_audio(d, d->sbuf, size, s->pts);
+            else if (k == 1) emit_audio(d, d->sbuf, size, s->pts);
+            else emit_text(d, t, d->sbuf, size, s->pts);
         }
     }
 }
