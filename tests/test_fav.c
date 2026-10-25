@@ -226,6 +226,49 @@ int main(void)
         fav_free(&v);
     }
 
+    /* 0.7.0: watched episodes */
+    {
+        WatchList w = {0};
+        char ek[WATCH_ID];
+        watch_ep_key("http://h:8080/series/u/p/12345.mkv", ek, sizeof ek); assert(!strcmp(ek, "12345"));
+        watch_ep_key("http://h/series/u/p/777.mp4?x=1.2", ek, sizeof ek); assert(!strcmp(ek, "777"));
+        watch_ep_key("http://h/a/b/", ek, sizeof ek); assert(ek[0] == 0);
+        assert(watch_find(&w, k1, "10") < 0);
+        assert(watch_mark(&w, k1, "10", "101", 1) == 1);
+        assert(watch_mark(&w, k1, "10", "101", 1) == 0);           /* nothing new */
+        assert(watch_mark(&w, k1, "10", "102", 0) == 1);           /* half watched */
+        assert(watch_mark(&w, k1, "20", "201", 1) == 1);           /* another series goes to the front */
+        assert(w.n == 2 && !strcmp(w.e[0].series, "20"));
+        assert(watch_mark(&w, k1, "10", "102", 0) == 1 && !strcmp(w.e[0].series, "10"));   /* back to the front */
+        int i = watch_find(&w, k1, "10");
+        assert(i == 0 && watch_is_done(&w.e[i], "101") && !watch_is_done(&w.e[i], "102") && !watch_is_done(&w.e[i], "10"));
+        assert(!strcmp(w.e[i].last, "102") && !w.e[i].last_done);
+        const char *eps[] = { "101", "102", "103" };
+        assert(watch_pick(&w.e[i], eps, 3) == 1);                  /* the half-watched one */
+        assert(watch_mark(&w, k1, "10", "102", 1) == 1);
+        assert(watch_pick(&w.e[0], eps, 3) == 2);                  /* finished: the next one */
+        assert(watch_mark(&w, k1, "10", "103", 1) == 1);
+        assert(watch_pick(&w.e[0], eps, 3) == 2);                  /* the final episode: stays on it */
+        assert(watch_pick(&w.e[0], eps, 2) == -1);                 /* not in the list */
+        assert(watch_find(&w, k2, "10") < 0);                      /* another playlist */
+        char *txt = watch_format(&w);
+        assert(txt);
+        WatchList w2 = {0};
+        assert(watch_parse(txt, &w2) == 2);
+        assert(!strcmp(w2.e[0].series, "10") && w2.e[0].last_done && !strcmp(w2.e[0].last, "103"));
+        assert(watch_is_done(&w2.e[0], "101") && watch_is_done(&w2.e[0], "102") && watch_is_done(&w2.e[0], "103"));
+        assert(watch_is_done(&w2.e[1], "201") && !watch_is_done(&w2.e[1], "20"));
+        char *txt2 = watch_format(&w2);
+        assert(txt2 && !strcmp(txt, txt2));
+        free(txt); free(txt2);
+        assert(watch_clear(&w2) == 2 && w2.n == 0);
+        txt = watch_format(&w2); assert(txt && watch_parse(txt, &w2) == 0); free(txt);
+        for (int k = 0; k < WATCH_MAX + 5; k++) { char sid[16]; snprintf(sid, sizeof sid, "%d", k); assert(watch_mark(&w, k1, sid, "1", 1) == 1); }
+        assert(w.n == WATCH_MAX && !strcmp(w.e[0].series, "304"));
+        watch_free(&w);
+        watch_free(&w2);
+    }
+
     /* full */
     FavList big;
     fav_init(&big);

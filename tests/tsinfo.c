@@ -34,6 +34,16 @@ static void on_audio(void *c, const uint8_t *d, size_t n, int64_t pts)
     if (fa) fwrite(d, 1, n, fa);
 }
 
+static unsigned ncues;
+/* 0.7.0: subtitles as cueN=id|pts|dur|text (new lines as \\n) */
+static void on_sub(void *c, int id, const char *text, int64_t pts, int64_t dur)
+{
+    (void)c;
+    printf("cue%u=%d|%lld|%lld|", ncues++, id, (long long)pts, (long long)dur);
+    for (const char *t = text; *t; t++) { if (*t == '\n') fputs("\\n", stdout); else putchar(*t); }
+    putchar('\n');
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) { fprintf(stderr, "usage: tsinfo file [-chunk N] [-o prefix]\n"); return 2; }
@@ -50,7 +60,7 @@ int main(int argc, char **argv)
         snprintf(p, sizeof p, "%s.video", prefix); fv = fopen(p, "wb");
         snprintf(p, sizeof p, "%s.audio", prefix); fa = fopen(p, "wb");
     }
-    TsSink sink = { on_video, on_audio, NULL };
+    TsSink sink = { on_video, on_audio, NULL, on_sub };
     uint8_t *buf = malloc(1 << 20);
     uint8_t head[4] = { 0 };
     size_t hn = fread(head, 1, 4, f);
@@ -83,6 +93,9 @@ int main(int argc, char **argv)
            (unsigned long long)i->packets, (unsigned long long)i->bytes, i->sync_losses, i->cc_errors,
            i->tei_errors, i->scrambled_packets, i->pes_overflows);
     printf("video_aus=%u\nkeyframes=%u\nintra_aus=%u\ndamaged_aus=%u\naudio_frames=%u\n", i->video_aus, i->keyframes, i->intra_aus, i->damaged_aus, i->audio_frames);
+    printf("subs=%d\ncues=%u\n", i->nsubs, ncues);
+    for (int k = 0; k < i->nsubs; k++)
+        printf("subtrack%d=%d|%s|%s|%d|%d|%d\n", k, i->subs[k].id, i->subs[k].lang, i->subs[k].name, i->subs[k].ass, i->subs[k].forced, i->subs[k].is_default);
     printf("first_video_pts=%lld\nfirst_audio_pts=%lld\n", (long long)i->first_video_pts, (long long)i->first_audio_pts);
     printf("sink_video_calls=%llu\nsink_audio_calls=%llu\nsink_video_bytes=%llu\nsink_audio_bytes=%llu\n",
            (unsigned long long)vcalls, (unsigned long long)acalls, (unsigned long long)vbytes, (unsigned long long)abytes);
