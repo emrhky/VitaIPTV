@@ -190,11 +190,12 @@ int main(int argc, char **argv)
                       { T("Language"), T("Automatic (system)"), SCR_F_CHOICE, 1 }, { T("Hide adult channels"), T("On"), SCR_F_TOGGLE, 1 }, { T("Parental lock (PIN)"), "****", SCR_F_TEXT, 1 },
                       { T("Hide channels named 4K / UHD"), T("Off"), SCR_F_TOGGLE, 1 },
                       { T("Preferred resolution"), T("Automatic"), SCR_F_CHOICE, 1 },
+                      { T("Theme"), T("Blue"), SCR_F_CHOICE, 1 },
                       { T("Test server"), NULL, SCR_F_BUTTON, 1 }, { T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 },
                       { T("Clear watched episodes"), NULL, SCR_F_BUTTON, 1 },
                       { T("Save"), NULL, SCR_F_BUTTON, 1 }, { T("Cancel"), NULL, SCR_F_BUTTON, 1 } };
-    preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), fs, 12, 2, hf2, 4, T("Server is running"), 0); shot("d_settings");
-    preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 12, 9, hf2, 4, NULL, 0); shot("d_settings_end");
+    preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), fs, 13, 2, hf2, 4, T("Server is running"), 0); shot("d_settings");
+    preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 13, 7, hf2, 4, NULL, 0); shot("d_settings_end");
     scr_confirm(T("Clear watched episodes?"), T("The ticks of watched episodes are removed. Where films stopped is kept.")); shot("d3_clear_watched");
     preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 11, 7, hf2, 4, NULL, 0);
     scr_confirm(T("Clear recently watched?"), T("The recently watched channels of every playlist are removed. Favorites stay.")); shot("d2_clear_recent");
@@ -426,8 +427,8 @@ int main(int argc, char **argv)
         vn.card.rating = -1; vn.card.line = NULL; vn.progress = -1; vn.fav = 0; vn.buttons = btn + 1; vn.nbuttons = 2;
         preview_clear(UI_BG); scr_vod_detail(&vn); shot("q_film_detail_bare");
         ScrVodDetail vo = v; vo.overlay = 1;
-        UiHint hov[] = { { UI_BTN_TRIANGLE, "Close" }, { UI_BTN_CIRCLE, "Close" } };
-        vo.hints = hov; vo.nhints = 2;
+        UiHint hov[] = { { UI_BTN_CIRCLE, "Close" } };   /* (0.8.1) */
+        vo.hints = hov; vo.nhints = 1;
         preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_vod_detail(&vo); shot("q_film_overlay");
 
         /* a series */
@@ -441,6 +442,63 @@ int main(int argc, char **argv)
                          { UI_BTN_SEP, "" }, { UI_BTN_START, "Fav." } };
         se.hints = hse; se.nhints = 6;
         preview_clear(UI_BG); es = 0; scr_series(&se); shot("r_series");
+    }
+    /* 0.8.1: subtitle looks and the themes */
+    {
+        ScrPlayer ps = pl;
+        ps.osd = 0;
+        ps.subtitle = "Bunu sana daha önce söylemiştim.\nAma dinlemedin.";
+        static const char *nm[] = { "s_sub_small_yellow_band", "s_sub_large_white_box", "s_sub_vlarge_green_none_higher", "s_sub_medium_blue_top" };
+        int st[4][4] = { { 0, 1, 0, 0 }, { 2, 0, 0, 1 }, { 3, 2, 1, 2 }, { 1, 3, 2, 0 } };
+        for (int k = 0; k < 4; k++) {
+            scr_sub_style(st[k][0], st[k][1], st[k][2], st[k][3]);
+            ps.osd = k == 3;
+            preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&ps); shot(nm[k]);
+        }
+        scr_sub_style(3, 0, 0, 0);                           /* the longest: 4 lines, very large, with the bars */
+        ps.osd = 1;
+        ps.subtitle = "Bu çok uzun bir altyazı satırı, ekranın genişliğini aşıyor ve bölünmesi gerekiyor.\nİkinci satır da uzun, o da bölünüyor.";
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&ps); shot("s_sub_vlarge_long");
+        scr_sub_style(1, 0, 0, 0);
+        const char *tabs[] = { T("Picture"), T("Audio"), T("Subtitles"), T("More") };
+        static char rows[8][64];
+        snprintf(rows[0], 64, "%s", T("Off")); snprintf(rows[1], 64, "> Türkçe"); snprintf(rows[2], 64, T("Sync:  < %+d.%d s >"), 0, 0);
+        snprintf(rows[3], 64, "%s:  < %s >", T("Size"), T("Large")); snprintf(rows[4], 64, "%s:  < %s >", T("Colour"), T("Yellow"));
+        snprintf(rows[5], 64, "%s:  < %s >", T("Place"), T("Bottom")); snprintf(rows[6], 64, "%s:  < %s >", T("Background"), T("Light band"));
+        const char *it[7] = { rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6] };
+        int dz[7] = { 0 };
+        scr_sub_style(2, 1, 0, 0);
+        ps.osd = 0; ps.subtitle = "Bunu sana daha önce söylemiştim.";
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&ps);
+        scr_tabmenu(tabs, 4, 2, it, dz, 7, 4, T("Left / Right / X: change   O: close")); shot("s_sub_menu");
+        scr_sub_style(1, 0, 0, 0);
+        /* each theme: the channels, the settings, a film's details */
+        static const char *tn[4] = { "blue", "green", "purple", "orange" };
+        for (int t = 0; t < UI_THEMES; t++) {
+            ui_set_theme(t);
+            char nmb[48];
+            static int gs, cs;
+            UiHint hr2[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_TRIANGLE, "Guide" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
+                             { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+            ScrDual d; memset(&d, 0, sizeof d);
+            d.title = "Ev internet - Xtream"; d.subtitle = "Ulusal"; d.right = "16 channels";
+            d.lcount = 9; d.lsel = 1; d.lscroll = &gs; d.lrow = grp_row_pv;
+            d.rcount = 16; d.rsel = 3; d.rscroll = &cs; d.rrow = ch_row; d.focus = 1; d.lmark = 1; d.hints = hr2; d.nhints = 8;
+            d.status = "Şimdi: Ana Haber Bülteni (19:00-20:30)";
+            fav_demo = 1;
+            snprintf(nmb, sizeof nmb, "t_%s_channels", tn[t]);
+            preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot(nmb);
+            fav_demo = 0;
+            fs[7].value = T(ui_theme_name(t));
+            snprintf(nmb, sizeof nmb, "t_%s_settings", tn[t]);
+            preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 13, 7, hf2, 4, NULL, 0); shot(nmb);
+            snprintf(nmb, sizeof nmb, "t_%s_menu", tn[t]);
+            preview_clear(UI_BG); scroll = 0; scr_list(&sl2); scr_menu(T("Menu"), menu, 5, 1); shot(nmb);
+            snprintf(nmb, sizeof nmb, "t_%s_player", tn[t]);
+            preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pf); shot(nmb);
+        }
+        ui_set_theme(0);
+        fs[7].value = T("Blue");
     }
     /* 0.4.1: the button bars, left and right */
     {
