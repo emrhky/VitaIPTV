@@ -246,6 +246,19 @@ int main(void)
         settings_parse("auto_proxy=7\n", &sb); assert(sb.auto_proxy == 1 && sb.plain_letters == 0);
         Settings sc; settings_defaults(&sc); settings_format(&sc, saf, sizeof saf); assert(!strstr(saf, "plain_letters"));
     }
+    {   /* 0.8.1: subtitle looks and the theme: kept, checked, written only when changed */
+        Settings sd; settings_defaults(&sd);
+        assert(sd.sub_size == 1 && sd.sub_color == 0 && sd.theme == 0);
+        char sdf[512]; settings_format(&sd, sdf, sizeof sdf); assert(!strstr(sdf, "sub_") && !strstr(sdf, "theme"));
+        settings_parse("sub_size=3\nsub_color=2\nsub_pos=1\nsub_bg=2\ntheme=3\npin=1234\n", &sd);
+        assert(sd.sub_size == 3 && sd.sub_color == 2 && sd.sub_pos == 1 && sd.sub_bg == 2 && sd.theme == 3 && !strcmp(sd.pin, "1234"));
+        assert(settings_format(&sd, sdf, sizeof sdf) > 0);
+        Settings se; settings_parse(sdf, &se);
+        assert(se.sub_size == 3 && se.sub_color == 2 && se.sub_pos == 1 && se.sub_bg == 2 && se.theme == 3 && !strcmp(se.pin, "1234"));
+        settings_parse("sub_size=9\nsub_color=-1\nsub_pos=x\nsub_bg=3\ntheme=4\n", &se);
+        assert(se.sub_size == 1 && se.sub_color == 0 && se.sub_pos == 0 && se.sub_bg == 0 && se.theme == 0);
+        char tiny[40]; assert(settings_format(&sd, tiny, sizeof tiny) == -1);
+    }
     char slf[256]; settings_format(&sl, slf, sizeof slf); Settings sl2; settings_parse(slf, &sl2); assert(sl2.lang == 2);
 
     /* adult filter */
