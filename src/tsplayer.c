@@ -290,6 +290,8 @@ typedef struct {
     volatile int ready;                 /* slots usable by the UI thread */
     volatile uint32_t frame_us;         /* estimated picture duration */
     uint64_t last_stats, start_us;
+    uint32_t log_bad;                   /* 0.8.1: dropped + late + damaged + errors + skipped at the last stats line */
+    int stats_quiet;                    /* ... intervals since the last short line (one a minute after the first 30 s) */
     uint32_t prev_bytes, prev_decoded;  /* stats line: values at the previous line, for rates */
     uint64_t prev_push_wait;            /* 0.6.0: ... and the reader's waits for room in the queues */
     unsigned net_free_kbs;              /* 0.6.0: what the network brings while the reader is not waiting for room (0 = unknown) */
@@ -2556,7 +2558,7 @@ static unsigned cur_read_size(const Tsp *t) { return t->read_size ? t->read_size
 /* CPU line: how much of the time each player thread ran, and how busy each core was (the network stack
  * and TLS run in the system, so only the cores show them). Answers "decoder, network or both at once?":
  * a core near 100% means the CPU is the limit, not the decoder hardware or the Wi-Fi. */
-static void cpu_line(Tsp *t, uint64_t now)
+static void cpu_line(Tsp *t, uint64_t now, int loud)
 {
     SceUID ids[4] = { t->thread, t->vthread, t->athread, t->ui_thid };
     static const char *const names[4] = { "reader", "video", "audio", "screen" };
@@ -2600,7 +2602,7 @@ static void cpu_line(Tsp *t, uint64_t now)
             }
             if (n) snprintf(co + (c < sizeof co ? c : sizeof co - 1), sizeof co - (c < sizeof co ? c : sizeof co - 1), " (avg %u%%)", sum / n);
         }
-        plog("tsp: cpu: %s%s%s", th, co[0] ? "; cores busy " : "", co);
+        if (loud) plog("tsp: cpu: %s%s%s", th, co[0] ? "; cores busy " : "", co);
     }
     t->cpu_t0 = now;
     for (int k = 0; k < 4; k++) {
@@ -2615,10 +2617,18 @@ static void stats_tick(Tsp *t)
     uint64_t dt = now - t->last_stats;                      /* the reader may block: use the real interval */
     if (dt < STATS_US) return;
     t->last_stats = now;
+    /* 0.8.1: the log every 5 s only in the first 30 s or when pictures are lost; after that a short line a minute
+     * (it grew by about 500 KB an hour of watching). The values below are still worked out every time: the
+     * information table uses them. */
+    uint32_t bad = t->st.dropped + t->st.late + t->st.damaged + t->st.errors + (uint32_t)t->st.skipped;
+    int loud = now - t->start_us < 31000000ULL || bad != t->log_bad;
+    int brief = loud || ++t->stats_quiet >= 12;
+    if (brief) t->stats_quiet = 0;
+    t->log_bad = bad;
     uint32_t ui = t->ui_calls;
     t->ui_calls = 0;
     unsigned ms = (unsigned)(dt / 1000);
-    plog("tsp: stats %u KB, decoded %u, shown %u, dropped %u, late %u, damaged %u, errors %u, skipped %u, frame %u us, "
+    if (brief) plog("tsp: stats %u KB, decoded %u, shown %u, dropped %u, late %u, damaged %u, errors %u, skipped %u, frame %u us, "
          "video %+d ms vs audio, out of order %u, screen %u fps",
          (unsigned)(t->st.bytes / 1024), t->st.decoded, t->st.shown, t->st.dropped, t->st.late, t->st.damaged,
          t->st.errors, (unsigned)t->st.skipped, (unsigned)t->frame_us, -t->st.av_late_ms, (unsigned)t->out_of_order,
@@ -2681,9 +2691,10 @@ static void stats_tick(Tsp *t)
         snprintf(nf, sizeof nf, " (queues full %u%% of the time; the line %s %u KB/s)", t->net_wait_pct,
                  t->net_wait_pct < 50 ? "brings" : "last brought", t->net_free_kbs);
     else if (t->net_wait_pct >= 5) snprintf(nf, sizeof nf, " (queues full %u%% of the time)", t->net_wait_pct);
-    plog("tsp: rates net %u KB/s%s, decode %u.%u fps%s, video queue %d (%u KB), audio queue %d (%d ms)%s%s",
+    if (brief) plog("tsp: rates net %u KB/s%s, decode %u.%u fps%s, video queue %d (%u KB), audio queue %d (%d ms)%s%s",
          kbs, nf, dfps10 / 10, dfps10 % 10, dc, vq_n, (unsigned)(vq_b / 1024), aq_n, aq_ms, mem, rd);
-    if (!t->internal && t->pub_fed)
+    if (!loud) {}
+    else if (!t->internal && t->pub_fed)
         plog("tsp: decoder units in %u, pictures out %u, units with no picture %u (%u of them nothing refers to)",
              (unsigned)t->pub_fed, (unsigned)t->st.decoded, (unsigned)t->pub_nopic, (unsigned)t->pub_nopic_nonref);
     else if (t->internal && t->hd_fed)
@@ -2708,13 +2719,13 @@ static void stats_tick(Tsp *t)
             unsigned used = pd + psl + pda + pb;
             uint32_t dr = t->drained;
             t->drained = 0;
-            plog("tsp: timing: video thread %u%% in the decoder, %u%% waiting for a free slot, %u%% waiting for data, "
+            if (loud) plog("tsp: timing: video thread %u%% in the decoder, %u%% waiting for a free slot, %u%% waiting for data, "
                  "%u%% HD decoder busy, %u%% other; picture to screen avg %u ms; screen frames with no picture %u, behind %u",
                  pd, psl, pda, pb, used < 100 ? 100 - used : 0, wn ? (unsigned)(wsum / wn / 1000) : 0, (unsigned)none, (unsigned)more);
-            if (dr) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
+            if (dr && loud) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
         }
     }
-    cpu_line(t, now);
+    cpu_line(t, now, loud);
     if (t->reader_done) return;                             /* (called by the video thread now: no reads to tune) */
 
     /* sceHttpReadData returns only when the request is full: small reads keep radio responsive, larger ones
@@ -3992,7 +4003,7 @@ static int worker(SceSize args, void *argp)
     uint8_t *buf = malloc(CHUNK);
     plog("tsp: start");
     t->last_stats = t->start_us = now_us();
-    cpu_line(t, t->start_us);                               /* the starting point of the first CPU line */
+    cpu_line(t, t->start_us, 0);                               /* the starting point of the first CPU line */
     if (!buf) set_error(t, "Out of memory");
     else if (!strncasecmp(t->url, "http://", 7) || !strncasecmp(t->url, "https://", 8)) {
         const char *q = t->url + strcspn(t->url, "?#");

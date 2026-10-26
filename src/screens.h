@@ -94,6 +94,8 @@ typedef struct {
     const char *time_note_l, *time_note_r;   /* ... and a line under it ("42 min watched", "Next: ...") */
 } ScrPlayer;
 void scr_player(const ScrPlayer *p);
+/* 0.8.1: how subtitles look: size 0-3, colour 0-3, place 0-2, background 0-2 (see Settings) */
+void scr_sub_style(int size, int color, int pos, int bg);
 
 void scr_radio(const char *name, const char *group, const char *audio_info, int level, unsigned t_ms,
                const UiHint *hints, int nhints, const char *note, int fav);
@@ -129,6 +131,7 @@ typedef struct {
     int playing;                        /* the channel on in the player */
     int sel;                            /* the selected row */
     int loading;                        /* its programmes are being asked for */
+    int noguide;                        /* 0.8.1: the channel has no guide at all (not only none at this time) */
     int nprogs;
     ScrProg progs[SCR_GUIDE_PROGS];
 } ScrGuideRow;

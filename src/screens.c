@@ -36,13 +36,13 @@ void scr_list(const ScrList *l)
         if (row.right && row.right[0]) {
             rw = ui_text_w(1.0f, row.right);
             if (rw > 230) rw = 230;
-            ui_text_fit(918 - rw, y + 34, on ? RGBA8(200, 210, 240, 255) : UI_DIM, 1.0f, row.right, 230);
+            ui_text_fit(918 - rw, y + 34, on ? ui_theme.sel_text : UI_DIM, 1.0f, row.right, 230);
         }
         int maxw = 918 - rw - 16 - x;
         if (row.sub && row.sub[0]) {
             ui_text_fit(x, y + 27, UI_TEXT, 1.2f, row.name, maxw);
             if (on) ui_text_fit(x + 1, y + 27, UI_TEXT, 1.2f, row.name, maxw);
-            ui_text_fit(x, y + 47, on ? RGBA8(190, 200, 230, 255) : UI_DIM, 0.9f, row.sub, maxw);
+            ui_text_fit(x, y + 47, on ? ui_theme.sel_text : UI_DIM, 0.9f, row.sub, maxw);
         } else {
             ui_text_fit(x, y + 36, UI_TEXT, 1.2f, row.name, maxw);
             if (on) ui_text_fit(x + 1, y + 36, UI_TEXT, 1.2f, row.name, maxw);
@@ -156,9 +156,23 @@ static int note_band(int y, const char *s, unsigned col)
     return y;
 }
 
-/* 0.7.0: subtitle lines at the bottom of the picture (above the bars when they show), white with a dark outline */
+/* 0.7.0: subtitle lines at the bottom of the picture (above the bars when they show), white with a dark outline.
+ * 0.8.1: size, colour, place and background as chosen (scr_sub_style). */
+static int g_sub_size = 1, g_sub_color, g_sub_pos, g_sub_bg;
+void scr_sub_style(int size, int color, int pos, int bg)
+{
+    g_sub_size = size >= 0 && size <= 3 ? size : 1;
+    g_sub_color = color >= 0 && color <= 3 ? color : 0;
+    g_sub_pos = pos >= 0 && pos <= 2 ? pos : 0;
+    g_sub_bg = bg >= 0 && bg <= 2 ? bg : 0;
+}
+
 static void subtitle_draw(const char *text, int osd)
 {
+    static const float SC[4] = { 1.05f, 1.3f, 1.55f, 1.8f };
+    static const unsigned COL[4] = { RGBA8(255, 255, 255, 255), RGBA8(255, 228, 64, 255), RGBA8(150, 255, 150, 255),
+                                     RGBA8(140, 205, 255, 255) };
+    float sc = SC[g_sub_size];
     char lines[4][160];
     int n = 0;
     const char *s = text;
@@ -170,18 +184,27 @@ static void subtitle_draw(const char *text, int osd)
         memcpy(one, s, len);
         one[len] = 0;
         UiWrap w;
-        ui_wrap(&w, 1.3f, one, 900, 2);
+        ui_wrap(&w, sc, one, 900, 2);
         for (int i = 0; i < w.n && n < 4; i++) snprintf(lines[n++], sizeof lines[0], "%s", w.line[i]);
         s = e ? e + 1 : s + len;
     }
-    int lh = 34, y = (osd ? UI_FOOTER_Y - 70 : 530) - (n - 1) * lh;
+    if (!n) return;
+    int lh = (int)(sc * 26.0f + 0.5f), asc = (int)(sc * 21.0f + 0.5f);
+    int y;                                                   /* the first line's baseline */
+    if (g_sub_pos == 2) y = (osd ? 64 : 0) + 16 + asc;      /* top (under the bar when it shows) */
+    else y = (osd ? UI_FOOTER_Y - 70 : 530) - (g_sub_pos == 1 ? 80 : 0) - (n - 1) * lh;
+    if (g_sub_bg == 1) {                                     /* a dark box around all the lines */
+        int mw = 0;
+        for (int i = 0; i < n; i++) { int w = ui_text_w(sc, lines[i]); if (w > mw) mw = w; }
+        vita2d_draw_rectangle(480 - mw / 2 - 16, y - asc - 6, mw + 32, n * lh + 12, RGBA8(0, 0, 0, 200));
+    }
     for (int i = 0; i < n; i++, y += lh) {
-        int w = ui_text_w(1.3f, lines[i]), x = 480 - w / 2;
-        vita2d_draw_rectangle(x - 10, y - 27, w + 20, lh, RGBA8(0, 0, 0, 120));   /* a light band: readable on white */
+        int w = ui_text_w(sc, lines[i]), x = 480 - w / 2;
+        if (g_sub_bg == 0) vita2d_draw_rectangle(x - 10, y - asc, w + 20, lh, RGBA8(0, 0, 0, 120));   /* a light band: readable on white */
         for (int dy = -2; dy <= 2; dy += 2)
             for (int dx = -2; dx <= 2; dx += 2)
-                if (dx || dy) ui_text(x + dx, y + dy, RGBA8(0, 0, 0, 255), 1.3f, lines[i]);
-        ui_text(x, y, RGBA8(255, 255, 255, 255), 1.3f, lines[i]);
+                if (dx || dy) ui_text(x + dx, y + dy, RGBA8(0, 0, 0, 255), sc, lines[i]);
+        ui_text(x, y, COL[g_sub_color], sc, lines[i]);
     }
 }
 
@@ -323,7 +346,7 @@ void scr_form(const char *title, const char *subtitle, const ScrField *f, int n,
             vita2d_draw_rectangle(10, y + 2, 4, fh - 4, UI_ACCENT);
         }
         ui_text_fit(36, y + ty, i == sel ? UI_TEXT : lc, FS, label, bx - 36 - 12);
-        vita2d_draw_rectangle(bx, y + 5, bw, fh - 10, i == sel ? RGBA8(30, 52, 110, 255) : UI_PANEL);
+        vita2d_draw_rectangle(bx, y + 5, bw, fh - 10, i == sel ? ui_theme.sel_dark : UI_PANEL);
         const char *v = f[i].value && f[i].value[0] ? f[i].value : (on ? T("(empty)") : "-");
         unsigned col = f[i].value && f[i].value[0] ? vc : RGBA8(100, 104, 122, 255);
         if (f[i].kind == SCR_F_CHOICE) {
@@ -507,7 +530,7 @@ static void list_area(int x0, int w, int count, int sel, int *scroll, ScrRowFn f
             ui_fill_triangle(ax, cy + 3, ax + 12, cy + 3, ax + 6, cy + 11, UI_WARN);
         } else if (is_sel) {
             vita2d_draw_rectangle(x0, y + 1, w - 10, ROW_H - 2, focused ? UI_SEL : UI_PANEL2);
-            vita2d_draw_rectangle(x0, y + 1, 4, ROW_H - 2, focused ? UI_ACCENT : RGBA8(90, 110, 170, 255));
+            vita2d_draw_rectangle(x0, y + 1, 4, ROW_H - 2, focused ? UI_ACCENT : ui_theme.accent_dim);
         } else if (r % 2) {
             vita2d_draw_rectangle(x0, y + 1, w - 10, ROW_H - 2, RGBA8(20, 23, 34, 255));
         }
@@ -522,7 +545,7 @@ static void list_area(int x0, int w, int count, int sel, int *scroll, ScrRowFn f
         if (row.right && row.right[0]) {
             rw = ui_text_w(1.0f, row.right);
             if (rw > 170) rw = 170;
-            ui_text_fit(x0 + w - 18 - rw, y + 25, is_sel ? RGBA8(200, 210, 240, 255) : UI_DIM, 1.0f, row.right, 170);
+            ui_text_fit(x0 + w - 18 - rw, y + 25, is_sel ? ui_theme.sel_text : UI_DIM, 1.0f, row.right, 170);
         }
         if (row.fav) { ui_star(x + 8, y + ROW_H / 2, 8, UI_FAV); x += 22; }   /* 0.5.0: a favourite */
         if (row.check) { ui_check(x + 8, y + ROW_H / 2, 8, RGBA8(64, 226, 160, 255)); x += 24; }   /* 0.7.0: watched */
@@ -681,7 +704,7 @@ void scr_guide(const ScrGuide *g)
         if (!r.nprogs) {
             vita2d_draw_rectangle(gx + 2, y, gw - 4, rh - 4, G_PAST);
             if (r.loading) ui_text(gx + 14, y + 26, UI_DIM, 0.95f, T("Loading..."));
-            else ui_text(gx + 14, y + 26, UI_DIM, 0.95f, T("No programme information"));
+            else ui_text(gx + 14, y + 26, UI_DIM, 0.95f, T(r.noguide ? "No programme guide" : "No programme information"));
         }
         for (int i = 0; i < r.nprogs; i++) {
             const ScrProg *p = &r.progs[i];
@@ -822,13 +845,13 @@ void scr_vod_detail(const ScrVodDetail *d)
         for (int i = 0; i < d->nbuttons && i < 3; i++) {
             int w = bw[i];
             int on = i == d->sel;
-            unsigned fill = i == 0 ? (on ? UI_ACCENT : RGBA8(40, 80, 170, 255)) : (on ? UI_SEL : UI_PANEL2);
+            unsigned fill = i == 0 ? (on ? UI_ACCENT : ui_theme.button) : (on ? UI_SEL : UI_PANEL2);
             ui_round_rect(bx, 384, w, 44, 10, fill);
             if (on && i) { vita2d_draw_rectangle(bx + 10, 424, w - 20, 2, UI_ACCENT); }
             if (i == 0) {
                 ui_fill_triangle(bx + 20, 394, bx + 20, 418, bx + 38, 406, UI_TEXT);
                 ui_text_fit(bx + 48, d->progress >= 0 ? 410 : 414, UI_TEXT, 1.1f, d->buttons[i], w - 58);
-                if (d->progress >= 0) bar(bx + 48, 418, w - 70, 3, d->progress, RGBA8(30, 60, 140, 255), UI_TEXT);
+                if (d->progress >= 0) bar(bx + 48, 418, w - 70, 3, d->progress, ui_theme.sel_dark, UI_TEXT);
             } else if (i == 2) {
                 ui_star(bx + 26, 406, 10, d->fav ? UI_FAV : UI_DIM);
                 ui_text_fit(bx + 44, 414, UI_TEXT, 1.1f, d->buttons[i], w - 54);
@@ -883,7 +906,7 @@ void scr_series(const ScrSeries *s)
         int rw = r.right ? ui_text_w(0.95f, r.right) : 0;
         ui_text_fit(x + 34, y2 + 26, UI_TEXT, 1.05f, r.name, r.progress > 0 ? 400 : 690 - rw);
         if (r.right) ui_text(940 - rw, y2 + 26, UI_DIM, 0.95f, r.right);
-        if (r.progress > 0) bar(x + 420, y2 + 16, 180, 5, r.progress, RGBA8(70, 90, 150, 255), UI_TEXT);
+        if (r.progress > 0) bar(x + 420, y2 + 16, 180, 5, r.progress, ui_theme.accent_dim, UI_TEXT);
     }
     ui_scrollbar(952, 288, SCR_EP_ROWS * 40 - 4, *scroll, SCR_EP_ROWS, s->count);
     ui_footer(s->hints, s->nhints, s->status, 0);

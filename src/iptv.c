@@ -1217,6 +1217,14 @@ void settings_defaults(Settings *st)
 {
     memset(st, 0, sizeof *st);
     st->auto_proxy = 1;
+    st->sub_size = 1;                                        /* 0.8.1 */
+}
+
+/* 0.8.1: a small number setting, kept within 0..max (else the default) */
+static int small_num(const char *v, int max, int def)
+{
+    int n = atoi(v);
+    return v[0] >= '0' && v[0] <= '9' && n >= 0 && n <= max ? n : def;
 }
 
 void settings_parse(const char *text, Settings *st)
@@ -1246,6 +1254,11 @@ void settings_parse(const char *text, Settings *st)
                 for (const char *q = v; *q && o + 1 < sizeof st->pin; q++) if (*q >= '0' && *q <= '9') st->pin[o++] = *q;
                 st->pin[o] = 0;
             }
+            else if (!strcmp(k, "sub_size")) st->sub_size = small_num(v, 3, 1);   /* 0.8.1 */
+            else if (!strcmp(k, "sub_color")) st->sub_color = small_num(v, 3, 0);
+            else if (!strcmp(k, "sub_pos")) st->sub_pos = small_num(v, 2, 0);
+            else if (!strcmp(k, "sub_bg")) st->sub_bg = small_num(v, 2, 0);
+            else if (!strcmp(k, "theme")) st->theme = small_num(v, 3, 0);
             /* hide_1080p= (before v0.4.0): that filter is gone, the 4K one starts off */
             else if (!strcmp(k, "resolution")) {
                 int r = atoi(v);
@@ -1263,7 +1276,19 @@ int settings_format(const Settings *st, char *out, size_t outsz)
     int w = snprintf(out, outsz, "# Vita IPTV settings (auto_proxy: 0 off, 1 when needed, 2 always)\nproxy=%s\nauto_proxy=%d\nlang=%d\nhide_adult=%d\nhide_4k=%d\nresolution=%d\n%s%s%s%s",
                      st->proxy, st->auto_proxy, st->lang, st->hide_adult, st->hide_4k, st->res_pref,
                      st->plain_letters ? "plain_letters=1\n" : "", st->pin[0] ? "pin=" : "", st->pin, st->pin[0] ? "\n" : "");
-    return (w < 0 || (size_t)w >= outsz) ? -1 : w;
+    if (w < 0 || (size_t)w >= outsz) return -1;
+    /* 0.8.1: subtitles and the theme, only when changed */
+    char ex[96];
+    int e = 0;
+    ex[0] = 0;
+    if (st->sub_size != 1) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_size=%d\n", st->sub_size);
+    if (st->sub_color) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_color=%d\n", st->sub_color);
+    if (st->sub_pos) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_pos=%d\n", st->sub_pos);
+    if (st->sub_bg) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_bg=%d\n", st->sub_bg);
+    if (st->theme) e += snprintf(ex + e, sizeof ex - (size_t)e, "theme=%d\n", st->theme);
+    if ((size_t)w + (size_t)e >= outsz) return -1;
+    memcpy(out + w, ex, (size_t)e + 1);
+    return w + e;
 }
 
 int proxy_url_at(const Settings *st, const char *url, int start_s, char *out, size_t outsz)
