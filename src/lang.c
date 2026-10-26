@@ -10,6 +10,33 @@ int  lang_get(void) { return g_lang; }
 typedef struct { const char *en, *tr; } Pair;
 
 static const Pair FIXED[] = {
+    /* 0.8.1: PIN, guide, subtitles, theme */
+    { "Type the new PIN again", "Yeni PIN'i tekrar yazın" },
+    { "The two PINs are not the same: not changed", "İki PIN aynı değil: değiştirilmedi" },
+    { "The new PIN is used when you save", "Yeni PIN kaydedince geçerli olur" },
+    { "The lock is removed when you save", "Kilit kaydedince kaldırılır" },
+    { "No programme guide", "Yayın akışı yok" },
+    { "Size", "Boyut" },
+    { "Colour", "Renk" },
+    { "Place", "Yer" },
+    { "Background", "Arka plan" },
+    { "Small", "Küçük" },
+    { "Medium", "Orta" },
+    { "Large", "Büyük" },
+    { "Very large", "Çok büyük" },
+    { "White", "Beyaz" },
+    { "Yellow", "Sarı" },
+    { "Green", "Yeşil" },
+    { "Blue", "Mavi" },
+    { "Bottom", "Alt" },
+    { "A little higher", "Biraz yukarı" },
+    { "Top", "Üst" },
+    { "Light band", "Hafif şerit" },
+    { "Dark box", "Koyu kutu" },
+    { "None", "Yok" },
+    { "Theme", "Tema" },
+    { "Purple", "Mor" },
+    { "Orange", "Turuncu" },
     /* 0.8.0: guide, catch-up, details, series, PIN, sleep timer, number zap, search */
     { "Guide", "Rehber" }, { "Schedule", "Yayın Akışı" }, { "Details", "Detaylar" }, { "Live", "Canlı" },
     { "Today", "Bugün" }, { "Tomorrow", "Yarın" }, { "Yesterday", "Dün" }, { "NOW", "ŞİMDİ" }, { "ARCHIVE", "ARŞİV" },

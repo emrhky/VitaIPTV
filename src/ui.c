@@ -30,6 +30,27 @@ static int in_latin(unsigned int c)
     return c < 0x250 || (c >= 0x1E00 && c < 0x1F00) || (c >= 0x2000 && c < 0x2070) || c == 0x20AC || c == 0x2122;
 }
 
+/* 0.8.1: themes. Blue is the look of every version before. The backgrounds stay the same in all of them. */
+static const UiTheme THEMES[UI_THEMES] = {
+    { RGBA8(236, 238, 245, 255), RGBA8(142, 148, 170, 255), RGBA8(70, 130, 255, 255), RGBA8(42, 72, 148, 255),
+      RGBA8(30, 52, 110, 255), RGBA8(90, 110, 170, 255), RGBA8(200, 210, 240, 255), RGBA8(40, 80, 170, 255) },          /* blue */
+    { RGBA8(234, 246, 238, 255), RGBA8(138, 164, 148, 255), RGBA8(40, 186, 116, 255), RGBA8(26, 104, 70, 255),
+      RGBA8(20, 76, 52, 255), RGBA8(80, 144, 112, 255), RGBA8(196, 236, 214, 255), RGBA8(28, 134, 86, 255) },           /* green */
+    { RGBA8(242, 236, 250, 255), RGBA8(158, 146, 178, 255), RGBA8(156, 104, 246, 255), RGBA8(86, 54, 154, 255),
+      RGBA8(62, 38, 116, 255), RGBA8(134, 108, 184, 255), RGBA8(222, 208, 246, 255), RGBA8(112, 72, 196, 255) },         /* purple */
+    { RGBA8(250, 242, 232, 255), RGBA8(176, 158, 138, 255), RGBA8(242, 138, 36, 255), RGBA8(146, 76, 22, 255),
+      RGBA8(108, 56, 16, 255), RGBA8(186, 132, 82, 255), RGBA8(246, 222, 196, 255), RGBA8(186, 100, 26, 255) },          /* orange */
+};
+UiTheme ui_theme = {
+    RGBA8(236, 238, 245, 255), RGBA8(142, 148, 170, 255), RGBA8(70, 130, 255, 255), RGBA8(42, 72, 148, 255),
+    RGBA8(30, 52, 110, 255), RGBA8(90, 110, 170, 255), RGBA8(200, 210, 240, 255), RGBA8(40, 80, 170, 255) };
+void ui_set_theme(int t) { ui_theme = THEMES[t >= 0 && t < UI_THEMES ? t : 0]; }
+const char *ui_theme_name(int t)
+{
+    static const char *const N[UI_THEMES] = { "Blue", "Green", "Purple", "Orange" };
+    return N[t >= 0 && t < UI_THEMES ? t : 0];
+}
+
 void ui_init(vita2d_pgf *pgf, int plain_letters)
 {
     g_pgf = pgf;
@@ -465,7 +486,7 @@ void ui_spinner(int cx, int cy, unsigned t_ms)
         int age = (head - i + 10) % 10;
         int alpha = 255 - age * 22;
         vita2d_draw_fill_circle(cx + 20.0f * sinf(a), cy - 20.0f * cosf(a), 4.0f - age * 0.25f,
-                                RGBA8(70, 130, 255, alpha));
+                                (ui_theme.accent & 0x00FFFFFFu) | ((unsigned)(alpha) << 24));
     }
 }
 

@@ -61,7 +61,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define FAV_FILE      DATA_DIR "/favorites.txt"
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v0.8.0"
+#define APP_VERSION   "v0.8.1"
 #endif
 #ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
 #define APP_BUILD     __DATE__ " " __TIME__
@@ -929,11 +929,19 @@ static void fav_move_end(int save)
     fav_moving = 0;
 }
 
+/* 0.8.1: the theme and how subtitles look, from the settings */
+static void apply_look(void)
+{
+    ui_set_theme(settings.theme);
+    scr_sub_style(settings.sub_size, settings.sub_color, settings.sub_pos, settings.sub_bg);
+}
+
 static void load_settings(void)
 {
     Mem m = {0};
     if (read_file(SETTINGS_FILE, &m) == 0) { settings_parse(m.buf, &settings); free(m.buf); }
     else settings_defaults(&settings);
+    apply_look();
 }
 
 static void save_settings(void)
@@ -1049,7 +1057,6 @@ typedef struct {
     int series;
 } LoadJob;
 static LoadJob job;
-static int frames_after_load = 99;          /* diagnostic: the first frames of a new list are logged */
 static int frames_after_fail = 99;          /* ... and the first frames after a list failed to load */
 
 static volatile int job_active, job_done;
@@ -1140,18 +1147,7 @@ static int load_xtream(const Source *s, ChannelList *out, char *err, size_t errs
     free(cats);
     log_heap("channels parsed", (size_t)out->count * sizeof(Channel));
     if (out->count >= IPTV_MAX_CHANNELS) plog("list: the list has more channels than %d: the rest is left out", IPTV_MAX_CHANNELS);
-    {   /* a sample of the raw names (UTF-8 bytes in hex from the first non-ASCII one) */
-        int shown = 0;
-        for (int i = 0; i < out->count && shown < 12; i += out->count / 12 + 1, shown++) {
-            const char *nm = out->items[i].name, *gr = out->items[i].group;
-            char hx[200]; size_t k = 0;
-            const char *f = nm;
-            while (*f && (unsigned char)*f < 0x80) f++;
-            for (int j = 0; f[j] && j < 24 && k + 4 < sizeof hx; j++) k += (size_t)snprintf(hx + k, sizeof hx - k, "%02X ", (unsigned char)f[j]);
-            hx[k] = 0;
-            plog("list: sample \"%s\" | \"%s\" | %s", nm, gr, hx);
-        }
-    }
+    /* (0.8.1: the 12 sample names with their bytes are gone: the letters are right since 0.4.5) */
     plog("list: %d channels in %d categories", out->count, ncats);
     if (out->count == 0) {
         snprintf(err, errsz, "No live channels returned (check host, username, password)");
@@ -1393,7 +1389,6 @@ static int load_poll(unsigned p)
         break;
     }
     if (job.note[0]) set_status(0, "%s", job.note);
-    frames_after_load = 0;
     return 1;
 }
 
@@ -1739,9 +1734,11 @@ static void guide_setup(void)
 {
     guide_reset();
     if (section != SEC_LIVE || in_episodes || chans.count < 1 || cur_src < 0 || cur_src >= nsources) return;
+    int xtream = sources[cur_src].type == SRC_XTREAM;
+    if (!xtream && (!chans.tvg_url[0] || !cio_available())) return;   /* 0.8.1: no guide address: no guide at all */
     if (guide_init(&guide, chans.count, GUIDE_LIMIT) != 0) return;
     guide_on = 1;
-    if (sources[cur_src].type == SRC_XTREAM || !chans.tvg_url[0] || !cio_available()) return;
+    if (xtream) return;
     int64_t now = now_unix();
     uint32_t tag = str_key(chans.tvg_url);
     char path[96];
@@ -1965,6 +1962,26 @@ static unsigned sleep_at;
 static int sleep_idx;
 static const int SLEEP_MIN[] = { 0, 15, 30, 45, 60, 90, 120 };
 #define SLEEP_N 7
+/* 0.8.1: how subtitles look (Select > Subtitles): size, colour, place, background; saved when the menu closes */
+static const char *const SUB_LOOK_NAME[4] = { "Size", "Colour", "Place", "Background" };
+static int sub_look_dirty;
+static const char *sub_look_value(int k)
+{
+    static const char *const V[4][4] = { { "Small", "Medium", "Large", "Very large" }, { "White", "Yellow", "Green", "Blue" },
+                                         { "Bottom", "A little higher", "Top", "" }, { "Light band", "Dark box", "None", "" } };
+    int v = k == 0 ? settings.sub_size : k == 1 ? settings.sub_color : k == 2 ? settings.sub_pos : settings.sub_bg;
+    return V[k & 3][v & 3];
+}
+static void sub_look_step(int k, int d)
+{
+    int *v = k == 0 ? &settings.sub_size : k == 1 ? &settings.sub_color : k == 2 ? &settings.sub_pos : &settings.sub_bg;
+    int nv = k < 2 ? 4 : 3;
+    *v = (*v + d + nv) % nv;
+    sub_look_dirty = 1;
+    apply_look();
+    plog("player: subtitle %s %s", SUB_LOOK_NAME[k], sub_look_value(k));
+}
+
 static int sleep_warning(void) { return sleep_at && sleep_at - now_ms() < 60000 && (int)(sleep_at - now_ms()) > 0; }
 
 /* 0.7.0: the corner note while the next episode waits */
@@ -2868,14 +2885,15 @@ static void grp_row(int i, ScrRow *r, void *ctx)
 
 static void draw_channels(void)
 {
-    if (frames_after_load < 4)
-        plog("ui: channel screen frame %d (%d groups, %d channels, focus %d)", frames_after_load++, ngroups, nvis, focus);
+    /* (0.8.1: "ui: channel screen frame" lines gone: the empty screen they looked for is long fixed) */
     if (in_episodes && !search_fold[0]) { draw_series(); return; }   /* 0.8.0: the series screen */
     /* 0.4.1: X, Square, O on the left; L/R page, Select (and START on channels) on the right */
     static const UiHint HL[] = { { UI_BTN_CROSS, "Channels" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
     static const UiHint HR[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_TRIANGLE, "Guide" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+    static const UiHint HR0[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },   /* (0.8.1: no guide) */
+                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
     static const UiHint HS[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "New search" }, { UI_BTN_CIRCLE, "Back" },
                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
     static const UiHint HMV[] = { { UI_BTN_UPDOWN, "Up / down" }, { UI_BTN_CROSS, "Save" }, { UI_BTN_CIRCLE, "Cancel" } };   /* (0.8.0: X saves) */
@@ -2910,8 +2928,8 @@ static void draw_channels(void)
     d.lmark = !searching;
     d.rempty = T(searching ? "Nothing found" : vod && cur_group != loaded_group && !in_episodes ? "Press X to open this category"
                                              : "No channels");
-    const UiHint *hr = vod ? (section == SEC_SERIES && !in_episodes ? HRS : HRV) : HR;
-    int nhr = vod ? (section == SEC_SERIES && !in_episodes ? NH(HRS) : NH(HRV)) : NH(HR);
+    const UiHint *hr = vod ? (section == SEC_SERIES && !in_episodes ? HRS : HRV) : guide_on ? HR : HR0;
+    int nhr = vod ? (section == SEC_SERIES && !in_episodes ? NH(HRS) : NH(HRV)) : guide_on ? NH(HR) : NH(HR0);
     if (fav_moving) { hr = HMV; nhr = NH(HMV); }
     d.hints = searching ? HS : focus == 0 ? (vod ? HLV : HL) : hr;
     d.nhints = searching ? NH(HS) : focus == 0 ? (vod ? NH(HLV) : NH(HL)) : nhr;
@@ -2939,7 +2957,7 @@ static void draw_channels(void)
 }
 
 /* ---- on-screen keyboard -------------------------------------------------- */
-enum { IME_SEARCH, IME_FIELD, IME_PIN, IME_NEWPIN, IME_ZAP };   /* 0.8.0: PIN check, a new PIN, a channel number */
+enum { IME_SEARCH, IME_FIELD, IME_PIN, IME_NEWPIN, IME_NEWPIN2, IME_ZAP };   /* 0.8.0: PIN check, a new PIN, a channel number */
 static SceWChar16 ime_title[64], ime_init[520], ime_buf[520];
 static int ime_active, ime_purpose;
 static char *ime_target;
@@ -2954,7 +2972,7 @@ static void ime_open(const char *title, const char *initial, int password, int p
     memset(ime_buf, 0, sizeof ime_buf);
     p.supportedLanguages = SCE_IME_LANGUAGE_ENGLISH;
     p.languagesForced = SCE_FALSE;
-    int num = purpose == IME_PIN || purpose == IME_NEWPIN || purpose == IME_ZAP;   /* 0.8.0: digits */
+    int num = purpose == IME_PIN || purpose == IME_NEWPIN || purpose == IME_NEWPIN2 || purpose == IME_ZAP;   /* 0.8.0: digits */
     p.type = num ? SCE_IME_TYPE_NUMBER : SCE_IME_TYPE_DEFAULT;
     p.option = 0;
     p.textBoxMode = password ? SCE_IME_DIALOG_TEXTBOX_MODE_PASSWORD : SCE_IME_DIALOG_TEXTBOX_MODE_WITH_CLEAR;
@@ -2989,7 +3007,10 @@ static void clear_search(void)
 static char f_pin[8];                       /* the settings form's PIN */
 static int f_adult;                         /* (the settings form's, below) */
 static void stop_all(void);
-static int pin_ok;                          /* the PIN was given since the app started */
+static int pin_ok;                          /* the PIN was given (adult content open until the console sleeps; 0.8.1) */
+static int form_pin_ok;                     /* 0.8.1: the PIN was given in the settings form now open (changing it,
+                                             * turning "Hide adult" off): that does not open adult content */
+static char pin_try[8];                     /* 0.8.1: a new PIN, until it is typed a second time */
 enum { PA_NONE, PA_ACTIVATE, PA_ZAP, PA_GUIDE_PLAY, PA_OPEN_CAT, PA_EDIT_PIN, PA_ADULT_OFF, PA_ARCH };
 static int pin_action, pin_arg;
 static GProg pin_prog;
@@ -3021,8 +3042,8 @@ static void pin_answer(const char *b)
     int act = pin_action;
     pin_action = PA_NONE;
     if (strcmp(b, settings.pin)) { set_status(1, "Wrong PIN", NULL); plog("pin: wrong"); return; }
-    pin_ok = 1;
-    plog("pin: unlocked until the app is closed");
+    if (act == PA_EDIT_PIN || act == PA_ADULT_OFF) form_pin_ok = 1;   /* 0.8.1: managing the lock is not watching */
+    else { pin_ok = 1; plog("pin: unlocked until the console sleeps"); }
     switch (act) {
     case PA_ACTIVATE: if (pin_arg >= 0 && pin_arg < nvis) activate_item(pin_arg); break;
     case PA_ZAP: if (pin_arg >= 0 && pin_arg < nvis) { return_state = ST_CHANNELS; state = ST_PLAYING; play_channel(pin_arg); } break;
@@ -3098,9 +3119,19 @@ static void ime_poll(void)
     if (ime_purpose == IME_PIN) { pin_answer(b); return; }  /* 0.8.0 */
     if (ime_purpose == IME_NEWPIN) {
         size_t o = 0;
-        for (const char *q = b; *q && o + 1 < sizeof f_pin; q++) if (*q >= '0' && *q <= '9') f_pin[o++] = *q;
-        f_pin[o] = 0;
-        if (o && o < 4) { f_pin[0] = 0; set_status(1, "The PIN needs 4 to 6 digits", NULL); }
+        char np[8];                                          /* (0.8.1: a wrong one keeps the PIN there was) */
+        for (const char *q = b; *q && o + 1 < sizeof np; q++) if (*q >= '0' && *q <= '9') np[o++] = *q;
+        np[o] = 0;
+        if (o && o < 4) { set_status(1, "The PIN needs 4 to 6 digits", NULL); return; }
+        if (!o) { f_pin[0] = 0; set_status(0, "The lock is removed when you save", NULL); return; }
+        snprintf(pin_try, sizeof pin_try, "%s", np);         /* 0.8.1: typed twice */
+        ime_open("Type the new PIN again", "", 1, IME_NEWPIN2, NULL, 0);
+        return;
+    }
+    if (ime_purpose == IME_NEWPIN2) {
+        if (strcmp(b, pin_try)) set_status(1, "The two PINs are not the same: not changed", NULL);
+        else { snprintf(f_pin, sizeof f_pin, "%s", pin_try); set_status(0, "The new PIN is used when you save", NULL); }
+        memset(pin_try, 0, sizeof pin_try);
         return;
     }
     if (ime_purpose == IME_ZAP) { zap_number(atoi(b)); return; }
@@ -3129,6 +3160,7 @@ static int form_kind, form_sel, edit_index;              /* edit_index -1 = new 
 static int f_type;                                        /* 0 Xtream, 1 M3U, 2 single stream */
 static char f_name[IPTV_NAME_MAX], f_url[IPTV_URL_MAX], f_user[IPTV_CRED_MAX], f_pass[IPTV_CRED_MAX], f_proxy[IPTV_URL_MAX];
 static int f_auto, f_lang, f_adult, f_hd, f_res;
+static int f_theme;                                      /* 0.8.1: shown at once, back if the form is cancelled */
 static const char *const AUTO_NAMES[3] = { "Off", "When needed", "Always" };
 static const char *const LANG_NAMES[3] = { "Automatic (system)", "English", "Türkçe" };
 static const char *const TYPE_NAMES[3] = { "Xtream (server + username + password)", "M3U playlist (link)", "Single stream (link)" };
@@ -3160,8 +3192,10 @@ static void open_settings_form(void)
     f_adult = settings.hide_adult;
     f_hd = settings.hide_4k;
     snprintf(f_pin, sizeof f_pin, "%s", settings.pin);      /* 0.8.0 */
+    form_pin_ok = 0;                                         /* 0.8.1: asked again every time the settings open */
     f_res = 0;
     for (int i = 0; i < RES_N; i++) if (RES_VALUES[i] == settings.res_pref) f_res = i;
+    f_theme = settings.theme;
 }
 
 /* fields 3 / 4 mean username / password, or Referer / User-Agent for a single stream: clear them when that changes */
@@ -3178,7 +3212,7 @@ static int source_field_enabled(int i)
 }
 
 #define SRC_FIELDS 7                                     /* (+1: "Delete playlist" when editing one) */
-#define SET_FIELDS 12                                    /* (0.5.0: + "Clear Recently Watched"; 0.7.0: + "Clear watched episodes"; 0.8.0: + PIN) */
+#define SET_FIELDS 13                                    /* (0.5.0: + "Clear Recently Watched"; 0.7.0: + "Clear watched episodes"; 0.8.0: + PIN; 0.8.1: + theme) */
 static int confirm_delete;                               /* the edit form's "Delete playlist?" box */
 static int confirm_clear_recent;                         /* 0.5.0: the settings' "Clear recently watched?" box */
 static int confirm_clear_watched;                        /* 0.7.0: "Clear watched episodes?" */
@@ -3287,9 +3321,11 @@ static void save_settings_form(void)
     settings.lang = f_lang;
     settings.hide_adult = f_adult;
     settings.hide_4k = f_hd;
-    if (strcmp(settings.pin, f_pin)) { plog("pin: %s", f_pin[0] ? "set" : "removed"); pin_ok = f_pin[0] != 0; }   /* (who set it knows it) */
+    if (strcmp(settings.pin, f_pin)) { plog("pin: %s", f_pin[0] ? "set" : "removed"); pin_ok = 0; }   /* 0.8.1: locked at once */
     snprintf(settings.pin, sizeof settings.pin, "%s", f_pin);
     settings.res_pref = RES_VALUES[f_res];
+    settings.theme = f_theme;                                /* 0.8.1 */
+    apply_look();
     save_settings();
     apply_language();
     form_kind = FORM_NONE;
@@ -3325,20 +3361,21 @@ static void form_activate(void)
         case 1: f_auto = (f_auto + 1) % 3; break;
         case 2: f_lang = (f_lang + 1) % 3; break;
         case 3:                                              /* (0.8.0: off only with the PIN) */
-            if (f_adult && settings.pin[0] && !pin_ok) pin_ask(PA_ADULT_OFF, 0);
+            if (f_adult && settings.pin[0] && !form_pin_ok) pin_ask(PA_ADULT_OFF, 0);   /* (0.8.1: always) */
             else f_adult = !f_adult;
             break;
         case 4:                                              /* 0.8.0: the parental lock's PIN */
-            if (settings.pin[0] && !pin_ok) pin_ask(PA_EDIT_PIN, 0);
+            if (settings.pin[0] && !form_pin_ok) pin_ask(PA_EDIT_PIN, 0);   /* 0.8.1: always the current PIN first */
             else ime_open("New PIN (4-6 digits, empty: no lock)", "", 1, IME_NEWPIN, NULL, 0);
             break;
         case 5: f_hd = !f_hd; break;
         case 6: f_res = (f_res + 1) % RES_N; break;
-        case 7: server_test_pending = 1; break;              /* (0.5.0: not inside the frame: it crashed the app) */
-        case 8: confirm_clear_recent = 1; break;
-        case 9: confirm_clear_watched = 1; break;
-        case 10: save_settings_form(); break;
-        default: form_kind = FORM_NONE; status[0] = 0; break;
+        case 7: f_theme = (f_theme + 1) % UI_THEMES; ui_set_theme(f_theme); break;   /* 0.8.1: seen at once */
+        case 8: server_test_pending = 1; break;              /* (0.5.0: not inside the frame: it crashed the app) */
+        case 9: confirm_clear_recent = 1; break;
+        case 10: confirm_clear_watched = 1; break;
+        case 11: save_settings_form(); break;
+        default: form_kind = FORM_NONE; status[0] = 0; apply_look(); break;   /* (0.8.1: the theme as it was) */
         }
     }
 }
@@ -3378,11 +3415,12 @@ static void draw_form(void)
         f[4] = (ScrField){ T("Parental lock (PIN)"), f_pin[0] ? "****" : T("Off"), SCR_F_TEXT, 1 };   /* 0.8.0 */
         f[5] = (ScrField){ T("Hide channels named 4K / UHD"), T(f_hd ? "On" : "Off"), SCR_F_TOGGLE, 1 };
         f[6] = (ScrField){ T("Preferred resolution"), T(RES_NAMES[f_res]), SCR_F_CHOICE, 1 };
-        f[7] = (ScrField){ T("Test server"), NULL, SCR_F_BUTTON, 1 };
-        f[8] = (ScrField){ T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 };
-        f[9] = (ScrField){ T("Clear watched episodes"), NULL, SCR_F_BUTTON, 1 };
-        f[10] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
-        f[11] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
+        f[7] = (ScrField){ T("Theme"), T(ui_theme_name(f_theme)), SCR_F_CHOICE, 1 };   /* 0.8.1 */
+        f[8] = (ScrField){ T("Test server"), NULL, SCR_F_BUTTON, 1 };
+        f[9] = (ScrField){ T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 };
+        f[10] = (ScrField){ T("Clear watched episodes"), NULL, SCR_F_BUTTON, 1 };
+        f[11] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
+        f[12] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
         scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), f, SET_FIELDS, form_sel, H, NH(H), status, status_err);
         if (confirm_clear_recent) scr_confirm(T("Clear recently watched?"), T("The recently watched channels of every playlist are removed. Favorites stay."));
         if (confirm_clear_watched) scr_confirm(T("Clear watched episodes?"), T("The ticks of watched episodes are removed. Where films stopped is kept."));
@@ -3686,6 +3724,7 @@ static void gd_row_fn(int i, ScrGuideRow *r, void *ctx)
     r->loading = guide.ch[ci].state == GC_ASKED || (guide.ch[ci].state == GC_NONE && sources[cur_src].type == SRC_XTREAM) || guide_xmltv == GX_READING;
     int n, k = guide_from(&guide, ci, gd_t0);
     const GProg *p = guide_progs(&guide, ci, &n);
+    r->noguide = !r->loading && n == 0;                      /* 0.8.1: the channel has no guide at all */
     for (; k >= 0 && k < n && (int64_t)p[k].start < t1 && r->nprogs < SCR_GUIDE_PROGS; k++) {
         ScrProg *sp = &r->progs[r->nprogs++];
         sp->start = p[k].start;
@@ -3747,7 +3786,11 @@ static void draw_guide(void)
         }
     } else if (nvis) {
         g.sel_title = chans.items[vis[gd_row]].name;
-        g.sel_line = T(guide_xmltv == GX_READING ? "Loading the guide..." : "No programme information at this time");
+        int nn = 0, ci0 = vis[gd_row];
+        guide_progs(&guide, ci0, &nn);
+        int asked = guide.ch[ci0].state == GC_ASKED || (guide.ch[ci0].state == GC_NONE && sources[cur_src].type == SRC_XTREAM);
+        g.sel_line = T(guide_xmltv == GX_READING || asked ? "Loading the guide..." :
+                       nn ? "No programme information at this time" : "No programme guide for this channel");   /* (0.8.1) */
     }
     if (guide_open == 2 && play_mode == 2) {
         int w = 0, h = 0;
@@ -4258,7 +4301,7 @@ static void draw_info_overlay(void)
         d.card.line = series_name;
     } else vod_card_of(&chans, c, &d.card, 1);
     d.overlay = 1;
-    static const UiHint H[] = { { UI_BTN_TRIANGLE, "Close" }, { UI_BTN_CIRCLE, "Close" } };
+    static const UiHint H[] = { { UI_BTN_CIRCLE, "Close" } };   /* (0.8.1: Triangle closes it too, not shown) */
     d.hints = H;
     d.nhints = NH(H);
     scr_vod_detail(&d);
@@ -4298,8 +4341,12 @@ static void update_clocks(int busy)
     int a = scePowerSetArmClockFrequency(fast ? 444 : 333);
     int b = scePowerSetBusClockFrequency(fast ? 222 : 166);
     int g = scePowerSetGpuClockFrequency(fast ? 222 : 111);
-    plog("clocks: %s (cpu %d) -> 0x%08X 0x%08X 0x%08X", fast ? "playing / loading" : "menus", fast ? 444 : 333,
-         (unsigned)a, (unsigned)b, (unsigned)g);
+    static int logged;                                       /* 0.8.1: once each way, and when one fails */
+    if (logged < 2 || a < 0 || b < 0 || g < 0) {
+        logged++;
+        plog("clocks: %s (cpu %d) -> 0x%08X 0x%08X 0x%08X", fast ? "playing / loading" : "menus", fast ? 444 : 333,
+             (unsigned)a, (unsigned)b, (unsigned)g);
+    }
 }
 
 static void splash_frame(const char *status_line)
@@ -4403,6 +4450,19 @@ int main(void)
         }
         frame_begin();
         guide_tick(state == ST_PLAYING);                     /* 0.8.0: background answers (before anything is drawn) */
+        {                                                    /* 0.8.1: the console slept (the clock jumped): the lock closes */
+            static int64_t last_wall;
+            static unsigned last_check;
+            if (now_ms() - last_check >= 1000) {
+                last_check = now_ms();
+                int64_t w = now_unix();
+                if (last_wall && (w - last_wall > 60 || w < last_wall - 60) && pin_ok) {
+                    pin_ok = 0;
+                    plog("pin: locked again (the console slept)");
+                }
+                last_wall = w;
+            }
+        }
         if (state == ST_PLAYING && sleep_at && (int)(now_ms() - sleep_at) >= 0) {   /* 0.8.0: the sleep timer ran out */
             sleep_at = 0;
             sleep_idx = 0;
@@ -4453,7 +4513,7 @@ int main(void)
             if (form_kind == FORM_SETTINGS && form_sel == 1 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
                 f_auto = (f_auto + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3;
             if (form_kind == FORM_SETTINGS && form_sel == 3 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {
-                if (f_adult && settings.pin[0] && !pin_ok) pin_ask(PA_ADULT_OFF, 0);   /* 0.8.0 */
+                if (f_adult && settings.pin[0] && !form_pin_ok) pin_ask(PA_ADULT_OFF, 0);   /* 0.8.0 (0.8.1: always) */
                 else f_adult = !f_adult;
             }
             if (form_kind == FORM_SETTINGS && form_sel == 5 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_hd = !f_hd;
@@ -4461,10 +4521,14 @@ int main(void)
                 f_res = (f_res + ((p & SCE_CTRL_LEFT) ? RES_N - 1 : 1)) % RES_N;
             if (form_kind == FORM_SETTINGS && form_sel == 2 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
                 f_lang = (f_lang + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3;
+            if (form_kind == FORM_SETTINGS && form_sel == 7 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {   /* 0.8.1: the theme */
+                f_theme = (f_theme + ((p & SCE_CTRL_LEFT) ? UI_THEMES - 1 : 1)) % UI_THEMES;
+                ui_set_theme(f_theme);
+            }
             if (p & SCE_CTRL_START) {                        /* START saves (like the Save button) */
                 if (form_kind == FORM_SOURCE) save_source_form(); else save_settings_form();
             } else if (p & SCE_CTRL_CROSS) form_activate();
-            if (p & SCE_CTRL_CIRCLE) { form_kind = FORM_NONE; status[0] = 0; }
+            if (p & SCE_CTRL_CIRCLE) { if (form_kind == FORM_SETTINGS) apply_look(); form_kind = FORM_NONE; status[0] = 0; }   /* (0.8.1: theme back) */
             if (form_kind != FORM_NONE) draw_form();
             else {
                 if (filters_changed) apply_filters_now();
@@ -4747,9 +4811,9 @@ int main(void)
             if (res_menu) {
                 /* Select (0.7.0: in tabs, so it stays short): Picture (the HLS sizes, newest first, or the one size it
                  * has), Audio (the tracks), Subtitles (off, the tracks, the sync), More (the server, the analysis) */
-                enum { MA_NONE, MA_AUTO, MA_VARIANT, MA_SERVER, MA_AUDIO, MA_ANALYSIS, MA_SUB_OFF, MA_SUB, MA_SUB_SYNC, MA_SLEEP, MA_ZAP };
+                enum { MA_NONE, MA_AUTO, MA_VARIANT, MA_SERVER, MA_AUDIO, MA_ANALYSIS, MA_SUB_OFF, MA_SUB, MA_SUB_SYNC, MA_SLEEP, MA_ZAP, MA_SUB_LOOK };
                 enum { TAB_PIC, TAB_AUDIO, TAB_SUB, TAB_MORE, NTABS };
-                #define MENU_MAX (TSP_MAX_VARIANTS + TSP_MAX_AUDIO + TSP_MAX_SUBS + 4)
+                #define MENU_MAX (TSP_MAX_VARIANTS + TSP_MAX_AUDIO + TSP_MAX_SUBS + 8)
                 static char names[MENU_MAX][96];
                 const char *items[MENU_MAX];
                 int act[MENU_MAX], arg[MENU_MAX], dim[MENU_MAX];
@@ -4808,6 +4872,10 @@ int main(void)
                         snprintf(names[n], sizeof names[n], T("Sync:  < %+d.%d s >"), sub_delay_ms / 1000, abs(sub_delay_ms) / 100 % 10);
                         if (sub_delay_ms < 0 && sub_delay_ms > -1000) snprintf(names[n], sizeof names[n], T("Sync:  < -0.%d s >"), -sub_delay_ms / 100 % 10);
                         MENU_ADD(MA_SUB_SYNC, 0, 0);
+                        for (int k = 0; k < 4; k++) {        /* 0.8.1: size, colour, place, background */
+                            snprintf(names[n], sizeof names[n], "%s:  < %s >", T(SUB_LOOK_NAME[k]), T(sub_look_value(k)));
+                            MENU_ADD(MA_SUB_LOOK, k, 0);
+                        }
                     } else {
                         snprintf(names[n], sizeof names[n], "%s", T(film && chans.items[vis[play_vis]].kind == CH_FILM ? "No subtitles in this film (MKV / MP4 text subtitles only)" : "No subtitles"));
                         MENU_ADD(MA_NONE, 0, 1);
@@ -4834,6 +4902,11 @@ int main(void)
                 if (res_menu_sel >= n) res_menu_sel = n - 1;
                 if (res_menu_sel < 0) res_menu_sel = 0;
                 int on_sync = act[res_menu_sel] == MA_SUB_SYNC, on_sleep = act[res_menu_sel] == MA_SLEEP;
+                int on_look = act[res_menu_sel] == MA_SUB_LOOK;
+                if (on_look && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {   /* 0.8.1: how subtitles look */
+                    sub_look_step(arg[res_menu_sel], (p & SCE_CTRL_RIGHT) ? 1 : -1);
+                    p &= ~(unsigned)(SCE_CTRL_LEFT | SCE_CTRL_RIGHT);
+                }
                 if (p & SCE_CTRL_DOWN) res_menu_sel = (res_menu_sel + 1) % n;
                 if (p & SCE_CTRL_UP) res_menu_sel = (res_menu_sel + n - 1) % n;
                 if (on_sleep && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {   /* 0.8.0: the sleep timer */
@@ -4861,9 +4934,11 @@ int main(void)
                 if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) {
                     res_menu = 0;
                     if (sub_delay_ms) plog("player: subtitles %+d ms", sub_delay_ms);
+                    if (sub_look_dirty) { sub_look_dirty = 0; save_settings(); }   /* 0.8.1 */
                 } else if (p & SCE_CTRL_CROSS) {
                     int a = act[res_menu_sel], g = arg[res_menu_sel];
-                    if (a != MA_NONE && a != MA_SUB_SYNC && a != MA_SLEEP) res_menu = 0;
+                    if (a != MA_NONE && a != MA_SUB_SYNC && a != MA_SLEEP && a != MA_SUB_LOOK) res_menu = 0;
+                    if (a == MA_SUB_LOOK) sub_look_step(g, 1);  /* 0.8.1: X: the next value */
                     if (a == MA_SUB_SYNC) { sub_delay_ms = 0; tsp_set_sub_delay(0); }   /* X: back to 0 */
                     else if (a == MA_SLEEP) {                    /* 0.8.0: X: the next value */
                         sleep_idx = (sleep_idx + 1) % SLEEP_N;
@@ -4920,9 +4995,10 @@ int main(void)
                     if (res_menu) {
                         on_sync = act[res_menu_sel] == MA_SUB_SYNC;
                         on_sleep = act[res_menu_sel] == MA_SLEEP;
+                        on_look = act[res_menu_sel] == MA_SUB_LOOK;
                         scr_tabmenu(tabs, NTABS, menu_tab, items, dim, n, res_menu_sel,
                                     T(on_sync ? "Left / Right: earlier / later   X: back to 0   O: close"
-                                              : on_sleep ? "Left / Right / X: change   O: close" : "L / R: tab   X: choose   O: close"));
+                                              : on_sleep || on_look ? "Left / Right / X: change   O: close" : "L / R: tab   X: choose   O: close"));
                     }
                 }
                 #undef MENU_MAX

@@ -67,6 +67,10 @@ typedef struct {
     int res_pref;               /* HLS picture size: 0 automatic (about 540p, else 720p), 1080/720/540/480, -1 the smallest */
     int plain_letters;          /* 0.4.5: 1 = Turkish letters drawn as plain ones (g s i c o u) as before; only in settings.txt */
     char pin[8];                /* 0.8.0: parental lock (adult categories and channels), digits; "" = off */
+    /* 0.8.1: subtitles: size 0-3 (1 = medium, as before), colour 0-3 (white, yellow, green, blue),
+     * place 0-2 (bottom, a little higher, top), background 0-2 (light band, dark box, none); the theme 0-3
+     * (blue, green, purple, orange). Written to settings.txt only when not the default. */
+    int sub_size, sub_color, sub_pos, sub_bg, theme;
 } Settings;
 
 void channel_list_init(ChannelList *l);
