@@ -7,7 +7,7 @@ listen to radio from your own M3U playlists or Xtream accounts, decoded by the V
 
 <p align="center"><img src="https://github.com/user-attachments/assets/010c908b-58ff-4be5-982d-5e6c4701ef0c" width="640" alt="Vita IPTV screenshot"></p>
 
-**Version 0.5.0** - AC-3 / E-AC-3 sound, choosing the audio track, favourites, recently watched channels, now / next for Xtream channels, Turkish letters, the transcoding server from the player's menu (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
+**Version 1.0** - live TV with a programme guide and watching again (catch-up), films and series with posters and details, subtitles, favourites, parental lock (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
 
 This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
@@ -24,6 +24,14 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 - **Films and series (Xtream):** opening an Xtream playlist asks for *Live TV*, *Films* or *Series*. Films and
   episodes (MKV, MP4 and TS files) can be paused and jumped through, and the app remembers where you stopped
   (*Continue from 41:10* the next time).
+- **Series:** watched episodes get a tick, and opening a series selects the episode left half-watched (or the one
+  after the last finished one). When an episode ends, *Next episode in 5 s* shows in the corner (X: now, O: stay).
+- **Film and series details:** choosing a film shows its poster, year, length, rating, genre and story beside the
+  list; **Triangle** opens the full details (cast, director, *Continue* / *From the start* / *Favourite*). A series
+  opens on its own screen with the seasons as tabs. **Square** searches every film or series of the account.
+- **Subtitles (MKV, MP4):** SRT and ASS / SSA text subtitles of MKV films and `mov_text` subtitles of MP4 films,
+  chosen in **Select > Subtitles**, with a sync setting (0.1 s steps) and their size, colour, place and background.
+  Picture subtitles (PGS, VobSub) and subtitles in TS files are not shown.
 - **HTTPS** with a built-in TLS stack (mbedTLS, TLS 1.2 / 1.3), so modern https playlists, short links
   (tinyurl and the like) and https/HLS channels work. The Vita's own TLS is too old for most sites today.
 - **Video:** H.264 up to 1920x1080 through the hardware decoder (details below), audio/video sync to the
@@ -31,27 +39,43 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 - **1080p:** 1080p channels and films play through the same hardware decoder.
 - **Picture size (HLS channels with several qualities):** they open at about 540p (the Vita's own screen size) if
   the channel offers it, else at 720p, or at the size chosen in the settings. **Select** lists the channel's
-  sizes (and the stream analysis at the end; channels and films with one size show it there); **Square** goes to
-  the next size up, from the biggest to the smallest.
+  sizes (tab *Picture*); **Square** goes to the next size up, from the biggest to the smallest.
 - **Stream analysis:** shows the resolution, codecs, frame rate and download speed of the stream (TS, HLS, MP4, MKV,
-  http and https) and whether the Vita can play it (the last entry of the **Select** menu while watching).
-- **Audio:** AAC (hardware), MP2 / MP3 and AC-3 / E-AC-3 (Dolby Digital / Dolby Digital Plus, software; 5.1 and
-  7.1 come out as stereo). Many TV channels use MP2, many films E-AC-3.
-- **Audio tracks:** a channel or film with more than one sound lists them in the **Select** menu with their
-  language (*Audio: Turkish (AAC)*). Without a choice the stream's default track plays, AAC before AC-3.
+  http and https) and whether the Vita can play it (**Select** > *More* while watching).
+- **Audio:** AAC (stereo on the hardware; 5.1 / 7.1 AAC in software), MP2 / MP3 and AC-3 / E-AC-3 (Dolby Digital /
+  Dolby Digital Plus, software). 5.1 and 7.1 come out as stereo. Many TV channels use MP2, many films E-AC-3.
+- **Audio tracks:** a channel or film with more than one sound lists them in **Select** > *Audio* with their
+  language (*Audio: Turkish (AAC)*). Without a choice the stream's default track plays, AAC before AC-3. HLS
+  channels whose sound comes in playlists of its own (one per language) play too, and list those languages.
 - **Radio:** audio-only streams get a radio screen.
-- **Favourites:** START marks a channel or a playlist (star). Favourite channels come first and have their own
-  *Favorites* category, where Triangle moves a channel up or down.
-- **Recently watched:** a category with the last 20 channels of the playlist (*Clear Recently Watched* in the
-  settings empties it).
-- **Now / next (Xtream):** the programme on now and next, in the top bar while watching and for the selected channel
-  in the list.
+- **Favourites:** START marks a playlist, a channel, a film or a series (star). A favourite channel stays in its
+  place in its category and gets its own *Favorites* category, where **Select** > *Reorder favourites* moves a
+  channel up or down (X saves). Films
+  and series (Xtream) have a *Favorites* category before the categories; it opens at once, without loading.
+- **Recently watched:** a category with the last 20 channels of the playlist; films and series (Xtream) have one
+  too, before their categories (the last 20 films, the last 20 series an episode of which was played).
+  *Clear Recently Watched* in the settings empties them all.
+- **Programme guide:** **Triangle** in a live channel list or while a channel plays opens a grid of channels and their
+  programmes along a time line (in the player the picture keeps playing in the corner). Xtream accounts give it by
+  themselves; M3U lists that name an XMLTV guide in their header (`url-tvg`, `.xml` or `.xml.gz`) get it too
+  (M3U lists without one have no guide). The
+  guide is read while nothing plays and kept for 12 hours. The programme on now is shown in the list and the player.
+- **Watching again (catch-up):** channels with an archive (Xtream `tv_archive`, M3U `catchup=`) get a rewind clock;
+  a past programme plays from its start, picked in the guide or in the channel's day-by-day schedule (**Square** in
+  the guide). Up / Down goes to the programme before / after, **Square** back to live.
+- **Sleep timer** and **channel number** (**Select** > *More* while watching; digits typed in a live list's search
+  go to that channel too).
+- **Parental lock:** a 4-6 digit PIN (*Settings*); adult categories and channels then ask for it, and it stays
+  open until the console sleeps. Changing or removing the PIN, or turning *Hide adult channels* off, always asks
+  for the current one. **Forgot the PIN?** Delete the `pin=` line in `ux0:data/VitaIPTV/settings.txt` (with
+  VitaShell, for example); the lock is then off.
 - **Two-pane channel browser:** categories on the left, channels on the right. Left stick scrolls categories,
   right stick scrolls channels. Search across all channels (case- and accent-insensitive).
 - **Settings** (**Select** on the playlists or the channels): language (English / Turkish, follows the console by
   default), hide adult channels, hide channels named 4K / UHD (the Vita cannot play 4K), preferred resolution
-  (automatic, 1080p, 720p, 540p, 480p, lowest), optional transcoding server (off / when needed / always), clear
-  recently watched.
+  (automatic, 1080p, 720p, 540p, 480p, lowest), parental lock (PIN), theme (blue, green, purple, orange),
+  optional transcoding server (off / when needed / always), clear recently watched, clear watched episodes.
+- **Player top bar:** the channel or film, the time of day in the middle, the picture size on the right.
 - **Optional transcoding server** (`tools/vita_iptv_proxy.py`, needs Python 3 and ffmpeg on a PC or an Android
   phone): plays what the Vita cannot - HEVC, interlaced video, 1080p at 50/60 fps - by converting it to 720p
   H.264 + AAC. **Select** while watching moves the channel or film to the server (*Through the Server*) and back.
@@ -99,19 +123,23 @@ Kodi style as `link|User-Agent=...&Referer=...`. The app sends them with every r
 
 The same buttons do the same things on every screen.
 
-| Button | Playlists | Channels | Playing | Forms |
-|---|---|---|---|---|
-| X | Open | Play | Pause / play | Edit / choose |
-| O | - | Back (first leaves a search) | Back (a film's position is kept) | Cancel |
-| Triangle | Edit | Favorites: move the channel (Triangle again saves) | Information | - |
-| Square | Add | Search | Next picture size (HLS) or the transcoding server | - |
-| START | Favourite (to the top) | Favourite channel | Favourite channel (a single link: its playlist) | Save |
-| Select | Menu | Menu | Picture sizes, server, audio tracks, stream analysis | - |
-| L / R | Page | Page | L: the channel before | - |
-| Up / Down, left stick | Move | Categories (left stick), channels (right stick) | Previous / next channel or film | Move |
-| Left / Right | Page | Categories / channels | Hold to move through a film, let go to jump there | Change a choice |
+| Button | Playlists | Channels / films | Playing | Guide | Forms |
+|---|---|---|---|---|---|
+| X | Open | Play (a series: open it) | Pause / play | Watch (a past programme: from the start or live) | Edit / choose |
+| O | - | Back (first leaves a search) | Back (a film's position is kept) | Close | Cancel |
+| Triangle | Edit | Live: guide. Films: details. Series: open | Live: guide. Film: details. Archive: the schedule | Close | - |
+| Square | Add | Search (films / series: all of them) | Next picture size, the server, or (archive) back to live | The channel's schedule | - |
+| R | Page | Page | Information | A day on | - |
+| L | Page | Page | The channel before | A day back | - |
+| START | Favourite (to the top) | Favourite channel, film or series (episodes: their series) | Favourite channel or film (a single link: its playlist) | - | Save |
+| Select | Menu | Menu (live *Favorites*: *Reorder favourites* first) | Tabs: Picture, Audio, Subtitles, More (analysis, sleep timer, channel number) | Categories | - |
+| Up / Down, left stick | Move | Categories (left stick), channels (right stick) | Previous / next channel or film (archive: programme) | Channel | Move |
+| Left / Right | Page | Categories / channels | Hold to move through a film, let go to jump there | Time | Change a choice |
 
-Moving through a film also works with the left stick sideways (further and longer = faster). In the stream
+In the series screen L / R change the season. While reordering favourites Up / Down moves the channel, X saves and
+O cancels.
+Moving through a film also works with the left stick sideways (further and longer = faster). In the Select menu
+L / R (or Left / Right) changes the tab; on the subtitle *Sync* row Left / Right moves the subtitles. In the stream
 analysis X runs it again and O goes back to the picture. Radio: Up / Down change station, Select the analysis.
 
 ## What plays and what does not
@@ -121,7 +149,7 @@ analysis X runs it again and O goes back to the picture. Radio: Up / Down change
 | H.264 up to 1920x1080 (see below), AAC, MP2, MP3 | Above 1080p (4K) |
 | MPEG-TS, HLS (MPEG-TS segments), FLV, MKV, MP4 | HEVC / H.265 |
 | Films: MKV, MP4, TS, FLV files (FLV: from the start, no jumping) | AVI files |
-| AC-3 / E-AC-3 audio (as stereo) | Interlaced broadcasts (576i, 1080i may stutter) |
+| AC-3 / E-AC-3 and 5.1 / 7.1 AAC audio (as stereo) | Interlaced broadcasts (576i, 1080i may stutter) |
 | http and https | DTS and TrueHD audio |
 | | Encrypted (AES) HLS, HLS with fMP4 segments |
 
@@ -145,7 +173,7 @@ other picture needs left out (in time with the sound, at a lower frame rate); an
 variant instead. The same happens when the decoder is measured to be slower than any other stream.
 When the picture falls behind the sound on live TV (a stream that sends the sound seconds ahead, a burst the
 decoder takes in at once), the sound waits until the picture has caught up.
-Triangle while watching shows three rows in fixed columns: picture size, shown / stream frame rate (e.g.
+R while watching shows three rows in fixed columns: picture size, shown / stream frame rate (e.g.
 43 / 50 fps), pictures shown and dropped; sound, A/V offset, waits, damaged pictures; connection speed, what the
 stream needs, data received, pictures not decoded.
 
@@ -208,9 +236,11 @@ export VITASDK=/usr/local/vitasdk
 cmake -B build && cmake --build build      # -> build/VitaIPTV.vpk
 ```
 
-**AC-3 / E-AC-3:** run `tools/build_ffmpeg_vita.sh` once before (downloads FFmpeg 7.1 and builds only its AC-3 /
-E-AC-3 decoders into `third_party/ffmpeg-vita`, a few minutes). CMake finds them and says
-*AC-3 / E-AC-3: FFmpeg from third_party/ffmpeg-vita*; without that step the app builds without AC-3 sound.
+**AC-3 / E-AC-3 and 5.1 AAC:** run `tools/build_ffmpeg_vita.sh` once before (downloads FFmpeg 7.1 and builds only
+its AC-3, E-AC-3 and AAC decoders into `third_party/ffmpeg-vita`, a few minutes). CMake finds them and says
+*AC-3 / E-AC-3: FFmpeg from third_party/ffmpeg-vita* and *AAC 5.1 / 7.1: FFmpeg's AAC decoder is built in*;
+without that step the app builds without that sound. A `third_party/ffmpeg-vita` from 0.5.0 has no AAC decoder:
+delete it (and `build-ffmpeg`) and run the script again.
 
 `-DVITAIPTV_HTTPS=OFF` builds without the built-in TLS. PC tests are in `tests/` (gcc, ffmpeg, Python 3),
 e.g. `python3 tests/run_player_tests.py`.
