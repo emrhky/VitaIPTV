@@ -30,7 +30,8 @@ static const char *ch_names[] = { "TRT 1 HD", "Kanal D HD", "Show TV HD", "Star 
 static const char *ch_groups[] = { "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Haber", "Haber", "Haber", "Haber",
     "Spor", "Çocuk", "Çocuk", "Çocuk", "Spor" };
 static int show_group = 0;
-static void ch_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[i]; r->number = i + 1; r->right = show_group ? ch_groups[i] : NULL; r->fav = fav_demo && i < 3; r->moving = fav_demo == 2 && i == 1; }
+static int check_demo;                                       /* 0.7.0: watched episodes */
+static void ch_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[i]; r->number = i + 1; r->right = show_group ? ch_groups[i] : NULL; r->fav = fav_demo && i < 3; r->moving = fav_demo == 2 && i == 1; r->check = check_demo && i < 3; }
 static int search_idx[] = { 12, 13 };
 static void search_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[search_idx[i]]; r->number = search_idx[i] + 1; r->right = ch_groups[search_idx[i]]; }
 
@@ -46,6 +47,40 @@ static void grp_row_pv(int i, ScrRow *r, void *c)
     r->name = i == 0 ? T("All") : gr[i]; r->right = cnt[i];
 }
 
+
+/* 0.8.0: guide rows: half-hour-ish programmes around now (UTC 1761410880) */
+static const char *prog_names[] = { "Ana Haber Bülteni", "Kızılcık Şerbeti", "Gönül Dağı", "Spor Haberleri", "Hava Durumu",
+                                    "Belgesel: Anadolu", "Yabancı Film: Uzak", "Müzik Kutusu", "Çizgi Film Saati", "Gece Haberleri" };
+static void gd_row_pv(int i, ScrGuideRow *r, void *ctx)
+{
+    const ScrGuide *g = ctx;
+    r->name = ch_names[i]; r->number = i + 1; r->archive = i < 6; r->playing = i == 0 && g->pic; r->sel = i == 0;
+    r->loading = i == 9;
+    if (r->loading) return;
+    int64_t t = g->t0 - (i * 7 % 5) * 600;
+    for (int k = 0; k < 7 && r->nprogs < SCR_GUIDE_PROGS; k++) {
+        int len = (30 + ((i * 3 + k * 5) % 4) * 15) * 60;
+        ScrProg *p = &r->progs[r->nprogs++];
+        p->start = t; p->end = t + len; p->title = prog_names[(i + k) % 10];
+        p->flags = (r->archive && p->end <= g->now ? SCR_PROG_ARCHIVE : 0) | (p->start <= g->now && p->end > g->now ? SCR_PROG_LIVE : 0) |
+                   (i == 0 && p->start <= g->now && p->end > g->now ? SCR_PROG_SEL : 0) | (!r->archive && p->end <= g->now ? SCR_PROG_DIM : 0);
+        t += len;
+    }
+}
+static void cg_row_pv(int i, ScrCGRow *r, void *c)
+{
+    (void)c;
+    static char tm[12][16];
+    snprintf(tm[i], sizeof tm[i], "%02d:%02d", 8 + i, i % 2 ? 30 : 0);
+    r->time = tm[i]; r->title = prog_names[i % 10]; r->archive = i < 11; r->live = i == 11; r->progress = i == 11 ? 0.4f : 0;
+}
+static void ep_row_pv(int i, ScrEpRow *r, void *c)
+{
+    (void)c;
+    static char nm[12][48];
+    snprintf(nm[i], sizeof nm[i], "%d. Bölüm", i + 1);
+    r->name = nm[i]; r->right = "1 sa 52 dk"; r->check = i < 2; r->progress = i == 2 ? 0.35f : 0;
+}
 static vita2d_texture wait_tex;
 static void load_backdrop(void)                              /* raw RGBA written by the test script from resources/waiting.png */
 {
@@ -152,12 +187,17 @@ int main(int argc, char **argv)
     preview_clear(UI_BG); scr_form(T("Edit playlist"), NULL, ff, 8, 7, hf, 4, NULL, 0);
     scr_confirm(T("Delete this playlist?"), "\"Spor paketi\" will be removed from the list."); shot("b_confirm");
     ScrField fs[] = { { T("Transcoding server"), "http://192.168.1.20:8090", SCR_F_TEXT, 1 }, { T("Use automatically"), T("When needed"), SCR_F_CHOICE, 1 },
-                      { T("Language"), T("Automatic (system)"), SCR_F_CHOICE, 1 }, { T("Hide adult channels"), T("On"), SCR_F_TOGGLE, 1 }, { T("Hide channels named 4K / UHD"), T("Off"), SCR_F_TOGGLE, 1 },
+                      { T("Language"), T("Automatic (system)"), SCR_F_CHOICE, 1 }, { T("Hide adult channels"), T("On"), SCR_F_TOGGLE, 1 }, { T("Parental lock (PIN)"), "****", SCR_F_TEXT, 1 },
+                      { T("Hide channels named 4K / UHD"), T("Off"), SCR_F_TOGGLE, 1 },
                       { T("Preferred resolution"), T("Automatic"), SCR_F_CHOICE, 1 },
+                      { T("Theme"), T("Blue"), SCR_F_CHOICE, 1 },
                       { T("Test server"), NULL, SCR_F_BUTTON, 1 }, { T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 },
+                      { T("Clear watched episodes"), NULL, SCR_F_BUTTON, 1 },
                       { T("Save"), NULL, SCR_F_BUTTON, 1 }, { T("Cancel"), NULL, SCR_F_BUTTON, 1 } };
-    preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), fs, 10, 2, hf2, 4, T("Server is running"), 0); shot("d_settings");
-    preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 10, 7, hf2, 4, NULL, 0);
+    preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), fs, 13, 2, hf2, 4, T("Server is running"), 0); shot("d_settings");
+    preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 13, 7, hf2, 4, NULL, 0); shot("d_settings_end");
+    scr_confirm(T("Clear watched episodes?"), T("The ticks of watched episodes are removed. Where films stopped is kept.")); shot("d3_clear_watched");
+    preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 11, 7, hf2, 4, NULL, 0);
     scr_confirm(T("Clear recently watched?"), T("The recently watched channels of every playlist are removed. Favorites stay.")); shot("d2_clear_recent");
     {   /* 0.5.0: the Select menu while playing: resolutions, the server line, audio tracks */
         static char a1[80], a2[80];
@@ -231,13 +271,13 @@ int main(int argc, char **argv)
     /* 0.4.5: reordering a favourite, the EPG line in the player */
     {
         static int gs, cs;
-        UiHint hm[] = { { UI_BTN_UPDOWN, "Up / down" }, { UI_BTN_TRIANGLE, "Save" }, { UI_BTN_CIRCLE, "Cancel" } };
+        UiHint hm[] = { { UI_BTN_UPDOWN, "Up / down" }, { UI_BTN_CROSS, "Save" }, { UI_BTN_CIRCLE, "Cancel" } };   /* (0.8.0: X saves) */
         fav_demo = 2;
         ScrDual d; memset(&d, 0, sizeof d);
         d.title = "Ev internet - Xtream"; d.subtitle = T("Favorites"); d.right = "3 channels";
         d.lcount = 10; d.lsel = 0; d.lscroll = &gs; d.lrow = grp_row_pv;
         d.rcount = 3; d.rsel = 1; d.rscroll = &cs; d.rrow = ch_row;
-        d.focus = 1; d.lmark = 1; d.hints = hm; d.nhints = 3; d.status = T("Up / down moves the channel, Triangle saves the order");
+        d.focus = 1; d.lmark = 1; d.hints = hm; d.nhints = 3; d.status = T("Up / down moves the channel, X saves the order");
         preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot("k_fav_move");
         d.hints = NULL; d.nhints = 0; d.status = "Şimdi: Ana Haber Bülteni (19:00-20:30)  ·  Sonra: Kızılcık Şerbeti (20:30)";
         fav_demo = 1; d.rcount = 16;
@@ -248,6 +288,218 @@ int main(int argc, char **argv)
         pe2.fav = 1;
         preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pe2); shot("k_epg_player");
     }
+    /* 0.7.0: the Select menu's tabs, a subtitle, the clock, the next episode, watched episodes */
+    {
+        const char *tabs[] = { T("Picture"), T("Audio"), T("Subtitles"), T("More") };
+        static char sy[64];
+        snprintf(sy, sizeof sy, T("Sync:  < %+d.%d s >"), 1, 5);
+        const char *pic[] = { T("Automatic"), "1920x1080", "1280x720", "720x576", T("Through the Server") };
+        const char *sub[] = { T("Off"), "Türkçe", "English (SDH)", "Türkçe (Zorunlu)", sy };
+        int dim0[] = { 0, 0, 0, 0, 0 };
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f);
+        scr_tabmenu(tabs, 4, 0, pic, dim0, 5, 2, T("L / R: tab   X: choose   O: close")); shot("l_tab_picture");
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f);
+        scr_tabmenu(tabs, 4, 2, sub, dim0, 5, 4, T("Left / Right: earlier / later   X: back to 0   O: close")); shot("l_tab_subs");
+        const char *none[] = { T("No subtitles in this film (MKV / MP4 text subtitles only)") };
+        int dim1[] = { 1 };
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f);
+        scr_tabmenu(tabs, 4, 2, none, dim1, 1, 0, T("L / R: tab   X: choose   O: close")); shot("l_tab_nosubs");
+        ScrPlayer ps = pl;
+        ps.clock = "21:47"; ps.subtitle = "Bunu sana daha önce söylemiştim.\nAma dinlemedin.";
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&ps); shot("l_player_clock_sub");
+        ps.osd = 0;
+        ps.corner = "Sonraki bölüm 4 sn içinde"; ps.corner2 = T("X: now   O: cancel");
+        if (lang_get() != LANG_TR) ps.corner = "Next episode in 4 s";
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&ps); shot("l_next_episode");
+        static int gs, cs;
+        check_demo = 1; show_group = 1;
+        ScrDual d; memset(&d, 0, sizeof d);
+        d.title = "Ev internet - Xtream"; d.subtitle = "Dizi - Sezon 1"; d.right = "16";
+        d.lcount = 10; d.lsel = 0; d.lscroll = &gs; d.lrow = grp_row_pv;
+        d.rcount = 16; d.rsel = 3; d.rscroll = &cs; d.rrow = ch_row; d.focus = 1;
+        preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot("l_watched");
+        check_demo = 0; show_group = 0;
+    }
+    /* 0.8.0: the guide, a channel's schedule, catch-up in the player, film / series details, the preview card */
+    {
+        static uint32_t ppx[240 * 360];                       /* a made-up poster */
+        for (int y = 0; y < 360; y++) for (int x = 0; x < 240; x++)
+            ppx[y * 240 + x] = RGBA8(160 - y * 120 / 360, 40 + x * 60 / 240, 50 + (y > 250 ? 90 : 0), 255);
+        vita2d_texture poster = { 240, 360, ppx };
+        const int64_t now = 1761410880;                       /* Sat 25 Oct 2025 16:48 UTC (19:48 at +3) */
+        const int tz = 180;
+        ScrGuide g; memset(&g, 0, sizeof g);
+        g.title = "Ev internet - Xtream"; g.subtitle = T("Guide"); g.right = "Ulusal";
+        g.t0 = now - now % 1800 - 1800; g.now = now; g.span_min = 150; g.tz_min = tz; g.day = T("Today");
+        g.count = 16; g.first = 0;
+        g.sel_title = "Ana Haber Bülteni"; g.sel_line = "TRT 1 HD  ·  19:00 - 20:30  ·  90 dk";
+        g.sel_desc = "Günün önemli gelişmeleri, son dakika haberleri ve hava durumu.";
+        g.sel_live = 1; g.sel_archive = 1; g.sel_progress = 0.54f; g.sel_left = "42 dk kaldı";
+        g.sel_note = T("X: watch from the start (archive) or live");
+        if (lang_get() != LANG_TR) { g.sel_line = "TRT 1 HD  ·  19:00 - 20:30  ·  90 min"; g.sel_left = "42 min left"; }
+        UiHint HL[] = { { UI_BTN_CROSS, "Watch" }, { UI_BTN_LEFTRIGHT, "Time" }, { UI_BTN_LR, "Day" }, { UI_BTN_SQUARE, "Schedule" },
+                        { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Category" } };
+        UiHint HP[] = { { UI_BTN_CROSS, "Watch" }, { UI_BTN_LEFTRIGHT, "Time" }, { UI_BTN_UPDOWN, "Channel" }, { UI_BTN_SQUARE, "Schedule" },
+                        { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_LR, "Day" } };
+        g.hints = HL; g.nhints = 7;
+        g.row = gd_row_pv; g.ctx = (void *)&g;
+        preview_clear(UI_BG); scr_guide(&g); shot("m_guide_list");
+        g.pic = &tex; g.pic_w = 1280; g.pic_h = 720; g.pic_label = "TRT 1 HD  ·  oynatılıyor";
+        g.hints = HP; g.nhints = 7;
+        preview_clear(UI_BG); scr_guide(&g); shot("m_guide_player");
+        g.pic = NULL; g.hints = HL;
+        static int ds;
+        UiHint HD[] = { { UI_BTN_CROSS, "Choose" }, { UI_BTN_UPDOWN, "Category" }, { UI_BTN_CIRCLE, "Close" } };
+        g.drawer = 1; g.dcount = 9; g.dsel = 1; g.dscroll = &ds; g.drow = grp_row_pv; g.hints = HD; g.nhints = 3;
+        preview_clear(UI_BG); scr_guide(&g); shot("m_guide_drawer");
+        g.drawer = 0;
+        UiHint HPOP[] = { { UI_BTN_CROSS, "Choose" }, { UI_BTN_CIRCLE, "Cancel" } };
+        g.popup = 1; g.popup_sel = 0; g.popup_title = "Ana Haber Bülteni"; g.popup_line = "TRT 1 HD  ·  Bugün 19:00 - 20:30";
+        g.popup_a = T("Watch from the start (archive)"); g.popup_b = T("Watch live"); g.hints = HPOP; g.nhints = 2;
+        preview_clear(UI_BG); scr_guide(&g); shot("m_guide_popup");
+        g.popup = 0; g.hints = HL; g.nhints = 7; g.count = 0; g.empty = T("No channels");
+        g.sel_title = "TRT 1 HD"; g.sel_line = T("Loading the guide..."); g.sel_desc = NULL; g.sel_note = NULL; g.sel_live = 0;
+        preview_clear(UI_BG); scr_guide(&g); shot("m_guide_loading");
+
+        /* a channel's schedule */
+        static const char *days[] = { "Çar 22", "Per 23", "Dün", "Bugün", "Yarın" };
+        static int cgs;
+        ScrChanGuide c; memset(&c, 0, sizeof c);
+        c.title = "TRT 1 HD"; c.subtitle = T("Schedule"); c.right = "arşiv 3 gün";
+        c.days = days; c.ndays = 5; c.day = 3; c.count = 12; c.sel = 4; c.scroll = &cgs; c.row = cg_row_pv;
+        c.d_title = "Gönül Dağı"; c.d_line1 = "Bugün 14:00 - 16:00  ·  120 dk";
+        c.d_desc = "Dilek ile Taner'in yolları yeniden kesişir. Köyde düğün hazırlıkları başlar."; c.d_archive = 1;
+        UiHint HC[] = { { UI_BTN_CROSS, "Watch" }, { UI_BTN_LR, "Day" }, { UI_BTN_UPDOWN, "Programme" }, { UI_BTN_CIRCLE, "Back" } };
+        c.hints = HC; c.nhints = 4;
+        preview_clear(UI_BG); cgs = 0; scr_chan_guide(&c); shot("n_schedule");
+
+        /* catch-up in the player */
+        UiHint ha[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_SQUARE, "Live" }, { UI_BTN_TRIANGLE, "Schedule" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" },
+                        { UI_BTN_LEFTRIGHT, "Seek" }, { UI_BTN_L, "P. Channel" }, { UI_BTN_R, "Info" }, { UI_BTN_SELECT, "Res." }, { UI_BTN_START, "Fav." } };
+        ScrPlayer pa; memset(&pa, 0, sizeof pa);
+        pa.name = "TRT 1 HD  ·  Gönül Dağı"; pa.group = "Bugün 14:00 - 16:00"; pa.info = "1280x720  25 fps"; pa.osd = 1;
+        pa.hints = ha; pa.nhints = 10; pa.film = 1; pa.pos_ms = 42 * 60000; pa.dur_ms = 120 * 60000; pa.seek_ms = -1;
+        pa.badge = T("ARCHIVE"); pa.time_l = "14:42"; pa.time_r = "16:00"; pa.clock = "19:48";
+        pa.time_note_l = "42 dk izlendi  ·  78 dk kaldı"; pa.time_note_r = "Sonraki: Kızılcık Şerbeti (20:00)";
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pa); shot("o_archive_player");
+        pa.osd = 0; pa.corner = "Sonraki program 4 sn içinde"; pa.corner2 = T("X: now   O: cancel");
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pa); shot("o_archive_next");
+        ScrPlayer pz = pl;
+        pz.osd = 0; pz.corner = "Uyku zamanlayıcı: 42 sn sonra duracak"; pz.corner2 = T("X: 15 more minutes");
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pz); shot("o_sleep_warning");
+        const char *tabs[] = { T("Picture"), T("Audio"), T("Subtitles"), T("More") };
+        const char *more[] = { "Akış analizi", "Uyku zamanlayıcı:  < 30 dk >   (28 dk kaldı)", T("Channel number...") };
+        int dimm[] = { 0, 0, 0 };
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f);
+        scr_tabmenu(tabs, 4, 3, more, dimm, 3, 1, T("Left / Right / X: change   O: close")); shot("o_more_sleep");
+
+        /* the films list with its preview card (layout A) */
+        ScrVodCard card; memset(&card, 0, sizeof card);
+        card.poster = &poster; card.title = "Kurak Günler"; card.line = "2022  ·  2 sa 9 dk";
+        card.genre = "Dram, Gerilim"; card.director = "Emin Alper"; card.cast = "Selahattin Paşalı, Ekin Koç, Erol Babaoğlu";
+        card.rating = 7.4f;
+        card.plot = "Genç ve idealist savcı Emre, siyasi çekişmelerle sarsılan küçük bir kasabaya atanır. Kasabadaki su krizi ve "
+                    "bir av partisinin ardından yaşananlar, Emre'yi tehlikeli bir oyunun içine çeker.";
+        static int gs, cs;
+        UiHint hv[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_TRIANGLE, "Details" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
+                        { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+        ScrDual d; memset(&d, 0, sizeof d);
+        d.title = "Ev internet - Xtream"; d.subtitle = "Yerli Filmler"; d.right = "16 film";
+        d.lcount = 9; d.lsel = 2; d.lscroll = &gs; d.lrow = grp_row_pv;
+        d.rcount = 16; d.rsel = 2; d.rscroll = &cs; d.rrow = ch_row; d.focus = 1; d.lmark = 1;
+        d.hints = hv; d.nhints = 8; d.preview = &card;
+        preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot("p_films_preview");
+        ScrVodCard cl2 = card; cl2.poster = NULL; cl2.loading = 1;
+        d.preview = &cl2;
+        preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot("p_films_preview_loading");
+
+        /* film details */
+        static const char *btn[] = { "Devam et (1:12:40)", "Baştan", "Favori" };
+        UiHint hdet[] = { { UI_BTN_CROSS, "Choose" }, { UI_BTN_LEFTRIGHT, "Button" }, { UI_BTN_UPDOWN, "Previous / next" },
+                          { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_START, "Fav." } };
+        ScrVodDetail v; memset(&v, 0, sizeof v);
+        v.header = "Ev internet - Xtream"; v.header_sub = T("Details"); v.card = card;
+        v.buttons = btn; v.nbuttons = 3; v.sel = 0; v.progress = 0.56f; v.fav = 1;
+        v.note = T("Details and poster come from the provider; without them only the name shows.");
+        v.hints = hdet; v.nhints = 6;
+        preview_clear(UI_BG); scr_vod_detail(&v); shot("q_film_detail");
+        ScrVodDetail vn = v; vn.card.poster = NULL; vn.card.genre = vn.card.director = vn.card.cast = vn.card.plot = NULL;
+        vn.card.rating = -1; vn.card.line = NULL; vn.progress = -1; vn.fav = 0; vn.buttons = btn + 1; vn.nbuttons = 2;
+        preview_clear(UI_BG); scr_vod_detail(&vn); shot("q_film_detail_bare");
+        ScrVodDetail vo = v; vo.overlay = 1;
+        UiHint hov[] = { { UI_BTN_CIRCLE, "Close" } };   /* (0.8.1) */
+        vo.hints = hov; vo.nhints = 1;
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_vod_detail(&vo); shot("q_film_overlay");
+
+        /* a series */
+        static const char *sn[] = { "Sezon 1", "Sezon 2", "Sezon 3", "Sezon 4" };
+        static int es;
+        ScrSeries se; memset(&se, 0, sizeof se);
+        se.header = "Ev internet - Xtream"; se.header_sub = "Diziler"; se.card = card;
+        se.card.title = "Bir Zamanlar Çukurova"; se.card.line = "2018  ·  4 sezon"; se.card.director = NULL;
+        se.seasons = sn; se.nseasons = 4; se.season = 1; se.count = 12; se.sel = 2; se.scroll = &es; se.row = ep_row_pv;
+        UiHint hse[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_LR, "Season" }, { UI_BTN_UPDOWN, "Episode" }, { UI_BTN_CIRCLE, "Back" },
+                         { UI_BTN_SEP, "" }, { UI_BTN_START, "Fav." } };
+        se.hints = hse; se.nhints = 6;
+        preview_clear(UI_BG); es = 0; scr_series(&se); shot("r_series");
+    }
+    /* 0.8.1: subtitle looks and the themes */
+    {
+        ScrPlayer ps = pl;
+        ps.osd = 0;
+        ps.subtitle = "Bunu sana daha önce söylemiştim.\nAma dinlemedin.";
+        static const char *nm[] = { "s_sub_small_yellow_band", "s_sub_large_white_box", "s_sub_vlarge_green_none_higher", "s_sub_medium_blue_top" };
+        int st[4][4] = { { 0, 1, 0, 0 }, { 2, 0, 0, 1 }, { 3, 2, 1, 2 }, { 1, 3, 2, 0 } };
+        for (int k = 0; k < 4; k++) {
+            scr_sub_style(st[k][0], st[k][1], st[k][2], st[k][3]);
+            ps.osd = k == 3;
+            preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&ps); shot(nm[k]);
+        }
+        scr_sub_style(3, 0, 0, 0);                           /* the longest: 4 lines, very large, with the bars */
+        ps.osd = 1;
+        ps.subtitle = "Bu çok uzun bir altyazı satırı, ekranın genişliğini aşıyor ve bölünmesi gerekiyor.\nİkinci satır da uzun, o da bölünüyor.";
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&ps); shot("s_sub_vlarge_long");
+        scr_sub_style(1, 0, 0, 0);
+        const char *tabs[] = { T("Picture"), T("Audio"), T("Subtitles"), T("More") };
+        static char rows[8][64];
+        snprintf(rows[0], 64, "%s", T("Off")); snprintf(rows[1], 64, "> Türkçe"); snprintf(rows[2], 64, T("Sync:  < %+d.%d s >"), 0, 0);
+        snprintf(rows[3], 64, "%s:  < %s >", T("Size"), T("Large")); snprintf(rows[4], 64, "%s:  < %s >", T("Colour"), T("Yellow"));
+        snprintf(rows[5], 64, "%s:  < %s >", T("Place"), T("Bottom")); snprintf(rows[6], 64, "%s:  < %s >", T("Background"), T("Light band"));
+        const char *it[7] = { rows[0], rows[1], rows[2], rows[3], rows[4], rows[5], rows[6] };
+        int dz[7] = { 0 };
+        scr_sub_style(2, 1, 0, 0);
+        ps.osd = 0; ps.subtitle = "Bunu sana daha önce söylemiştim.";
+        preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&ps);
+        scr_tabmenu(tabs, 4, 2, it, dz, 7, 4, T("Left / Right / X: change   O: close")); shot("s_sub_menu");
+        scr_sub_style(1, 0, 0, 0);
+        /* each theme: the channels, the settings, a film's details */
+        static const char *tn[4] = { "blue", "green", "purple", "orange" };
+        for (int t = 0; t < UI_THEMES; t++) {
+            ui_set_theme(t);
+            char nmb[48];
+            static int gs, cs;
+            UiHint hr2[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_TRIANGLE, "Guide" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
+                             { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+            ScrDual d; memset(&d, 0, sizeof d);
+            d.title = "Ev internet - Xtream"; d.subtitle = "Ulusal"; d.right = "16 channels";
+            d.lcount = 9; d.lsel = 1; d.lscroll = &gs; d.lrow = grp_row_pv;
+            d.rcount = 16; d.rsel = 3; d.rscroll = &cs; d.rrow = ch_row; d.focus = 1; d.lmark = 1; d.hints = hr2; d.nhints = 8;
+            d.status = "Şimdi: Ana Haber Bülteni (19:00-20:30)";
+            fav_demo = 1;
+            snprintf(nmb, sizeof nmb, "t_%s_channels", tn[t]);
+            preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot(nmb);
+            fav_demo = 0;
+            fs[7].value = T(ui_theme_name(t));
+            snprintf(nmb, sizeof nmb, "t_%s_settings", tn[t]);
+            preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 13, 7, hf2, 4, NULL, 0); shot(nmb);
+            snprintf(nmb, sizeof nmb, "t_%s_menu", tn[t]);
+            preview_clear(UI_BG); scroll = 0; scr_list(&sl2); scr_menu(T("Menu"), menu, 5, 1); shot(nmb);
+            snprintf(nmb, sizeof nmb, "t_%s_player", tn[t]);
+            preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pf); shot(nmb);
+        }
+        ui_set_theme(0);
+        fs[7].value = T("Blue");
+    }
     /* 0.4.1: the button bars, left and right */
     {
         UiHint b1[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" }, { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
@@ -257,14 +509,18 @@ int main(int argc, char **argv)
         UiHint b5[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_SQUARE, "720p" }, { UI_BTN_TRIANGLE, "Info" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_LEFTRIGHT, "Seek" }, { UI_BTN_L, "P. Channel" }, { UI_BTN_SELECT, "Res." }, { UI_BTN_START, "Fav." } };
         UiHint b6[] = { { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_CIRCLE, "Cancel" }, { UI_BTN_SEP, "" }, { UI_BTN_START, "Save" } };
         UiHint b7[] = { { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_L, "P. Channel" }, { UI_BTN_SELECT, "Analyze" }, { UI_BTN_START, "Fav." } };
-        const UiHint *bars[] = { b1, b2, b3, b4, b5, b6, b7 };
-        int nb[] = { 6, 6, 7, 8, 9, 4, 5 };
+        /* 0.8.0: the fullest player bars (live with sizes; an episode with the list behind; catch-up) */
+        UiHint b8[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_SQUARE, "1080p" }, { UI_BTN_TRIANGLE, "Guide" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_L, "P. Channel" }, { UI_BTN_R, "Info" }, { UI_BTN_SELECT, "Res." }, { UI_BTN_START, "Fav." } };
+        UiHint b9[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_SQUARE, "Original" }, { UI_BTN_TRIANGLE, "Details" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_LEFTRIGHT, "Seek" }, { UI_BTN_L, "P. Channel" }, { UI_BTN_R, "Info" }, { UI_BTN_SELECT, "Res." }, { UI_BTN_START, "Fav." } };
+        UiHint b10[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_SQUARE, "Live" }, { UI_BTN_TRIANGLE, "Schedule" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_LEFTRIGHT, "Seek" }, { UI_BTN_L, "P. Channel" }, { UI_BTN_R, "Info" }, { UI_BTN_SELECT, "Res." }, { UI_BTN_START, "Fav." } };
+        const UiHint *bars[] = { b1, b2, b3, b4, b5, b6, b7, b8, b9, b10 };
+        int nb[] = { 6, 6, 7, 8, 9, 4, 5, 9, 10, 10 };
         preview_clear(UI_BG);
-        for (int k = 0; k < 7; k++) {
+        for (int k = 0; k < 10; k++) {
             /* each bar drawn, then its strip copied up (the bar is always at the bottom) */
             ui_footer(bars[k], nb[k], NULL, 0);
             extern uint32_t fb[];
-            memmove(&fb[(k * 70 + 20) * 960], &fb[496 * 960], sizeof(uint32_t) * 960 * 48);
+            memmove(&fb[(k * 49 + 2) * 960], &fb[496 * 960], sizeof(uint32_t) * 960 * 48);
         }
         shot("j_bars");
     }

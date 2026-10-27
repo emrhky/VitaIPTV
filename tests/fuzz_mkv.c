@@ -6,6 +6,7 @@
 static uint64_t sum;
 static void v(void *c, const uint8_t *d, size_t n, int64_t p, int64_t q, int f) { (void)c;(void)p;(void)q;(void)f; if (n) sum += d[0] + d[n-1]; }
 static void a(void *c, const uint8_t *d, size_t n, int64_t p) { (void)c;(void)p; if (n) sum += d[0] + d[n-1]; }
+static void sb(void *c, int id, const char *t, int64_t p, int64_t q) { (void)c;(void)p;(void)q; sum += (unsigned)id + strlen(t); }   /* 0.7.0 */
 int main(int argc, char **argv)
 {
     int iters = atoi(argv[1]);
@@ -24,7 +25,7 @@ int main(int argc, char **argv)
             else if (mode == 2) n = (size_t)rand() % n;
             else if (mode == 3) { size_t x = (size_t)rand() % n, y = x + (size_t)rand() % 30000; if (y > n) y = n; memmove(m + x, m + y, n - y); n -= y - x; }
             else { size_t x = (size_t)rand() % n, k = 1 + (size_t)rand() % 4000; memmove(m + x + k, m + x, n - x); for (size_t q = 0; q < k; q++) m[x + q] = (uint8_t)rand(); n += k; }
-            TsSink s = { v, a, NULL };
+            TsSink s = { v, a, NULL, sb };
             MkvDemux *d = mkv_create(&s);
             for (size_t p = 0; p < n;) { size_t c = 1 + (size_t)rand() % 5000; if (c > n - p) c = n - p; mkv_feed(d, m + p, c); p += c; }
             mkv_flush(d);

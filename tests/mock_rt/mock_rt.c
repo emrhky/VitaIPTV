@@ -179,10 +179,12 @@ int sceHttpSendRequest(int r, const void *p, unsigned s)
     }
     return http_f || http_mapped ? 0 : -1;
 }
+int mock_http_busy_from, mock_http_busy_n;  /* 1.0: sessions from..from+n-1 answer 407 (a busy account) */
 int sceHttpGetStatusCode(int r, int *s)
 {
     (void)r;
     *s = http_loc[0] ? 302 : (http_mapped && !http_f) ? 404 : mock_http_status;
+    if (mock_http_busy_n && mock_http_sessions >= mock_http_busy_from && mock_http_sessions < mock_http_busy_from + mock_http_busy_n) *s = 407;
     if (*s == 200 && http_range && !mock_http_no_ranges) *s = 206;
     return 0;
 }

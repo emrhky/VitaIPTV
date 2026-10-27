@@ -212,6 +212,64 @@ for ext, fmt in (("ts", "mpegts"), ("mkv", "matroska")):
     sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 "
        f"-f lavfi -i sine=frequency=880:sample_rate=48000 -t 6 -map 0:v -map 1:a -map 2:a -c:v libx264 -g 25 -pix_fmt yuv420p "
        f"-c:a:0 aac -c:a:1 ac3 -metadata:s:a:0 language=tur -metadata:s:a:1 language=eng -f {fmt} {T}/hls/twoaudio.{ext}")
+# 0.6.0: HLS with the sound in playlists of its own (#EXT-X-MEDIA): picture-only TS segments, Turkish sound as
+# audio-only TS segments, English as packed AAC (.aac with an ID3 time stamp, as Apple's packager makes them;
+# the times are those of the TS segments, which the HLS muxer moved)
+os.makedirs(f"{T}/alt", exist_ok=True)
+sh(f"ffmpeg -loglevel error -y -i {T}/s720g30.ts -an -c copy -copyts -f hls -hls_time 1 -hls_list_size 0 -hls_playlist_type vod "
+   f"-hls_segment_filename {T}/alt/av%03d.ts {T}/alt/altv.m3u8")
+sh(f"ffmpeg -loglevel error -y -i {T}/s720g30.ts -vn -c copy -copyts -f hls -hls_time 1 -hls_list_size 0 -hls_playlist_type vod "
+   f"-hls_segment_filename {T}/alt/aa%03d.ts {T}/alt/alttr.m3u8")
+sh(f"ffmpeg -loglevel error -y -i {T}/s720g30.ts -vn -c copy -f adts {T}/alt/all.aac")
+st = subprocess.run(f"ffprobe -v error -select_streams a:0 -show_entries stream=start_pts -of csv=p=0 {T}/alt/aa000.ts",
+                    shell=True, capture_output=True, text=True).stdout.strip()
+apts = int(st.split()[0].split(",")[0]) if st else 126000
+adts = open(f"{T}/alt/all.aac", "rb").read()
+frames, i = [], 0
+while i + 7 <= len(adts):
+    ln = ((adts[i + 3] & 3) << 11) | (adts[i + 4] << 3) | (adts[i + 5] >> 5)
+    frames.append(adts[i:i + ln]); i += ln
+def id3_ts(pts):
+    owner = b"com.apple.streaming.transportStreamTimestamp\0"
+    body = owner + (pts & 0x1FFFFFFFF).to_bytes(8, "big")
+    frame = b"PRIV" + len(body).to_bytes(4, "big") + b"\0\0" + body
+    n = len(frame)
+    size = bytes([(n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F])
+    return b"ID3\x04\x00\x00" + size + frame
+per = 47                                                     # about 1 s of 48 kHz AAC frames
+pl = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n#EXT-X-PLAYLIST-TYPE:VOD\n"
+for k in range(0, len(frames), per):
+    seg = id3_ts(apts + k * 1024 * 90000 // 48000) + b"".join(frames[k:k + per])
+    open(f"{T}/alt/ae{k // per:03d}.aac", "wb").write(seg)
+    pl += f"#EXTINF:{len(frames[k:k + per]) * 1024 / 48000:.3f},\nae{k // per:03d}.aac\n"
+open(f"{T}/alt/alten.m3u8", "w").write(pl + "#EXT-X-ENDLIST\n")
+open(f"{T}/alt/altm.m3u8", "w").write("#EXTM3U\n"
+    "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",LANGUAGE=\"tr\",NAME=\"Turkce\",DEFAULT=YES,AUTOSELECT=YES,URI=\"alttr.m3u8\"\n"
+    "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aud\",LANGUAGE=\"en\",NAME=\"English\",DEFAULT=NO,AUTOSELECT=YES,URI=\"alten.m3u8\"\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,CODECS=\"avc1.640020,mp4a.40.2\",AUDIO=\"aud\"\naltv.m3u8\n")
+for f in ("altv", "alttr"):                                  # live copies (no #EXT-X-ENDLIST): both start 3 s from the end
+    open(f"{T}/alt/{f}_l.m3u8", "w").write(open(f"{T}/alt/{f}.m3u8").read().replace("#EXT-X-ENDLIST\n", "").replace("#EXT-X-PLAYLIST-TYPE:VOD\n", ""))
+open(f"{T}/alt/altml.m3u8", "w").write("#EXTM3U\n"
+    "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",LANGUAGE=\"tr\",NAME=\"Turkce\",DEFAULT=YES,URI=\"alttr_l.m3u8\"\n"
+    "#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720,AUDIO=\"a\"\naltv_l.m3u8\n")
+# 0.6.0: a 40 s film for the fast / slow line tests (the queues' sizes)
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 40 "
+   f"-c:v libx264 -g 50 -b:v 600k -pix_fmt yuv420p -c:a aac -ac 2 -f matroska {T}/hls/long.mkv")
+# 0.6.0: 5.1 AAC (the Vita's decoder takes two channels; FFmpeg's aac decoder mixes it down) in TS, MKV, MP4
+for ext, fmt in (("ts", "mpegts"), ("mkv", "matroska"), ("mp4", "mp4")):
+    sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 6 "
+       f"-c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -ac 6 -b:a 256k -f {fmt} {T}/hls/aac51.{ext}")
+# 0.7.0: a film with two text subtitle tracks (Turkish SRT, English ASS "SDH")
+open(f"{T}/hls/subs_tr.srt", "w").write("1\n00:00:01,000 --> 00:00:02,000\nBir\n\n2\n00:00:03,000 --> 00:00:04,000\nİki\n\n")
+open(f"{T}/hls/subs_en.ass", "w").write("[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
+    "Style: Default,Arial,16,&Hffffff,&Hffffff,&H0,&H0,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,0\n\n[Events]\nFormat: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n"
+    "Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\i1}One{\\i0}\\Nline two\nDialogue: 0,0:00:03.00,0:00:04.00,Default,,0,0,0,,Two\n")
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -i {T}/hls/subs_tr.srt -i {T}/hls/subs_en.ass "
+   f"-map 0 -map 1 -map 2 -map 3 -t 5 -c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -c:s:0 srt -c:s:1 ass "
+   f"-metadata:s:s:0 language=tur -metadata:s:s:1 language=eng -metadata:s:s:1 title=SDH {T}/hls/subs.mkv")
+# 1.0: a stream whose 33-bit TS clock wraps after about 6 s (2^33 / 90000 = 95443.7 s)
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 12 "
+   f"-c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -output_ts_offset 95436 -f mpegts {T}/wrap.ts")
 M = f"{ROOT}/tests/mock_rt"
 # with FFMPEG_PREFIX (an FFmpeg with the ac3/eac3 decoders, see run_a52_test.py) the AC-3 audio is decoded too
 FP = os.environ.get("FFMPEG_PREFIX", "")
@@ -221,7 +279,7 @@ print("AC-3 decoding:", "with FFmpeg from " + FP if A52 else "not built in")
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL {A52} -I{ROOT}/src -I{M} "
    f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
 r = subprocess.run(f"{T}/test_tsplayer {T}/s720.ts {T}/s1080.ts {T}/hevc.ts {T}/midgop.ts {T}/dropped.ts "
-                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4 {T}/f1080_60.ts",
+                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4 {T}/f1080_60.ts {T}/wrap.ts",
                    shell=True, capture_output=True, text=True)
 print(r.stdout); print(r.stderr[-4000:])
 sys.exit(r.returncode)

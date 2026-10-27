@@ -7,6 +7,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import mbedtls_pc
 MCF, MLIB = mbedtls_pc.build()
 T = tempfile.mkdtemp()
+# 0.6.0: the receive buffer search (a system that refuses sizes above a limit, like the Vita at 1 MB)
+subprocess.run(f"gcc -O1 -g -fsanitize=address,undefined -Wall {MCF} -I{ROOT}/src {ROOT}/tests/test_rcvbuf.c {ROOT}/src/hls.c {MLIB} -o {T}/test_rcvbuf",
+               shell=True, check=True)
+r = subprocess.run(f"{T}/test_rcvbuf", shell=True, capture_output=True, text=True)
+print(r.stdout, r.stderr[-2000:])
+if r.returncode: sys.exit(1)
 subprocess.run(f"openssl req -x509 -newkey rsa:2048 -nodes -keyout {T}/k.pem -out {T}/c.pem -days 2 -subj /CN=localhost",
                shell=True, check=True, capture_output=True)
 data = os.urandom(300000)

@@ -14,8 +14,14 @@ sh(f"ffmpeg -loglevel error -y {SRC} {T}/end.mp4")
 sh(f"ffmpeg -loglevel error -y {SRC} -movflags +faststart {T}/start.mp4")
 sh(f"ffmpeg -loglevel error -y {SRC} -cluster_time_limit 1000 {T}/film.mkv")
 sh(f"ffmpeg -loglevel error -y {SRC} -f mpegts {T}/film.ts")
+with open(f"{T}/subs.srt", "w", encoding="utf-8") as f:
+    f.write("1\n00:00:01,000 --> 00:00:03,000\nMerhaba dünya\n\n2\n00:00:25,000 --> 00:00:27,500\nİkinci\nsatır\n\n"
+            "3\n00:00:40,000 --> 00:00:42,000\nSon satır\n\n")
+SRCI, SRCO = SRC.split(" -c:v ", 1)
+sh(f"ffmpeg -loglevel error -y {SRCI.replace(f' -t {LEN}', '')} -i {T}/subs.srt -t {LEN} -c:v {SRCO} -map 0:v -map 1:a -map 2:s -c:s mov_text -metadata:s:s:0 language=tur "
+   f"-movflags +faststart {T}/sub.mp4")
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -I{ROOT}/src {ROOT}/tests/test_vod.c {ROOT}/src/vod.c "
    f"{ROOT}/src/mkvdemux.c {ROOT}/src/tsdemux.c -o {T}/test_vod")
-r = subprocess.run(f"{T}/test_vod {LEN * 1000} {T}/end.mp4 {T}/start.mp4 {T}/film.mkv {T}/film.ts", shell=True, capture_output=True, text=True)
+r = subprocess.run(f"{T}/test_vod {LEN * 1000} {T}/end.mp4 {T}/start.mp4 {T}/film.mkv {T}/film.ts {T}/sub.mp4", shell=True, capture_output=True, text=True)
 print(r.stdout); print(r.stderr[-4000:])
 sys.exit(r.returncode)

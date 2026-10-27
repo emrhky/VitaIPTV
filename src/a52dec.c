@@ -15,6 +15,7 @@ struct A52Dec {
     int16_t pcm[A52_MAX_SAMPLES * 2];
     int64_t next_pts;                   /* 90 kHz, -1 = unknown */
     int64_t last_pp;                    /* the parser's last time stamp (it repeats it for every frame of a packet) */
+    int aac;                            /* 0.6.0: FFmpeg's AAC decoder (whole ADTS frames, no parser) */
     uint32_t frames, errors;
 };
 
@@ -35,6 +36,26 @@ A52Dec *a52_create(void)
     AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
     av_opt_set_chlayout(d->ctx->priv_data, "downmix", &stereo, 0);  /* the decoder mixes 5.1 down itself */
     if (avcodec_open2(d->ctx, c, NULL) < 0) { a52_destroy(d); return NULL; }
+    d->next_pts = -1;
+    d->last_pp = AV_NOPTS_VALUE;
+    return d;
+}
+
+int a52_aac_available(void) { return avcodec_find_decoder(AV_CODEC_ID_AAC) != NULL; }
+
+A52Dec *a52_create_aac(void)
+{
+    const AVCodec *c = avcodec_find_decoder(AV_CODEC_ID_AAC);
+    if (!c) return NULL;
+    A52Dec *d = calloc(1, sizeof *d);
+    if (!d) return NULL;
+    d->aac = 1;
+    d->ctx = avcodec_alloc_context3(c);
+    d->pkt = av_packet_alloc();
+    d->frame = av_frame_alloc();
+    if (!d->ctx || !d->pkt || !d->frame) { a52_destroy(d); return NULL; }
+    d->ctx->thread_count = 1;
+    if (avcodec_open2(d->ctx, c, NULL) < 0) { a52_destroy(d); return NULL; }   /* (ADTS headers: read by the decoder) */
     d->next_pts = -1;
     d->last_pp = AV_NOPTS_VALUE;
     return d;
@@ -100,7 +121,7 @@ static int to_pcm(A52Dec *d, int *out_ch)
 
 static void decode(A52Dec *d, const uint8_t *frame, int size, int64_t pts, A52Out out, void *ctx)
 {
-    int eac3 = size > 5 && (frame[5] >> 3) > 10;             /* bsid above 10: E-AC-3 */
+    int eac3 = !d->aac && size > 5 && (frame[5] >> 3) > 10;  /* bsid above 10: E-AC-3 */
     d->pkt->data = (uint8_t *)frame;
     d->pkt->size = size;
     if (avcodec_send_packet(d->ctx, d->pkt) < 0) { d->errors++; return; }
@@ -145,6 +166,12 @@ void a52_feed(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out ou
     }
 }
 
+void a52_feed_frame(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out out, void *ctx)
+{
+    if (!d || !len) return;
+    decode(d, data, (int)len, pts, out, ctx);
+}
+
 void a52_stats(const A52Dec *d, uint32_t *frames, uint32_t *errors)
 {
     *frames = d ? d->frames : 0;
@@ -161,5 +188,11 @@ void    a52_feed(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out
     (void)d; (void)data; (void)len; (void)pts; (void)out; (void)ctx;
 }
 void    a52_stats(const A52Dec *d, uint32_t *frames, uint32_t *errors) { (void)d; *frames = *errors = 0; }
+int     a52_aac_available(void) { return 0; }
+A52Dec *a52_create_aac(void) { return NULL; }
+void    a52_feed_frame(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out out, void *ctx)
+{
+    (void)d; (void)data; (void)len; (void)pts; (void)out; (void)ctx;
+}
 
 #endif

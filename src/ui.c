@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "lang.h"
+#include "btn_icons.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -7,6 +8,19 @@
 static vita2d_pgf *g_pgf;
 static vita2d_pvf *g_pvf;                   /* the system fonts */
 static int g_turkish;                       /* 0.4.5: Turkish letters drawn as they are (the Latin font is loaded) */
+static vita2d_texture *g_btn_tex;           /* 0.6.0: the button symbols, smooth (src/btn_icons.h) */
+enum { BTN_I_CROSS, BTN_I_CIRCLE, BTN_I_TRIANGLE, BTN_I_SQUARE, BTN_I_DPAD, BTN_I_UPDOWN, BTN_I_LEFTRIGHT };
+
+/* 0.6.0: the symbols into a texture, once (a row of 30 x 30 pictures) */
+static void btn_icons_load(void)
+{
+    const int w = BTN_ICON_SIZE * BTN_ICON_COUNT, h = BTN_ICON_SIZE;
+    g_btn_tex = vita2d_create_empty_texture(w, h);
+    if (!g_btn_tex) return;                                  /* (then drawn from shapes as before) */
+    uint8_t *dst = vita2d_texture_get_datap(g_btn_tex);
+    unsigned stride = vita2d_texture_get_stride(g_btn_tex);
+    for (int y = 0; y < h; y++) memcpy(dst + (size_t)y * stride, BTN_ICONS + (size_t)y * w, (size_t)w * 4);
+}
 
 /* 0.4.5: Latin letters (Turkish ğ ş ı İ included) from the system's Latin font, the one the Vita's own menus
  * use; everything else (Cyrillic, Greek, Japanese...) from the default font as before. vita2d's default font
@@ -14,6 +28,27 @@ static int g_turkish;                       /* 0.4.5: Turkish letters drawn as t
 static int in_latin(unsigned int c)
 {
     return c < 0x250 || (c >= 0x1E00 && c < 0x1F00) || (c >= 0x2000 && c < 0x2070) || c == 0x20AC || c == 0x2122;
+}
+
+/* 0.8.1: themes. Blue is the look of every version before. The backgrounds stay the same in all of them. */
+static const UiTheme THEMES[UI_THEMES] = {
+    { RGBA8(236, 238, 245, 255), RGBA8(142, 148, 170, 255), RGBA8(70, 130, 255, 255), RGBA8(42, 72, 148, 255),
+      RGBA8(30, 52, 110, 255), RGBA8(90, 110, 170, 255), RGBA8(200, 210, 240, 255), RGBA8(40, 80, 170, 255) },          /* blue */
+    { RGBA8(234, 246, 238, 255), RGBA8(138, 164, 148, 255), RGBA8(40, 186, 116, 255), RGBA8(26, 104, 70, 255),
+      RGBA8(20, 76, 52, 255), RGBA8(80, 144, 112, 255), RGBA8(196, 236, 214, 255), RGBA8(28, 134, 86, 255) },           /* green */
+    { RGBA8(242, 236, 250, 255), RGBA8(158, 146, 178, 255), RGBA8(156, 104, 246, 255), RGBA8(86, 54, 154, 255),
+      RGBA8(62, 38, 116, 255), RGBA8(134, 108, 184, 255), RGBA8(222, 208, 246, 255), RGBA8(112, 72, 196, 255) },         /* purple */
+    { RGBA8(250, 242, 232, 255), RGBA8(176, 158, 138, 255), RGBA8(242, 138, 36, 255), RGBA8(146, 76, 22, 255),
+      RGBA8(108, 56, 16, 255), RGBA8(186, 132, 82, 255), RGBA8(246, 222, 196, 255), RGBA8(186, 100, 26, 255) },          /* orange */
+};
+UiTheme ui_theme = {
+    RGBA8(236, 238, 245, 255), RGBA8(142, 148, 170, 255), RGBA8(70, 130, 255, 255), RGBA8(42, 72, 148, 255),
+    RGBA8(30, 52, 110, 255), RGBA8(90, 110, 170, 255), RGBA8(200, 210, 240, 255), RGBA8(40, 80, 170, 255) };
+void ui_set_theme(int t) { ui_theme = THEMES[t >= 0 && t < UI_THEMES ? t : 0]; }
+const char *ui_theme_name(int t)
+{
+    static const char *const N[UI_THEMES] = { "Blue", "Green", "Purple", "Orange" };
+    return N[t >= 0 && t < UI_THEMES ? t : 0];
 }
 
 void ui_init(vita2d_pgf *pgf, int plain_letters)
@@ -28,6 +63,7 @@ void ui_init(vita2d_pgf *pgf, int plain_letters)
     g_pvf = vita2d_load_system_pvf(2, cfg);
     g_turkish = g_pvf != NULL && !plain_letters;
     if (!g_pvf) g_pvf = vita2d_load_default_pvf();          /* (as before 0.4.5) */
+    if (!g_btn_tex) btn_icons_load();
 }
 
 int ui_font_state(void) { return g_turkish ? 2 : g_pvf ? 1 : 0; }
@@ -263,6 +299,14 @@ int ui_button(int x, int cy, int btn)
 {
     const unsigned dark = RGBA8(64, 70, 96, 255);      /* (0.4.0: lighter, the symbols stand out) */
     int cx = x + BR;
+    int ic = btn == UI_BTN_CROSS ? BTN_I_CROSS : btn == UI_BTN_CIRCLE ? BTN_I_CIRCLE : btn == UI_BTN_TRIANGLE ? BTN_I_TRIANGLE :
+             btn == UI_BTN_SQUARE ? BTN_I_SQUARE : btn == UI_BTN_DPAD ? BTN_I_DPAD : btn == UI_BTN_UPDOWN ? BTN_I_UPDOWN :
+             btn == UI_BTN_LEFTRIGHT ? BTN_I_LEFTRIGHT : -1;
+    if (ic >= 0 && g_btn_tex) {                              /* 0.6.0: the smooth symbols, one screen pixel each */
+        vita2d_draw_texture_part_scale(g_btn_tex, (float)x, (float)(cy - BTN_ICON_SIZE / 2), (float)(ic * BTN_ICON_SIZE), 0,
+                                       BTN_ICON_SIZE, BTN_ICON_SIZE, 1.0f, 1.0f);
+        return 2 * BR;
+    }
     switch (btn) {
     case UI_BTN_CROSS: {
         unsigned c = RGBA8(124, 178, 232, 255);
@@ -442,7 +486,7 @@ void ui_spinner(int cx, int cy, unsigned t_ms)
         int age = (head - i + 10) % 10;
         int alpha = 255 - age * 22;
         vita2d_draw_fill_circle(cx + 20.0f * sinf(a), cy - 20.0f * cosf(a), 4.0f - age * 0.25f,
-                                RGBA8(70, 130, 255, alpha));
+                                (ui_theme.accent & 0x00FFFFFFu) | ((unsigned)(alpha) << 24));
     }
 }
 
@@ -480,6 +524,16 @@ void ui_message(const char *title, const char *line, unsigned title_col, int spi
     if (ui_text_w(1.15f, title) <= w - 40) ui_text_center(480, ty, title_col, 1.15f, title);
     else ui_text_fit(x + 20, ty, title_col, 1.15f, title, w - 40);
     for (int i = 0; i < lw.n; i++) ui_text_center(480, ty + 32 + i * 26, UI_DIM, 1.0f, lw.line[i]);
+}
+
+void ui_check(float cx, float cy, float r, unsigned col)
+{
+    /* two strokes, about 3 pixels thick: down to the bottom point, then up to the right */
+    float ax = cx - r, ay = cy, bx = cx - r * 0.3f, by = cy + r * 0.7f, ex = cx + r, ey = cy - r * 0.8f;
+    for (float o = -1.5f; o <= 1.5f; o += 0.5f) {
+        vita2d_draw_line(ax, ay + o, bx, by + o, col);
+        vita2d_draw_line(bx, by + o, ex, ey + o, col);
+    }
 }
 
 void ui_star(float cx, float cy, float r, unsigned col)

@@ -101,6 +101,33 @@ int main(void)
     const char *none = "#EXTM3U\n#EXT-X-KEY:METHOD=NONE\n#EXTINF:4,\na.ts\n";
     assert(hls_parse_media(none, &m) == 0 && !m.encrypted);
     hls_media_free(&m);
+    {   /* 0.6.0: audio playlists of their own */
+        const char *ma = "#EXTM3U\n"
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",LANGUAGE=\"tr\",NAME=\"Turkce\",DEFAULT=YES,AUTOSELECT=YES,URI=\"a/tr.m3u8\"\n"
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"aac\",LANGUAGE=\"en-US\",NAME=\"English\",URI=\"a/en.m3u8\"\n"
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"ac3\",LANGUAGE=\"ger\",NAME=\"Deutsch\",URI=\"b/de.m3u8\"\n"
+            "#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"mux\",LANGUAGE=\"tr\",NAME=\"In\",DEFAULT=YES\n"
+            "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"s\",LANGUAGE=\"tr\",URI=\"s.m3u8\"\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,CODECS=\"avc1.64001f,mp4a.40.2\",AUDIO=\"aac\"\nv720.m3u8\n"
+            "#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720,CODECS=\"avc1.64001f,ec-3\",AUDIO=\"ac3\"\nv720e.m3u8\n";
+        HlsVariant vv[4];
+        HlsRendition rr[HLS_MAX_RENDITIONS];
+        assert(hls_parse_master(ma, "http://h/x/master.m3u8", vv, 4) == 2);
+        assert(!strcmp(vv[0].audio_group, "aac") && vv[0].audio_codec == 1 && !strcmp(vv[1].audio_group, "ac3") && vv[1].audio_codec == 3);
+        int nr = hls_parse_audio(ma, "http://h/x/master.m3u8", rr, HLS_MAX_RENDITIONS);
+        assert(nr == 3);                                     /* (the one without a URI and the subtitles: not listed) */
+        assert(!strcmp(rr[0].uri, "http://h/x/a/tr.m3u8") && rr[0].is_default && !strcmp(rr[1].lang, "en-US") && !strcmp(rr[2].group, "ac3"));
+        assert(hls_pick_audio(rr, nr, "aac", -1, "") == 0);           /* DEFAULT */
+        assert(hls_pick_audio(rr, nr, "aac", -1, "eng") == 1);        /* en-US = eng */
+        assert(hls_pick_audio(rr, nr, "aac", -1, "deu") == 0);        /* not in this group: the default */
+        assert(hls_pick_audio(rr, nr, "ac3", -1, "deu") == 2);        /* ger = deu */
+        assert(hls_pick_audio(rr, nr, "aac", 1, "tur") == 1);         /* the one asked for wins */
+        assert(hls_pick_audio(rr, nr, "aac", 2, "") == 0);            /* ... unless it is in another group */
+        assert(hls_pick_audio(rr, nr, "none", -1, "") == -1);
+        char l[16], nm[64];
+        assert(hls_audio_muxed(ma, "mux", l, sizeof l, nm, sizeof nm) == 1 && !strcmp(l, "tr") && !strcmp(nm, "In"));
+        assert(hls_audio_muxed(ma, "aac", l, sizeof l, nm, sizeof nm) == 0);
+    }
     puts("all hls tests passed");
     return 0;
 }

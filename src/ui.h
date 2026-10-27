@@ -8,10 +8,22 @@
 #define UI_PANEL   RGBA8(26, 30, 44, 255)
 #define UI_PANEL2  RGBA8(36, 41, 60, 255)
 #define UI_LINE    RGBA8(58, 64, 90, 255)
-#define UI_ACCENT  RGBA8(70, 130, 255, 255)
-#define UI_SEL     RGBA8(42, 72, 148, 255)
-#define UI_TEXT    RGBA8(236, 238, 245, 255)
-#define UI_DIM     RGBA8(142, 148, 170, 255)
+/* 0.8.1: the theme's colours (ui_set_theme): the text, the accent and the selection change with it */
+typedef struct {
+    unsigned text, dim, accent, sel;
+    unsigned sel_dark;                  /* a darker selection (a chosen field, a bar's empty part) */
+    unsigned accent_dim;                /* the accent when its list is not focused */
+    unsigned sel_text;                  /* small text on a selected row */
+    unsigned button;                    /* a main button (Play) when not chosen */
+} UiTheme;
+extern UiTheme ui_theme;
+enum { UI_THEME_BLUE, UI_THEME_GREEN, UI_THEME_PURPLE, UI_THEME_ORANGE, UI_THEMES };
+void ui_set_theme(int t);
+const char *ui_theme_name(int t);       /* English, for T() */
+#define UI_ACCENT  (ui_theme.accent)
+#define UI_SEL     (ui_theme.sel)
+#define UI_TEXT    (ui_theme.text)
+#define UI_DIM     (ui_theme.dim)
 #define UI_ERR     RGBA8(255, 110, 110, 255)
 #define UI_OK      RGBA8(90, 220, 140, 255)
 #define UI_WARN    RGBA8(255, 196, 90, 255)
@@ -51,6 +63,8 @@ int  ui_wrap(UiWrap *w, float scale, const char *s, int maxw, int maxlines);
 int  ui_text_wrap(int x, int y, unsigned col, float scale, const char *s, int maxw, int line_h, int maxlines, int center);
 /* 0.5.0: a filled five-pointed star (favourites) */
 void ui_star(float cx, float cy, float r, unsigned col);
+/* 0.7.0: a tick (a watched episode), about 2*r wide, centred on cx, cy */
+void ui_check(float cx, float cy, float r, unsigned col);
 void ui_panel(int x, int y, int w, int h, unsigned fill);
 void ui_header(const char *title, const char *subtitle, const char *right);
 /* hints along the bottom bar; status (if any) is drawn just above it */

@@ -20,6 +20,8 @@
 #include <unistd.h>
 
 static int g_own_http;                      /* 0.6.0: "own socket (http)" was logged */
+static int g_net_slow, g_net_fast;          /* 0.6.0: "the network is slower than the film" / "the network is fast" */
+static int g_asked_again;                   /* 0.6.0: "the film does not come ...: asking the server again" */
 void plog(const char *fmt, ...)
 {
     char line[1024];
@@ -28,6 +30,9 @@ void plog(const char *fmt, ...)
     vsnprintf(line, sizeof line, fmt, a);
     va_end(a);
     if (strstr(line, "own socket (http)")) g_own_http = 1;
+    if (strstr(line, "network is slower than the film (")) g_net_slow = 1;   /* (the queues line, not "buffering (...: n pictures") */
+    if (strstr(line, "network is fast")) g_net_fast = 1;
+    if (strstr(line, "asking the server again")) g_asked_again = 1;
     if (getenv("VERBOSE")) puts(line);
 }
 extern int mock_mapped;
@@ -368,6 +373,43 @@ static void show(const char *name, const Run *r)
 }
 
 
+/* 0.7.0: the subtitles seen while a film plays: each text once, with the picture time it first showed under */
+typedef struct { char text[8][64]; int64_t at[8]; int n; TspStatus st; } SubRun;
+static SubRun sub_play(const char *path, int64_t choose_at, int choose_k)
+{
+    SubRun r; memset(&r, 0, sizeof r);
+    assert(tsp_start(path) == 0);
+    double t0 = now_s(), end_seen = 0;
+    int64_t last_pts = -1;
+    while (now_s() - t0 < 10) {
+        int w = 0, h = 0;
+        vita2d_texture *tx = tsp_frame(&w, &h);
+        if (tx) memcpy(&last_pts, tx->gxm_tex.data, 8);
+        if (choose_at >= 0 && last_pts >= choose_at) { tsp_sub_choose(choose_k); choose_at = -1; }
+        char b[640];
+        if (tsp_sub_text(b, sizeof b)) {
+            int k = 0;
+            while (k < r.n && strcmp(r.text[k], b)) k++;
+            if (k == r.n && r.n < 8) { snprintf(r.text[r.n], sizeof r.text[0], "%s", b); r.at[r.n++] = last_pts; }
+        }
+        const TspStatus *s = tsp_status();
+        if (s->state == TSP_ERROR) break;
+        if (s->state == TSP_ENDED) { if (!end_seen) end_seen = now_s(); else if (now_s() - end_seen > 0.6) break; }
+        usleep(8000);
+    }
+    r.st = *tsp_status();
+    tsp_stop();
+    printf("               subtitles: tracks %d, shown %d:", r.st.s_n, r.st.s_cur);
+    for (int k = 0; k < r.n; k++) printf(" '%s' at %.2f s", r.text[k], r.at[k] / 90000.0);
+    printf("\n");
+    return r;
+}
+static int64_t sub_at(const SubRun *r, const char *text)
+{
+    for (int k = 0; k < r->n; k++) if (!strcmp(r->text[k], text)) return r->at[k];
+    return -1;
+}
+
 /* ---- films: start at a time, pause, read position ---- */
 extern int mock_http_no_ranges, mock_http_range_requests;
 typedef struct { Run r; int first_pos, last_pos, dur, pos_during_pause_a, pos_during_pause_b, froze; } VRun;
@@ -499,6 +541,15 @@ int main(int argc, char **argv)
         vshow("http mkv (own socket)", &v);
         assert(v.r.st.state == TSP_ENDED && v.first_pos >= 6900 && v.first_pos <= 7300 && v.r.changes >= 100);
         g_own_http = 0;
+        {   /* 0.6.0: a far server that answers a jump with a little and then nothing: asked again after 8 s */
+            char su[512];
+            snprintf(su, sizeof su, "%s/stall/film.mkv", b);
+            g_asked_again = 0;
+            v = play_vod_url(su, NULL, 7200, 30, 0, 0);
+            vshow("film stalled once", &v);
+            assert(g_asked_again && v.r.st.state == TSP_ENDED && v.first_pos >= 6900 && v.r.changes >= 80);
+        }
+        g_own_http = 0;
         tsp_set_via_server(1);                               /* the transcoding server: still the system HTTP */
         snprintf(u, sizeof u, "%s/s720.ts", b);
         h = play(u, 6);
@@ -511,7 +562,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r;
@@ -524,6 +575,10 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "late")) goto late;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "limit")) goto limit;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls")) goto hls;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "alt")) goto alt;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "qsize")) goto qsize;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "subs")) goto subs;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "wrap")) goto wrap;
     r = play(argv[1], 10);
     show("720p30", &r);
     assert(r.st.state == TSP_ENDED && r.st.errors == 0);
@@ -659,6 +714,51 @@ int main(int argc, char **argv)
         }
         tsp_set_audio(-1, NULL);
     }
+    {   /* 0.6.0: 5.1 AAC: the Vita's decoder takes two channels, FFmpeg's aac decoder plays it as stereo */
+        static char pa[512];
+        const char *ext[3] = { "ts", "mkv", "mp4" };
+        for (int k = 0; k < 3; k++) {
+            snprintf(pa, sizeof pa, "%s/aac51.%s", argv[16], ext[k]);
+            Run ra;
+            if (k < 2) ra = play(pa, 6);
+            else { VRun v = play_vod(pa, 0, 8, 0, 0); ra = v.r; }
+            printf("               5.1 AAC %s: audio %d ch (stream %d ch), frames %u, msg '%s'\n", ext[k], ra.st.audio_ch, ra.st.audio_src_ch,
+                   (unsigned)ra.st.audio_frames, ra.st.audio_msg);
+            if (a52_aac_available())
+                assert(ra.st.audio_frames > 100 && ra.st.audio_ch == 2 && ra.st.audio_src_ch == 6 && !ra.st.audio_msg[0] && !ra.st.audio_ac3 && ra.synced);
+            else
+                assert(ra.st.audio_frames == 0 && strstr(ra.st.audio_msg, "6 channels") && ra.changes >= 100);   /* the picture plays */
+        }
+    }
+subs:
+    {   /* 0.7.0: MKV text subtitles: the track by language, switching while playing, off, later / earlier */
+        static char ps[512];
+        snprintf(ps, sizeof ps, "%s/subs.mkv", argv[16]);
+        tsp_set_sub(-1, "en", 0); tsp_set_sub_delay(0);
+        SubRun s = sub_play(ps, -1, 0);
+        assert(s.st.state == TSP_ENDED && s.st.s_n == 2 && s.st.s_cur >= 0 && !strcmp(s.st.s_lang[s.st.s_cur], "eng"));
+        int tur = !strcmp(s.st.s_lang[0], "tur") ? 0 : 1;
+        assert(!strcmp(s.st.s_lang[tur], "tur") && !strcmp(s.st.s_name[1 - tur], "SDH"));
+        int64_t one = sub_at(&s, "One\nline two"), two = sub_at(&s, "Two");
+        assert(s.n == 2 && one >= 90000 && one <= 90000 + 3 * 3600 && two >= 270000 && two <= 270000 + 3 * 3600);
+        tsp_set_sub(-1, "en", 0);
+        s = sub_play(ps, 225000, tur);                       /* Turkish from 2.5 s on */
+        assert(s.n == 2 && sub_at(&s, "One\nline two") >= 0 && sub_at(&s, "İki") >= 270000 && sub_at(&s, "Two") < 0 && sub_at(&s, "Bir") < 0);
+        tsp_set_sub(s.st.s_id[tur], "en", 0);               /* the track wins over the language */
+        s = sub_play(ps, -1, 0);
+        assert(s.st.s_cur == tur && sub_at(&s, "Bir") >= 90000 && sub_at(&s, "İki") >= 270000 && s.n == 2);
+        tsp_set_sub(-1, "tr", 1);                            /* off */
+        s = sub_play(ps, -1, 0);
+        assert(s.st.s_n == 2 && s.st.s_cur == -1 && s.n == 0);
+        tsp_set_sub(-1, "tr", 0); tsp_set_sub_delay(1500);   /* 1.5 s later */
+        s = sub_play(ps, -1, 0);
+        assert(sub_at(&s, "Bir") >= 225000 && sub_at(&s, "Bir") <= 225000 + 3 * 3600);
+        tsp_set_sub_delay(-700);                             /* 0.7 s earlier */
+        s = sub_play(ps, -1, 0);
+        assert(sub_at(&s, "İki") >= 207000 && sub_at(&s, "İki") <= 207000 + 3 * 3600);
+        tsp_set_sub_delay(0); tsp_set_sub(-1, NULL, 1);
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "subs")) { puts("subtitle tests passed"); return 0; }
+    }
     if (argc > 23) {                                         /* a few AAC frames claiming 7 channels: skipped, sound stays on */
         r = play(argv[23], 10);
         show("aac glitch", &r);
@@ -729,6 +829,17 @@ slow:
     assert(r.st.decoded >= 140 && r.st.reconnects >= 3 && mock_http_sessions >= 4);
     assert(r.synced && r.av_bad * 10 <= r.avn);
     mock_http_reset();
+    {   /* 1.0: reconnecting, the server answers 407 twice (it still counts the lost connection): waits, goes on */
+        extern int mock_http_busy_from, mock_http_busy_n;
+        mock_http_busy_from = 2; mock_http_busy_n = 2;
+        r = play("http://example.invalid/live/1.ts", 30);
+        show("http drops, then 407 twice", &r);
+        printf("               sessions=%d reconnects=%u state %d\n", mock_http_sessions, r.st.reconnects, r.st.state);
+        /* (the stream itself ends after the file: the reconnects after that end it; the 407s must not) */
+        assert(r.st.decoded >= 140 && !strstr(r.st.msg, "407") && mock_http_sessions >= 5 && r.play_time > 9.0);
+        mock_http_busy_n = 0;
+        mock_http_reset();
+    }
     mock_http_fail_after = 0;
 
     r = play(argv[13], 10);                                 /* Matroska instead of MPEG-TS */
@@ -1094,6 +1205,70 @@ hls_slow:
         mock_http_reset();
     }
 
+qsize:
+    {   /* 0.6.0: a film on a line 4x faster than it: the reader fills the queues and then waits for room, which
+         * read as "slower than the film" (the rate shown is then what is played); now it says "fast" and takes the
+         * larger queues. On a line slower than the film it still says so. */
+        static char lf[512];
+        snprintf(lf, sizeof lf, "%s/long.mkv", argv[16]);
+        struct stat ls; assert(stat(lf, &ls) == 0);
+        long need = (long)(ls.st_size / 40);                 /* bytes per second (40 s film) */
+        g_net_slow = g_net_fast = 0;
+        mock_http_reset(); mock_http_rate = need * 4;
+        VRun v = play_vod(lf, 0, 16, 0, 0);
+        vshow("film fast line", &v);
+        printf("               said fast %d, said slower %d\n", g_net_fast, g_net_slow);
+        assert(g_net_fast && !g_net_slow && v.r.changes >= 300);
+        g_net_slow = g_net_fast = 0;
+        mock_http_reset(); mock_http_rate = need * 6 / 10;
+        v = play_vod(lf, 0, 26, 0, 0);                       /* (measured from 8 s after the first wait) */
+        vshow("film slow line", &v);
+        printf("               said fast %d, said slower %d\n", g_net_fast, g_net_slow);
+        assert(g_net_slow && !g_net_fast);
+        mock_http_rate = 0; mock_http_reset();
+    }
+alt:
+    {   /* 0.6.0: HLS with the sound in playlists of its own (#EXT-X-MEDIA:TYPE=AUDIO,URI=...) */
+        static char an[64][32], ap[64][512];
+        int k = 0;
+        char altdir[512];
+        snprintf(altdir, sizeof altdir, "%s/../alt", argv[16]);
+        const char *pl[] = { "altm.m3u8", "altv.m3u8", "alttr.m3u8", "alten.m3u8", "altml.m3u8", "altv_l.m3u8", "alttr_l.m3u8" };
+        for (int i = 0; i < 7; i++) { snprintf(an[k], 32, "%s", pl[i]); snprintf(ap[k], 512, "%s/%s", altdir, pl[i]); k++; }
+        const char *pre[] = { "av", "aa", "ae" };
+        for (int p = 0; p < 3; p++)
+            for (int i = 0; i < 20 && k < 63; i++) {
+                snprintf(an[k], 32, "%s%03d.%s", pre[p], i, p == 2 ? "aac" : "ts");
+                snprintf(ap[k], 512, "%s/%s", altdir, an[k]);
+                FILE *f = fopen(ap[k], "rb"); if (!f) break; fclose(f); k++;
+            }
+        mock_http_reset();
+        for (int i = 0; i < k; i++) { mock_http_map[i][0] = an[i]; mock_http_map[i][1] = ap[i]; }
+        tsp_set_options(0, 720);
+        tsp_set_audio(-1, NULL);
+        r = play("http://example.invalid/alt/altm.m3u8", 12);
+        show("hls own audio tr", &r);
+        printf("               tracks %d, playing %d (%s)\n", r.st.a_n, r.st.a_cur, r.st.a_cur >= 0 ? r.st.a_lang[r.st.a_cur] : "-");
+        assert(r.st.state == TSP_ENDED && r.changes >= 130 && r.st.audio_frames > 200 && r.synced && r.w == 1280);
+        assert(r.st.a_n == 2 && r.st.a_cur >= 0 && !strcmp(r.st.a_lang[r.st.a_cur], "tur"));   /* DEFAULT=YES */
+        int en = !strcmp(r.st.a_lang[0], "eng") ? 0 : 1;
+        assert(!strcmp(r.st.a_lang[en], "eng"));
+        tsp_set_audio(-1, "en");                             /* by language: the packed AAC one */
+        r = play("http://example.invalid/alt/altm.m3u8", 12);
+        show("hls own audio en", &r);
+        assert(r.st.state == TSP_ENDED && r.changes >= 130 && r.st.audio_frames > 200 && r.synced);
+        assert(r.st.a_cur >= 0 && !strcmp(r.st.a_lang[r.st.a_cur], "eng"));
+        tsp_set_audio(r.st.a_id[1 - en], "eng");             /* the track from the menu wins over the language */
+        r = play("http://example.invalid/alt/altm.m3u8", 6);
+        assert(r.st.a_cur >= 0 && !strcmp(r.st.a_lang[r.st.a_cur], "tur") && r.st.audio_frames > 50);
+        tsp_set_audio(-1, NULL);
+        r = play("http://example.invalid/alt/altml.m3u8", 5);    /* live: the sound starts where the picture does */
+        show("hls own audio live", &r);
+        assert(r.st.audio_frames > 60 && r.synced && r.changes >= 60 && r.st.a_n == 1);
+        mock_http_reset();
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "alt")) return 0;
+    }
+
     /* HLS: master playlist -> the 720p variant -> 1 s MPEG-TS segments */
 hls:
     tsp_set_options(0, 720);
@@ -1414,6 +1589,25 @@ films:
         assert(!alib_open && !adec_open && ports_open == 0);
     }
     printf("zapping x12 ok\n");
+wrap:
+    if (argc > 32) {
+        /* 1.0: the TS clock (33 bits of 90 kHz) wraps every 26.5 hours, at any moment of a live channel: this
+         * file's clock passes 2^33 after about 6 s. It must play on, in time, as from a file and as live. */
+        r = play(argv[32], 16);
+        show("clock wrap", &r);
+        assert(r.st.state == TSP_ENDED && r.changes >= 270 && r.synced && r.av_bad <= 1 && r.st.dropped == 0);
+        struct stat ws; assert(stat(argv[32], &ws) == 0);
+        mock_http_reset();
+        mock_http_file = argv[32];
+        mock_http_rate = (long)(ws.st_size / 12);            /* paced like a live channel */
+        r = play("http://example.invalid/live/wrap.ts", 16);
+        show("clock wrap live", &r);
+        assert(r.changes >= 250 && r.synced && r.av_bad <= 1 && r.st.state != TSP_ERROR);
+        mock_http_rate = 0;
+        mock_http_reset();
+        mock_http_file = NULL;
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "wrap")) { puts("wrap tests passed"); return 0; }
+    }
     tsp_stop();                                              /* stop twice is harmless */
     assert(tsp_status() == NULL);
     puts("all tsplayer tests passed");

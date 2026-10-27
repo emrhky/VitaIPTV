@@ -180,8 +180,7 @@ static int pget(ProbeCtx *c, const char *url, long long from, long long to, PDat
     if (cio_available() && !strncasecmp(url, "https:", 6)) {
         PgCtx g = { c, fn, ctx };
         CioRequest rq = { url, NULL, NULL, 10, 5, pg_data, pg_stop, &g, from >= 0, from >= 0 ? (uint64_t)from : 0,
-                          to >= 0 ? (uint64_t)to : 0, NULL };
-        rq.ua = c->ua; rq.referer = c->ref;
+                          to >= 0 ? (uint64_t)to : 0, NULL, c->ua, c->ref, NULL, 0 };
         int r = cio_get(&rq, status, err, errsz);
         return r == -2 ? 0 : r;
     }
@@ -241,7 +240,7 @@ static int st_data(void *x, const uint8_t *b, size_t n)
             if (b[0] == '<') { s->sniff = SNIFF_WEB; return 1; }
         }
     }
-    TsSink sk = { count_video, NULL, NULL };
+    TsSink sk = { count_video, NULL, NULL, NULL };
     dmx_feed(s->d, &sk, b, n, s->c->res.bytes == 0);
     s->got += (uint32_t)n;
     s->c->res.bytes += (uint32_t)n;
@@ -354,7 +353,7 @@ static Mp4Demux *probe_mp4(ProbeCtx *c, const char *url)
     size_t ml = 0;
     int r = mp4_read_moov(range_read, &rc, 0, &moov, &ml);
     if (r != 0) { fail(&c->res, r == -2 ? "MP4 index too big" : "MP4: index not readable (the server may not send parts of files)"); return NULL; }
-    TsSink sk = { count_video, NULL, NULL };
+    TsSink sk = { count_video, NULL, NULL, NULL };
     char err[96];
     Mp4Demux *m = mp4_create(moov, ml, &sk, err, sizeof err);
     free(moov);
@@ -379,7 +378,7 @@ static int read_local(ProbeCtx *c, Demux *d, uint8_t *buf, unsigned long long t0
     uint32_t total = 0;
     size_t n;
     while (!c->cancel && (n = fread(buf, 1, CHUNK, f)) > 0) {
-        { TsSink sk = { count_video, NULL, NULL }; dmx_feed(d, &sk, buf, n, total == 0); }
+        { TsSink sk = { count_video, NULL, NULL, NULL }; dmx_feed(d, &sk, buf, n, total == 0); }
         total += (uint32_t)n;
         c->res.bytes = total;
         if (total >= PROBE_MAX) break;
@@ -394,7 +393,7 @@ static int probe_main(SceSize args, void *argp)
     ProbeCtx *c = *(ProbeCtx **)argp;
     ProbeResult *r = &c->res;
     g_pics = g_nonref = g_sei = 0;
-    TsSink sink = { count_video, NULL, NULL };
+    TsSink sink = { count_video, NULL, NULL, NULL };
     Demux dm = { ts_create(&sink), NULL, NULL }, *d = &dm;
     uint8_t *buf = malloc(CHUNK);
     unsigned long long t0 = sceKernelGetProcessTimeWide();

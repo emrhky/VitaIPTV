@@ -6,6 +6,7 @@
  * H.264 access units to the Vita hardware decoder, which writes RGBA pictures
  * straight into GPU textures. The UI thread asks for the picture to show now.
  */
+#include <stddef.h>
 #include <stdint.h>
 #include <vita2d.h>
 
@@ -14,6 +15,7 @@ typedef enum { TSP_ERRK_NONE = 0, TSP_ERRK_FORMAT, TSP_ERRK_NET, TSP_ERRK_OTHER 
 
 #define TSP_MAX_VARIANTS 8
 #define TSP_MAX_AUDIO    8
+#define TSP_MAX_SUBS     8              /* 0.7.0 */
 
 typedef struct {
     volatile int state;                 /* TspState */
@@ -58,10 +60,19 @@ typedef struct {
     volatile int hls_no_video;          /* the error: this HLS variant carries no picture (another one may) */
     /* 0.5.0: the audio tracks the player can play (TS / MKV), in the stream's order, and the one playing */
     volatile int audio_ac3;             /* AC-3 (1) / E-AC-3 (2) decoded in software, else 0 */
+    volatile unsigned net_read_kbs;     /* 0.6.0: the line's speed, last measured while the reader read most of the time
+                                         * (with full queues net_kbs is what is played), 0 = same as net_kbs */
+    volatile int audio_src_ch;          /* 0.6.0: the stream's channels when more than played (5.1 -> stereo: 6) */
     int a_n, a_cur;                     /* a_cur -1 = none */
     int a_id[TSP_MAX_AUDIO];            /* PID / MKV track number (tsp_set_audio) */
     int a_codec[TSP_MAX_AUDIO];         /* TsCodec */
     char a_lang[TSP_MAX_AUDIO][4];      /* ISO 639-2, "" = not given */
+    /* 0.7.0: the text subtitle tracks (MKV), in the file's order, and the one shown (-1 = off) */
+    int s_n, s_cur;
+    int s_id[TSP_MAX_SUBS];             /* MKV track number (tsp_set_sub) */
+    char s_lang[TSP_MAX_SUBS][4];
+    char s_name[TSP_MAX_SUBS][32];      /* the track's name ("SDH", "Forced"...), "" = none */
+    int s_forced[TSP_MAX_SUBS];
 } TspStatus;
 
 /* For the next tsp_start: hd1080 = decode above 720p; hls_want = the HLS variant to choose: 0 automatic (about
@@ -73,11 +84,19 @@ void              tsp_set_hls_bw(long bw);
 /* 0.5.0: for the next tsp_start: the audio track to play (a_id[] of the status; -1 = none), else the best one in
  * this language ("tur"...; NULL / "" = any), else the best one (AAC first). */
 void              tsp_set_audio(int id, const char *lang);
+/* 0.7.0: subtitles for the next tsp_start: the track id (s_id[] of the status), else the first track in lang
+ * ("tur"...); off = none shown (the choice of the menu stays for the next films) */
+void              tsp_set_sub(int id, const char *lang, int off);
+/* 0.7.0: show subtitle track k of the status now (-1 = off), without starting again */
+void              tsp_sub_choose(int k);
+/* 0.7.0: subtitles shown this many ms later (negative: earlier); stays for the next starts */
+void              tsp_set_sub_delay(int ms);
+/* 0.7.0: the subtitle for the picture on the screen; 1 = out has text */
+int               tsp_sub_text(char *out, size_t cap);
 /* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */
 void              tsp_set_via_server(int on);
 /* 0.5.0 test builds: AC-3 / E-AC-3 stutter on the HD decoder. 0 normal, 1 decoded but not played (the picture runs
  * on its own clock), 2 the audio thread at the video thread's priority, 3 the sound output in 768-sample parts. */
-void              tsp_set_ac3_test(int mode);
 int               tsp_start(const char *url);       /* 0 = started */
 /* A film or episode (a file on a server that sends parts of it): starts at start_ms (the keyframe at or
  * before it). MKV, MP4 and TS files. */

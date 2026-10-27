@@ -110,6 +110,7 @@ int hls_parse_master(const char *text, const char *base_url, HlsVariant *v, int 
                 for (char *c = val; *c; c++) *c = (char)tolower((unsigned char)*c);
                 cur.hevc = strstr(val, "hvc1") || strstr(val, "hev1");
                 cur.audio_only = !strstr(val, "avc") && !cur.hevc && (strstr(val, "mp4a") != NULL);
+                cur.audio_codec = strstr(val, "ec-3") ? 3 : strstr(val, "ac-3") ? 2 : strstr(val, "mp4a") ? 1 : 0;
                 const char *avc = strstr(val, "avc1.");                 /* avc1.PPCCLL: LL = level x10, in hex */
                 if (!avc) avc = strstr(val, "avc3.");
                 if (avc && isxdigit((unsigned char)avc[9]) && isxdigit((unsigned char)avc[10])) {
@@ -117,6 +118,7 @@ int hls_parse_master(const char *text, const char *base_url, HlsVariant *v, int 
                     cur.avc_level = (int)strtol(lv, NULL, 16);
                 }
             }
+            attr(a, e, "AUDIO", cur.audio_group, sizeof cur.audio_group);
             pending = 1;
         } else if (*s == '#') {
             continue;
@@ -129,6 +131,87 @@ int hls_parse_master(const char *text, const char *base_url, HlsVariant *v, int 
         }
     }
     return n;
+}
+
+int hls_parse_audio(const char *text, const char *base_url, HlsRendition *r, int max)
+{
+    const char *p = text, *s, *e;
+    int n = 0;
+    while (next_line(&p, &s, &e) && n < max) {
+        if (!starts(s, e, "#EXT-X-MEDIA:")) continue;
+        const char *a = s + 13;
+        char val[HLS_URL_MAX];
+        if (!attr(a, e, "TYPE", val, sizeof val) || strcasecmp(val, "AUDIO")) continue;
+        if (!attr(a, e, "URI", val, sizeof val) || !val[0]) continue;   /* (the sound is in the variant) */
+        HlsRendition *x = &r[n];
+        memset(x, 0, sizeof *x);
+        hls_resolve(base_url, val, -1, x->uri, sizeof x->uri);
+        attr(a, e, "GROUP-ID", x->group, sizeof x->group);
+        attr(a, e, "LANGUAGE", x->lang, sizeof x->lang);
+        attr(a, e, "NAME", x->name, sizeof x->name);
+        if (attr(a, e, "DEFAULT", val, sizeof val)) x->is_default = !strcasecmp(val, "YES");
+        if (attr(a, e, "AUTOSELECT", val, sizeof val)) x->autoselect = !strcasecmp(val, "YES");
+        n++;
+    }
+    return n;
+}
+
+int hls_audio_muxed(const char *text, const char *group, char *lang, size_t lcap, char *name, size_t ncap)
+{
+    const char *p = text, *s, *e;
+    char val[HLS_URL_MAX];
+    while (next_line(&p, &s, &e)) {
+        if (!starts(s, e, "#EXT-X-MEDIA:")) continue;
+        const char *a = s + 13;
+        if (!attr(a, e, "TYPE", val, sizeof val) || strcasecmp(val, "AUDIO")) continue;
+        if (attr(a, e, "URI", val, sizeof val) && val[0]) continue;
+        if (group && group[0] && (!attr(a, e, "GROUP-ID", val, sizeof val) || strcmp(val, group))) continue;
+        if (lang && lcap) { lang[0] = 0; attr(a, e, "LANGUAGE", lang, lcap); }
+        if (name && ncap) { name[0] = 0; attr(a, e, "NAME", name, ncap); }
+        return 1;
+    }
+    return 0;
+}
+
+/* LANGUAGE ("tr", "tur", "tr-TR", "ger") as an ISO 639-2/T code, like ts_lang3 in tsdemux.c does it ("" if not one) */
+static void lang3(const char *in, char out[4])
+{
+    static const char *const TWO[][2] = { { "tr", "tur" }, { "en", "eng" }, { "de", "deu" }, { "fr", "fra" }, { "es", "spa" },
+        { "it", "ita" }, { "ar", "ara" }, { "ru", "rus" }, { "nl", "nld" }, { "pt", "por" }, { "pl", "pol" }, { "el", "ell" },
+        { "ku", "kur" }, { "fa", "fas" }, { "az", "aze" }, { "ja", "jpn" }, { "ko", "kor" }, { "zh", "zho" }, { "hi", "hin" } };
+    static const char *const B2T[][2] = { { "ger", "deu" }, { "fre", "fra" }, { "dut", "nld" }, { "gre", "ell" }, { "per", "fas" }, { "chi", "zho" } };
+    char a[4] = { 0 };
+    int n = 0;
+    while (in && n < 3 && ((in[n] >= 'a' && in[n] <= 'z') || (in[n] >= 'A' && in[n] <= 'Z'))) { a[n] = (char)(in[n] | 32); n++; }
+    out[0] = 0;
+    if (in && n < 3 && in[n] && in[n] != '-' && in[n] != '_') return;   /* (a name like "Turkish": not a code) */
+    if (n == 3 && in[3] && in[3] != '-' && in[3] != '_') return;
+    if (n == 2) { for (size_t i = 0; i < sizeof TWO / sizeof TWO[0]; i++) if (!strcmp(a, TWO[i][0])) { memcpy(out, TWO[i][1], 4); return; } return; }
+    if (n != 3) return;
+    for (size_t i = 0; i < sizeof B2T / sizeof B2T[0]; i++) if (!strcmp(a, B2T[i][0])) { memcpy(a, B2T[i][1], 4); break; }
+    memcpy(out, a, 4);
+}
+
+static int lang_is(const char *l, const char *want3)
+{
+    char c[4];
+    lang3(l, c);
+    return c[0] && want3 && want3[0] && !strncmp(c, want3, 3);
+}
+
+int hls_pick_audio(const HlsRendition *r, int n, const char *group, int want_index, const char *lang3)
+{
+    int first = -1, def = -1;
+    #define IN_GROUP(i) (!group || !group[0] || !strcmp(r[i].group, group))
+    if (want_index >= 0 && want_index < n && IN_GROUP(want_index)) return want_index;
+    for (int i = 0; i < n; i++) {
+        if (!IN_GROUP(i)) continue;
+        if (lang3 && lang_is(r[i].lang, lang3)) return i;
+        if (first < 0) first = i;
+        if (def < 0 && r[i].is_default) def = i;
+    }
+    #undef IN_GROUP
+    return def >= 0 ? def : first;
 }
 
 /* Does the variant fit a decoder that plays up to max_h lines? 1 yes, 0 no, -1 unknown (no size given). */

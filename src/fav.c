@@ -49,6 +49,17 @@ void fav_channel_key(const Source *s, const Channel *c, char *out, size_t outsz)
     clean_copy(out, outsz, u);
 }
 
+void fav_vod_key(const Channel *c, char *out, size_t outsz)
+{
+    out[0] = 0;
+    if (c->kind == CH_SERIES) { if (c->url[0]) { char tmp[IPTV_URL_MAX + 8]; snprintf(tmp, sizeof tmp, "series:%s", c->url); clean_copy(out, outsz, tmp); } return; }
+    const char *m = strstr(c->url, "/movie/"), *file = strrchr(c->url, '/');
+    if (c->kind != CH_FILM || !m || !file || !file[1]) return;
+    char tmp[IPTV_URL_MAX + 8];
+    snprintf(tmp, sizeof tmp, "movie:%s", file + 1);
+    clean_copy(out, outsz, tmp);
+}
+
 static int grow(FavList *f)
 {
     if (f->n < f->cap) return 0;
@@ -69,7 +80,7 @@ static int add(FavList *f, char kind, const char *src, const char *ch, const cha
     memset(e, 0, sizeof *e);
     e->kind = kind;
     clean_copy(e->src, sizeof e->src, src);
-    if (kind == FAV_CHANNEL || kind == FAV_RECENT) {
+    if (kind != FAV_LIST) {
         clean_copy(e->ch, sizeof e->ch, ch);
         clean_copy(e->name, sizeof e->name, name);
     }
@@ -97,7 +108,7 @@ int fav_parse(const char *text, FavList *f)
         while (*end && *end != '\n') end++;
         const char *le = end;
         if (le > p && le[-1] == '\r') le--;
-        if ((*p == FAV_LIST || *p == FAV_CHANNEL || *p == FAV_RECENT) && p + 1 < le && p[1] == '\t') {
+        if ((*p == FAV_LIST || *p == FAV_CHANNEL || *p == FAV_RECENT || fav_is_vod_kind(*p)) && p + 1 < le && p[1] == '\t') {
             char kind = *p;
             static char src[FAV_SRC_MAX], ch[IPTV_URL_MAX], name[IPTV_NAME_MAX];
             const char *q = field(p + 2, le, src, sizeof src);
@@ -115,7 +126,7 @@ int fav_parse(const char *text, FavList *f)
 
 int fav_format(const FavList *f, char *out, size_t outsz)
 {
-    int n = snprintf(out, outsz, "# Vita IPTV favourites (START adds or removes one). L = playlist, C = channel\n");
+    int n = snprintf(out, outsz, "# Vita IPTV favourites (START adds or removes one). L = playlist, C = channel, R = recently watched, F = film, S = series, M / N = films / series watched last\n");
     if (n < 0 || (size_t)n >= outsz) return -1;
     size_t o = (size_t)n;
     for (int i = 0; i < f->n; i++) {
@@ -201,23 +212,33 @@ int fav_move(FavList *f, const char *src, const char *ch, int dir)
     return 1;
 }
 
+int fav_is_vod_kind(char kind)
+{
+    return kind == FAV_FILM || kind == FAV_SERIES || kind == FAV_RECENT_FILM || kind == FAV_RECENT_SERIES;
+}
+
 int fav_push_recent(FavList *f, const char *src, const char *ch, const char *name)
+{
+    return fav_push_recent_kind(f, FAV_RECENT, src, ch, name);
+}
+
+int fav_push_recent_kind(FavList *f, char kind, const char *src, const char *ch, const char *name)
 {
     char s2[FAV_SRC_MAX], c2[IPTV_URL_MAX];
     clean_copy(s2, sizeof s2, src);
     clean_copy(c2, sizeof c2, ch);
-    int i = fav_find(f, FAV_RECENT, s2, c2);
+    int i = fav_find(f, kind, s2, c2);
     if (i >= 0) {                                            /* already there: taken out, put in front again */
         memmove(&f->e[i], &f->e[i + 1], sizeof(FavEntry) * (size_t)(f->n - i - 1));
         f->n--;
     }
-    if (add(f, FAV_RECENT, s2, c2, name) != 0) return -1;
+    if (add(f, kind, s2, c2, name) != 0) return -1;
     FavEntry t = f->e[f->n - 1];                             /* to the front of the whole list */
     memmove(&f->e[1], &f->e[0], sizeof(FavEntry) * (size_t)(f->n - 1));
     f->e[0] = t;
     int kept = 0;                                            /* only the newest FAV_RECENT_MAX of this playlist */
     for (int k = 0; k < f->n; k++) {
-        if (f->e[k].kind != FAV_RECENT || strcmp(f->e[k].src, s2)) continue;
+        if (f->e[k].kind != kind || strcmp(f->e[k].src, s2)) continue;
         if (++kept > FAV_RECENT_MAX) {
             memmove(&f->e[k], &f->e[k + 1], sizeof(FavEntry) * (size_t)(f->n - k - 1));
             f->n--;
@@ -252,7 +273,9 @@ int fav_rank_kind(const FavList *f, char kind, const Source *s, const ChannelLis
         qsort(keys, (size_t)nk, sizeof *keys, cmp_key);
         char ck[IPTV_URL_MAX];
         for (int i = 0; i < l->count; i++) {
-            fav_channel_key(s, &l->items[i], ck, sizeof ck);
+            if (fav_is_vod_kind(kind)) fav_vod_key(&l->items[i], ck, sizeof ck);
+            else fav_channel_key(s, &l->items[i], ck, sizeof ck);
+            if (!ck[0]) continue;
             RankKey probe = { hash(ck), 0, 0 };
             RankKey *k = bsearch(&probe, keys, (size_t)nk, sizeof *keys, cmp_key);
             if (!k) continue;
@@ -267,4 +290,205 @@ int fav_rank_kind(const FavList *f, char kind, const Source *s, const ChannelLis
     }
     free(keys);
     return found;
+}
+
+/* ---- 0.7.0: watched episodes ---- */
+void watch_free(WatchList *w)
+{
+    for (int i = 0; i < w->n; i++) free(w->e[i].done);
+    free(w->e);
+    w->e = NULL;
+    w->n = w->cap = 0;
+}
+
+static int done_has(const char *done, const char *ep)
+{
+    if (!done || !ep[0]) return 0;
+    size_t l = strlen(ep);
+    for (const char *p = done; (p = strstr(p, ep)) != NULL; p++)
+        if (p > done && p[-1] == ',' && p[l] == ',') return 1;
+    return 0;
+}
+
+int watch_is_done(const WatchEntry *e, const char *ep) { return e && done_has(e->done, ep); }
+
+static int done_add(WatchEntry *e, const char *ep)
+{
+    if (!ep[0] || done_has(e->done, ep)) return 0;
+    size_t ol = e->done ? strlen(e->done) : 1, el = strlen(ep);
+    char *nd = realloc(e->done, ol + el + 2);
+    if (!nd) return -1;
+    if (!e->done) nd[0] = ',';
+    memcpy(nd + ol, ep, el);
+    nd[ol + el] = ',';
+    nd[ol + el + 1] = 0;
+    e->done = nd;
+    return 1;
+}
+
+/* an id as it is stored: no separators */
+static void id_copy(char *out, size_t outsz, const char *in)
+{
+    size_t o = 0;
+    for (; in && *in && o + 1 < outsz; in++) if (*in != ',' && *in != '\t' && *in != '\r' && *in != '\n' && *in != ' ') out[o++] = *in;
+    out[o] = 0;
+}
+
+/* a new entry at the front (the oldest goes when the list is full) */
+static WatchEntry *watch_front(WatchList *w)
+{
+    if (w->n >= WATCH_MAX) { free(w->e[w->n - 1].done); w->n--; }
+    if (w->n >= w->cap) {
+        int nc = w->cap ? w->cap * 2 : 16;
+        if (nc > WATCH_MAX) nc = WATCH_MAX;
+        WatchEntry *ne = realloc(w->e, sizeof(WatchEntry) * (size_t)nc);
+        if (!ne) return NULL;
+        w->e = ne;
+        w->cap = nc;
+    }
+    memmove(&w->e[1], &w->e[0], sizeof(WatchEntry) * (size_t)w->n);
+    w->n++;
+    memset(&w->e[0], 0, sizeof(WatchEntry));
+    return &w->e[0];
+}
+
+int watch_find(const WatchList *w, const char *src, const char *series)
+{
+    char s2[FAV_SRC_MAX], id[WATCH_ID];
+    clean_copy(s2, sizeof s2, src);
+    id_copy(id, sizeof id, series);
+    for (int i = 0; i < w->n; i++) if (!strcmp(w->e[i].series, id) && !strcmp(w->e[i].src, s2)) return i;
+    return -1;
+}
+
+int watch_mark(WatchList *w, const char *src, const char *series, const char *ep, int done)
+{
+    char id[WATCH_ID], e2[WATCH_ID];
+    id_copy(id, sizeof id, series);
+    id_copy(e2, sizeof e2, ep);
+    if (!id[0] || !e2[0] || !src || !src[0]) return 0;
+    int i = watch_find(w, src, id), changed = 0;
+    WatchEntry *e;
+    if (i < 0) {
+        e = watch_front(w);
+        if (!e) return -1;
+        clean_copy(e->src, sizeof e->src, src);
+        snprintf(e->series, sizeof e->series, "%s", id);
+        changed = 1;
+    } else {
+        if (i > 0) {                                         /* to the front */
+            WatchEntry t = w->e[i];
+            memmove(&w->e[1], &w->e[0], sizeof(WatchEntry) * (size_t)i);
+            w->e[0] = t;
+            changed = 1;
+        }
+        e = &w->e[0];
+    }
+    if (strcmp(e->last, e2) || e->last_done != (done != 0)) changed = 1;
+    snprintf(e->last, sizeof e->last, "%s", e2);
+    e->last_done = done != 0;
+    if (done) { int r = done_add(e, e2); if (r < 0) return -1; if (r) changed = 1; }
+    return changed;
+}
+
+int watch_clear(WatchList *w)
+{
+    int n = w->n;
+    watch_free(w);
+    return n;
+}
+
+int watch_parse(const char *text, WatchList *w)
+{
+    int got = 0;
+    const char *p = text;
+    while (p && *p) {
+        const char *end = p;
+        while (*end && *end != '\n') end++;
+        const char *le = end;
+        if (le > p && le[-1] == '\r') le--;
+        if (*p == 'W' && p + 1 < le && p[1] == '\t' && w->n < WATCH_MAX) {
+            static char src[FAV_SRC_MAX];
+            char ser[WATCH_ID], last[WATCH_ID], flag[4];
+            const char *q = field(p + 2, le, src, sizeof src);
+            q = field(q, le, ser, sizeof ser);
+            q = field(q, le, last, sizeof last);
+            q = field(q, le, flag, sizeof flag);
+            if (src[0] && ser[0] && watch_find(w, src, ser) < 0) {
+                /* added at the end: the file is newest first */
+                if (w->n >= w->cap) {
+                    int nc = w->cap ? w->cap * 2 : 16;
+                    if (nc > WATCH_MAX) nc = WATCH_MAX;
+                    WatchEntry *ne = realloc(w->e, sizeof(WatchEntry) * (size_t)nc);
+                    if (!ne) break;
+                    w->e = ne;
+                    w->cap = nc;
+                }
+                WatchEntry *e = &w->e[w->n++];
+                memset(e, 0, sizeof *e);
+                snprintf(e->src, sizeof e->src, "%s", src);
+                id_copy(e->series, sizeof e->series, ser);
+                id_copy(e->last, sizeof e->last, last);
+                e->last_done = flag[0] == '1';
+                while (q < le) {                             /* the ticks: id,id,... */
+                    const char *c = q;
+                    while (c < le && *c != ',') c++;
+                    char ep[WATCH_ID];
+                    size_t l = (size_t)(c - q);
+                    if (l > 0 && l < sizeof ep) { memcpy(ep, q, l); ep[l] = 0; id_copy(ep, sizeof ep, ep); if (done_add(e, ep) < 0) break; }
+                    q = c < le ? c + 1 : le;
+                }
+                got++;
+            }
+        }
+        p = *end ? end + 1 : end;
+    }
+    return got;
+}
+
+char *watch_format(const WatchList *w)
+{
+    static const char head[] = "# Vita IPTV watched episodes: W, playlist, series, the episode played last, 1 = watched to its end, the episodes watched to their end\n";
+    size_t cap = sizeof head;
+    for (int i = 0; i < w->n; i++) cap += strlen(w->e[i].src) + 2 * WATCH_ID + 16 + (w->e[i].done ? strlen(w->e[i].done) : 0);
+    char *out = malloc(cap);
+    if (!out) return NULL;
+    size_t o = (size_t)snprintf(out, cap, "%s", head);
+    for (int i = 0; i < w->n; i++) {
+        const WatchEntry *e = &w->e[i];
+        const char *d = e->done ? e->done + 1 : "";          /* (without the first ',') */
+        size_t dl = strlen(d);
+        if (dl && d[dl - 1] == ',') dl--;
+        int n = snprintf(out + o, cap - o, "W\t%s\t%s\t%s\t%d\t%.*s\n", e->src, e->series, e->last, e->last_done, (int)dl, d);
+        if (n < 0 || (size_t)n >= cap - o) { free(out); return NULL; }
+        o += (size_t)n;
+    }
+    return out;
+}
+
+void watch_ep_key(const char *url, char *out, size_t outsz)
+{
+    out[0] = 0;
+    if (!url) return;
+    const char *q = strchr(url, '?');
+    size_t len = q ? (size_t)(q - url) : strlen(url);
+    const char *b = url;
+    for (size_t i = 0; i < len; i++) if (url[i] == '/') b = url + i + 1;
+    const char *e = url + len, *dot = NULL;
+    for (const char *t = b; t < e; t++) if (*t == '.') dot = t;
+    if (dot) e = dot;
+    char tmp[WATCH_ID];
+    size_t n = (size_t)(e - b);
+    if (n >= sizeof tmp) n = sizeof tmp - 1;
+    memcpy(tmp, b, n);
+    tmp[n] = 0;
+    id_copy(out, outsz, tmp);
+}
+
+int watch_pick(const WatchEntry *e, const char *const *eps, int n)
+{
+    if (!e || !e->last[0]) return -1;
+    for (int i = 0; i < n; i++)
+        if (!strcmp(eps[i], e->last)) return e->last_done && i + 1 < n ? i + 1 : i;
+    return -1;
 }
