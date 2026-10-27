@@ -10,9 +10,9 @@ projects below, each under its own license. Their copyright notices are kept her
 | [minimp3](https://github.com/lieff/minimp3) | MP2 / MP3 audio decoding | CC0 1.0 (public domain); `src/minimp3.LICENSE` |
 | [libvita2d](https://github.com/xerpi/libvita2d) | drawing | MIT |
 | [FreeType](https://freetype.org) | font rendering (through vita2d) | FreeType License (FTL) |
-| [libpng](http://www.libpng.org/pub/png/libpng.html) | PNG pictures (through vita2d) | libpng License |
-| [libjpeg](https://ijg.org) | JPEG pictures (through vita2d) | IJG License |
-| [zlib](https://zlib.net) | compression (through libpng) | zlib License |
+| [libpng](http://www.libpng.org/pub/png/libpng.html) | PNG pictures (through vita2d) and film posters | libpng License |
+| [libjpeg-turbo](https://libjpeg-turbo.org) (libjpeg) | JPEG pictures (through vita2d) and film posters | IJG License and BSD-3-Clause |
+| [zlib](https://zlib.net) | compression (through libpng) and compressed (.gz) programme guides | zlib License |
 | [VitaSDK](https://vitasdk.org) | toolchain, system library stubs, C library (newlib) | various permissive licenses |
 
 Required statements:
@@ -22,6 +22,7 @@ Required statements:
   `third_party/mbedtls_user_config.h`.
 - Portions of this software are copyright © The FreeType Project (www.freetype.org). All rights reserved.
 - This software is based in part on the work of the Independent JPEG Group.
+- libjpeg-turbo: Copyright (C) the libjpeg-turbo Project authors (BSD-3-Clause for its TurboJPEG parts).
 - zlib: Copyright (C) Jean-loup Gailly and Mark Adler.
 - libpng: Copyright (c) the PNG Reference Library Authors.
 
