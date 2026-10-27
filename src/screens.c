@@ -260,10 +260,10 @@ void scr_player(const ScrPlayer *p)
             vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE);
             stat_row(y + 19, rows[r]);
         }
-        y = note_band(y, p->stats_note, UI_DIM);
+        note_band(y, p->stats_note, UI_DIM);
     } else {
         y = note_band(y, p->stats2, UI_DIM);
-        y = note_band(y, p->stats1, UI_DIM);
+        note_band(y, p->stats1, UI_DIM);
     }
     ui_footer(p->hints, p->nhints, NULL, 0);
 }

@@ -55,7 +55,7 @@ static int decode_jpeg(const uint8_t *data, size_t n, int max_w, int max_h, uint
     je.pub.output_message = jerr_out;
     if (setjmp(je.jb)) { jpeg_destroy_decompress(&ci); free(buf); return -1; }
     jpeg_create_decompress(&ci);
-    jpeg_mem_src(&ci, (unsigned char *)data, (unsigned long)n);
+    jpeg_mem_src(&ci, (unsigned char *)data, (unsigned long)n);   /* (non-const in older libjpeg versions) */
     if (jpeg_read_header(&ci, TRUE) != JPEG_HEADER_OK || ci.image_width > POSTER_MAX_SRC || ci.image_height > POSTER_MAX_SRC) {
         jpeg_destroy_decompress(&ci);
         return -1;

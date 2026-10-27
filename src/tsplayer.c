@@ -173,6 +173,8 @@ typedef struct {
     /* decoder (worker thread) */
     int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder, no_two;
     int connect_fails, multi_out, oom_fixed, status_retries;
+    int busy_retries;                   /* 1.0: "busy" answers while reconnecting a stream that played */
+    uint32_t busy_bytes;                /* ... the data received at the last one */
     int cio_http_off;                   /* 0.6.0: plain http:// through our own socket failed: the system HTTP from now on */
     volatile int vod_kick, vod_kicked;  /* 0.6.0: the film's first data did not come: the request is made again (once) */
     uint32_t film_bytes0;               /* ... the bytes before the film itself (header, index) */
@@ -1361,6 +1363,15 @@ static size_t build_es(Tsp *t, const VInfo *i, const uint8_t *data, size_t len, 
 }
 
 static int audio_now(Tsp *t, uint64_t now, int64_t *apts);
+/* 1.0: a - b of two 90 kHz TS times, across the 33-bit clock wrapping (every 26.5 hours: the picture and the
+ * sound wrap a moment apart, and their difference looked like 26 hours) */
+static int64_t pts_diff(int64_t a, int64_t b)
+{
+    int64_t d = a - b;
+    if (d > (1LL << 32)) d -= 1LL << 33;
+    else if (d < -(1LL << 32)) d += 1LL << 33;
+    return d;
+}
 static int g_via_server;
 /* 0.5.0: the next stream comes through the transcoding server */
 void tsp_set_via_server(int on) { g_via_server = on; }
@@ -1425,7 +1436,7 @@ static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int st
     if (t->jump_pending) {                                   /* leave out units up to the keyframe at the sound */
         int64_t apts;
         int have = audio_now(t, now, &apts);
-        if (start_ok && (!have || pts < 0 || pts >= apts)) {
+        if (start_ok && (!have || pts < 0 || pts_diff(pts, apts) >= 0)) {
             t->jump_pending = 0;
             t->late_ema_us = 0;
             t->late_ms = 0;
@@ -2822,6 +2833,20 @@ static int http_refused(Tsp *t, int status)
         for (int k = 0; k < 75 && !stopping(t); k++) sceKernelDelayThread(20000);
         return 1;
     }
+    /* 1.0: reconnecting a stream that played: a one-connection account is refused while the server still
+     * counts the lost connection (seen after 2 hours: "No data for too long", then 407). It lets it go after
+     * a few seconds: asked again after 3, 6 and 10 s (again from the start once it has played a while). */
+    if (busy && t->st.bytes > 0) {
+        static const int WAIT_S[3] = { 3, 6, 10 };
+        if (t->st.bytes > t->busy_bytes + 512 * 1024) t->busy_retries = 0;
+        if (t->busy_retries < 3) {
+            int w = WAIT_S[t->busy_retries++];
+            t->busy_bytes = t->st.bytes;
+            plog("tsp: server answered %d while reconnecting (it may still count the lost connection): again in %d s", status, w);
+            for (int k = 0; k < w * 50 && !stopping(t); k++) sceKernelDelayThread(20000);
+            return !stopping(t);
+        }
+    }
     if (status == 407)
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP 407 (the provider refuses: account busy or channel not in the package)");
     else
@@ -4081,7 +4106,7 @@ static uint64_t due_time(Tsp *t, const Slot *s, uint64_t now)
     int64_t apts;
     /* (while the sound waits for a late picture the video runs on its own clock, towards the sound) */
     if (!t->ahold && s->pts >= 0 && audio_now(t, now, &apts)) {   /* audio is the master clock */
-        int64_t d = s->pts - apts;
+        int64_t d = pts_diff(s->pts, apts);
         if (d > -90000LL * 10 && d < 90000LL * 10) {
             t->clock_on = 0;                                /* re-anchor the video clock if audio stops */
             t->st.av_sync = 1;
@@ -4093,7 +4118,7 @@ static uint64_t due_time(Tsp *t, const Slot *s, uint64_t now)
     if (!t->clock_on) { rebase(t, s, now); return now; }
     int64_t off;
     if (s->pts >= 0 && t->base_pts >= 0) {
-        int64_t d = s->pts - t->base_pts;
+        int64_t d = pts_diff(s->pts, t->base_pts);
         if (d < -90000LL * 5 || d > 90000LL * 60) { rebase(t, s, now); return now; }   /* timestamp jump */
         off = d * 100 / 9;
     } else {                                                  /* no timestamps: fixed cadence */
@@ -4113,7 +4138,7 @@ static int next_ready(Tsp *t, int after_seq_valid, uint32_t after_seq)
         if (after_seq_valid && (int32_t)(s->seq - after_seq) <= 0) continue;
         if (best < 0) { best = i; continue; }
         const Slot *b = &t->slots[best];
-        int64_t d = (s->pts >= 0 && b->pts >= 0) ? s->pts - b->pts : 0;
+        int64_t d = (s->pts >= 0 && b->pts >= 0) ? pts_diff(s->pts, b->pts) : 0;   /* (1.0: across the clock wrapping) */
         if (d != 0 && d > -90000LL * 10 && d < 90000LL * 10) { if (d < 0) best = i; }   /* display order by time */
         else if ((int32_t)(s->seq - b->seq) < 0) best = i;
     }
@@ -4283,7 +4308,7 @@ static void buffer_check(Tsp *t, uint64_t now)
     if (!t->vod && t->vq_have_pts) {
         int64_t apts;
         if (audio_now(t, now, &apts)) {
-            int64_t d = t->vq_newest_pts - apts;
+            int64_t d = pts_diff(t->vq_newest_pts, apts);
             if (d > -90000LL * 60 && d < 90000LL * 60) { ahead_ms = (int)(d / 90); have_ahead = 1; }
         }
     }
@@ -4369,7 +4394,8 @@ vita2d_texture *tsp_frame(int *w, int *h)
         int n = next_ready(t, 0, 0);
         if (n < 0) { if (t->st.decoded) t->ui_none++; break; }
         int64_t sp = t->slots[n].pts;
-        if (sp >= 0 && t->shown_pts >= 0 && sp < t->shown_pts && t->shown_pts - sp < 90000LL) {   /* (a bigger jump back is a new start) */
+        int64_t back = sp >= 0 && t->shown_pts >= 0 ? pts_diff(t->shown_pts, sp) : 0;
+        if (back > 0 && back < 90000LL) {   /* (a bigger jump back is a new start) */
             t->slots[n].state = SLOT_FREE;                  /* older than what is on screen: never go back */
             t->st.dropped++;
             t->drop_old++;
@@ -4496,7 +4522,7 @@ int tsp_av_offset(int *ms)
     if (t->shown >= 0) vp = t->slots[t->shown].pts;
     sceKernelUnlockMutex(t->lock, 1);
     if (vp < 0 || !audio_now(t, now_us(), &apts)) return 0;
-    *ms = (int)((vp - apts) / 90);
+    *ms = (int)(pts_diff(vp, apts) / 90);
     return 1;
 }
 

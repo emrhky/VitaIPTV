@@ -61,7 +61,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define FAV_FILE      DATA_DIR "/favorites.txt"
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v0.8.1"
+#define APP_VERSION   "v1.0.0"
 #endif
 #ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
 #define APP_BUILD     __DATE__ " " __TIME__
@@ -703,12 +703,13 @@ static int src_disp(int i)                                                      
 
 static void load_favorites(void);
 static void save_favorites(void);
+static int read_saved(const char *path, Mem *m);
 
 static void load_sources(void)
 {
     sceIoMkdir(DATA_DIR, 0777);
     Mem m = {0};
-    if (read_file(SOURCES_FILE, &m) != 0) {
+    if (read_saved(SOURCES_FILE, &m) != 0) {
         FILE *f = fopen(SOURCES_FILE, "wb");
         if (f) {
             fputs("# Vita IPTV sources. Add lists in the app (Square), or write them here, one per line:\n"
@@ -736,13 +737,40 @@ static void load_sources(void)
     sel = scroll = 0;
 }
 
+/* 1.0: the user's files are written safely: first to "<file>.new"; only when that is complete, the old file
+ * becomes "<file>.bak" and the new one takes its place. A crash or an empty battery while writing leaves the
+ * old file (or the complete new one) instead of an empty sources.txt (read_saved finds it). */
 static int write_text_file(const char *path, const char *text)
 {
-    FILE *f = fopen(path, "wb");
+    char tmp[128], bak[128];
+    snprintf(tmp, sizeof tmp, "%s.new", path);
+    snprintf(bak, sizeof bak, "%s.bak", path);
+    FILE *f = fopen(tmp, "wb");
     if (!f) return -1;
     size_t n = strlen(text);
     int ok = fwrite(text, 1, n, f) == n;
-    return (fclose(f) == 0 && ok) ? 0 : -1;
+    if (fclose(f) != 0 || !ok) { remove(tmp); return -1; }
+    remove(bak);                                             /* (a rename does not replace a file here) */
+    int had = rename(path, bak) == 0;
+    if (rename(tmp, path) != 0) {
+        if (had) rename(bak, path);                          /* put the old one back */
+        remove(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+/* 1.0: a file written by write_text_file: the file; if it is missing, the complete new one a crash left before
+ * it took its place, else the one before it. (An empty file is kept as it is: "nothing watched" is empty.) */
+static int read_saved(const char *path, Mem *m)
+{
+    if (read_file(path, m) == 0) return 0;
+    char alt[128];
+    snprintf(alt, sizeof alt, "%s.new", path);
+    if (read_file(alt, m) == 0) { plog("files: %s was missing, the new one written before a crash is used", path); return 0; }
+    snprintf(alt, sizeof alt, "%s.bak", path);
+    if (read_file(alt, m) == 0) { plog("files: %s was missing, the one before it is used", path); return 0; }
+    return -1;
 }
 
 /* Writes the user's sources (not the auto-found files) back to sources.txt and rescans; the row of
@@ -766,7 +794,7 @@ static void load_favorites(void)
 {
     Mem m = {0};
     fav_free(&favs);
-    if (read_file(FAV_FILE, &m) == 0) { fav_parse(m.buf, &favs); free(m.buf); }
+    if (read_saved(FAV_FILE, &m) == 0) { fav_parse(m.buf, &favs); free(m.buf); }
     plog("fav: %d favourites", favs.n);
 }
 
@@ -939,7 +967,7 @@ static void apply_look(void)
 static void load_settings(void)
 {
     Mem m = {0};
-    if (read_file(SETTINGS_FILE, &m) == 0) { settings_parse(m.buf, &settings); free(m.buf); }
+    if (read_saved(SETTINGS_FILE, &m) == 0) { settings_parse(m.buf, &settings); free(m.buf); }
     else settings_defaults(&settings);
     apply_look();
 }
@@ -956,7 +984,7 @@ static void load_resume(void)
 {
     Mem m = {0};
     nresume = 0;
-    if (read_file(RESUME_FILE, &m) == 0) { nresume = resume_parse(m.buf, resume, MAX_RESUME); free(m.buf); }
+    if (read_saved(RESUME_FILE, &m) == 0) { nresume = resume_parse(m.buf, resume, MAX_RESUME); free(m.buf); }
 }
 
 static void remember_position(const char *url, int pos_ms, int dur_ms)
@@ -976,7 +1004,7 @@ static void load_watched(void)
 {
     Mem m = {0};
     watch_free(&watched);
-    if (read_file(WATCH_FILE, &m) == 0) { watch_parse(m.buf, &watched); free(m.buf); }
+    if (read_saved(WATCH_FILE, &m) == 0) { watch_parse(m.buf, &watched); free(m.buf); }
 }
 
 static void save_watched(void)
