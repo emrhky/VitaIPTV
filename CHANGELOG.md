@@ -2,212 +2,40 @@
 
 ## 1.0.0
 
-0.7.0, 0.8.0 and 0.8.1 were not released on their own: their changes (below) come with 1.0. This release itself
-is about staying stable:
+### Highlights
+- **Much faster streaming:** the network receive buffer was stuck at 63 KB; it is now 512 KB, and plain http streams use the app's own connection too.. On a fast line a film buffers about a minute (40 MB) ahead, so playback is smoother and jumps start sooner.
+- **Programme guide (EPG):** Triangle opens a full guide with channels and a timeline; while watching, the channel keeps playing in a small picture. Works with Xtream and with M3U lists that have an XMLTV guide (`url-tvg`, also `.gz`).
+- **Catch-up:** watch past programmes from the start on channels with an archive (Xtream `tv_archive`, M3U `catchup=`). Pick them from the guide or from a channel's day-by-day schedule.
+- **Film and series details:** posters, year, rating, genre, cast and story next to the list and on a details screen. Series open on their own screen with seasons as tabs.
+- **Subtitles:** text subtitles in MKV (SRT, ASS/SSA) and MP4 films, with sync, size, colour, position and background settings.
+- **Series:** watched episodes get a tick, the series opens on the right episode, and the next episode starts after a countdown.
+- **Search every film / series** of the account, not only the open category.
 
-- **Your files are saved safely.** The playlists (`sources.txt`), favourites, settings, where films stopped and
-  the watched episodes are first written to a new file that takes the old one's place only when it is complete
-  (the one before is kept as `.bak`). A crash or an empty battery while saving can no longer leave an empty
-  `sources.txt`; the app takes the complete file that is left.
-- **A channel that drops after hours keeps going.** When the server refuses a reconnection with *407* (a
-  one-connection account it still counts as busy with the lost connection), the player asks again after 3, 6 and
-  10 seconds instead of stopping with an error (seen after 2 hours of one channel).
-- **The TS clock wrapping** (every 26.5 hours, at any moment of a live channel): the picture and the sound wrap
-  a moment apart, and for that moment their difference was taken as 26 hours: the picture ran on its own clock,
-  the pictures around the wrap were put in the wrong order (a few were lost) and the information table showed a
-  huge A/V value. Times are now compared across the wrap; a test plays through it, from a file and as a live
-  stream, without losing a picture.
-- Unused translations left out, small code clean-ups, the third-party notices name what the posters and the
-  compressed guides use.
+### Player
+- The Select menu is now in tabs: Picture, Audio, Subtitles, More.
+- R shows the information table; the time of day is in the top bar.
+- Sleep timer and jump to a channel number.
+- 5.1 / 7.1 AAC audio plays (as stereo).
+- HLS channels with separate audio playlists play with sound, and their languages can be chosen.
 
-## 0.8.1
+### Favourites and lists
+- Films and series can be favourites, and they have a *Recently Watched* category.
+- Favourite channels stay in their place in their category; they are reordered from Select > *Reorder favourites*.
 
-**Parental lock (PIN)**
-- Changing or removing the PIN always asks for the current one first, even when it was given earlier for an adult
-  channel. Turning *Hide adult channels* off asks for it every time too. Giving it there does not open adult content.
-- A new PIN is typed twice; a PIN that is too short, or two that differ, leave the old one as it was (a too short
-  one used to remove the lock).
-- The lock is on as soon as the settings are saved (it used to stay open until the app was closed).
-- Once given for adult content, the lock closes again when the console sleeps (it used to stay open until the app
-  was closed, which on the Vita can be days).
-- A forgotten PIN: delete the `pin=` line in `ux0:data/VitaIPTV/settings.txt` (README).
+### Settings
+- Parental lock (PIN) for adult content.
+- Themes: blue, green, purple, orange.
 
-**Subtitles**
-- **Select > Subtitles** has four more rows (Left / Right or X changes them, seen at once, kept for every film):
-  *Size* (small, medium, large, very large), *Colour* (white, yellow, green, blue), *Place* (bottom, a little
-  higher, top) and *Background* (light band, dark box, none).
+### Stability
+- Playlists, favourites, settings and resume points are saved safely: a crash or an empty battery while saving can't wipe them.
 
-**Theme**
-- *Settings > Theme*: blue (as before), green, purple or orange - the accent, the selection and the text colours.
-  It changes at once while choosing; *Cancel* puts it back.
-
-**Programme guide**
-- An M3U list without a guide address no longer opens an empty guide: Triangle is not offered in its channel list,
-  and in the player it says *No programme guide for this channel*.
-- In a guide, a channel with no programmes at all says *No programme guide* in its row (one with programmes on
-  other days: *No programme information*).
-
-**Log**
-- While playing, the statistics lines come every 5 s only in the first 30 s or when pictures are lost; after that
-  one pair a minute (the log grew by about 500 KB an hour of watching, now by about 35 KB).
-- The log has a limit: past 1 MB the statistics lines stop, past 3 MB nothing more is written until the app starts
-  again (the app may run for days: the console sleeps, the app is not closed).
-- Old diagnostic lines left out: the first frames of the channel screen, the 12 sample names with their bytes, the
-  clock settings each time (now once each way and when one fails).
-
-**Other**
-- A film's details over the picture show only *O Close* in the button bar (Triangle still closes them).
-
-## 0.8.0
-
-**Programme guide**
-- **Triangle in a live channel list** opens the guide: channels down the side, their programmes along a time line
-  (2.5 hours across), a red line at the time now. Left / Right moves through the time, L / R a day back / on,
-  Select opens the categories. The selected programme is shown below with its description and how long it has left.
-- **Triangle while a channel plays** opens the same guide with the picture still playing small in the corner;
-  Up / Down changes channel there, X switches to the selected one.
-- **Xtream:** the programmes of a channel are asked for when it comes into view (only those, a few at a time).
-- **M3U:** the guide address in the list's header (`url-tvg`, `x-tvg-url`) is read (XMLTV, also `.gz`), matched to
-  the channels by `tvg-id`, else by name. It is read in pieces as it arrives, only while nothing plays (a channel
-  started stops it, it goes on later), with a memory limit of 6 MB (the rest is left out), and kept for 12 hours
-  in `ux0:data/VitaIPTV/epg_*.bin`, so the next start does not read it again.
-- The channel rows of the list show what is on now.
-
-**Watching again (catch-up)**
-- Channels with an archive get a rewind clock in the list and the guide. A past programme of such a channel asks
-  *Watch from the start (archive)* or *Watch live*.
-- **Square in the guide** opens the channel's schedule: day tabs (as far back as the archive goes), its
-  programmes, X plays one from the start.
-- Playing from the archive: the top bar says *ARCHIVE* and the programme; the time line shows clock times; Left /
-  Right moves through it (not past now), Up / Down goes to the programme before / after, Square goes back live,
-  Triangle opens the schedule, O goes back to the guide or schedule it came from. When it ends, the next programme
-  starts after 5 s (X: now, O: stay).
-- Xtream archives (`tv_archive`) and M3U `catchup` (`default`, `append`, `shift`, `flussonic`, `xc`, with
-  `catchup-source` / `catchup-days`) work. The server's time zone is taken from the account, so programmes start
-  at the right minute.
-
-**Films and series**
-- **Choosing a film in the list** moves the categories aside and shows its card on the right: poster, year,
-  length, rating, genre, director and the start of the story (from the provider, asked for when a film stays
-  selected).
-- **Triangle on a film** opens its details: a big poster, the whole story, the cast, and buttons *Continue (time)*,
-  *From the start*, *Favourite*. Up / Down goes to the film before / after. While a film plays, Triangle shows
-  the details over the picture.
-- **A series** opens on a screen of its own: poster and story on top, its seasons as tabs (L / R), the episodes
-  below with their ticks and where an unfinished one was left. The selection opens on the right season.
-- Posters are decoded straight to a small picture (one at a time, about 350 KB), so big pictures do not fill the memory.
-- **Square in films / series** searches every film or series of the account (not only the open category).
-
-**Subtitles**
-- MP4 films and episodes show their text subtitles too (`mov_text` / `tx3g`), with the language from the file.
-- Track names are cleaned up: site names and repeated language words go, *SDH* and *Forced* stay.
-
-**Player and lists**
-- **R while watching** shows the information table (was Triangle).
-- **Favourites:** in the live *Favorites* category **Select** offers *Reorder favourites*; Up / Down moves the
-  channel, X saves, O cancels (was Triangle).
-- **Sleep timer** (Select > More): 15 min to 2 hours; a minute before it stops a note shows in the corner
-  (X: 15 more minutes), then the playback stops.
-- **Channel number** (Select > More, or digits typed in the search of a live list): goes straight to that channel.
-- **Parental lock:** *Settings > Parental lock (PIN)* sets a 4-6 digit PIN. With it set, turning *Hide adult
-  channels* off and opening adult categories, channels, films or their guide asks for it (once per start).
-
-**Log**
-- Choosing the episode to open in a series (watched / half-watched) is written to the log.
-
-## 0.7.0
-
-0.6.0 was not released on its own: its changes (below, from *Audio* on) come with 0.7.0.
-
-**Subtitles (MKV)**
-- Text subtitles of MKV films and episodes are shown: SRT (`S_TEXT/UTF8`) and ASS / SSA tracks, also the ones
-  mkvmerge packs with zlib or header stripping. ASS styling is left out (the text is shown plain, `\N` makes a new
-  line). Picture subtitles (PGS, VobSub) and subtitles of TS / MP4 files are not shown.
-- **Select > Subtitles** lists the tracks (language, *SDH*, *Forced*); the choice works at once and its language is
-  chosen for the next films. *Off* stays off for the next films too.
-- **Sync:** Left / Right moves the subtitles 0.1 s earlier / later (held: it keeps moving; up to 60 s), X sets it back to 0.
-
-**Player**
-- The **Select menu** is in tabs (*Picture*, *Audio*, *Subtitles*, *More*): L / R or Left / Right changes the tab;
-  the long list of picture sizes, sounds and the analysis is gone.
-- The **time of day** is in the middle of the top bar while the information is shown (24 or 12 hours as the
-  console is set).
-- **Next episode:** when an episode ends, *Next episode in 5 s* shows in the corner; X plays it at once, O stays on
-  the ended episode. It starts where it was left if it was started before.
-
-**Series**
-- **Watched episodes** get a tick (watched to the end, or into its last 5% / last minute). Opening a series puts the
-  selection on the episode left half-watched, or on the one after the last episode watched to its end.
-  Kept per playlist and series in `watched.txt` (300 series).
-- **Settings > Clear watched episodes** removes the ticks (asks first). Where films stopped is kept;
-  *Clear Recently Watched* is separate.
-
-**Log**
-- The list's memory: after a list is read the log says how many channels it holds and the app's memory
-  (*app memory N KB of 96 MB, peak N KB*); the player's statistics line says it too. The large film queues are
-  now checked against the app's own memory (the heap) instead of the system's.
-
-
-**Audio**
-- **5.1 and 7.1 AAC** play (films and channels, TS / MKV / MP4): the Vita's AAC decoder takes only one or two
-  channels, so these said *Audio has 6 channels: not supported*. Now FFmpeg's AAC decoder plays them, mixed down to
-  stereo like AC-3 (stereo AAC stays on the hardware). The information screen says *5.1 > stereo*. Building it needs
-  `tools/build_ffmpeg_vita.sh` again (it adds the AAC decoder; CMake warns when the old build is there).
-- **HLS with separate audio playlists** (`#EXT-X-MEDIA:TYPE=AUDIO` with a URI, one playlist per language): the sound
-  is fetched from its own playlist beside the picture, TS segments or packed AAC / AC-3 (`.aac` with an ID3 time
-  stamp). The languages are listed in the **Select** menu; the choice goes by the language for the next channels.
-  Until now such channels played without sound (or with the variant's own one only).
-
-**Favourites and recently watched**
-- **Recently watched films and series:** the films and series (Xtream) have a *Recently Watched* category too,
-  after *Favorites*: the last 20 films played and the last 20 series an episode of which was played, newest
-  first. It opens at once (no loading); films go on where they were left. *Clear Recently Watched* in the
-  settings empties it as well.
-- **Films and series** can be favourites: START on a film or series (in the episodes: their series; while a film
-  plays: the film). They get a star and a *Favorites* category before the categories, which opens at once from
-  `favorites.txt` (no loading). A film saved there plays with the playlist's current password.
-- A favourite channel **stays in its place** in its own category and in *All*, with its star. Only the *Favorites*
-  category gathers them (Triangle still reorders them there).
-
-**Network**
-- Plain `http://` films, channels, HLS and lists now go through the app's own connection (as `https://` did), which
-  asks for a 1 MB receive buffer; the system HTTP keeps a small one, so with a long round trip the speed stopped
-  early. The log shows the buffer the system gave (*own socket ..., receive buffer N KB*) and, for lists, the time.
-  When the own connection cannot reach a server at all, the system HTTP takes over as before. The transcoding
-  server stays on the system HTTP.
-- The network memory is 4 MB (was 1 MB): the socket buffers come from it.
-- Radio servers that answer `ICY 200 OK` work through the own connection.
-- **Much faster films:** the receive buffer stayed at 63 KB, because the Vita refuses 1 MB (ENOBUFS) and the
-  request was then ignored altogether; a connection then manages at most 64 KB per round trip (about 285 KB/s from a
-  server 225 ms away). The Vita takes at most 512 KB (528 KB was refused too), so 512 KB is asked for; should it be
-  refused (another firmware, or the network's memory short for a moment), 256 and 128 KB are tried. On the
-  device, films went from about 285 to 1700 KB/s (https, far server) and from 950 to about 3800 KB/s (http), the
-  Vita's own TCP limit. The log says the buffer once (*receive buffer: 512 KB*, or what was refused) and each
-  connection how long it took to connect (about one round trip) and the speed its buffer allows.
-- A film whose server answers a jump with a little data and then nothing (seen with a far server: 14 KB in 10 s,
-  then *No video data received*) is asked for again after 8 s, once, and waits 20 s in all before giving up.
-- **Queues:** on a line at least twice as fast as the film the queues take about a minute (40 MB) at once.
-  With full queues the reader takes only what is played; that rate was taken for the network's and every fast
-  film said *the network is slower than the film*. Now the time spent waiting for room is left out: the log adds
-  *queues full N% of the time; the line brings (or last brought) X KB/s*, measured only while the reader read most
-  of the time, and the information screen shows the line's speed. The video queue holds 1800 pictures before that
-  (30 s at 60 fps; was 750, 12 s at 60 fps). The wait at a film's start says *buffering at the start* instead
-  of *the network is slower than the film*.
-
-**Look**
-- The button symbols (X, O, Triangle, Square and the d-pad) are drawn smooth (anti-aliased) and the four face
-  buttons take the same space; before, the X was larger and the corners looked jagged.
-
-**Removed**
-- The AC-3 test modes (`ac3_test` in `settings.txt`), the AC-3 trace and the detailed timing line of the 0.5.0
-  test builds (the stutter they were for is fixed).
-
+  
 ## 0.5.0
 
 0.4.1 and 0.4.5 were test builds and were not released; their changes are part of 0.5.0 and are listed here.
 
 **Audio**
-- **AC-3 and E-AC-3 (Dolby Digital / Dolby Digital Plus)** play, on channels (TS, HLS) and in films (MKV, MP4, TS),
+- **AC-3 and E-AC-3 ** play, on channels (TS, HLS) and in films (MKV, MP4, TS),
   decoded in software with FFmpeg's decoder (LGPL, only the AC-3 / E-AC-3 decoders are built in). 5.1 and 7.1
   sound comes out as stereo. When a stream has AAC as well, AAC is chosen (the hardware decodes it).
   Until now these films played without sound and these channels needed the transcoding server.
