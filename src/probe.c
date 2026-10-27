@@ -180,8 +180,7 @@ static int pget(ProbeCtx *c, const char *url, long long from, long long to, PDat
     if (cio_available() && !strncasecmp(url, "https:", 6)) {
         PgCtx g = { c, fn, ctx };
         CioRequest rq = { url, NULL, NULL, 10, 5, pg_data, pg_stop, &g, from >= 0, from >= 0 ? (uint64_t)from : 0,
-                          to >= 0 ? (uint64_t)to : 0, NULL };
-        rq.ua = c->ua; rq.referer = c->ref;
+                          to >= 0 ? (uint64_t)to : 0, NULL, c->ua, c->ref, NULL, 0 };
         int r = cio_get(&rq, status, err, errsz);
         return r == -2 ? 0 : r;
     }
