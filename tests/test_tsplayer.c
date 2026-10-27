@@ -562,7 +562,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r;
@@ -578,6 +578,7 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "alt")) goto alt;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "qsize")) goto qsize;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "subs")) goto subs;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "wrap")) goto wrap;
     r = play(argv[1], 10);
     show("720p30", &r);
     assert(r.st.state == TSP_ENDED && r.st.errors == 0);
@@ -828,6 +829,17 @@ slow:
     assert(r.st.decoded >= 140 && r.st.reconnects >= 3 && mock_http_sessions >= 4);
     assert(r.synced && r.av_bad * 10 <= r.avn);
     mock_http_reset();
+    {   /* 1.0: reconnecting, the server answers 407 twice (it still counts the lost connection): waits, goes on */
+        extern int mock_http_busy_from, mock_http_busy_n;
+        mock_http_busy_from = 2; mock_http_busy_n = 2;
+        r = play("http://example.invalid/live/1.ts", 30);
+        show("http drops, then 407 twice", &r);
+        printf("               sessions=%d reconnects=%u state %d\n", mock_http_sessions, r.st.reconnects, r.st.state);
+        /* (the stream itself ends after the file: the reconnects after that end it; the 407s must not) */
+        assert(r.st.decoded >= 140 && !strstr(r.st.msg, "407") && mock_http_sessions >= 5 && r.play_time > 9.0);
+        mock_http_busy_n = 0;
+        mock_http_reset();
+    }
     mock_http_fail_after = 0;
 
     r = play(argv[13], 10);                                 /* Matroska instead of MPEG-TS */
@@ -1577,6 +1589,25 @@ films:
         assert(!alib_open && !adec_open && ports_open == 0);
     }
     printf("zapping x12 ok\n");
+wrap:
+    if (argc > 32) {
+        /* 1.0: the TS clock (33 bits of 90 kHz) wraps every 26.5 hours, at any moment of a live channel: this
+         * file's clock passes 2^33 after about 6 s. It must play on, in time, as from a file and as live. */
+        r = play(argv[32], 16);
+        show("clock wrap", &r);
+        assert(r.st.state == TSP_ENDED && r.changes >= 270 && r.synced && r.av_bad <= 1 && r.st.dropped == 0);
+        struct stat ws; assert(stat(argv[32], &ws) == 0);
+        mock_http_reset();
+        mock_http_file = argv[32];
+        mock_http_rate = (long)(ws.st_size / 12);            /* paced like a live channel */
+        r = play("http://example.invalid/live/wrap.ts", 16);
+        show("clock wrap live", &r);
+        assert(r.changes >= 250 && r.synced && r.av_bad <= 1 && r.st.state != TSP_ERROR);
+        mock_http_rate = 0;
+        mock_http_reset();
+        mock_http_file = NULL;
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "wrap")) { puts("wrap tests passed"); return 0; }
+    }
     tsp_stop();                                              /* stop twice is harmless */
     assert(tsp_status() == NULL);
     puts("all tsplayer tests passed");
