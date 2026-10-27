@@ -2,7 +2,9 @@
 #define CURLIO_H
 /* HTTPS with the app's own TLS (mbedTLS in third_party/, built in with HAVE_TLS). The Vita's own TLS
  * (sceHttp/sceSsl) fails on most sites today (handshake error 0x80431075), so https:// addresses go
- * through here. Without HAVE_TLS cio_available() is 0 and the app stays on sceHttp. */
+ * through here. Without HAVE_TLS cio_available() is 0 and the app stays on sceHttp.
+ * 0.6.0: plain http:// too (films, channels, lists): its own socket asks for a 1 MB receive buffer, the
+ * system HTTP library keeps a small one, and with a long round trip the speed stops near buffer / time. */
 #include <stddef.h>
 #include <stdint.h>
 
@@ -32,5 +34,11 @@ void cio_init(void);                    /* once, at start-up (curl_global_init) 
 /* Returns 0 when the body ended (or data() stopped it), or a negative error. status = HTTP status
  * (0 if none arrived); err gets a short English description of a failure. */
 int  cio_get(const CioRequest *rq, int *status, char *err, size_t errsz);
+/* 0.6.0: the receive buffer the last connection got from the system, in bytes (0 = unknown) */
+int  cio_last_rcvbuf(void);
+/* 0.6.0 (diagnosis): how long the last connect took in ms (about one round trip), and the receive buffer the
+ * system gave ("512 KB", or "512 KB refused (105), using 256 KB"): returned once, then "" until it changes */
+int  cio_last_connect_ms(void);
+const char *cio_rcvbuf_note(void);
 
 #endif

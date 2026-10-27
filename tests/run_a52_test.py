@@ -21,4 +21,27 @@ for name, codec, rate, layout in (("ac3_51.ac3", "ac3", 48000, "5.1"), ("eac3_51
     r = subprocess.run(f"{T}/t {T}/{name} {T}/{name}.s16 {rate}", shell=True, capture_output=True, text=True)
     print(r.stdout, r.stderr[-3000:])
     if r.returncode: sys.exit(1)
+# 0.6.0: 5.1 and 7.1 AAC (ADTS) through FFmpeg's aac decoder. The reference: ffmpeg's decode of all channels,
+# mixed here like src/a52dec.c does it (left / right + centre and surrounds at -3 dB, LFE left out, scaled by
+# 1 / (1 + 2 * 0.7071)); 7.1 takes the side channels as the surrounds
+import array, math
+def mix_ref(f32, out, nch):
+    a = array.array("f"); a.frombytes(open(f32, "rb").read())
+    k = 0.7071; norm = 1 / (1 + 2 * k)
+    sl, sr = (6, 7) if nch == 8 else (4, 5)
+    o = array.array("h")
+    for i in range(0, len(a) - nch + 1, nch):
+        c = a[i + 2] * k
+        for v in ((a[i] + c + a[i + sl] * k) * norm, (a[i + 1] + c + a[i + sr] * k) * norm):
+            x = int(round(v * 32767)); o.append(max(-32768, min(32767, x)))
+    open(out, "wb").write(o.tobytes())
+for name, layout, nch in (("aac_51.aac", "5.1", 6), ("aac_71.aac", "7.1", 8)):
+    sh(f"ffmpeg -loglevel error -y {SRC.format(r=48000)} -filter_complex \"[0][1][2]amerge=inputs=3,pan={layout}|c0=c0|c1=c1"
+       + "|c2=c2|c3=c0|c4=c1|c5=c2" + ("|c6=c0|c7=c1" if layout == "7.1" else "") + "\" "
+       f"-c:a aac -b:a 384k -f adts {T}/{name}")
+    sh(f"ffmpeg -loglevel error -y -i {T}/{name} -f f32le -acodec pcm_f32le {T}/{name}.f32")
+    mix_ref(f"{T}/{name}.f32", f"{T}/{name}.s16", nch)
+    r = subprocess.run(f"{T}/t {T}/{name} {T}/{name}.s16 48000", shell=True, capture_output=True, text=True)
+    print(r.stdout, r.stderr[-3000:])
+    if r.returncode: sys.exit(1)
 print("ALL A52 TESTS PASSED")

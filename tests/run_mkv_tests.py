@@ -11,8 +11,8 @@ def sh(c, check=True):
 def check(cond, msg):
     if not cond: fails.append(msg); print("  FAIL:", msg)
 san = "-O1 -g -fsanitize=address,undefined -Wall -Wextra"
-sh(f"gcc {san} -I{ROOT}/src {ROOT}/tests/tsinfo.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c -o {T}/tsinfo")
-sh(f"gcc {san} -I{ROOT}/src {ROOT}/tests/fuzz_mkv.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c -o {T}/fuzz")
+sh(f"gcc {san} -DMKV_ZLIB -I{ROOT}/src {ROOT}/tests/tsinfo.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c -lz -o {T}/tsinfo")   # (0.7.0: zlib as on the Vita)
+sh(f"gcc {san} -DMKV_ZLIB -I{ROOT}/src {ROOT}/tests/fuzz_mkv.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c -lz -o {T}/fuzz")
 def info(path, *a):
     d = {}
     for l in sh(f"{T}/tsinfo {path} {' '.join(a)}").stdout.splitlines():
@@ -97,8 +97,78 @@ check(dec.returncode == 0 and not dec.stderr.strip(), "laced: output does not de
 check(open(f"{T}/laced.audio", "rb").read() != b"", "laced: no output")
 print(f"  {blocks} laced blocks (Xiph/EBML alternating), {i['audio_frames']} of {len(frames)} frames recovered, {i['aac_rate']} Hz {i['aac_channels']} ch")
 
+print("== text subtitles (0.7.0)")
+def cues(path, *a):
+    out = []
+    for l in sh(f"{T}/tsinfo {path} {' '.join(a)}").stdout.splitlines():
+        if l.startswith("cue") and "=" in l and l[3].isdigit():
+            idn, pts, dur, text = l.partition("=")[2].split("|", 3)
+            out.append((int(idn), int(pts), int(dur), text))
+    return out
+open(f"{T}/a.srt", "w").write("1\n00:00:00,500 --> 00:00:01,500\nMerhaba <i>dünya</i>\n\n2\n00:00:02,000 --> 00:00:03,250\nİkinci satır\nüçüncü\n\n")
+open(f"{T}/b.ass", "w").write("""[Script Info]
+ScriptType: v4.00+
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Arial,16,&Hffffff,&Hffffff,&H0,&H0,0,0,0,0,100,100,0,0,1,1,0,2,10,10,10,0
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:02.00,Default,,0,0,0,,{\\an8}Hello, {\\i1}world{\\i0}\\NSecond line
+Dialogue: 0,0:00:03.00,0:00:04.50,Default,,0,0,0,,Non\\hbreaking
+Dialogue: 0,0:00:04.00,0:00:04.50,Default,,0,0,0,,{\\p1}m 0 0 l 10 0 10 10{\\p0}
+""")
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=320x240:rate=25 -f lavfi -i sine=sample_rate=48000 -i {T}/a.srt -i {T}/b.ass "
+   f"-map 0 -map 1 -map 2 -map 3 -t 5 -c:v libx264 -pix_fmt yuv420p -c:a aac -c:s:0 srt -c:s:1 ass "
+   f"-metadata:s:s:0 language=tur -metadata:s:s:1 language=eng -metadata:s:s:1 title=SDH -disposition:s:1 forced {T}/subs.mkv")
+i = info(f"{T}/subs.mkv")
+check(i.get("subs") == "2", f"subs: {i.get('subs')} subtitle tracks, expected 2")
+t0, t1 = i.get("subtrack0", "").split("|"), i.get("subtrack1", "").split("|")
+check(t0[1:] == ["tur", "", "0", "0", "0"], f"subs: track 0 {t0}")
+check(t1[1:] == ["eng", "SDH", "1", "1", "0"], f"subs: track 1 {t1}")
+c = cues(f"{T}/subs.mkv")
+want = [(int(t0[0]), 45000, 90000, "Merhaba dünya"), (int(t1[0]), 90000, 90000, "Hello, world\\nSecond line"),
+        (int(t0[0]), 180000, 112500, "İkinci satır\\nüçüncü"), (int(t1[0]), 270000, 135000, "Non breaking")]
+check(c == want, f"subs: cues {c}")
+for ch in ("1", "13", "0"):
+    check(cues(f"{T}/subs.mkv", f"-chunk {ch}") == c, f"subs: chunk {ch} gives other cues")
+print(f"  srt + ass: {len(c)} cues, tracks {t0[1]} / {t1[1]} ({t1[2]}, forced)")
+
+# by hand: zlib-packed and header-stripped tracks (as mkvmerge writes them), BlockGroups with BlockDuration
+import zlib
+def sub_track(num, lang, enc):
+    e = uint(b"\xD7", num) + uint(b"\x83", 17) + el(b"\x86", b"S_TEXT/UTF8") + el(b"\x22\xB5\x9C", lang)
+    if enc: e += el(b"\x6D\x80", el(b"\x62\x40", el(b"\x50\x34", enc)))
+    return el(b"\xAE", e)
+tr2 = el(b"\x16\x54\xAE\x6B", el(b"\xAE", uint(b"\xD7", 1) + uint(b"\x83", 2) + el(b"\x86", b"A_AAC") + el(b"\x63\xA2", asc)
+          + el(b"\xE1", el(b"\xB5", struct.pack(">d", 48000.0)) + uint(b"\x9F", chn)))
+          + sub_track(2, b"tur", uint(b"\x42\x54", 0))
+          + sub_track(3, b"ger", uint(b"\x42\x54", 3) + el(b"\x42\x55", b"Hal"))
+          + sub_track(4, b"fre", b""))
+def bgroup(track, rel, payload, dur):
+    blk = bytes([0x80 | track]) + rel.to_bytes(2, "big", signed=True) + b"\x00" + payload
+    return el(b"\xA0", el(b"\xA1", blk) + uint(b"\x9B", dur))
+cl = b""
+for k in range(0, 40, 4):
+    tc = int(k * ms_per)
+    body = uint(b"\xE7", tc) + b"".join(el(b"\xA3", bytes([0x81]) + int(j * ms_per - tc).to_bytes(2, "big", signed=True) + b"\x80" + frames[j]) for j in range(k, k + 4))
+    if k == 8: body += bgroup(2, 10, zlib.compress("Sıkıştırılmış <b>yazı</b>".encode()), 1500)
+    if k == 16: body += bgroup(3, 20, b"lo Welt", 800)
+    if k == 24: body += bgroup(4, 0, b"Sans dur\xc3\xa9e", 0)
+    cl += el(b"\x1F\x43\xB6\x75", body)
+mkv2 = el(b"\x1A\x45\xDF\xA3", el(b"\x42\x82", b"matroska")) + b"\x18\x53\x80\x67" + bytes([0x01] + [0xFF]*7) + info_el + tr2 + cl
+open(f"{T}/packed.mkv", "wb").write(mkv2)
+c = cues(f"{T}/packed.mkv")
+want = [(2, (int(8 * ms_per) + 10) * 90, 1500 * 90, "Sıkıştırılmış yazı"), (3, (int(16 * ms_per) + 20) * 90, 800 * 90, "Hallo Welt"),
+        (4, int(24 * ms_per) * 90, 0, "Sans durée")]
+check(c == want, f"packed: cues {c}")
+i = info(f"{T}/packed.mkv")
+check(i.get("subs") == "3" and int(i["audio_frames"]) == 40, f"packed: {i.get('subs')} tracks, {i.get('audio_frames')} audio frames")
+print(f"  zlib / header stripping / no duration: {len(c)} cues")
+
 print("== fuzz")
-r = sh(f"{T}/fuzz 120 {T}/bframes.mkv {T}/live.mkv {T}/laced.mkv {T}/hevc.mkv", check=False)
+r = sh(f"{T}/fuzz 120 {T}/bframes.mkv {T}/live.mkv {T}/laced.mkv {T}/hevc.mkv {T}/subs.mkv {T}/packed.mkv", check=False)
 print(r.stdout.strip())
 check(r.returncode == 0 and "ERROR" not in r.stderr, "fuzz: " + r.stderr[-800:])
 print("FAILURES: %d" % len(fails) if fails else "ALL MKV TESTS PASSED")

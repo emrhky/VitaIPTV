@@ -26,14 +26,14 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: FFmpeg cache (AC-3 / E-AC-3)
+      - name: FFmpeg cache (AC-3 / E-AC-3 / AAC)
         id: ffcache
         uses: actions/cache@v4
         with:
           path: third_party/ffmpeg-vita
           key: ffmpeg-vita-7.1-${{ hashFiles('tools/build_ffmpeg_vita.sh') }}
 
-      - name: Build FFmpeg (AC-3 / E-AC-3 only)
+      - name: Build FFmpeg (AC-3 / E-AC-3 / AAC decoders only)
         if: steps.ffcache.outputs.cache-hit != 'true'
         shell: bash
         run: |
@@ -48,6 +48,7 @@ jobs:
           rm -rf build && mkdir build && cd build
           cmake .. | tee cmake.log
           grep -q "AC-3 / E-AC-3: FFmpeg" cmake.log || { echo "FFmpeg was not found: no AC-3 sound"; exit 1; }
+          grep -q "AAC 5.1 / 7.1: FFmpeg" cmake.log || { echo "FFmpeg has no AAC decoder: no 5.1 AAC sound"; exit 1; }
           make -j"$(nproc)"
 
       - uses: actions/upload-artifact@v4

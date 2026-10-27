@@ -13,9 +13,9 @@ include("${VITASDK}/share/vita.cmake" REQUIRED)
 
 set(VITA_APP_NAME "Vita IPTV")
 set(VITA_TITLEID  "VIPTV0001")
-# the version, in one place: the VPK's "00.50" and the app's "v0.5.0" (shown in About and in the log) both come from here
-set(APP_VER_MAJOR 0)
-set(APP_VER_MINOR 5)
+# the version, in one place: the VPK's "00.70" and the app's "v0.7.0" (shown in About and in the log) both come from here
+set(APP_VER_MAJOR 1)
+set(APP_VER_MINOR 0)
 set(APP_VER_PATCH 0)
 # The VPK takes "XX.YY" (two digits each side): minor and patch share the two digits, so a patch above 9
 # is written as 9 (0.2.10 -> "00.29"; 0.3.0 -> "00.30" is still higher).
@@ -53,6 +53,9 @@ add_executable(${PROJECT_NAME}.elf
   src/fav.c
   src/epg.c
   src/a52dec.c
+  src/guide.c
+  src/catchup.c
+  src/poster.c
 )
 target_compile_definitions(${PROJECT_NAME}.elf PRIVATE "APP_VERSION=\"v${APP_VER_MAJOR}.${APP_VER_MINOR}.${APP_VER_PATCH}\"")
 # 0.4.1: when this build was made (the log's second line says it, to tell builds apart while testing). Set when
@@ -86,6 +89,14 @@ if(EXISTS ${FFMPEG_VITA}/lib/libavcodec.a AND EXISTS ${FFMPEG_VITA}/lib/libavuti
     set(A52_VPK_FILES FILE third_party/ffmpeg-vita/COPYING.LGPLv2.1 licenses/ffmpeg-COPYING.LGPLv2.1.txt)
   endif()
   message(STATUS "AC-3 / E-AC-3: FFmpeg from third_party/ffmpeg-vita")
+  # 0.6.0: 5.1 / 7.1 AAC needs FFmpeg's aac decoder too (built by tools/build_ffmpeg_vita.sh since 0.6.0)
+  file(STRINGS ${FFMPEG_VITA}/lib/libavcodec.a FF_AAC LIMIT_COUNT 1 REGEX "ff_aac_decoder")
+  if(FF_AAC)
+    message(STATUS "AAC 5.1 / 7.1: FFmpeg's AAC decoder is built in")
+  else()
+    message(WARNING "AAC 5.1 / 7.1: this FFmpeg has no AAC decoder (built before 0.6.0): run tools/build_ffmpeg_vita.sh again "
+                    "(rm -rf third_party/ffmpeg-vita build-ffmpeg first). Without it such films play without sound.")
+  endif()
 else()
   message(STATUS "AC-3 / E-AC-3: not built in (run tools/build_ffmpeg_vita.sh)")
 endif()

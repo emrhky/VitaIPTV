@@ -23,6 +23,7 @@ typedef enum {
 #define TS_FLAG_DAMAGED  2      /* packets were lost while this unit was received */
 #define TS_FLAG_INTRA    4      /* non-IDR picture whose first slice is an I slice (no recovery SEI) */
 #define TS_MAX_STREAMS   16
+#define TS_MAX_SUBS      8      /* 0.7.0: text subtitle tracks (Matroska) */
 
 typedef struct { int pid, stream_type; TsCodec codec; char lang[4]; } TsStream;   /* lang (0.5.0): ISO 639-2, "" = none */
 
@@ -45,12 +46,18 @@ typedef struct {
     uint32_t sync_losses, cc_errors, tei_errors, scrambled_packets, pes_overflows;
     uint32_t video_aus, keyframes, intra_aus, damaged_aus, audio_frames;
     int64_t first_video_pts, min_video_pts, max_video_pts, first_audio_pts;
+    /* 0.7.0: text subtitle tracks (Matroska S_TEXT/UTF8, S_TEXT/ASS, S_TEXT/SSA), in the file's order */
+    int nsubs;
+    struct { int id; char lang[4]; char name[32]; int ass, forced, is_default; } subs[TS_MAX_SUBS];
 } TsInfo;
 
 typedef struct {
     void (*video)(void *ctx, const uint8_t *data, size_t len, int64_t pts, int64_t dts, int flags);
     void (*audio)(void *ctx, const uint8_t *data, size_t len, int64_t pts);
     void *ctx;
+    /* 0.7.0 (Matroska, may be NULL): a subtitle of track id as plain text (lines separated by '\n'; the ASS
+     * fields and the style tags taken away), from pts for dur (90 kHz; dur 0 = not given) */
+    void (*sub)(void *ctx, int id, const char *text, int64_t pts, int64_t dur);
 } TsSink;
 
 typedef struct TsDemux TsDemux;

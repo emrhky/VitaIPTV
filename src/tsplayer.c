@@ -11,6 +11,7 @@
 #include "curlio.h"
 #include "vod.h"
 #include "httpio.h"                     /* plog() */
+#include "memstat.h"
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
@@ -45,7 +46,8 @@
 #ifndef STALL_US
 #define STALL_US     10000000ULL        /* no picture after this long: report why */
 #endif
-#define VQ_PKTS      750                /* compressed video waiting for the decoder (30 s at 25 fps) */
+#define VQ_PKTS      1800               /* compressed video waiting for the decoder (30 s at 60 fps; 0.6.0: was 750, only
+                                         * 12 s at 60 fps; the bytes below and the ~30 s of sound are the usual limit) */
 #define VQ_BYTES     (16 * 1024 * 1024)
 #define AQ_PKTS      1400               /* compressed audio frames waiting (~30 s): rides out network gaps */
 #define AQ_BYTES     (3 * 1024 * 1024)
@@ -95,6 +97,9 @@ static int g_hls_want = 720;            /* HLS: the variant to choose (see tsp_s
 static long g_hls_bw;                   /* ... with exactly this bit rate (0 = any) */
 static int g_aid = -1;                  /* 0.5.0: the audio track wanted (tsp_set_audio) */
 static char g_alang[4];
+static int g_sid = -1, g_soff = 1;      /* 0.7.0: the subtitle track wanted (tsp_set_sub), or its language, or none */
+static char g_slang[4];
+static volatile int g_sub_delay;        /* ms, + = later */
 #define NO_TS        0xFFFFFFFFu
 
 enum { SLOT_FREE = 0, SLOT_READY, SLOT_SHOWN, SLOT_OFF };   /* OFF: the decoder refused its memory */
@@ -168,6 +173,13 @@ typedef struct {
     /* decoder (worker thread) */
     int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder, no_two;
     int connect_fails, multi_out, oom_fixed, status_retries;
+    int busy_retries;                   /* 1.0: "busy" answers while reconnecting a stream that played */
+    uint32_t busy_bytes;                /* ... the data received at the last one */
+    int cio_http_off;                   /* 0.6.0: plain http:// through our own socket failed: the system HTTP from now on */
+    volatile int vod_kick, vod_kicked;  /* 0.6.0: the film's first data did not come: the request is made again (once) */
+    uint32_t film_bytes0;               /* ... the bytes before the film itself (header, index) */
+    int film_phase;                     /* ... the film itself is being read (not its header or index) */
+    int rcvbuf_logged;
     int no_out, reopen_pending, reopens;  /* decoder that takes units but gives no pictures: restart it */
     int dry_restarts, good_since;       /* restarts that did not bring steady pictures back (each waits longer) */
     int es_full_fails;                  /* HD decoder: "ES buffer full" even after a picture was taken out */
@@ -238,18 +250,6 @@ typedef struct {
     /* 0.4.0: the stream's timing information (VUI HRD / pic_struct, buffering period / picture timing SEI).
      * A 720p25 channel with it gave no picture from either decoder; the second try leaves it out. */
     int hdr_timing, sei_timing, drop_timing, timing_tried, hdr_logged, sei_logged;
-    /* 0.5.0 test builds: the first sound frames of the software decoder, logged together (a52_trace) */
-    struct { int64_t in_pts, pts, clk; uint32_t t_ms, block_us; uint16_t n; } a52tr[300];
-    int a52tr_n, a52tr_done;
-    int64_t a52_in_pts;                     /* the time of the last packet given to the software decoder */
-    uint64_t a52_t0;
-    /* 0.5.0: detail line for the picture / sound timing (stats_tick) */
-    uint64_t pic_last_us, pic_gap_max_us;   /* video thread: time between pictures coming out of the decoder */
-    uint32_t pic_gaps_long, pic_n;          /* ... gaps above 3 picture times, pictures counted */
-    uint64_t aout_max_us, aout_sum_us;      /* audio thread: sceAudioOutOutput blocking time */
-    uint32_t aout_n, aout_min_us;
-    int64_t aclk_prev_pts;                  /* audio clock at the last stats line (90 kHz) */
-    uint64_t aclk_prev_us;
     int hd_fallback;                    /* 0.4.1: the HD decoder (720p above 30 fps) gave nothing: the normal one */
     int hdr_no_restr;                   /* the SPS has no bitstream_restriction (the second try adds it) */
     int64_t late_sum_us;
@@ -258,6 +258,17 @@ typedef struct {
     uint8_t *asil;                      /* silence for audio pauses */
     MpaDec *mpa;                        /* MPEG audio (MP2/MP3) in software */
     A52Dec *a52;                        /* 0.5.0: AC-3 / E-AC-3 in software (FFmpeg) */
+    A52Dec *aacsw;                      /* 0.6.0: AAC with more than two channels in software (FFmpeg) */
+    int asw_rate, asw_ch;               /* ... the format it was opened for (the stream's channels) */
+    /* 0.6.0: HLS sound from an audio playlist of its own (#EXT-X-MEDIA:TYPE=AUDIO) */
+    TsDemux *adm;                       /* its MPEG-TS segments */
+    int alt_on;                         /* the sound comes from there (the variant's own sound is left out) */
+    int alt_list;                       /* the track list (st.a_*) is the master playlist's, not the stream's */
+    int64_t alt_pts;                    /* packed audio (.aac / .ac3 segments): the next frame's time, -1 unknown */
+    /* 0.7.0: subtitles (all text tracks kept, so another one shows at once); under qlock */
+    struct SubCue *cues;
+    uint32_t ncues;                     /* cues written (the ring holds the last SUB_CUES) */
+    int sub_tracks_n;                   /* the tracks in st.s_* came from this many */
     uint8_t *a52pcm;
     int a_nstreams;                     /* (the stream list the audio track list was made from) */
     uint8_t *mpcm;
@@ -281,7 +292,12 @@ typedef struct {
     volatile int ready;                 /* slots usable by the UI thread */
     volatile uint32_t frame_us;         /* estimated picture duration */
     uint64_t last_stats, start_us;
+    uint32_t log_bad;                   /* 0.8.1: dropped + late + damaged + errors + skipped at the last stats line */
+    int stats_quiet;                    /* ... intervals since the last short line (one a minute after the first 30 s) */
     uint32_t prev_bytes, prev_decoded;  /* stats line: values at the previous line, for rates */
+    uint64_t prev_push_wait;            /* 0.6.0: ... and the reader's waits for room in the queues */
+    unsigned net_free_kbs;              /* 0.6.0: what the network brings while the reader is not waiting for room (0 = unknown) */
+    unsigned net_wait_pct;              /* ... and how much of the last interval it waited (the queues were full) */
     uint32_t hreads, hread_bytes, hread_full;   /* sceHttpReadData calls since the last stats line */
     unsigned read_size;                 /* bytes asked per sceHttpReadData: it fills the whole request before returning */
     volatile uint32_t dcalls, dus_sum, dus_max; /* decoder call time since the last stats line */
@@ -1117,13 +1133,6 @@ static void take_picture(Tsp *t, SceAvcdecPicture *p, int si)
         sl->pts = opts;
         sl->seq = t->out_seq++;
         sl->ready_us = now_us();
-        if (t->pic_last_us) {                               /* 0.5.0: detail line: how evenly pictures come out */
-            uint64_t g = sl->ready_us - t->pic_last_us;
-            if (g > t->pic_gap_max_us) t->pic_gap_max_us = g;
-            if (g > 3ULL * (t->frame_us ? t->frame_us : 40000)) t->pic_gaps_long++;
-        }
-        t->pic_last_us = sl->ready_us;
-        t->pic_n++;
         sl->state = SLOT_READY;
         sceKernelUnlockMutex(t->lock, 1);
         t->st.decoded++;
@@ -1354,10 +1363,49 @@ static size_t build_es(Tsp *t, const VInfo *i, const uint8_t *data, size_t len, 
 }
 
 static int audio_now(Tsp *t, uint64_t now, int64_t *apts);
+/* 1.0: a - b of two 90 kHz TS times, across the 33-bit clock wrapping (every 26.5 hours: the picture and the
+ * sound wrap a moment apart, and their difference looked like 26 hours) */
+static int64_t pts_diff(int64_t a, int64_t b)
+{
+    int64_t d = a - b;
+    if (d > (1LL << 32)) d -= 1LL << 33;
+    else if (d < -(1LL << 32)) d += 1LL << 33;
+    return d;
+}
 static int g_via_server;
-static int g_ac3_test;                                      /* 0.5.0 test builds (tsp_set_ac3_test) */
-void tsp_set_ac3_test(int mode) { g_ac3_test = mode; }                                    /* 0.5.0: the next stream comes through the transcoding server */
+/* 0.5.0: the next stream comes through the transcoding server */
 void tsp_set_via_server(int on) { g_via_server = on; }
+
+/* 0.6.0: our own socket (src/curlio.c) for https:// and now plain http:// too: it asks for a 1 MB receive
+ * buffer, the system HTTP keeps a small one, so with a long round trip films and channels came slower.
+ * Not for the transcoding server (on the home network; its X-Content-Duration is read from sceHttp), and
+ * not after our socket failed to reach this server (then the system HTTP as before). */
+static int via_cio(Tsp *t, const char *url)
+{
+    if (!cio_available()) return 0;
+    if (!strncasecmp(url, "https:", 6)) return 1;
+    return !strncasecmp(url, "http:", 5) && !g_via_server && !t->cio_http_off;
+}
+
+/* the http:// connection through our socket failed before any answer: the system HTTP from now on */
+static int cio_http_failed(Tsp *t, const char *url, int status, const char *err)
+{
+    if (status || strncasecmp(url, "http:", 5) || t->cio_http_off) return 0;
+    t->cio_http_off = 1;
+    plog("tsp: own socket could not reach the server (%s): system HTTP from now on", err);
+    return 1;
+}
+
+static void log_rcvbuf(Tsp *t)
+{
+    if (t->rcvbuf_logged) return;
+    t->rcvbuf_logged = 1;
+    int rb = cio_last_rcvbuf(), cms = cio_last_connect_ms();
+    plog("tsp: own socket (%s), receive buffer %d KB, connect %d ms (about one round trip: at most %d KB/s with this buffer)",
+         strncasecmp(t->url, "https:", 6) ? "http" : "https", rb / 1024, cms, cms > 0 ? rb / cms : 0);
+    const char *rn = cio_rcvbuf_note();                     /* (once, and again when a size was refused) */
+    if (rn[0]) plog("tsp: receive buffer: %s", rn);
+}
 
 /* A decoder slower than the stream (1080p at 50/60 fps may be): leave out the pictures nothing else needs
  * (non-reference pictures, about half in most streams), for a steady lower picture rate in time with the
@@ -1388,7 +1436,7 @@ static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int st
     if (t->jump_pending) {                                   /* leave out units up to the keyframe at the sound */
         int64_t apts;
         int have = audio_now(t, now, &apts);
-        if (start_ok && (!have || pts < 0 || pts >= apts)) {
+        if (start_ok && (!have || pts < 0 || pts_diff(pts, apts) >= 0)) {
             t->jump_pending = 0;
             t->late_ema_us = 0;
             t->late_ms = 0;
@@ -1880,6 +1928,105 @@ static void video_packet(Tsp *t, Pkt *p)
 }
 
 /* Demuxer callbacks (reader thread): copy the unit into a queue. */
+/* ---- 0.7.0: subtitles (Matroska text tracks) ---- */
+#define SUB_CUES 512
+#define SUB_DEFAULT_MS 4000                 /* a cue without a duration: until the next one, at most this long */
+typedef struct SubCue { int track; int64_t start, dur; char text[240]; } SubCue;
+
+/* the tracks for the menu (once the file's tracks are known); the one to show: the id asked for, else the
+ * language, else none (subtitles are off until chosen) */
+static void update_sub_tracks(Tsp *t)
+{
+    if (!t->mkv && !t->mp4) return;                          /* (0.8.0: MP4 text tracks too) */
+    const TsInfo *i = dmx_info(t);
+    if (i->program < 0 || i->nsubs == t->sub_tracks_n) return;
+    int n = i->nsubs < TSP_MAX_SUBS ? i->nsubs : TSP_MAX_SUBS, cur = -1;
+    for (int k = 0; k < n; k++) {
+        t->st.s_id[k] = i->subs[k].id;
+        memcpy(t->st.s_lang[k], i->subs[k].lang, 4);
+        snprintf(t->st.s_name[k], sizeof t->st.s_name[k], "%s", i->subs[k].name);
+        t->st.s_forced[k] = i->subs[k].forced;
+    }
+    if (!g_soff) {
+        for (int k = 0; k < n && cur < 0; k++) if (t->st.s_id[k] == g_sid) cur = k;
+        for (int k = 0; k < n && cur < 0 && g_slang[0]; k++) if (!strcmp(t->st.s_lang[k], g_slang) && !t->st.s_forced[k]) cur = k;
+        for (int k = 0; k < n && cur < 0 && g_slang[0]; k++) if (!strcmp(t->st.s_lang[k], g_slang)) cur = k;
+    }
+    t->st.s_cur = cur;
+    t->st.s_n = n;
+    t->sub_tracks_n = i->nsubs;
+    char list[200];
+    size_t o = 0;
+    for (int k = 0; k < n && o + 40 < sizeof list; k++)
+        o += (size_t)snprintf(list + o, sizeof list - o, "%s%s%s%s%s", k ? ", " : "", t->st.s_lang[k][0] ? t->st.s_lang[k] : "-",
+                              t->st.s_name[k][0] ? " " : "", t->st.s_name[k], k == cur ? " (shown)" : "");
+    if (n) plog("tsp: subtitle tracks: %s", list);
+}
+
+static void on_sub(void *ctx, int id, const char *text, int64_t pts, int64_t dur)
+{
+    Tsp *t = ctx;
+    if (stopping(t) || pts < 0) return;
+    update_sub_tracks(t);
+    if (!t->cues && !(t->cues = calloc(SUB_CUES, sizeof(SubCue)))) return;
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    SubCue *c = &t->cues[t->ncues % SUB_CUES];
+    c->track = id;
+    c->start = pts;
+    c->dur = dur;
+    snprintf(c->text, sizeof c->text, "%s", text);
+    t->ncues++;
+    sceKernelUnlockMutex(t->qlock, 1);
+}
+
+void tsp_set_sub(int id, const char *lang, int off)
+{
+    g_sid = id;
+    ts_lang3(lang ? lang : "", g_slang);
+    g_soff = off;
+}
+
+void tsp_sub_choose(int k)
+{
+    Tsp *t = g_tsp;
+    if (!t) return;
+    if (k < 0 || k >= t->st.s_n) { t->st.s_cur = -1; plog("tsp: subtitles off"); return; }
+    t->st.s_cur = k;
+    plog("tsp: subtitles: track %d (%s)", t->st.s_id[k], t->st.s_lang[k][0] ? t->st.s_lang[k] : "-");
+}
+
+void tsp_set_sub_delay(int ms) { g_sub_delay = ms; }
+
+int tsp_sub_text(char *out, size_t cap)
+{
+    Tsp *t = g_tsp;
+    if (!t || !t->cues || t->st.s_cur < 0 || t->st.s_cur >= t->st.s_n || cap < 2) return 0;
+    int64_t p = -1;
+    sceKernelLockMutex(t->lock, 1, NULL);
+    if (t->shown >= 0) p = t->shown_pts;
+    sceKernelUnlockMutex(t->lock, 1);
+    if (p < 0) return 0;
+    p -= (int64_t)g_sub_delay * 90;                          /* (later subtitles: an earlier point of the film) */
+    int track = t->st.s_id[t->st.s_cur], found = 0;
+    int64_t best = -1;
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    uint32_t n = t->ncues < SUB_CUES ? t->ncues : SUB_CUES;
+    for (uint32_t k = 0; k < n; k++) {
+        const SubCue *c = &t->cues[k];
+        if (c->track != track || c->start > p || c->start < best) continue;
+        int64_t end = c->dur > 0 ? c->start + c->dur : c->start + SUB_DEFAULT_MS * 90;
+        if (c->dur <= 0)                                     /* until the next cue of the track */
+            for (uint32_t j = 0; j < n; j++)
+                if (t->cues[j].track == track && t->cues[j].start > c->start && t->cues[j].start < end) end = t->cues[j].start;
+        if (p >= end) continue;
+        best = c->start;
+        snprintf(out, cap, "%s", c->text);
+        found = 1;
+    }
+    sceKernelUnlockMutex(t->qlock, 1);
+    return found;
+}
+
 static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, int64_t dts, int flags)
 {
     (void)dts;
@@ -1945,17 +2092,13 @@ static void update_audio_tracks(Tsp *t, const TsInfo *i)
     t->a_nstreams = i->nstreams;
 }
 
-static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
+/* one audio packet (codec: TS_CODEC_*) to the audio thread */
+static void audio_push(Tsp *t, int codec, const uint8_t *data, size_t len, int64_t pts)
 {
-    Tsp *t = ctx;
-    if (stopping(t) || t->audio_off) return;
-    if (!t->first_audio_us) t->first_audio_us = now_us();
-    const TsInfo *i = dmx_info(t);
-    update_audio_tracks(t, i);
-    if (!audio_playable(i->audio_codec)) {
+    if (!audio_playable(codec)) {
         if (!t->audio_warned) {
             t->audio_warned = 1;
-            snprintf(t->st.audio_msg, sizeof t->st.audio_msg, "Audio %s: not supported", ts_codec_name(i->audio_codec));
+            snprintf(t->st.audio_msg, sizeof t->st.audio_msg, "Audio %s: not supported", ts_codec_name((TsCodec)codec));
             plog("tsp: %s", t->st.audio_msg);
         }
         return;
@@ -1965,9 +2108,90 @@ static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
     memset(p, 0, sizeof *p);
     p->pts = pts;
     p->len = len;
-    p->flags = i->audio_codec == TS_CODEC_MPEG_AUDIO ? 1 : i->audio_codec == TS_CODEC_AC3 || i->audio_codec == TS_CODEC_EAC3 ? 2 : 0;   /* 1 MPEG, 2 AC-3 (software) */
+    p->flags = codec == TS_CODEC_MPEG_AUDIO ? 1 : codec == TS_CODEC_AC3 || codec == TS_CODEC_EAC3 ? 2 : 0;   /* 1 MPEG, 2 AC-3 (software) */
     memcpy(p->data, data, len);
     q_push(t, &t->aq, p);
+}
+
+static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
+{
+    Tsp *t = ctx;
+    if (stopping(t) || t->audio_off) return;
+    if (t->alt_on) return;                                  /* 0.6.0: the sound comes from the HLS audio playlist */
+    if (!t->first_audio_us) t->first_audio_us = now_us();
+    const TsInfo *i = dmx_info(t);
+    if (!t->alt_list) update_audio_tracks(t, i);
+    update_sub_tracks(t);                                    /* 0.7.0 */
+    audio_push(t, i->audio_codec, data, len, pts);
+}
+
+/* 0.6.0: the HLS audio playlist's segments: TS (its own demuxer; a picture in them is left out) */
+static void on_alt_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, int64_t dts, int flags)
+{
+    (void)ctx; (void)data; (void)len; (void)pts; (void)dts; (void)flags;
+}
+
+static void alt_codec_seen(Tsp *t, int codec)
+{
+    if (t->alt_list && t->st.a_cur >= 0 && t->st.a_cur < t->st.a_n && t->st.a_codec[t->st.a_cur] != codec) {
+        t->st.a_codec[t->st.a_cur] = codec;
+        plog("tsp: HLS audio playlist: %s", ts_codec_name((TsCodec)codec));
+    }
+}
+
+static void on_alt_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
+{
+    Tsp *t = ctx;
+    if (stopping(t) || t->audio_off || !t->alt_on || !t->adm) return;
+    if (!t->first_audio_us) t->first_audio_us = now_us();
+    int c = ts_info(t->adm)->audio_codec;
+    alt_codec_seen(t, c);
+    audio_push(t, c, data, len, pts);
+}
+
+static const int ADTS_RATES[13];
+
+/* 0.6.0: a packed audio segment (.aac / .ac3: frames one after the other, the time in an ID3 tag at the start,
+ * PRIV "com.apple.streaming.transportStreamTimestamp", 33 bits in 8 bytes) */
+static void alt_feed_packed(Tsp *t, const uint8_t *b, size_t n)
+{
+    static const char OWNER[] = "com.apple.streaming.transportStreamTimestamp";
+    size_t at = 0;
+    while (n - at >= 10 && !memcmp(b + at, "ID3", 3)) {      /* ID3 tags (one or more) */
+        size_t sz = ((size_t)(b[at + 6] & 0x7F) << 21) | ((size_t)(b[at + 7] & 0x7F) << 14) | ((size_t)(b[at + 8] & 0x7F) << 7) | (b[at + 9] & 0x7F);
+        size_t end = at + 10 + sz;
+        if (end > n) end = n;
+        for (size_t k = at + 10; k + 10 + sizeof OWNER + 8 <= end; ) {   /* frames: id(4) size(4) flags(2) */
+            size_t fs = ((size_t)b[k + 4] << 24) | ((size_t)b[k + 5] << 16) | ((size_t)b[k + 6] << 8) | b[k + 7];
+            if (!memcmp(b + k, "PRIV", 4) && fs >= sizeof OWNER + 8 && !memcmp(b + k + 10, OWNER, sizeof OWNER)) {
+                const uint8_t *v = b + k + 10 + sizeof OWNER;
+                t->alt_pts = (int64_t)((((uint64_t)v[3] & 1) << 32) | ((uint64_t)v[4] << 24) | ((uint64_t)v[5] << 16) | ((uint64_t)v[6] << 8) | v[7]);
+            }
+            if (!fs || k + 10 + fs > end) break;
+            k += 10 + fs;
+        }
+        at = end;
+    }
+    if (n - at < 7) return;
+    if (b[at] == 0x47 && t->adm) { ts_feed(t->adm, b + at, n - at); return; }   /* (TS after an ID3 tag) */
+    if (b[at] == 0x0B && b[at + 1] == 0x77) {                /* AC-3 / E-AC-3: the software decoder splits the frames */
+        int c = n - at > 5 && (b[at + 5] >> 3) > 10 ? TS_CODEC_EAC3 : TS_CODEC_AC3;
+        alt_codec_seen(t, c);
+        audio_push(t, c, b + at, n - at, t->alt_pts);
+        t->alt_pts = -1;                                     /* (the next segment's ID3 tag gives the time again) */
+        return;
+    }
+    alt_codec_seen(t, TS_CODEC_AAC);
+    while (n - at >= 7 && !stopping(t)) {                    /* ADTS frames, one packet each */
+        if (b[at] != 0xFF || (b[at + 1] & 0xF6) != 0xF0) { at++; continue; }
+        size_t len = ((size_t)(b[at + 3] & 3) << 11) | ((size_t)b[at + 4] << 3) | (b[at + 5] >> 5);
+        int sfi = (b[at + 2] >> 2) & 15;
+        if (len < 7 || at + len > n || sfi >= 13) break;
+        audio_push(t, TS_CODEC_AAC, b + at, len, t->alt_pts);
+        int frames = (b[at + 6] & 3) + 1;
+        if (t->alt_pts >= 0) t->alt_pts += (int64_t)frames * 1024 * 90000 / ADTS_RATES[sfi];
+        at += len;
+    }
 }
 
 /* ------------------------------------------------------------------ audio */
@@ -1986,6 +2210,7 @@ static void audio_close(Tsp *t)
 {
     if (t->aport >= 0) { sceAudioOutReleasePort(t->aport); t->aport = -1; }
     if (t->adec) { sceAudiodecDeleteDecoder(&t->actrl); t->adec = 0; }
+    if (t->aacsw) { a52_destroy(t->aacsw); t->aacsw = NULL; t->asw_rate = t->asw_ch = 0; }
     free(t->aes);
     free(t->apcm);
     free(t->asil);
@@ -2097,15 +2322,7 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
         }
         t->audio_delay_us = 0;
     }
-    {
-        uint64_t o0 = now_us();
-        sceAudioOutOutput(t->aport, pcm);
-        uint32_t od = (uint32_t)(now_us() - o0);           /* 0.5.0: detail line */
-        t->aout_sum_us += od;
-        if (od > t->aout_max_us) t->aout_max_us = od;
-        if (!t->aout_n || od < t->aout_min_us) t->aout_min_us = od;
-        t->aout_n++;
-    }
+    sceAudioOutOutput(t->aport, pcm);
     if (t->st.audio_frames++ == 0) plog("tsp: first audio frame output");
     if (pts >= 0) {                      /* the previous buffer is playing now */
         int64_t dur = (int64_t)samples * 90000 / rate;
@@ -2118,6 +2335,25 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
 }
 
 
+/* 0.6.0: a frame of 5.1 / 7.1 AAC from FFmpeg's decoder, mixed down to stereo */
+static void aacsw_frame(void *ctx, const int16_t *pcm, int samples, int rate, int ch, int src_ch, int eac3, int64_t pts)
+{
+    Tsp *t = ctx;
+    (void)eac3;
+    if (t->audio_off) return;
+    if (samples % 64 || samples > A52_MAX_SAMPLES) { t->st.audio_errors++; return; }
+    if (!t->a52pcm) t->a52pcm = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
+    if (!t->a52pcm) return;
+    memcpy(t->a52pcm, pcm, (size_t)samples * 2u * (size_t)ch);
+    t->st.audio_rate = rate;
+    t->st.audio_ch = ch;
+    t->st.audio_src_ch = src_ch;
+    audio_out(t, t->a52pcm, samples, rate, ch, pts);
+}
+
+/* one ADTS frame's channel configuration that only the software decoder plays (3 .. 7: 3.0 up to 7.1) */
+static int aac_needs_sw(int ch) { return ch >= 3 && ch <= 7; }
+
 /* One ADTS frame. Runs on the audio thread; sceAudioOutOutput blocks in real time. */
 static void audio_packet(Tsp *t, Pkt *p)
 {
@@ -2126,15 +2362,21 @@ static void audio_packet(Tsp *t, Pkt *p)
     int sfi = (d[2] >> 2) & 15, ch = ((d[2] & 1) << 2) | (d[3] >> 6);
     if (sfi >= 13) return;
     int rate = ADTS_RATES[sfi];
-    if (!t->adec || rate != t->arate || ch != t->ach) {
-        int ok = ch >= 1 && ch <= 2 && out_rate_ok(rate);
-        if (t->adec && t->st.audio_frames > 0) {
+    if (t->aacsw && rate == t->asw_rate && ch == t->asw_ch) {           /* 0.6.0: 5.1 / 7.1 in software */
+        t->aparam_new = 0;
+        a52_feed_frame(t->aacsw, d, p->len, p->pts, aacsw_frame, t);
+        return;
+    }
+    if ((!t->adec && !t->aacsw) || t->aacsw || rate != t->arate || ch != t->ach) {
+        int ok = ((ch >= 1 && ch <= 2) || (aac_needs_sw(ch) && a52_aac_available())) && out_rate_ok(rate);
+        if ((t->adec || t->aacsw) && t->st.audio_frames > 0) {
             /* The sound is playing: a frame that says otherwise is usually damaged (a skipped HLS segment left
              * one saying "7 channels" and the sound was switched off for good). Skip such frames; reopen
              * only when the new format lasts (8 frames in a row) and can be played. */
             if (!ok || ++t->aparam_new < 8) {
                 t->st.audio_errors++;
-                if (t->aparam_logs++ < 3) plog("tsp: audio frame says %d Hz %d ch (playing %d Hz %d ch): skipped", rate, ch, t->arate, t->ach);
+                if (t->aparam_logs++ < 3) plog("tsp: audio frame says %d Hz %d ch (playing %d Hz %d ch): skipped", rate, ch,
+                                               t->aacsw ? t->asw_rate : t->arate, t->aacsw ? t->asw_ch : t->ach);
                 return;
             }
             plog("tsp: audio format changed to %d Hz %d ch", rate, ch);
@@ -2143,6 +2385,16 @@ static void audio_packet(Tsp *t, Pkt *p)
         }
         t->aparam_new = 0;
         audio_close(t);
+        if (aac_needs_sw(ch) && out_rate_ok(rate)) {                     /* 0.6.0: the Vita's decoder takes 1-2 channels */
+            t->aacsw = a52_create_aac();
+            if (!t->aacsw) { audio_disable(t, "Audio has %d channels: not supported", ch); return; }
+            t->asw_rate = rate;
+            t->asw_ch = ch;
+            plog("tsp: AAC %d Hz, %s: software decoder (FFmpeg), played as stereo", rate,
+                 ch == 6 ? "5.1" : ch == 7 ? "7.1" : ch == 5 ? "5.0" : ch == 4 ? "4.0" : "3.0");
+            a52_feed_frame(t->aacsw, d, p->len, p->pts, aacsw_frame, t);
+            return;
+        }
         if (ch < 1 || ch > 2) { audio_disable(t, "Audio has %d channels: not supported", ch); return; }
         if (!out_rate_ok(rate)) { audio_disable(t, "Audio rate %d Hz: not supported", rate); return; }
         int r = audio_open(t, rate, ch);
@@ -2197,28 +2449,12 @@ static void mpa_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     audio_out(t, t->mpcm, samples, rate, ch, pts);
 }
 
-/* 0.5.0 test builds: the first sound frames of the software decoder in one go (writing a line per frame while
- * playing would disturb what is measured): time since the first frame, the packet's time, the frame's time, its
- * samples, how long the output blocked, and the sound clock right after (all ms; pts from the first frame). */
-static void a52_trace(Tsp *t)
-{
-    t->a52tr_done = 1;
-    int64_t b = t->a52tr_n && t->a52tr[0].pts >= 0 ? t->a52tr[0].pts : 0;
-    plog("tsp: AC-3 trace (%d frames): t_ms packet_ms frame_ms samples block_ms clock_ms", t->a52tr_n);
-    for (int k = 0; k < t->a52tr_n; k++) {
-        #define MS(v) ((v) >= 0 ? (long)(((v) - b) / 90) : -1L)
-        plog("tsp: tr %u %ld %ld %u %u %ld", (unsigned)t->a52tr[k].t_ms, MS(t->a52tr[k].in_pts), MS(t->a52tr[k].pts), (unsigned)t->a52tr[k].n,
-             (unsigned)(t->a52tr[k].block_us / 1000), MS(t->a52tr[k].clk));
-        #undef MS
-    }
-}
-
 /* 0.5.0: an AC-3 / E-AC-3 frame from the software decoder (stereo already) */
 static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int ch, int src_ch, int eac3, int64_t pts)
 {
     Tsp *t = ctx;
-    (void)src_ch;
     if (t->audio_off) return;
+    t->st.audio_src_ch = src_ch;
     if (!t->st.audio_frames && !t->a52pcm) plog("tsp: %s audio, %d Hz, played as %s (software decoder)", eac3 ? "E-AC-3" : "AC-3", rate, ch == 1 ? "mono" : "stereo");
     if (samples % 64) { t->st.audio_errors++; return; }
     if (!t->a52pcm) t->a52pcm = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
@@ -2229,42 +2465,12 @@ static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     t->st.audio_rate = rate;
     t->st.audio_ch = ch;
     t->st.audio_ac3 = eac3 ? 2 : 1;
-    uint64_t o0 = now_us();
-    if (!t->a52_t0) t->a52_t0 = o0;
-    if (g_ac3_test == 1) {                                  /* test 1: not played; the time a frame lasts, as the output would */
-        t->st.audio_frames++;
-        uint64_t dur = (uint64_t)samples * 1000000ULL / (uint64_t)rate;
-        sceKernelDelayThread((SceUInt)dur);
-    } else if (g_ac3_test == 3 && samples % 128 == 0 && samples >= 256) {   /* test 3: two halves (768 for AC-3) */
-        int h = samples / 2;
-        audio_out(t, t->a52pcm, h, rate, ch, pts);
-        if (!t->audio_off) audio_out(t, t->a52pcm + (size_t)h * 2u * (size_t)ch, h, rate, ch, pts >= 0 ? pts + (int64_t)h * 90000 / rate : -1);
-    } else {
-        audio_out(t, t->a52pcm, samples, rate, ch, pts);
-    }
-    if (g_ac3_test && !t->a52tr_done && t->a52tr_n < (int)(sizeof t->a52tr / sizeof t->a52tr[0])) {   /* trace (test modes only): kept, logged at once later */
-        uint64_t now = now_us();
-        int k = t->a52tr_n++;
-        t->a52tr[k].in_pts = t->a52_in_pts;
-        t->a52tr[k].pts = pts;
-        t->a52tr[k].n = (uint16_t)samples;
-        t->a52tr[k].t_ms = (uint32_t)((now - t->a52_t0) / 1000);
-        t->a52tr[k].block_us = (uint32_t)(now - o0);
-        int64_t c = -1;
-        if (t->aclock_valid) c = t->aclock_pts + (int64_t)(now - t->aclock_us) * 9 / 100;
-        t->a52tr[k].clk = c;
-    }
-    if (!t->a52tr_done && t->a52tr_n >= (int)(sizeof t->a52tr / sizeof t->a52tr[0])) a52_trace(t);
+    audio_out(t, t->a52pcm, samples, rate, ch, pts);
 }
 
 static void audio_a52(Tsp *t, Pkt *p)
 {
-    if (!t->a52) {
-        if (!(t->a52 = a52_create())) { audio_disable(t, "Audio %s: not supported", "ac3"); return; }
-        if (g_ac3_test) plog("tsp: AC-3 test mode %d (%s)", g_ac3_test, g_ac3_test == 1 ? "decoded, not played" :
-                             g_ac3_test == 2 ? "audio thread at video priority" : "sound in 768-sample parts");
-    }
-    t->a52_in_pts = p->pts;
+    if (!t->a52 && !(t->a52 = a52_create())) { audio_disable(t, "Audio %s: not supported", "ac3"); return; }
     a52_feed(t->a52, p->data, p->len, p->pts, a52_frame, t);
 }
 
@@ -2343,7 +2549,6 @@ static int audio_main(SceSize args, void *argp)
     audio_close(t);
     mpa_destroy(t->mpa);                                    /* only this thread uses it */
     t->mpa = NULL;
-    if (t->a52tr_n && !t->a52tr_done) a52_trace(t);       /* (a short play: what was kept) */
     a52_destroy(t->a52);
     t->a52 = NULL;
     free(t->a52pcm);
@@ -2364,7 +2569,7 @@ static unsigned cur_read_size(const Tsp *t) { return t->read_size ? t->read_size
 /* CPU line: how much of the time each player thread ran, and how busy each core was (the network stack
  * and TLS run in the system, so only the cores show them). Answers "decoder, network or both at once?":
  * a core near 100% means the CPU is the limit, not the decoder hardware or the Wi-Fi. */
-static void cpu_line(Tsp *t, uint64_t now)
+static void cpu_line(Tsp *t, uint64_t now, int loud)
 {
     SceUID ids[4] = { t->thread, t->vthread, t->athread, t->ui_thid };
     static const char *const names[4] = { "reader", "video", "audio", "screen" };
@@ -2408,7 +2613,7 @@ static void cpu_line(Tsp *t, uint64_t now)
             }
             if (n) snprintf(co + (c < sizeof co ? c : sizeof co - 1), sizeof co - (c < sizeof co ? c : sizeof co - 1), " (avg %u%%)", sum / n);
         }
-        plog("tsp: cpu: %s%s%s", th, co[0] ? "; cores busy " : "", co);
+        if (loud) plog("tsp: cpu: %s%s%s", th, co[0] ? "; cores busy " : "", co);
     }
     t->cpu_t0 = now;
     for (int k = 0; k < 4; k++) {
@@ -2423,10 +2628,18 @@ static void stats_tick(Tsp *t)
     uint64_t dt = now - t->last_stats;                      /* the reader may block: use the real interval */
     if (dt < STATS_US) return;
     t->last_stats = now;
+    /* 0.8.1: the log every 5 s only in the first 30 s or when pictures are lost; after that a short line a minute
+     * (it grew by about 500 KB an hour of watching). The values below are still worked out every time: the
+     * information table uses them. */
+    uint32_t bad = t->st.dropped + t->st.late + t->st.damaged + t->st.errors + (uint32_t)t->st.skipped;
+    int loud = now - t->start_us < 31000000ULL || bad != t->log_bad;
+    int brief = loud || ++t->stats_quiet >= 12;
+    if (brief) t->stats_quiet = 0;
+    t->log_bad = bad;
     uint32_t ui = t->ui_calls;
     t->ui_calls = 0;
     unsigned ms = (unsigned)(dt / 1000);
-    plog("tsp: stats %u KB, decoded %u, shown %u, dropped %u, late %u, damaged %u, errors %u, skipped %u, frame %u us, "
+    if (brief) plog("tsp: stats %u KB, decoded %u, shown %u, dropped %u, late %u, damaged %u, errors %u, skipped %u, frame %u us, "
          "video %+d ms vs audio, out of order %u, screen %u fps",
          (unsigned)(t->st.bytes / 1024), t->st.decoded, t->st.shown, t->st.dropped, t->st.late, t->st.damaged,
          t->st.errors, (unsigned)t->st.skipped, (unsigned)t->frame_us, -t->st.av_late_ms, (unsigned)t->out_of_order,
@@ -2436,6 +2649,20 @@ static void stats_tick(Tsp *t)
     uint32_t bytes = t->st.bytes, decoded = t->st.decoded;
     unsigned kbs = (unsigned)((uint64_t)(bytes - t->prev_bytes) * 1000 / 1024 / ms);
     t->st.net_kbs = kbs;
+    /* 0.6.0: with full queues the reader takes only what is played: "rates net" then shows the film's rate, not
+     * the network's (it said "slower than the film" on 3 MB/s lines). The time it waited for room is left out. */
+    {
+        uint64_t pw = t->push_wait_us, wus = pw - t->prev_push_wait;
+        t->prev_push_wait = pw;
+        unsigned wms = (unsigned)(wus / 1000);
+        if (wms > ms) wms = ms;
+        t->net_wait_pct = wms * 100 / ms;
+        unsigned act = ms - wms;
+        /* (only from an interval in which it read most of the time: with the queues nearly always full the few
+         * reads in between come from the socket's buffer at once, and the same old value stood for minutes) */
+        if (act >= 1000 && t->net_wait_pct < 50) t->net_free_kbs = (unsigned)((uint64_t)(bytes - t->prev_bytes) * 1000 / 1024 / act);
+        t->st.net_read_kbs = t->net_wait_pct >= 5 ? t->net_free_kbs : 0;
+    }
     t->st.fps10 = t->frame_us ? (int)(10000000u / t->frame_us) : 0;
     unsigned dfps10 = (unsigned)((uint64_t)(decoded - t->prev_decoded) * 10000 / ms);   /* fps x10 */
     t->prev_bytes = bytes;
@@ -2463,13 +2690,22 @@ static void stats_tick(Tsp *t)
     t->dcalls = t->dus_sum = t->dus_max = 0;
     if (dcalls) snprintf(dc, sizeof dc, ", decoder call avg %u us max %u us, dropped old %u late %u, %d slots",
                          dsum / dcalls, dmax, (unsigned)t->drop_old, (unsigned)t->drop_behind, t->nslots);
-    char mem[64] = "";
-    if (have_mem)
-        snprintf(mem, sizeof mem, ", free main %u MB cdram %u MB phycont %u MB", (unsigned)fm.size_user >> 20,
+    char mem[112] = "";
+    MemStat hm = mem_stat();                                 /* 0.7.0: the app's own memory (lists, queues, caches) */
+    int ml = hm.total_kb ? snprintf(mem, sizeof mem, ", app memory %u of %u MB (peak %u)", hm.used_kb >> 10, hm.total_kb >> 10, hm.peak_kb >> 10)
+                         : snprintf(mem, sizeof mem, ", app memory %u MB (peak %u)", hm.used_kb >> 10, hm.peak_kb >> 10);
+    if (have_mem && ml > 0 && (size_t)ml < sizeof mem)
+        snprintf(mem + ml, sizeof mem - (size_t)ml, ", system free main %u MB cdram %u MB phycont %u MB", (unsigned)fm.size_user >> 20,
                  (unsigned)fm.size_cdram >> 20, (unsigned)fm.size_phycont >> 20);
-    plog("tsp: rates net %u KB/s, decode %u.%u fps%s, video queue %d (%u KB), audio queue %d (%d ms)%s%s",
-         kbs, dfps10 / 10, dfps10 % 10, dc, vq_n, (unsigned)(vq_b / 1024), aq_n, aq_ms, mem, rd);
-    if (!t->internal && t->pub_fed)
+    char nf[64] = "";
+    if (t->net_wait_pct >= 5 && t->net_free_kbs)
+        snprintf(nf, sizeof nf, " (queues full %u%% of the time; the line %s %u KB/s)", t->net_wait_pct,
+                 t->net_wait_pct < 50 ? "brings" : "last brought", t->net_free_kbs);
+    else if (t->net_wait_pct >= 5) snprintf(nf, sizeof nf, " (queues full %u%% of the time)", t->net_wait_pct);
+    if (brief) plog("tsp: rates net %u KB/s%s, decode %u.%u fps%s, video queue %d (%u KB), audio queue %d (%d ms)%s%s",
+         kbs, nf, dfps10 / 10, dfps10 % 10, dc, vq_n, (unsigned)(vq_b / 1024), aq_n, aq_ms, mem, rd);
+    if (!loud) {}
+    else if (!t->internal && t->pub_fed)
         plog("tsp: decoder units in %u, pictures out %u, units with no picture %u (%u of them nothing refers to)",
              (unsigned)t->pub_fed, (unsigned)t->st.decoded, (unsigned)t->pub_nopic, (unsigned)t->pub_nopic_nonref);
     else if (t->internal && t->hd_fed)
@@ -2494,33 +2730,13 @@ static void stats_tick(Tsp *t)
             unsigned used = pd + psl + pda + pb;
             uint32_t dr = t->drained;
             t->drained = 0;
-            plog("tsp: timing: video thread %u%% in the decoder, %u%% waiting for a free slot, %u%% waiting for data, "
+            if (loud) plog("tsp: timing: video thread %u%% in the decoder, %u%% waiting for a free slot, %u%% waiting for data, "
                  "%u%% HD decoder busy, %u%% other; picture to screen avg %u ms; screen frames with no picture %u, behind %u",
                  pd, psl, pda, pb, used < 100 ? 100 - used : 0, wn ? (unsigned)(wsum / wn / 1000) : 0, (unsigned)none, (unsigned)more);
-            if (dr) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
+            if (dr && loud) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
         }
     }
-    cpu_line(t, now);
-    {   /* 0.5.0: picture / sound timing in detail (the AC-3 films that stuttered on the HD decoder) */
-        int64_t ap = 0;
-        int have = audio_now(t, now, &ap);
-        int clk = 0;
-        if (have && t->aclk_prev_us && t->aclk_prev_pts >= 0 && !t->paused && !t->buffering)
-            clk = (int)((ap - t->aclk_prev_pts) / 90) - (int)((now - t->aclk_prev_us) / 1000);   /* + = the sound clock ran ahead of real time */
-        t->aclk_prev_pts = have ? ap : -1;
-        t->aclk_prev_us = now;
-        if (t->pic_n || t->aout_n)
-            plog("tsp: detail: pictures %u, longest gap %u ms, gaps over 3 pictures %u; sound output %u calls, blocked min %u avg %u max %u ms; "
-                 "sound clock vs real time %+d ms%s",
-                 (unsigned)t->pic_n, (unsigned)(t->pic_gap_max_us / 1000), (unsigned)t->pic_gaps_long, (unsigned)t->aout_n,
-                 (unsigned)(t->aout_min_us / 1000), t->aout_n ? (unsigned)(t->aout_sum_us / t->aout_n / 1000) : 0u,
-                 (unsigned)(t->aout_max_us / 1000), clk, g_ac3_test ? ", AC-3 test mode" : "");
-        t->pic_n = t->pic_gaps_long = 0;
-        t->pic_gap_max_us = 0;
-        t->aout_n = 0;
-        t->aout_sum_us = t->aout_max_us = 0;
-        t->aout_min_us = 0;
-    }
+    cpu_line(t, now, loud);
     if (t->reader_done) return;                             /* (called by the video thread now: no reads to tune) */
 
     /* sceHttpReadData returns only when the request is full: small reads keep radio responsive, larger ones
@@ -2597,7 +2813,9 @@ static void check_stall(Tsp *t)
     }
     /* 0.5.0: a film through the server from the middle: the server first finds the place and starts converting
      * (more than 10 s on a phone; "No video data" / "No usable keyframe" before) */
-    uint64_t stall = t->vod_stream || g_via_server ? 3 * STALL_US : STALL_US;   /* (also live channels through the server) */
+    /* 0.6.0: a film directly: 20 s (a far server answered a jump with 14 KB in 10 s and nothing more; it is asked
+     * again after 8 s, see vod_first_data) */
+    uint64_t stall = t->vod_stream || g_via_server ? 3 * STALL_US : t->vod ? 2 * STALL_US : STALL_US;   /* (also live channels through the server) */
     if (t->st.decoded || t->st.audio_only || t->st.state == TSP_ERROR || now_us() - t->start_us < stall) return;
     explain_no_picture(t);
 }
@@ -2614,6 +2832,20 @@ static int http_refused(Tsp *t, int status)
         plog("tsp: server answered %d, asking once more in 1.5 s", status);
         for (int k = 0; k < 75 && !stopping(t); k++) sceKernelDelayThread(20000);
         return 1;
+    }
+    /* 1.0: reconnecting a stream that played: a one-connection account is refused while the server still
+     * counts the lost connection (seen after 2 hours: "No data for too long", then 407). It lets it go after
+     * a few seconds: asked again after 3, 6 and 10 s (again from the start once it has played a while). */
+    if (busy && t->st.bytes > 0) {
+        static const int WAIT_S[3] = { 3, 6, 10 };
+        if (t->st.bytes > t->busy_bytes + 512 * 1024) t->busy_retries = 0;
+        if (t->busy_retries < 3) {
+            int w = WAIT_S[t->busy_retries++];
+            t->busy_bytes = t->st.bytes;
+            plog("tsp: server answered %d while reconnecting (it may still count the lost connection): again in %d s", status, w);
+            for (int k = 0; k < w * 50 && !stopping(t); k++) sceKernelDelayThread(20000);
+            return !stopping(t);
+        }
     }
     if (status == 407)
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP 407 (the provider refuses: account busy or channel not in the package)");
@@ -2634,6 +2866,7 @@ static int hs_data(void *ctx, const uint8_t *d, size_t n)
         if (hls_is_playlist((const char *)d, n)) { t->is_hls = 1; return 1; }
         if (d[0] == '<') { set_error_kind(t, TSP_ERRK_NET, "The server sent a web page instead of video"); return 1; }
     }
+    if (!h->got) log_rcvbuf(t);
     h->got += (uint32_t)n;
     t->st.bytes += (uint32_t)n;
     dmx_feed(t, d, n);
@@ -2653,9 +2886,11 @@ static int https_session(Tsp *t, uint32_t *got)
     char err[96];
     int r = cio_get(&rq, &status, err, sizeof err);
     *got = h.got;
-    plog("tsp: HTTPS status %d, %u KB%s%s", status, (unsigned)(h.got / 1024), r < 0 && r != -2 ? ", " : "", r < 0 && r != -2 ? err : "");
+    plog("tsp: %s status %d, %u KB%s%s", strncasecmp(t->url, "https:", 6) ? "HTTP (own socket)" : "HTTPS", status,
+         (unsigned)(h.got / 1024), r < 0 && r != -2 ? ", " : "", r < 0 && r != -2 ? err : "");
     if (stopping(t) || t->is_hls) return 0;
     if (status >= 400) return http_refused(t, status);
+    if (r < 0 && !h.got && cio_http_failed(t, t->url, status, err)) return 1;   /* (next try: the system HTTP) */
     if (r < 0) {
         snprintf(t->net_err, sizeof t->net_err, "%s", err);
         if (t->st.bytes || ++t->connect_fails <= 2) return 1;  /* worked before, or first tries: try again */
@@ -2669,7 +2904,7 @@ static int http_session(Tsp *t, uint8_t *buf, uint32_t *got)
 {
     int tpl = -1, conn = -1, req = -1, status = 0, n, retry = 0;
     *got = 0;
-    if (cio_available() && !strncasecmp(t->url, "https:", 6)) return https_session(t, got);
+    if (via_cio(t, t->url)) return https_session(t, got);
     tpl = sceHttpCreateTemplate(t->hdr_ua[0] ? t->hdr_ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) { set_error(t, "HTTP init failed"); goto done; }
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
@@ -2752,7 +2987,7 @@ static void dmx_feed(Tsp *t, const uint8_t *b, size_t n)
 {
     if (t->net_err[0] && n) t->net_err[0] = 0;              /* data comes: an earlier failure is not the story any more */
     if (!t->mkv && !t->flv && t->st.bytes == n) {
-        TsSink sink = { on_video, on_audio, t };
+        TsSink sink = { on_video, on_audio, t, on_sub };
         if (mkv_probe(b, n)) {
             t->mkv = mkv_create(&sink);
             if (t->mkv) mkv_prefer_audio(t->mkv, g_aid, g_alang);
@@ -2938,7 +3173,7 @@ static int hls_get_once(Tsp *t, const char *url, char *out, size_t cap, uint8_t 
 {
     int tpl = -1, conn = -1, req = -1, n, total = -1;
     *status = 0;
-    if (cio_available() && !strncasecmp(url, "https:", 6)) {
+    if (via_cio(t, url)) {
         HgCtx h = { t, out, cap, 0 };
         CioRequest rq = { url, NULL, NULL, 10, 15, hg_data, hg_stop, &h };
         rq.ua = t->hdr_ua; rq.referer = t->hdr_ref;
@@ -2946,9 +3181,12 @@ static int hls_get_once(Tsp *t, const char *url, char *out, size_t cap, uint8_t 
         char err[96];
         int r = cio_get(&rq, status, err, sizeof err);
         if (out) out[h.total] = 0;
+        if (r < 0 && r != -2 && !h.total && cio_http_failed(t, url, *status, err)) goto system_http;
         if (r < 0 && r != -2 && !h.total) { plog("tsp: HTTPS %s", err); snprintf(t->net_err, sizeof t->net_err, "%s", err); return r; }
+        if (h.total && !out) log_rcvbuf(t);
         return h.total;
     }
+system_http:
     tpl = sceHttpCreateTemplate(t->hdr_ua[0] ? t->hdr_ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) return tpl;
     sceHttpSetResolveTimeOut(tpl, 10 * 1000 * 1000);
@@ -3044,12 +3282,135 @@ static int seg_is_mp4(const char *uri, int len)
 
 static void hls_list_variants(Tsp *t, const HlsVariant *v, int n, int k);
 
+/* ---- 0.6.0: HLS sound from an audio playlist of its own (#EXT-X-MEDIA:TYPE=AUDIO,URI=...) ----
+ * The picture's segments come from the variant, the sound's from the audio playlist, fetched just before the
+ * picture segment of the same time (the times in the segments put them together, as with one stream). */
+#define ALT_SEG_MAX (2u * 1024 * 1024)
+#define ALT_MUXED_ID (0x10000 + 99)              /* the track menu's id for the sound inside the variant */
+typedef struct {
+    char *text;                                 /* the audio playlist */
+    char url[HLS_URL_MAX], base[HLS_URL_MAX];
+    uint8_t *seg;                               /* one audio segment */
+    int64_t next;                               /* the next audio segment, -1 = not chosen yet */
+    int64_t ms;                                 /* sound fetched so far (ms of segments) */
+    int back_ms;                                /* live: where the picture starts, ms before the playlist's end */
+    int end, fails;
+} AltAudio;
+
+static void alt_off(Tsp *t, const char *why)
+{
+    if (!t->alt_on) return;
+    t->alt_on = 0;
+    plog("tsp: HLS audio playlist left out: %s (the variant's own sound, if it has one)", why);
+}
+
+/* the track list from the master playlist (the variant's own sound first when the group names one), and the
+ * one to play; returns the rendition to fetch, -1 for none (the variant's own sound) */
+static int alt_choose(Tsp *t, const HlsRendition *r, int nr, const char *group, int muxed, const char *mux_lang, int vcodec)
+{
+    int codec = vcodec == 3 ? TS_CODEC_EAC3 : vcodec == 2 ? TS_CODEC_AC3 : TS_CODEC_AAC;
+    int n = 0, cur = -1;
+    int want = g_aid >= 0x10000 && g_aid < ALT_MUXED_ID ? g_aid - 0x10000 : -1;
+    int pick = hls_pick_audio(r, nr, group, want, g_alang);
+    if (pick < 0) return -1;
+    if (muxed) {                                             /* the sound inside the variant: kept unless asked otherwise */
+        char l3[4];
+        ts_lang3(mux_lang, l3);
+        int lang_match = g_alang[0] && (pick >= 0 && want < 0);
+        if (lang_match) { char pl[4]; ts_lang3(r[pick].lang, pl); lang_match = pl[0] && !strcmp(pl, g_alang) && strcmp(l3, g_alang); }
+        if (g_aid == ALT_MUXED_ID || (want < 0 && !lang_match)) pick = -1;
+        t->st.a_id[n] = ALT_MUXED_ID;
+        t->st.a_codec[n] = codec;
+        memcpy(t->st.a_lang[n], l3, 4);
+        if (pick < 0) cur = n;
+        n++;
+    }
+    for (int i = 0; i < nr && n < TSP_MAX_AUDIO; i++) {
+        if (group && group[0] && strcmp(r[i].group, group)) continue;
+        t->st.a_id[n] = 0x10000 + i;
+        t->st.a_codec[n] = codec;
+        ts_lang3(r[i].lang, t->st.a_lang[n]);
+        if (i == pick) cur = n;
+        n++;
+    }
+    t->st.a_n = n;
+    t->st.a_cur = cur;
+    t->alt_list = 1;
+    char list[200];
+    size_t o = 0;
+    for (int k = 0; k < n && o + 32 < sizeof list; k++)
+        o += (size_t)snprintf(list + o, sizeof list - o, "%s%s%s%s", k ? ", " : "", t->st.a_lang[k][0] ? t->st.a_lang[k] : "-",
+                              t->st.a_id[k] == ALT_MUXED_ID ? " (in the stream)" : "", k == cur ? " (playing)" : "");
+    plog("tsp: HLS audio playlists: %s", list);
+    return pick;
+}
+
+/* fetches the sound up to until_ms (the end of the picture segment that comes next) */
+static void alt_fill(Tsp *t, AltAudio *A, int64_t until_ms, uint8_t *buf)
+{
+    int refreshed = 0;
+    while (!stopping(t) && t->alt_on && !A->end && A->ms < until_ms) {
+        HlsMedia am;
+        if (hls_parse_media(A->text, &am) < 0) { alt_off(t, "no segments"); return; }
+        if (am.encrypted || am.fmp4 || (am.nseg && seg_is_mp4(am.seg[0].uri, am.seg[0].uri_len))) {
+            hls_media_free(&am);
+            alt_off(t, "encrypted or MP4 segments");
+            return;
+        }
+        if (A->next < 0) {
+            if (am.endlist || am.nseg == 0) A->next = am.first_seq;
+            else {                                           /* live: as far from the end as the picture */
+                int i = am.nseg - 1;
+                int64_t acc = am.seg[i].duration_ms;
+                while (i > 0 && acc < A->back_ms) { i--; acc += am.seg[i].duration_ms; }
+                A->next = am.seg[i].seq;
+            }
+            plog("tsp: HLS audio playlist: %d segments, starting at #%lld", am.nseg, (long long)A->next);
+        }
+        if (am.nseg && A->next < am.seg[0].seq) A->next = am.seg[0].seq;
+        int idx = -1;
+        for (int i = 0; i < am.nseg; i++) if (am.seg[i].seq == A->next) { idx = i; break; }
+        if (idx < 0) {
+            int endlist = am.endlist;
+            hls_media_free(&am);
+            if (endlist) { A->end = 1; return; }
+            if (refreshed) return;                           /* (not listed yet: the next round) */
+            refreshed = 1;
+            if (hls_fetch_text(t, A->url, A->text, "audio playlist update", 1, A->base) < 0) return;
+            continue;
+        }
+        char su[HLS_URL_MAX];
+        hls_resolve(A->base, am.seg[idx].uri, am.seg[idx].uri_len, su, sizeof su);
+        int dur = am.seg[idx].duration_ms;
+        int64_t seq = am.seg[idx].seq;
+        hls_media_free(&am);
+        int status = 0, r = hls_get(t, su, (char *)A->seg, ALT_SEG_MAX, buf, &status);
+        if ((r <= 0 || status >= 400) && !stopping(t)) { hls_wait(t, 300); r = hls_get(t, su, (char *)A->seg, ALT_SEG_MAX, buf, &status); }
+        if (stopping(t)) return;
+        if (r > 0 && status < 400) {
+            t->st.bytes += (uint32_t)r;
+            if (A->seg[0] == 0x47) ts_feed(t->adm, A->seg, (size_t)r);
+            else alt_feed_packed(t, A->seg, (size_t)r);
+            A->fails = 0;
+        } else {
+            char lp[96];
+            plog("tsp: HLS audio segment #%lld failed (0x%08X, status %d, %s)", (long long)seq, (unsigned)r, status, url_path_for_log(su, lp, sizeof lp));
+            if (++A->fails >= 5) { alt_off(t, "its segments do not come"); return; }
+        }
+        A->next = seq + 1;
+        A->ms += dur;
+    }
+}
+
 /* HLS: playlists are read with sceHttp; the MPEG-TS segments go into the demuxer one after the other.
  * Live playlists start three segments from the end and are read again while playing. */
 static void read_hls(Tsp *t, uint8_t *buf)
 {
     char *text = malloc(HLS_TEXT_MAX);
     char url[HLS_URL_MAX], seg_url[HLS_URL_MAX], base[HLS_URL_MAX];
+    AltAudio *alt = NULL;                                    /* 0.6.0: the sound's own playlist */
+    HlsRendition *rend = NULL;
+    int alt_pick = -1;
     if (!text) { set_error(t, "Out of memory"); return; }
     snprintf(url, sizeof url, "%s", t->url);
     plog("tsp: HLS stream");
@@ -3059,6 +3420,8 @@ static void read_hls(Tsp *t, uint8_t *buf)
         HlsVariant *v = malloc(sizeof *v * 32);
         if (!v) { set_error(t, "Out of memory"); goto out; }
         int n = hls_parse_master(text, base, v, 32);
+        rend = malloc(sizeof *rend * HLS_MAX_RENDITIONS);
+        int nrend = rend ? hls_parse_audio(text, base, rend, HLS_MAX_RENDITIONS) : 0;
         int want = !g_hd1080 && g_hls_want > 720 ? 720 : g_hls_want;
         t->st.hls_hd = g_hd1080 && hls_has_variant_above(v, n, 720, 1080);   /* the player offers R: 1080p */
         int k = hls_pick_wanted(v, n, want, g_hls_bw);
@@ -3071,6 +3434,12 @@ static void read_hls(Tsp *t, uint8_t *buf)
             plog("tsp: HLS variant %d: %dx%d, %ld kbit/s%s%s%s", i, v[i].width, v[i].height, v[i].bandwidth / 1000,
                  v[i].hevc ? ", HEVC" : "", v[i].audio_only ? ", audio only" : "", i == k ? "  <- chosen" : "");
         if (k < 0) { free(v); set_error_kind(t, TSP_ERRK_FORMAT, "HLS playlist without a usable stream"); goto out; }
+        if (nrend > 0 && (!v[k].audio_group[0] || hls_pick_audio(rend, nrend, v[k].audio_group, -1, "") >= 0)) {
+            /* 0.6.0: the sound has playlists of its own (chosen now: the master playlist's text is still here) */
+            char ml[16], mn[64];
+            int muxed = hls_audio_muxed(text, v[k].audio_group, ml, sizeof ml, mn, sizeof mn);
+            alt_pick = alt_choose(t, rend, nrend, v[k].audio_group, muxed, ml, v[k].audio_codec);
+        }
         /* a variant that does not answer: try the next best one (up to three) */
         int got = -1;
         for (int tries = 0; tries < 3 && k >= 0 && !stopping(t); tries++) {
@@ -3091,6 +3460,22 @@ static void read_hls(Tsp *t, uint8_t *buf)
         }
         if (hls_is_master(text)) { set_error_kind(t, TSP_ERRK_FORMAT, "HLS playlist inside a playlist: not supported"); goto out; }
     }
+    if (alt_pick >= 0 && rend && !stopping(t)) {             /* 0.6.0: the sound's playlist */
+        alt = calloc(1, sizeof *alt);
+        if (alt) { alt->text = malloc(HLS_TEXT_MAX); alt->seg = malloc(ALT_SEG_MAX); }
+        TsSink as = { on_alt_video, on_alt_audio, t, NULL };
+        if (alt && alt->text && alt->seg && (t->adm = ts_create(&as)) != NULL) {
+            snprintf(alt->url, sizeof alt->url, "%s", rend[alt_pick].uri);
+            alt->next = -1;
+            t->alt_pts = -1;
+            t->alt_on = 1;
+            if (hls_fetch_text(t, alt->url, alt->text, "audio playlist", 1, alt->base) < 0) alt_off(t, "it does not answer");
+            else if (hls_is_master(alt->text)) alt_off(t, "a playlist of playlists");
+            else plog("tsp: HLS sound from its own playlist (%s%s%s)", rend[alt_pick].lang[0] ? rend[alt_pick].lang : "-",
+                      rend[alt_pick].name[0] ? ", " : "", rend[alt_pick].name);
+        } else plog("tsp: HLS audio playlist: out of memory");
+    }
+    int64_t v_ms = 0;                                        /* (0.6.0: picture fetched so far, to keep the sound with it) */
     int64_t next = -1;
     uint64_t last_new = now_us();
     int fed = 0, seg_fails = 0;
@@ -3107,6 +3492,11 @@ static void read_hls(Tsp *t, uint8_t *buf)
             int back = m.target_ms >= 8000 ? 2 : 3;           /* long segments: start closer to live */
             next = m.endlist || m.nseg <= back ? m.first_seq : m.seg[m.nseg - back].seq;
             plog("tsp: HLS %s, %d segments of %d ms, starting at #%lld", m.endlist ? "video" : "live", m.nseg, m.target_ms, (long long)next);
+            if (alt) {                                       /* 0.6.0: live: the sound starts as far from the end */
+                int64_t back = 0;
+                for (int i = 0; i < m.nseg; i++) if (m.seg[i].seq >= next) back += m.seg[i].duration_ms;
+                alt->back_ms = (int)back;
+            }
         }
         if (m.nseg && next < m.seg[0].seq) {                /* the playlist moved past us */
             plog("tsp: HLS segments %lld..%lld are gone, continuing at %lld", (long long)next, (long long)m.seg[0].seq - 1, (long long)m.seg[0].seq);
@@ -3118,6 +3508,11 @@ static void read_hls(Tsp *t, uint8_t *buf)
             if (g->seq < next) continue;
             hls_resolve(base, g->uri, g->uri_len, seg_url, sizeof seg_url);
             if (g->discontinuity && fed) plog("tsp: HLS discontinuity at #%lld", (long long)g->seq);
+            if (alt && t->alt_on) {                          /* 0.6.0: the sound of this time first */
+                alt_fill(t, alt, v_ms + g->duration_ms, buf);
+                if (stopping(t)) break;
+            }
+            v_ms += g->duration_ms;
             uint64_t g0 = now_us(), gw0 = t->push_wait_us;
             uint32_t gb0 = t->st.bytes;
             int status = 0, r = hls_get(t, seg_url, NULL, 0, buf, &status);
@@ -3169,6 +3564,10 @@ static void read_hls(Tsp *t, uint8_t *buf)
         if (hls_fetch_text(t, url, text, "playlist update", 0, base) < 0) goto out;
     }
 out:
+    if (alt) { free(alt->text); free(alt->seg); free(alt); }
+    t->alt_on = 0;
+    if (t->adm) { ts_destroy(t->adm); t->adm = NULL; }      /* (only this thread feeds it) */
+    free(rend);
     free(text);
 }
 
@@ -3183,6 +3582,8 @@ typedef int (*VodData)(Tsp *t, void *ctx, const uint8_t *d, size_t n);
 #define VOD_NORANGE_HEAD (16 * 1024)
 typedef struct { Tsp *t; VodData fn; void *ctx; int *status; uint64_t off; int refused; size_t got; } VgCtx;
 
+static int vod_first_data(Tsp *t);
+
 static int vg_data(void *c, const uint8_t *d, size_t n)
 {
     VgCtx *g = c;
@@ -3190,11 +3591,25 @@ static int vg_data(void *c, const uint8_t *d, size_t n)
     if (*g->status == 200 && g->off > 0) { g->refused = 1; return 1; }
     int r = g->fn(g->t, g->ctx, d, n);
     g->got += n;
+    if (vod_first_data(g->t)) return 1;
     if (*g->status == 200 && g->got >= VOD_NORANGE_HEAD) return 1;
     return r;
 }
 
-static int vg_stop(void *c) { return stopping(((VgCtx *)c)->t); }
+/* 0.6.0: the film's request answered but the film itself does not come (8 s, under 64 KB, no picture): stop it,
+ * the film's loop asks again from the same place (once) */
+static int vod_first_data(Tsp *t)
+{
+    if (t->vod_kick) return 1;
+    if (!t->vod || t->vod_stream || !t->film_phase || t->vod_kicked || t->st.decoded || t->st.state == TSP_ERROR) return 0;
+    if (now_us() - t->start_us < 2 * STALL_US * 2 / 5 || t->st.bytes - t->film_bytes0 >= 64 * 1024) return 0;   /* (8 s of the 20) */
+    t->vod_kicked = t->vod_kick = 1;
+    plog("tsp: the film does not come (%u KB in %u s): asking the server again", (unsigned)((t->st.bytes - t->film_bytes0) / 1024),
+         (unsigned)((now_us() - t->start_us) / 1000000));
+    return 1;
+}
+
+static int vg_stop(void *c) { Tsp *t = ((VgCtx *)c)->t; return stopping(t) || vod_first_data(t); }
 
 /* ---- film index cache ----
  * Every jump in a film starts the player again, and it read the film's index again each time: an MP4
@@ -3300,7 +3715,7 @@ static void vc_check_total(Tsp *t, uint64_t tot)
 static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, int *status)
 {
     *status = 0;
-    if (cio_available() && !strncasecmp(t->url, "https:", 6)) {
+    if (via_cio(t, t->url)) {
         VgCtx g = { t, fn, ctx, status, off, 0 };
         uint64_t tot = 0;
         CioRequest rq = { t->url, NULL, NULL, 10, (int)(RECV_TIMEOUT_US / 1000000), vg_data, vg_stop, &g,
@@ -3312,9 +3727,12 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
         if (tot && !t->vod_total) t->vod_total = tot;
         else vc_check_total(t, tot);
         if (g.refused) return VG_NO_RANGE;
-        if (r < 0 && r != -2) plog("tsp: VOD HTTPS error: %s", err);
+        if (r < 0 && r != -2 && !g.got && cio_http_failed(t, t->url, *status, err)) goto system_http;
+        if (r < 0 && r != -2) plog("tsp: VOD %s error: %s", strncasecmp(t->url, "https:", 6) ? "HTTP (own socket)" : "HTTPS", err);
+        if (g.got) log_rcvbuf(t);
         return r == -2 ? 0 : r;
     }
+system_http:;
     int tpl = -1, conn = -1, req = -1, n, ret = -1;
     tpl = sceHttpCreateTemplate(t->hdr_ua[0] ? t->hdr_ua : NET_UA, SCE_HTTP_VERSION_1_1, 1);
     if (tpl < 0) goto done;
@@ -3372,6 +3790,7 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
         if (n == 0) break;
         got += (uint64_t)n;
         if (fn(t, ctx, t->rbuf, (size_t)n)) break;
+        if (vod_first_data(t)) break;                       /* (0.6.0: a trickle: ask again) */
     }
 done:
     set_cur_req(t, -1);                                    /* before the request is deleted: no abort of a gone id */
@@ -3508,7 +3927,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         t->st.dur_ms = (int)L.duration_ms;
         off = L.first_cluster;
         if (start > 0 && mkv_seek(vio_read, &io, t->vod_total, &L, start, &off, &at) != 0) { off = L.first_cluster; at = 0; }
-        TsSink sink = { on_video, on_audio, t };
+        TsSink sink = { on_video, on_audio, t, on_sub };
         t->mkv = mkv_create(&sink);
         if (t->mkv) mkv_prefer_audio(t->mkv, g_aid, g_alang);   /* (0.5.0: the audio track chosen in the menu) */
         if (t->mkv) mkv_feed(t->mkv, L.head, L.head_len);
@@ -3527,7 +3946,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
                                               "MP4 file: the server does not allow reading its index" : "Damaged MP4 file (no index)");
             return;
         }
-        TsSink sink = { on_video, on_audio, t };
+        TsSink sink = { on_video, on_audio, t, on_sub };
         char err[96];
         t->mp4 = mp4_create(moov, ml, &sink, err, sizeof err);
         free(moov);
@@ -3537,7 +3956,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         plog("tsp: MP4: %d s, %u samples, index %u KB, start at %d s (byte %llu)", t->st.dur_ms / 1000, mp4_samples(t->mp4),
              (unsigned)(ml / 1024), (int)(at / 1000), (unsigned long long)off);
     } else if (kind == VOD_FLV) {                           /* no index to jump with: from the start, pause only */
-        TsSink sink = { on_video, on_audio, t };
+        TsSink sink = { on_video, on_audio, t, on_sub };
         if (!(t->flv = flv_create(&sink))) { free(io.win); set_error(t, "Out of memory"); return; }
         t->vod_base = 0;
         if (io.win && io.woff == 0) t->st.dur_ms = (int)flv_meta_duration_ms(io.win, io.wlen);
@@ -3570,6 +3989,8 @@ static void read_vod(Tsp *t, uint8_t *buf)
 
     /* the film itself, from off to the end; a lost connection goes on where it stopped */
     t->start_us = now_us();                                 /* "no picture yet" counts from here, not from the header reads */
+    t->film_bytes0 = t->st.bytes;
+    t->film_phase = 1;
     uint64_t pos = off;
     int fails = 0;
     while (!stopping(t)) {
@@ -3577,6 +3998,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         if (t->mp4 && mp4_finished(t->mp4)) break;
         uint64_t before = pos;
         int st = 0;
+        t->vod_kick = 0;
         int r = vod_get(t, pos, 0, vod_feed_cb, &pos, &st);
         if (stopping(t)) break;
         if (st >= 400) { if (!http_refused(t, st)) break; continue; }
@@ -3606,7 +4028,7 @@ static int worker(SceSize args, void *argp)
     uint8_t *buf = malloc(CHUNK);
     plog("tsp: start");
     t->last_stats = t->start_us = now_us();
-    cpu_line(t, t->start_us);                               /* the starting point of the first CPU line */
+    cpu_line(t, t->start_us, 0);                               /* the starting point of the first CPU line */
     if (!buf) set_error(t, "Out of memory");
     else if (!strncasecmp(t->url, "http://", 7) || !strncasecmp(t->url, "https://", 8)) {
         const char *q = t->url + strcspn(t->url, "?#");
@@ -3684,7 +4106,7 @@ static uint64_t due_time(Tsp *t, const Slot *s, uint64_t now)
     int64_t apts;
     /* (while the sound waits for a late picture the video runs on its own clock, towards the sound) */
     if (!t->ahold && s->pts >= 0 && audio_now(t, now, &apts)) {   /* audio is the master clock */
-        int64_t d = s->pts - apts;
+        int64_t d = pts_diff(s->pts, apts);
         if (d > -90000LL * 10 && d < 90000LL * 10) {
             t->clock_on = 0;                                /* re-anchor the video clock if audio stops */
             t->st.av_sync = 1;
@@ -3696,7 +4118,7 @@ static uint64_t due_time(Tsp *t, const Slot *s, uint64_t now)
     if (!t->clock_on) { rebase(t, s, now); return now; }
     int64_t off;
     if (s->pts >= 0 && t->base_pts >= 0) {
-        int64_t d = s->pts - t->base_pts;
+        int64_t d = pts_diff(s->pts, t->base_pts);
         if (d < -90000LL * 5 || d > 90000LL * 60) { rebase(t, s, now); return now; }   /* timestamp jump */
         off = d * 100 / 9;
     } else {                                                  /* no timestamps: fixed cadence */
@@ -3716,7 +4138,7 @@ static int next_ready(Tsp *t, int after_seq_valid, uint32_t after_seq)
         if (after_seq_valid && (int32_t)(s->seq - after_seq) <= 0) continue;
         if (best < 0) { best = i; continue; }
         const Slot *b = &t->slots[best];
-        int64_t d = (s->pts >= 0 && b->pts >= 0) ? s->pts - b->pts : 0;
+        int64_t d = (s->pts >= 0 && b->pts >= 0) ? pts_diff(s->pts, b->pts) : 0;   /* (1.0: across the clock wrapping) */
         if (d != 0 && d > -90000LL * 10 && d < 90000LL * 10) { if (d < 0) best = i; }   /* display order by time */
         else if ((int32_t)(s->seq - b->seq) < 0) best = i;
     }
@@ -3838,23 +4260,33 @@ static void buffer_check(Tsp *t, uint64_t now)
      * with queues that hold about a minute (0.2.6: 16 MB of video, about 40 s of such a film) */
     /* (only after 8 s of playing: while the film's index is read the speed looks like 1-2 KB/s, and 0.2.9
      * decided "slower than the film" at every start) */
-    int film_slow = t->vod && t->first_show_us && now - t->first_show_us > 8000000ULL &&
-                    t->st.need_kbs && t->st.net_kbs && t->st.net_kbs < t->st.need_kbs * 9 / 10;
-    if (film_slow && !t->big_queues) {
+    /* 0.6.0: "slower" only from an interval in which the reader did not wait for room (a full queue reads only
+     * what is played, which looked like a slow line); and a network at least twice as fast as the film gets the
+     * larger queues too (it fills them in seconds; a longer gap of the server is then ridden out) */
+    int measured = t->vod && t->first_show_us && now - t->first_show_us > 8000000ULL && t->st.need_kbs && t->st.net_kbs;
+    int film_slow = measured && t->net_wait_pct < 10 && t->st.net_kbs < t->st.need_kbs * 9 / 10;
+    int film_fast = measured && t->net_free_kbs >= t->st.need_kbs * 2;
+    if ((film_slow || film_fast) && !t->big_queues) {
         t->big_queues = 1;
-        SceKernelFreeMemorySizeInfo fm;
-        memset(&fm, 0, sizeof fm);
-        fm.size = sizeof fm;
-        if (sceKernelGetFreeMemorySize(&fm) >= 0 && (unsigned)fm.size_user >= (unsigned)(VQ_BYTES_BIG - VQ_BYTES) + 48u * 1024 * 1024) {
+        /* 0.7.0: room in the app's own memory, where the queues are (it looked at the system's memory outside it,
+         * 122 MB on the device, which always said yes): the larger queues and 24 MB left for everything else */
+        unsigned need_kb = (unsigned)((VQ_BYTES_BIG - VQ_BYTES + AQ_BYTES_BIG - AQ_BYTES) / 1024) + 24u * 1024;
+        unsigned free_kb = mem_free_kb();
+        if (free_kb >= need_kb) {
             sceKernelLockMutex(t->qlock, 1, NULL);
             t->vq.max_bytes = VQ_BYTES_BIG;
             t->vq.max_count = VQ_PKTS_BIG;
             t->aq.max_bytes = AQ_BYTES_BIG;
             t->aq.max_count = AQ_PKTS_BIG;
             sceKernelUnlockMutex(t->qlock, 1);
-            plog("tsp: the network is slower than the film (%u KB/s, it needs %u KB/s): queues for about a minute (%u MB)",
-                 t->st.net_kbs, t->st.need_kbs, (unsigned)(VQ_BYTES_BIG >> 20));
-        } else plog("tsp: the network is slower than the film, but there is no memory for larger queues");
+            if (film_slow)
+                plog("tsp: the network is slower than the film (%u KB/s, it needs %u KB/s): queues for about a minute (%u MB)",
+                     t->st.net_kbs, t->st.need_kbs, (unsigned)(VQ_BYTES_BIG >> 20));
+            else
+                plog("tsp: the network is fast (%u KB/s, the film needs %u KB/s): queues for about a minute (%u MB)",
+                     t->net_free_kbs, t->st.need_kbs, (unsigned)(VQ_BYTES_BIG >> 20));
+        } else plog("tsp: larger queues wanted (network %s than the film), but the app's memory has only %u MB free",
+                    film_slow ? "slower" : "faster", free_kb >> 10);
     }
     sceKernelLockMutex(t->qlock, 1, NULL);
     int vq = t->vq.count, aq_ms = 0, vq_ms = -1;
@@ -3876,7 +4308,7 @@ static void buffer_check(Tsp *t, uint64_t now)
     if (!t->vod && t->vq_have_pts) {
         int64_t apts;
         if (audio_now(t, now, &apts)) {
-            int64_t d = t->vq_newest_pts - apts;
+            int64_t d = pts_diff(t->vq_newest_pts, apts);
             if (d > -90000LL * 60 && d < 90000LL * 60) { ahead_ms = (int)(d / 90); have_ahead = 1; }
         }
     }
@@ -3890,7 +4322,10 @@ static void buffer_check(Tsp *t, uint64_t now)
             t->buf_bytes0 = t->st.bytes;
             t->st.buffering = 1;
             t->st.buf_pct = 0;
-            if (film_dry) plog("tsp: buffering (the network is slower than the film: %d pictures, %d ms of sound left)", vq, aq_ms);
+            /* (0.6.0: in the first seconds the film is only starting to come: not a slow line, as it said) */
+            if (film_dry && (!t->first_show_us || now - t->first_show_us < 5000000ULL))
+                plog("tsp: buffering at the start (the film's first seconds are still coming: %d pictures, %d ms of sound)", vq, aq_ms);
+            else if (film_dry) plog("tsp: buffering (the network is slower than the film: %d pictures, %d ms of sound left)", vq, aq_ms);
             else plog("tsp: buffering (live: the video that came reaches %d ms beyond the sound; %d pictures, %d ms of sound waiting)",
                       ahead_ms, vq, aq_ms);
         }
@@ -3959,7 +4394,8 @@ vita2d_texture *tsp_frame(int *w, int *h)
         int n = next_ready(t, 0, 0);
         if (n < 0) { if (t->st.decoded) t->ui_none++; break; }
         int64_t sp = t->slots[n].pts;
-        if (sp >= 0 && t->shown_pts >= 0 && sp < t->shown_pts && t->shown_pts - sp < 90000LL) {   /* (a bigger jump back is a new start) */
+        int64_t back = sp >= 0 && t->shown_pts >= 0 ? pts_diff(t->shown_pts, sp) : 0;
+        if (back > 0 && back < 90000LL) {   /* (a bigger jump back is a new start) */
             t->slots[n].state = SLOT_FREE;                  /* older than what is on screen: never go back */
             t->st.dropped++;
             t->drop_old++;
@@ -4086,7 +4522,7 @@ int tsp_av_offset(int *ms)
     if (t->shown >= 0) vp = t->slots[t->shown].pts;
     sceKernelUnlockMutex(t->lock, 1);
     if (vp < 0 || !audio_now(t, now_us(), &apts)) return 0;
-    *ms = (int)((vp - apts) / 90);
+    *ms = (int)(pts_diff(vp, apts) / 90);
     return 1;
 }
 
@@ -4135,10 +4571,11 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     if (g_vc.lock < 0) g_vc.lock = sceKernelCreateMutex("tsp_vcache", 0, 0, NULL);   /* before any reader thread uses it */
     t->lock = sceKernelCreateMutex("tsp_lock", 0, 0, NULL);
     t->qlock = sceKernelCreateMutex("tsp_qlock", 0, 0, NULL);
-    TsSink sink = { on_video, on_audio, t };
+    TsSink sink = { on_video, on_audio, t, on_sub };
     t->dmx = ts_create(&sink);
     if (t->dmx) ts_prefer_audio(t->dmx, g_aid, g_alang);    /* 0.5.0: the audio track chosen in the menu */
     t->st.a_cur = -1;
+    t->st.s_cur = -1;
     if (!t->dmx || t->lock < 0 || t->qlock < 0) {
         if (t->dmx) ts_destroy(t->dmx);
         if (t->lock >= 0) sceKernelDeleteMutex(t->lock);
@@ -4150,7 +4587,7 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     t->running = 2;
     g_tsp = t;
     /* audio slightly higher priority (0.5.0 test 2: the same as the video thread) */
-    t->athread = start_thread("tsp_audio", audio_main, g_ac3_test == 2 ? 0x10000100 : 0x10000100 - 10, t);
+    t->athread = start_thread("tsp_audio", audio_main, 0x10000100 - 10, t);
     t->vthread = start_thread("tsp_video", video_main, 0x10000100, t);
     t->thread = start_thread("tsp_reader", worker, 0x10000100, t);
     if (t->thread < 0 || t->vthread < 0 || t->athread < 0) {
@@ -4246,5 +4683,6 @@ void tsp_stop(void)
     sceKernelDeleteMutex(t->lock);
     sceKernelDeleteMutex(t->qlock);
     plog("tsp: stopped");
+    free(t->cues);
     free(t);
 }

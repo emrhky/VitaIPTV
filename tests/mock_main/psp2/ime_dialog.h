@@ -3,7 +3,7 @@
 #include <psp2/common_dialog.h>
 #include <string.h>
 #define SCE_IME_LANGUAGE_ENGLISH 0x00000004ULL
-enum { SCE_IME_TYPE_DEFAULT = 0 };
+enum { SCE_IME_TYPE_DEFAULT = 0, SCE_IME_TYPE_NUMBER = 2 };
 enum { SCE_IME_DIALOG_TEXTBOX_MODE_DEFAULT = 0, SCE_IME_DIALOG_TEXTBOX_MODE_PASSWORD = 1, SCE_IME_DIALOG_TEXTBOX_MODE_WITH_CLEAR = 2 };
 enum { SCE_IME_DIALOG_BUTTON_NONE = 0, SCE_IME_DIALOG_BUTTON_CLOSE = 1, SCE_IME_DIALOG_BUTTON_ENTER = 2 };
 typedef int (*SceImeTextFilter)(SceWChar16 *, unsigned *, const SceWChar16 *, unsigned);

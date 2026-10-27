@@ -24,6 +24,9 @@ void vita2d_draw_fill_circle(float x, float y, float radius, unsigned int color)
 int  vita2d_pgf_draw_text(vita2d_pgf *font, int x, int y, unsigned int color, float scale, const char *text);
 int  vita2d_pgf_text_width(vita2d_pgf *font, float scale, const char *text);
 void vita2d_draw_texture(const vita2d_texture *t, float x, float y);
+void vita2d_draw_texture_scale(const vita2d_texture *t, float x, float y, float sx, float sy);
 vita2d_texture *vita2d_load_PNG_file(const char *path);
+vita2d_texture *vita2d_create_empty_texture(unsigned int w, unsigned int h);
+void *vita2d_texture_get_datap(const vita2d_texture *t); unsigned int vita2d_texture_get_stride(const vita2d_texture *t);
 void vita2d_free_texture(vita2d_texture *t);
 void vita2d_wait_rendering_done(void);

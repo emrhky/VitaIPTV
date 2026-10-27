@@ -61,6 +61,58 @@ typedef struct {
 
 #define TICK_MS 500
 
+#ifdef __vita__
+#include <psp2/kernel/processmgr.h>
+static uint64_t now_ms64(void) { return sceKernelGetProcessTimeWide() / 1000; }
+#else
+static uint64_t now_ms64(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000; }
+#endif
+
+static volatile int g_rcvbuf;            /* the receive buffer the last connection got (bytes) */
+static volatile int g_connect_ms;        /* how long the last connect took (about one round trip) */
+static char g_rcv_note[160];             /* 0.6.0: the receive buffer the system gave ("512 KB", or what was refused) */
+static volatile int g_rcv_new;           /* ... not logged yet */
+int cio_last_rcvbuf(void) { return g_rcvbuf; }
+int cio_last_connect_ms(void) { return g_connect_ms; }
+const char *cio_rcvbuf_note(void)
+{
+    if (!g_rcv_new) return "";
+    g_rcv_new = 0;
+    return g_rcv_note;
+}
+
+/* 0.6.0: a 512 KB receive buffer. The Vita refuses anything bigger with ENOBUFS (1 MB, and even 528 KB, on the
+ * device) and then keeps its default of 63 KB without a word: a connection then manages at most 64 KB per round
+ * trip (0.5.0: about 285 KB/s from a server 200 ms away; with 512 KB: 1.7 MB/s). Should 512 KB be refused (other
+ * firmware, or the network's memory, which all connections share, short for a moment) 256 and 128 KB are tried;
+ * what was given is noted for the log. */
+static int rcv_try(int fd, int v, int *e)
+{
+    int r = setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &v, sizeof v);
+    *e = r < 0 ? errno : 0;
+    return r == 0;
+}
+
+static void set_rcvbuf(int fd)
+{
+    static const int SIZES[] = { 512 * 1024, 256 * 1024, 128 * 1024 };
+    int e = 0, k = 0, ok = 0;
+    char note[120];                                          /* (room left in g_rcv_note for ", using N KB") */
+    note[0] = 0;
+    for (size_t i = 0; i < sizeof SIZES / sizeof SIZES[0] && !ok; i++) {
+        ok = rcv_try(fd, SIZES[i], &e);
+        if (!ok && k >= 0 && (size_t)k < sizeof note)
+            k += snprintf(note + k, sizeof note - (size_t)k, "%s%d KB refused (%d)", k ? ", " : "", SIZES[i] / 1024, e);
+    }
+    int got = 0;
+    socklen_t rl = sizeof got;
+    if (getsockopt(fd, SOL_SOCKET, SO_RCVBUF, &got, &rl) == 0) g_rcvbuf = got;
+    if (note[0] || !g_rcv_note[0]) {                         /* (said once; again only when something was refused) */
+        snprintf(g_rcv_note, sizeof g_rcv_note, "%s%s%d KB", note, note[0] ? ", using " : "", got / 1024);
+        g_rcv_new = 1;
+    }
+}
+
 static int stopped(const CioRequest *rq) { return rq->stop && rq->stop(rq->ctx); }
 
 /* ---- sockets ---- */
@@ -138,9 +190,10 @@ static int tcp_connect(const char *host, int port, const CioRequest *rq, char *e
         /* A big receive buffer, set before connecting so TCP can offer a big window: with the small default
          * the speed stops near buffer / round trip (films over https stayed at about 300 KB/s while the
          * Vita's own HTTP reached 800 KB/s). */
-        int rcv = 1024 * 1024;
-        setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &rcv, sizeof rcv);
+        set_rcvbuf(fd);
+        uint64_t t0 = now_ms64();
         st = connect_wait(fd, a->ai_addr, a->ai_addrlen, rq, &why);
+        g_connect_ms = (int)(now_ms64() - t0);
         if (st == 0) break;
         close(fd);
         fd = -1;
@@ -447,7 +500,8 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
         }
         *eoh = 0;
         int code = 0;
-        if (sscanf((char *)hb, "HTTP/%*d.%*d %d", &code) != 1) {
+        if (sscanf((char *)hb, "HTTP/%*d.%*d %d", &code) != 1 &&
+            sscanf((char *)hb, "ICY %d", &code) != 1) {      /* (0.6.0: radio servers answer "ICY 200 OK") */
             char head[24];
             size_t k = 0;
             for (; k < sizeof head - 1 && hb[k]; k++) head[k] = hb[k] >= 32 && hb[k] < 127 ? (char)hb[k] : '.';
@@ -507,6 +561,9 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 #else   /* built without TLS */
 
 int cio_available(void) { return 0; }
+int cio_last_rcvbuf(void) { return 0; }
+int cio_last_connect_ms(void) { return 0; }
+const char *cio_rcvbuf_note(void) { return ""; }
 void cio_init(void) {}
 int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 {

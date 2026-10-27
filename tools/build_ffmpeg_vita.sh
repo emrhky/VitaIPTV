@@ -1,7 +1,8 @@
 #!/bin/bash
-# Builds FFmpeg's AC-3 and E-AC-3 decoders (nothing else) for the PS Vita into third_party/ffmpeg-vita.
-# CMakeLists.txt finds them there and the app plays Dolby Digital / Dolby Digital Plus audio (0.5.0).
-# Without this step the app builds as before, without AC-3.
+# Builds FFmpeg's AC-3, E-AC-3 and AAC decoders (nothing else) for the PS Vita into third_party/ffmpeg-vita.
+# CMakeLists.txt finds them there and the app plays Dolby Digital / Dolby Digital Plus audio (0.5.0) and
+# 5.1 / 7.1 AAC, which the Vita's own AAC decoder refuses (0.6.0; the stereo AAC stays on the hardware).
+# Without this step the app builds as before, without them. An older build (0.5.0, no AAC): run it again.
 #
 #   export VITASDK=/home/acer/vitasdk          (as for building the app)
 #   ./tools/build_ffmpeg_vita.sh               (downloads FFmpeg 7.1, about 5 minutes)
@@ -36,7 +37,7 @@ make distclean >/dev/null 2>&1 || true
 ./configure \
     --prefix="$OUT" \
     --enable-cross-compile --cross-prefix=arm-vita-eabi- --arch=arm --cpu=cortex-a9 --target-os=none \
-    --disable-everything --enable-decoder=ac3,eac3 --enable-parser=ac3 \
+    --disable-everything --enable-decoder=ac3,eac3,aac --enable-parser=ac3 \
     --disable-programs --disable-doc --disable-network --disable-autodetect \
     --disable-avdevice --disable-avformat --disable-swscale --disable-postproc --disable-avfilter --disable-swresample \
     --disable-pthreads --disable-w32threads --disable-os2threads --disable-runtime-cpudetect \
