@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.1.0
+
+### Highlights
+- **Smoother 50 / 60 fps channels:** 720p at 50 / 60 fps now plays every picture (it was 25-30 a second). 1080p at
+  50 / 60 fps plays a steady 25 / 30 pictures a second, evenly spaced, instead of 10-20 unevenly spaced ones; 1080p50
+  channels without B-pictures no longer jump and freeze. (The Vita's decoder manages about 320 000 macroblocks a
+  second: 720p about 90 pictures, 1080p about 40; measured with `tools/hwbench`.)
+- **My List:** one list of your own from the live channels of any of your playlists. *Select > Add to My List* in a
+  channel list or while watching; it shows as the first row of the playlists, grouped by playlist. Xtream channels
+  open with their playlist's current username and password and keep their programme guide.
+- **Fast list opening:** Xtream and M3U-link playlists open at once from the copy saved last time, also without a
+  connection. The list is downloaded again in the background and replaced at a quiet moment when it changed.
+- **Sound** (*Select > Audio* and the settings, all off by default): *Volume boost* (+3 / +6 / +9 dB with a
+  limiter), *Clear sound* for the Vita's small speakers, *Clear speech* for 5.1 films (the voices louder in the
+  stereo mix).
+
+### Reordering
+- *Reorder favourites*, *Reorder My List* and the new *Reorder playlists* (Select): X picks an item up and puts it
+  down, any number of them, START saves; O asks "Save the new order?" when something moved.
+- START no longer makes a playlist a favourite; the order of the playlists is kept in `order.txt` (the first time,
+  the favourite playlists keep their places on top). My List stays on top while it has channels.
+
+### A new look
+- The settings and the playlist form are cards like the playlists, with larger, lighter letters, switches for on /
+  off and arrows for choices; the line at the bottom says what the selected setting does. *Save* / *Cancel* rows are
+  gone (START / O); O with something changed asks whether to save. *About* moved into the settings.
+- The transcoding server is one row (off / when needed / always); its address and the test show while it is on.
+- Rounded shapes are drawn with smooth edges, all button symbols are the same size, and the button bar has the same
+  order on every screen (up / down, X, Square, Triangle, O on the left; L, R, Select, START on the right).
+- The Select menu fits the screen: on the playlists Add, Reorder, Reload, Settings, Quit; on the channels Reorder,
+  My List, Settings, Quit. O on the playlists asks "Quit Vita IPTV?".
+
 ## 1.0.0
 
 ### Highlights
