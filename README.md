@@ -7,7 +7,7 @@ listen to radio from your own M3U playlists or Xtream accounts, decoded by the V
 
 <p align="center"><img src="https://github.com/user-attachments/assets/010c908b-58ff-4be5-982d-5e6c4701ef0c" width="640" alt="Vita IPTV screenshot"></p>
 
-**Version 1.1** - live TV with a programme guide and watching again (catch-up), smoother 50 / 60 fps channels, My List, fast list opening, films and series with posters and details, subtitles, favourites, parental lock (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
+**Version 1.1** - live TV with a programme guide, smoother 50 / 60 fps channels, My List, fast list opening, louder and clearer sound (volume boost, clear speech), films and series with posters and details, subtitles, favourites, parental lock (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
 
 This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
@@ -132,29 +132,6 @@ With headers     | stream | https://cdn.example.com/live.flv | https://example.c
 `#EXTVLCOPT:http-user-agent=...` lines before the link (as VLC reads them), with `#EXTHTTP:{"Referer":"..."}`, or
 Kodi style as `link|User-Agent=...&Referer=...`. The app sends them with every request of that channel.
 
-## Controls
-
-The same buttons do the same things on every screen.
-
-| Button | Playlists | Channels / films | Playing | Guide | Forms |
-|---|---|---|---|---|---|
-| X | Open | Play (a series: open it) | Pause / play | Watch (a past programme: from the start or live) | Edit / choose |
-| O | Quit (asks first) | Back (first leaves a search) | Back (a film's position is kept) | Close | Cancel |
-| Triangle | Edit | Live: guide. Films: details. Series: open | Live: guide. Film: details. Archive: the schedule | Close | - |
-| Square | Add | Search (films / series: all of them) | Next picture size, the server, or (archive) back to live | The channel's schedule | - |
-| R | Page | Page | Information | A day on | - |
-| L | Page | Page | The channel before | A day back | - |
-| START | - | Favourite channel, film or series (episodes: their series) | Favourite channel or film | - | Save |
-| Select | Menu | Menu (live *Favorites* and My List: *Reorder* first) | Tabs: Picture, Audio, Subtitles, More (analysis, sleep timer, channel number) | Categories | - |
-| Up / Down, left stick | Move | Categories (left stick), channels (right stick) | Previous / next channel or film (archive: programme) | Channel | Move |
-| Left / Right | Page | Categories / channels | Hold to move through a film, let go to jump there | Time | Change a choice |
-
-In the series screen L / R change the season. When reordering (*Favorites*, My List, playlists) X picks a channel up and puts it
-down, Up / Down moves it, START saves, O asks "Save the new order?".
-Moving through a film also works with the left stick sideways (further and longer = faster). In the Select menu
-L / R (or Left / Right) changes the tab; on the subtitle *Sync* row Left / Right moves the subtitles. In the stream
-analysis X runs it again and O goes back to the picture. Radio: Up / Down change station, Select the analysis.
-
 ## What plays and what does not
 
 | Works | Does not work (without the transcoding server) |
@@ -240,24 +217,6 @@ as an Xtream playlist. Film links (`.mkv`, `.mp4`, `.mov` ...) in M3U lists and 
 films (pause, jumps, resume), so a freely licensed film such as the Blender Foundation's open movies works too.
 `--pace` sends live channels at their own bit rate like a broadcast, `--https` serves over HTTPS with a
 self-signed certificate (needs `openssl`), for comparing the same file over HTTP and HTTPS.
-
-## Building
-
-Needs [VitaSDK](https://vitasdk.org) (with `vita2d`, installed by `vdpm`'s `install-all.sh`).
-
-```
-export VITASDK=/usr/local/vitasdk
-cmake -B build && cmake --build build      # -> build/VitaIPTV.vpk
-```
-
-**AC-3 / E-AC-3 and 5.1 AAC:** run `tools/build_ffmpeg_vita.sh` once before (downloads FFmpeg 7.1 and builds only
-its AC-3, E-AC-3 and AAC decoders into `third_party/ffmpeg-vita`, a few minutes). CMake finds them and says
-*AC-3 / E-AC-3: FFmpeg from third_party/ffmpeg-vita* and *AAC 5.1 / 7.1: FFmpeg's AAC decoder is built in*;
-without that step the app builds without that sound. A `third_party/ffmpeg-vita` from 0.5.0 has no AAC decoder:
-delete it (and `build-ffmpeg`) and run the script again.
-
-`-DVITAIPTV_HTTPS=OFF` builds without the built-in TLS. PC tests are in `tests/` (gcc, ffmpeg, Python 3),
-e.g. `python3 tests/run_player_tests.py`.
 
 ## License
 
