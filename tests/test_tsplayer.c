@@ -319,7 +319,8 @@ int sceAudioOutSetVolume(int port, int ch, int *vol) { (void)port; (void)ch; (vo
 /* ---- helpers ---- */
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 
-typedef struct { TspStatus st; int changes, nonmono, w, h, avn, av_bad, av_max, synced, av_last, avn2, av_bad2; double first_show, last_show, play_time, slow_at, wait_max, wait_t0, end_at; int64_t first_pts, last_pts; } Run;
+typedef struct { TspStatus st; int changes, nonmono, w, h, avn, av_bad, av_max, synced, av_last, avn2, av_bad2; double first_show, last_show, play_time, slow_at, wait_max, wait_t0, end_at; int64_t first_pts, last_pts;
+                 int gapn, gap2; } Run;   /* 1.1: steps between shown pictures, and how many were exactly 3600 (two at 50 fps) */
 
 static Run play(const char *path, double max_s)
 {
@@ -334,6 +335,7 @@ static Run play(const char *path, double max_s)
             int64_t pts; memcpy(&pts, tx->gxm_tex.data, 8);
             if (r.changes == 0) { r.first_show = now_s(); r.first_pts = pts; }
             else if (pts >= 0 && r.last_pts >= 0 && pts <= r.last_pts) r.nonmono++;
+            if (r.changes > 0 && pts > r.last_pts && r.last_pts >= 0) { int64_t d = pts - r.last_pts; r.gapn++; if (d > 3500 && d < 3700) r.gap2++; }
             r.last_pts = pts; r.last_show = now_s(); r.changes++; r.w = w; r.h = h; last = tx;
             int ms;
             if (tsp_av_offset(&ms)) {                        /* picture time vs. what is being heard */
@@ -562,7 +564,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33 || argc == 34 || argc == 35);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r;
@@ -1098,6 +1100,35 @@ limit:
         show("1080p60 HD", &r);
         printf("               shown %u, decoded %u, not decoded %u, last %d ms from the sound\n", r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.av_last);
         assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 150 && r.st.shown * 10 >= r.st.decoded * 7 && abs(r.av_last) < 200);
+        if (argc > 33) {
+            /* 1.1: 1080p50 with P every third picture (B-pictures nothing refers to: two thirds) from an HD decoder
+             * at about 45 pictures/s: "even half": the reference pictures and the other pictures at even places
+             * are decoded (2/3), every second picture is shown, evenly (before: only the reference pictures,
+             * 17 a second) */
+            decode_order = 1; int_delay = 5; int_out_us = 22000;
+            r = play(argv[33], 12);
+            decode_order = 0; int_delay = 2; int_out_us = 0;
+            show("1080p50 even", &r);
+            printf("               shown %u, decoded %u, not shown %u, steps of two pictures %d of %d, last %d ms from the sound\n",
+                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.gap2, r.gapn, r.av_last);
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 180 && r.st.shown <= 215 && abs(r.av_last) < 200);
+            assert(r.gap2 * 10 >= r.gapn * 9);
+        }
+        if (argc > 34) {
+            /* 1.1: 1080p50 without B-pictures (every picture is a reference: seen on the device, 0% left to leave
+             * out) from an HD decoder at about 42 pictures/s: "group trim": the first pictures of each 1 s group
+             * are decoded, the end of the group is left out; in time with the sound, no jumps to keyframes */
+            decode_order = 0; int_delay = 2; int_out_us = 24000;
+            r = play(argv[34], 12);
+            int_out_us = 0;
+            show("1080p50 all P", &r);
+            printf("               shown %u, decoded %u, left out %u, dropped %u, last %d ms from the sound\n",
+                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.st.dropped, r.av_last);
+            /* (the decoded run of a group plays a little behind the sound, at most about 150 ms with this decoder, and
+             * catches up while the end of the group is left out: no dropped pictures, no jumps) */
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 250 && r.st.skipped >= 50);
+            assert(r.st.dropped < 40 && r.av_max < 400);
+        }
         /* a file from the memory card (1080p25, HD decoder in decode order): plays to the end without the sound
          * waiting for pictures that will not come (0.2.7: 10 s of silence and a still picture at the end) */
         tsp_set_options(1, 720);
