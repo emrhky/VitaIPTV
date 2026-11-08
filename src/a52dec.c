@@ -1,6 +1,7 @@
 #include "a52dec.h"
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #ifdef HAVE_A52
 #include <libavcodec/avcodec.h>
@@ -16,10 +17,15 @@ struct A52Dec {
     int64_t next_pts;                   /* 90 kHz, -1 = unknown */
     int64_t last_pp;                    /* the parser's last time stamp (it repeats it for every frame of a packet) */
     int aac;                            /* 0.6.0: FFmpeg's AAC decoder (whole ADTS frames, no parser) */
+    int dialog;                         /* 1.1: "clear dialogue" mix (set when created) */
     uint32_t frames, errors;
 };
 
 int a52_available(void) { return 1; }
+
+static volatile int g_dialog;
+void a52_set_dialog(int on) { g_dialog = on ? 1 : 0; }
+int  a52_get_dialog(void) { return g_dialog; }
 
 A52Dec *a52_create(void)
 {
@@ -33,8 +39,11 @@ A52Dec *a52_create(void)
     d->frame = av_frame_alloc();
     if (!d->ctx || !d->parser || !d->pkt || !d->frame) { a52_destroy(d); return NULL; }
     d->ctx->thread_count = 1;
-    AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
-    av_opt_set_chlayout(d->ctx->priv_data, "downmix", &stereo, 0);  /* the decoder mixes 5.1 down itself */
+    d->dialog = g_dialog;
+    if (!d->dialog) {                                                /* the decoder mixes 5.1 down itself */
+        AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
+        av_opt_set_chlayout(d->ctx->priv_data, "downmix", &stereo, 0);
+    }                                                                /* (clear dialogue: all channels, mixed below) */
     if (avcodec_open2(d->ctx, c, NULL) < 0) { a52_destroy(d); return NULL; }
     d->next_pts = -1;
     d->last_pp = AV_NOPTS_VALUE;
@@ -50,6 +59,7 @@ A52Dec *a52_create_aac(void)
     A52Dec *d = calloc(1, sizeof *d);
     if (!d) return NULL;
     d->aac = 1;
+    d->dialog = g_dialog;
     d->ctx = avcodec_alloc_context3(c);
     d->pkt = av_packet_alloc();
     d->frame = av_frame_alloc();
@@ -75,6 +85,15 @@ static inline int16_t clip16(float v)
 {
     int x = (int)(v * 32767.0f + (v >= 0 ? 0.5f : -0.5f));
     return (int16_t)(x > 32767 ? 32767 : x < -32768 ? -32768 : x);
+}
+
+/* peaks above 0.9 rounded off towards 1.0 (never above) */
+static inline float soft16(float v)
+{
+    float a = v < 0 ? -v : v;
+    if (a <= 0.9f) return v;
+    float y = 0.9f + 0.1f * tanhf((a - 0.9f) / 0.1f);
+    return v < 0 ? -y : y;
 }
 
 /* the decoded frame as interleaved 16-bit stereo (or mono); more channels than two (the decoder did not mix
@@ -106,13 +125,18 @@ static int to_pcm(A52Dec *d, int *out_ch)
     if (sr < 0) sr = av_channel_layout_index_from_channel(&f->ch_layout, AV_CHAN_BACK_RIGHT);
     if (fl < 0) fl = 0;
     if (fr < 0) fr = 1;
-    const float k = 0.7071f, norm = 1.0f / (1.0f + k + k);
+    /* 1.1 "clear dialogue": the centre (where the voices are) at full level, the surrounds at half, and the
+     * whole about 3 dB louder than the usual mix (which divides by the sum of the levels, 2.4 for 5.1: the
+     * quiet films); peaks that would clip are rounded off instead */
+    const float k = 0.7071f, kc = d->dialog ? 1.0f : k, ks = d->dialog ? 0.5f : k;
+    const float norm = d->dialog ? 0.6f : 1.0f / (1.0f + k + k);
     for (int i = 0; i < n; i++) {
-        float c = fc >= 0 ? SAMPLE(fc, i) * k : 0.0f;
-        float l = SAMPLE(fl, i) + c + (sl >= 0 ? SAMPLE(sl, i) * k : 0.0f);
-        float r = SAMPLE(fr, i) + c + (sr >= 0 ? SAMPLE(sr, i) * k : 0.0f);
-        d->pcm[2 * i] = clip16(l * norm);
-        d->pcm[2 * i + 1] = clip16(r * norm);
+        float c = fc >= 0 ? SAMPLE(fc, i) * kc : 0.0f;
+        float l = (SAMPLE(fl, i) + c + (sl >= 0 ? SAMPLE(sl, i) * ks : 0.0f)) * norm;
+        float r = (SAMPLE(fr, i) + c + (sr >= 0 ? SAMPLE(sr, i) * ks : 0.0f)) * norm;
+        if (d->dialog) { l = soft16(l); r = soft16(r); }
+        d->pcm[2 * i] = clip16(l);
+        d->pcm[2 * i + 1] = clip16(r);
     }
     #undef SAMPLE
     *out_ch = 2;
@@ -181,6 +205,8 @@ void a52_stats(const A52Dec *d, uint32_t *frames, uint32_t *errors)
 #else   /* built without FFmpeg */
 
 int     a52_available(void) { return 0; }
+void    a52_set_dialog(int on) { (void)on; }
+int     a52_get_dialog(void) { return 0; }
 A52Dec *a52_create(void) { return NULL; }
 void    a52_destroy(A52Dec *d) { (void)d; }
 void    a52_feed(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out out, void *ctx)

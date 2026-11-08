@@ -375,6 +375,15 @@ int xtream_movie_url(const Source *s, const char *file, char *out, size_t outsz)
     return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
 }
 
+int xtream_live_url(const Source *s, const char *file, char *out, size_t outsz)
+{
+    char base[IPTV_URL_MAX + 16], u[IPTV_CRED_MAX * 3 + 1], p[IPTV_CRED_MAX * 3 + 1];
+    if (source_xtream_base(s, base, sizeof base)) return -1;
+    if (url_encode(u, sizeof u, s->user) || url_encode(p, sizeof p, s->pass)) return -1;
+    int n = snprintf(out, outsz, "%s/live/%s/%s/%s", base, u, p, file);
+    return (n < 0 || (size_t)n >= outsz) ? -1 : 0;
+}
+
 int xtream_api_url(const Source *s, const char *action, char *out, size_t outsz)
 {
     char base[IPTV_URL_MAX + 16], u[IPTV_CRED_MAX * 3 + 1], p[IPTV_CRED_MAX * 3 + 1];
@@ -1259,6 +1268,10 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "sub_pos")) st->sub_pos = small_num(v, 2, 0);
             else if (!strcmp(k, "sub_bg")) st->sub_bg = small_num(v, 2, 0);
             else if (!strcmp(k, "theme")) st->theme = small_num(v, 3, 0);
+            else if (!strcmp(k, "snd_boost")) st->snd_boost = small_num(v, 3, 0);   /* 1.1 */
+            else if (!strcmp(k, "snd_speaker")) st->snd_speaker = small_num(v, 1, 0);
+            else if (!strcmp(k, "snd_dialog")) st->snd_dialog = small_num(v, 1, 0);
+            else if (!strcmp(k, "proxy_off")) st->proxy_off = small_num(v, 1, 0);   /* 1.1 */
             /* hide_1080p= (before v0.4.0): that filter is gone, the 4K one starts off */
             else if (!strcmp(k, "resolution")) {
                 int r = atoi(v);
@@ -1278,7 +1291,7 @@ int settings_format(const Settings *st, char *out, size_t outsz)
                      st->plain_letters ? "plain_letters=1\n" : "", st->pin[0] ? "pin=" : "", st->pin, st->pin[0] ? "\n" : "");
     if (w < 0 || (size_t)w >= outsz) return -1;
     /* 0.8.1: subtitles and the theme, only when changed */
-    char ex[96];
+    char ex[192];
     int e = 0;
     ex[0] = 0;
     if (st->sub_size != 1) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_size=%d\n", st->sub_size);
@@ -1286,6 +1299,10 @@ int settings_format(const Settings *st, char *out, size_t outsz)
     if (st->sub_pos) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_pos=%d\n", st->sub_pos);
     if (st->sub_bg) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_bg=%d\n", st->sub_bg);
     if (st->theme) e += snprintf(ex + e, sizeof ex - (size_t)e, "theme=%d\n", st->theme);
+    if (st->proxy_off) e += snprintf(ex + e, sizeof ex - (size_t)e, "proxy_off=1\n");   /* 1.1 */
+    if (st->snd_boost) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_boost=%d\n", st->snd_boost);   /* 1.1 */
+    if (st->snd_speaker) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_speaker=1\n");
+    if (st->snd_dialog) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_dialog=1\n");
     if ((size_t)w + (size_t)e >= outsz) return -1;
     memcpy(out + w, ex, (size_t)e + 1);
     return w + e;
@@ -1302,7 +1319,7 @@ int proxy_url_at(const Settings *st, const char *url, int start_s, char *out, si
 
 int proxy_url(const Settings *st, const char *url, char *out, size_t outsz)
 {
-    if (!st->proxy[0]) return -1;
+    if (!st->proxy[0] || st->proxy_off) return -1;
     char base[IPTV_URL_MAX], enc[IPTV_URL_MAX * 3 + 1];
     copy_trunc(base, sizeof base, st->proxy, strlen(st->proxy));
     trim_inplace(base);

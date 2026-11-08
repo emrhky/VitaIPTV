@@ -15,10 +15,10 @@ typedef struct {
     char url[IPTV_URL_MAX];
     unsigned char adult;        /* the server marked it as adult (Xtream is_adult) */
     unsigned char kind;         /* CH_LIVE, CH_FILM (a file: pause, jump, resume) or CH_SERIES (opens its episodes) */
-    unsigned short episode;     /* episode number (series), 0 = none */
+    unsigned short episode;     /* episode number (series), 0 = none; 1.1: My List's live channels: its entry + 1 */
     unsigned char archive;      /* 0.8.0: days the server keeps for catch-up (0 = none) */
     unsigned char cu_mode;      /* 0.8.0: how its catch-up address is made (CU_...) */
-    unsigned short reserved;
+    unsigned short src_ix;      /* 1.1: a channel of My List: its playlist (sources[] index + 1), 0 = none / deleted */
     unsigned int extra;         /* 0.8.0: its extra fields in the list's pool (channel_extra), 0 = none */
 } Channel;
 
@@ -46,7 +46,8 @@ typedef enum {
     SRC_M3U_URL,   /* M3U list on HTTP(S), optional Basic/Digest auth */
     SRC_XTREAM,    /* host + username + password (get.php style)      */
     SRC_STREAM,    /* single direct stream link, played immediately   */
-    SRC_M3U_FILE   /* local M3U file on the Vita memory card          */
+    SRC_M3U_FILE,  /* local M3U file on the Vita memory card          */
+    SRC_MYLIST     /* 1.1: "My List", live channels gathered from the other playlists (mylist.h); never saved */
 } SourceType;
 
 typedef struct {
@@ -61,6 +62,7 @@ typedef struct {
 typedef struct {
     char proxy[IPTV_URL_MAX];   /* transcoding server, e.g. http://192.168.1.20:8090 ("" = none) */
     int auto_proxy;             /* 0 off, 1 for channels the Vita cannot play, 2 (0.4.5) always: every channel through it */
+    int proxy_off;              /* 1.1: the server turned off in the settings (its address is kept for later) */
     int lang;                   /* 0 = like the console, 1 = English, 2 = Turkish */
     int hide_adult;             /* leave adult channels out of the lists */
     int hide_4k;                /* leave channels labelled 4K / UHD / 2160p / 8K out (the Vita cannot play them) */
@@ -71,6 +73,9 @@ typedef struct {
      * place 0-2 (bottom, a little higher, top), background 0-2 (light band, dark box, none); the theme 0-3
      * (blue, green, purple, orange). Written to settings.txt only when not the default. */
     int sub_size, sub_color, sub_pos, sub_bg, theme;
+    /* 1.1: sound: boost 0-3 (off, +3, +6, +9 dB), speaker mode 0/1, clear dialogue for 5.1 0/1 (audiofx.h,
+     * a52dec.h); written only when not off */
+    int snd_boost, snd_speaker, snd_dialog;
 } Settings;
 
 void channel_list_init(ChannelList *l);
@@ -106,6 +111,8 @@ int  source_xtream_base(const Source *s, char *out, size_t outsz);
 int  xtream_api_url(const Source *s, const char *action, char *out, size_t outsz);
 /* 0.6.0: .../movie/USER/PASS/<file> (file "ID.ext"), the address of a film saved as a favourite */
 int  xtream_movie_url(const Source *s, const char *file, char *out, size_t outsz);
+/* 1.1: .../live/USER/PASS/<file> (file "ID.ts"), a live channel of My List with the playlist's current password */
+int  xtream_live_url(const Source *s, const char *file, char *out, size_t outsz);
 /* The account part of player_api.php's answer ("user_info"). Returns -1 if there is none. */
 typedef struct {
     int found, auth;                    /* auth 0: wrong username or password */

@@ -262,11 +262,8 @@ int ui_text_wrap(int x, int y, unsigned col, float scale, const char *s, int max
 
 void ui_panel(int x, int y, int w, int h, unsigned fill)
 {
-    vita2d_draw_rectangle(x, y, w, h, fill);
-    vita2d_draw_rectangle(x, y, w, 1, UI_LINE);
-    vita2d_draw_rectangle(x, y + h - 1, w, 1, UI_LINE);
-    vita2d_draw_rectangle(x, y, 1, h, UI_LINE);
-    vita2d_draw_rectangle(x + w - 1, y, 1, h, UI_LINE);
+    ui_round_rect(x, y, w, h, 14, UI_LINE);                  /* 1.1: rounded, as the cards (a thin edge) */
+    ui_round_rect(x + 1, y + 1, w - 2, h - 2, 13, fill | 0xFF000000u);
 }
 
 void ui_header(const char *title, const char *subtitle, const char *right)
@@ -310,41 +307,41 @@ int ui_button(int x, int cy, int btn)
     switch (btn) {
     case UI_BTN_CROSS: {
         unsigned c = RGBA8(124, 178, 232, 255);
-        vita2d_draw_fill_circle(cx, cy, BR, dark);
+        ui_circle(cx, cy, BR, dark);
         thick_line(cx - K(5), cy - K(5), cx + K(5), cy + K(5), c);
         thick_line(cx + K(5), cy - K(5), cx - K(5), cy + K(5), c);
         return 2 * BR;
     }
     case UI_BTN_CIRCLE: {
-        vita2d_draw_fill_circle(cx, cy, BR, dark);
-        vita2d_draw_fill_circle(cx, cy, K(7), RGBA8(255, 102, 102, 255));
-        vita2d_draw_fill_circle(cx, cy, K(7) - 3, dark);
+        ui_circle(cx, cy, BR, dark);
+        ui_circle(cx, cy, K(7), RGBA8(255, 102, 102, 255));
+        ui_circle(cx, cy, K(7) - 3, dark);
         return 2 * BR;
     }
     case UI_BTN_TRIANGLE: {
         unsigned c = RGBA8(64, 226, 160, 255);
-        vita2d_draw_fill_circle(cx, cy, BR, dark);
+        ui_circle(cx, cy, BR, dark);
         thick_line(cx, cy - K(6), cx - K(6), cy + K(5), c);
         thick_line(cx, cy - K(6), cx + K(6), cy + K(5), c);
         thick_line(cx - K(6), cy + K(5), cx + K(6), cy + K(5), c);
         return 2 * BR;
     }
     case UI_BTN_SQUARE: {
-        vita2d_draw_fill_circle(cx, cy, BR, dark);
+        ui_circle(cx, cy, BR, dark);
         vita2d_draw_rectangle(cx - K(5), cy - K(5), 2 * K(5) + 1, 2 * K(5) + 1, RGBA8(255, 105, 220, 255));
         vita2d_draw_rectangle(cx - K(5) + 3, cy - K(5) + 3, 2 * K(5) - 5, 2 * K(5) - 5, dark);
         return 2 * BR;
     }
     case UI_BTN_DPAD: case UI_BTN_UPDOWN: {
         unsigned c = RGBA8(200, 205, 220, 255);
-        vita2d_draw_fill_circle(cx, cy, BR, dark);
+        ui_circle(cx, cy, BR, dark);
         if (btn == UI_BTN_DPAD) vita2d_draw_rectangle(cx - K(7), cy - K(2), 2 * K(7) + 1, 2 * K(2) + 1, c);
         vita2d_draw_rectangle(cx - K(2), cy - K(7), 2 * K(2) + 1, 2 * K(7) + 1, c);
         return 2 * BR;
     }
     case UI_BTN_LEFTRIGHT: {                           /* d-pad left / right: two small arrows */
         unsigned c = RGBA8(200, 205, 220, 255);
-        vita2d_draw_fill_circle(cx, cy, BR, dark);
+        ui_circle(cx, cy, BR, dark);
         ui_fill_triangle(cx - K(7), cy, cx - K(2), cy - K(5), cx - K(2), cy + K(5), c);
         ui_fill_triangle(cx + K(7), cy, cx + K(2), cy - K(5), cx + K(2), cy + K(5), c);
         return 2 * BR;
@@ -357,9 +354,7 @@ int ui_button(int x, int cy, int btn)
         const int h = 2 * BR, r = BR;
         int w = ui_text_w(sc, t) + 24;
         unsigned bg = RGBA8(86, 96, 128, 255), fg = RGBA8(255, 255, 255, 255);
-        vita2d_draw_rectangle(x + r, cy - r, w - 2 * r, h, bg);
-        vita2d_draw_fill_circle(x + r, cy, r, bg);
-        vita2d_draw_fill_circle(x + w - r, cy, r, bg);
+        ui_round_rect(x, cy - r, w, h, r, bg);
         ui_text(x + 12, cy + 7, fg, sc, t);
         ui_text(x + 13, cy + 7, fg, sc, t);                 /* second pass: bolder strokes */
         return w;
@@ -377,8 +372,40 @@ static int button_w(int btn)
     return 2 * BR;
 }
 
-void ui_footer(const UiHint *hints, int n, const char *status, int status_err)
+/* 1.1: the hints always in one order on every screen: on the left up / down (d-pad), X, Square, Triangle, O; on
+ * the right L, R, Select, START (whatever order a screen lists them in) */
+static int hint_rank(int btn)
 {
+    switch (btn) {
+    case UI_BTN_UPDOWN: return 0;
+    case UI_BTN_DPAD: return 1;
+    case UI_BTN_LEFTRIGHT: return 2;
+    case UI_BTN_CROSS: return 3;
+    case UI_BTN_SQUARE: return 4;
+    case UI_BTN_TRIANGLE: return 5;
+    case UI_BTN_CIRCLE: return 6;
+    case UI_BTN_L: return 100;
+    case UI_BTN_R: return 101;
+    case UI_BTN_LR: return 102;
+    case UI_BTN_SELECT: return 103;
+    case UI_BTN_START: return 104;
+    default: return 200;                                    /* (the separator: left out) */
+    }
+}
+
+void ui_footer(const UiHint *hints_in, int n_in, const char *status, int status_err)
+{
+    UiHint hints[20];
+    int n = 0, left = 0;
+    for (int pass = 0; pass < 2; pass++)                     /* the left ones, a separator, the right ones */
+        for (int r = pass ? 100 : 0; r < (pass ? 200 : 100); r++)
+            for (int i = 0; i < n_in && n < 19; i++)
+                if (hint_rank(hints_in[i].btn) == r) { hints[n++] = hints_in[i]; if (!pass) left++; }
+    if (left < n) {                                          /* (the layout below puts what follows the separator right) */
+        memmove(&hints[left + 1], &hints[left], sizeof hints[0] * (size_t)(n - left));
+        hints[left] = (UiHint){ UI_BTN_SEP, "" };
+        n++;
+    }
     if (status && status[0]) {                               /* 0.5.0: a long one takes two lines */
         UiWrap w;
         ui_wrap(&w, 1.0f, status, 924, 2);
@@ -441,17 +468,55 @@ int ui_badge(int x, int y, const char *txt, unsigned col)
     return w;
 }
 
+/* 1.1: rounded shapes drawn row by row from the circle's own formula, the edge pixels partly covered (smooth
+ * edges). vita2d's filled circle is a polygon of few sides without smoothing, and the four corner circles were
+ * a pixel apart (a dent where a pill's halves met). */
+static unsigned with_alpha(unsigned col, float cov)
+{
+    unsigned a = (unsigned)((float)(col >> 24) * cov + 0.5f);
+    return (col & 0x00FFFFFFu) | (a << 24);
+}
+
+static void aa_span(float xl, float xr, int y, unsigned col)   /* one row from xl to xr (fractions smoothed) */
+{
+    if (xr <= xl) return;
+    int il = (int)floorf(xl), ir = (int)floorf(xr);
+    if (il == ir) { vita2d_draw_rectangle((float)il, (float)y, 1, 1, with_alpha(col, xr - xl)); return; }
+    float cl = (float)(il + 1) - xl, cr = xr - (float)ir;
+    if (cl > 0.004f) vita2d_draw_rectangle((float)il, (float)y, 1, 1, with_alpha(col, cl));
+    if (ir > il + 1) vita2d_draw_rectangle((float)(il + 1), (float)y, (float)(ir - il - 1), 1, col);
+    if (cr > 0.004f) vita2d_draw_rectangle((float)ir, (float)y, 1, 1, with_alpha(col, cr));
+}
+
 void ui_round_rect(int x, int y, int w, int h, int r, unsigned col)
 {
-    if (r * 2 > h) r = h / 2;
-    if (r * 2 > w) r = w / 2;
-    vita2d_draw_rectangle(x + r, y, w - 2 * r, h, col);
-    vita2d_draw_rectangle(x, y + r, r, h - 2 * r, col);
-    vita2d_draw_rectangle(x + w - r, y + r, r, h - 2 * r, col);
-    vita2d_draw_fill_circle(x + r, y + r, r, col);
-    vita2d_draw_fill_circle(x + w - r - 1, y + r, r, col);
-    vita2d_draw_fill_circle(x + r, y + h - r - 1, r, col);
-    vita2d_draw_fill_circle(x + w - r - 1, y + h - r - 1, r, col);
+    if (w <= 0 || h <= 0) return;
+    float rf = (float)r;
+    if (rf * 2 > (float)h) rf = (float)h / 2;
+    if (rf * 2 > (float)w) rf = (float)w / 2;
+    int rows = (int)ceilf(rf);
+    if (h - 2 * rows > 0) vita2d_draw_rectangle((float)x, (float)(y + rows), (float)w, (float)(h - 2 * rows), col);
+    for (int j = 0; j < rows && j < h; j++) {
+        float d = rf - ((float)j + 0.5f);                    /* how far above the corner circles' centre */
+        float in = d > 0 ? rf - sqrtf(rf * rf - d * d) : 0;  /* the row starts this far in */
+        aa_span((float)x + in, (float)(x + w) - in, y + j, col);
+        if (h - 1 - j > j) aa_span((float)x + in, (float)(x + w) - in, y + h - 1 - j, col);
+    }
+}
+
+void ui_circle(float cx, float cy, float r, unsigned col)
+{
+    int y0 = (int)floorf(cy - r), y1 = (int)ceilf(cy + r);
+    for (int y = y0; y < y1; y++) {
+        float yc = (float)y + 0.5f - cy;
+        if (yc * yc >= r * r) {                              /* (a row the circle only grazes: a faint line) */
+            continue;
+        }
+        float hw = sqrtf(r * r - yc * yc);
+        float cov = 1.0f;
+        if (fabsf(yc) > r - 1.0f) cov = r - fabsf(yc) + 0.5f > 1.0f ? 1.0f : r - fabsf(yc) + 0.5f;   /* top / bottom rows */
+        aa_span(cx - hw, cx + hw, y, cov < 1.0f ? with_alpha(col, cov) : col);
+    }
 }
 
 /* A big, readable source-type tag: fixed width so the names line up, bold white letters. */
