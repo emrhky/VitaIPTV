@@ -17,6 +17,7 @@
 #include <stdarg.h>
 #include <strings.h>
 #include "httpio.h"
+#include "audiofx.h"
 #include <psp2/sysmodule.h>
 
 /* ---- tunables ---------------------------------------------------------- */
@@ -123,6 +124,8 @@ static int audio_main(SceSize args, void *argp)
     (void)args; (void)argp;
     SceAvPlayerFrameInfo ai;
     int cur_len = 0, cur_freq = 0, cur_mode = -1;
+    AudioFx fx;                                              /* 1.1: volume boost / speaker mode */
+    afx_init(&fx);
 
     while (g_audio_run) {
         if (g_player && sceAvPlayerIsActive(g_player) && sceAvPlayerGetAudioData(g_player, &ai)) {
@@ -139,7 +142,13 @@ static int audio_main(SceSize args, void *argp)
                     sceAudioOutSetConfig(g_audio_port, len, freq, mode);
                 }
                 cur_len = len; cur_freq = freq; cur_mode = mode;
-                if (g_audio_port >= 0) sceAudioOutOutput(g_audio_port, ai.pData);
+                if (g_audio_port >= 0) {
+                    int b, sp;
+                    afx_get_global(&b, &sp);
+                    afx_set(&fx, b, sp);
+                    if (ch == 1 || ch == 2) afx_process(&fx, (int16_t *)ai.pData, len, ch, freq);
+                    sceAudioOutOutput(g_audio_port, ai.pData);
+                }
             }
         } else {
             sceKernelDelayThread(5000);

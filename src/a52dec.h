@@ -27,6 +27,10 @@ void    a52_feed(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out
 int     a52_aac_available(void);
 A52Dec *a52_create_aac(void);
 void    a52_feed_frame(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out out, void *ctx);
+/* 1.1: "clear dialogue" for 5.1 / 7.1 (Select > Audio): the centre louder in the stereo mix; for decoders
+ * created after the call (the player opens a new one when it changes) */
+void    a52_set_dialog(int on);
+int     a52_get_dialog(void);
 /* frames decoded, frames that failed */
 void    a52_stats(const A52Dec *d, uint32_t *frames, uint32_t *errors);
 
