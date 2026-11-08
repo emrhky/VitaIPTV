@@ -7,7 +7,7 @@ listen to radio from your own M3U playlists or Xtream accounts, decoded by the V
 
 <p align="center"><img src="https://github.com/user-attachments/assets/010c908b-58ff-4be5-982d-5e6c4701ef0c" width="640" alt="Vita IPTV screenshot"></p>
 
-**Version 1.0** - live TV with a programme guide and watching again (catch-up), films and series with posters and details, subtitles, favourites, parental lock (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
+**Version 1.1** - live TV with a programme guide and watching again (catch-up), smoother 50 / 60 fps channels, My List, fast list opening, films and series with posters and details, subtitles, favourites, parental lock (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
 
 This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
@@ -37,6 +37,10 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 - **Video:** H.264 up to 1920x1080 through the hardware decoder (details below), audio/video sync to the
   sound, automatic recovery from decoder errors.
 - **1080p:** 1080p channels and films play through the same hardware decoder.
+- **50 / 60 fps:** 720p at 50 / 60 fps plays every picture; 1080p at 50 / 60 fps a steady 25 / 30 pictures a
+  second (every second picture, evenly spaced).
+- **Sound (Select > Audio):** volume boost (+3 / +6 / +9 dB, with a limiter), "clear sound" for the Vita's small
+  speakers, and "clear speech" for 5.1 films (the centre channel louder in the stereo mix).
 - **Picture size (HLS channels with several qualities):** they open at about 540p (the Vita's own screen size) if
   the channel offers it, else at 720p, or at the size chosen in the settings. **Select** lists the channel's
   sizes (tab *Picture*); **Square** goes to the next size up, from the biggest to the smallest.
@@ -48,10 +52,15 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   language (*Audio: Turkish (AAC)*). Without a choice the stream's default track plays, AAC before AC-3. HLS
   channels whose sound comes in playlists of its own (one per language) play too, and list those languages.
 - **Radio:** audio-only streams get a radio screen.
-- **Favourites:** START marks a playlist, a channel, a film or a series (star). A favourite channel stays in its
-  place in its category and gets its own *Favorites* category, where **Select** > *Reorder favourites* moves a
-  channel up or down (X saves). Films
+- **Favourites:** START marks a channel, a film or a series (star). A favourite channel stays in its
+  place in its category and gets its own *Favorites* category, where **Select** > *Reorder favourites* reorders them (X
+  picks a channel up and puts it down, any number of them; START saves; O asks whether to save). Films
   and series (Xtream) have a *Favorites* category before the categories; it opens at once, without loading.
+- **My List:** **Select** > *Add to My List* on a live channel of any playlist; a *My List* row at the top of the
+  playlists then holds them together, grouped by playlist (Xtream channels with their programme guide, opened
+  with the playlist's current password). Also while watching (**Select** > *More*); *Reorder My List* reorders it.
+- **Fast list opening:** Xtream and M3U-link playlists open at once from the copy saved
+  last time; the list is checked in the background and replaced at a quiet moment when it changed.
 - **Recently watched:** a category with the last 20 channels of the playlist; films and series (Xtream) have one
   too, before their categories (the last 20 films, the last 20 series an episode of which was played).
   *Clear Recently Watched* in the settings empties them all.
@@ -71,10 +80,14 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   VitaShell, for example); the lock is then off.
 - **Two-pane channel browser:** categories on the left, channels on the right. Left stick scrolls categories,
   right stick scrolls channels. Search across all channels (case- and accent-insensitive).
-- **Settings** (**Select** on the playlists or the channels): language (English / Turkish, follows the console by
-  default), hide adult channels, hide channels named 4K / UHD (the Vita cannot play 4K), preferred resolution
-  (automatic, 1080p, 720p, 540p, 480p, lowest), parental lock (PIN), theme (blue, green, purple, orange),
-  optional transcoding server (off / when needed / always), clear recently watched, clear watched episodes.
+- **Settings** (**Select** on the playlists or the channels; the line at the bottom says what the chosen one does):
+  language (English / Turkish, follows the console by default), theme (blue, green, purple, orange), preferred
+  resolution (automatic, 1080p, 720p, 540p, 480p, lowest), hide adult channels, hide channels named 4K / UHD (the
+  Vita cannot play 4K), parental lock (PIN), volume boost, clear sound, clear speech (5.1), the transcoding server
+  (off / when needed / always; its address and a test while it is on), clear recently watched, clear watched
+  episodes, About. O with something changed asks whether to save.
+- **Playlists' order:** **Select** > *Reorder playlists* on the playlists screen (as for the favourites); My List
+  stays on top while it has channels. **O** there asks "Quit Vita IPTV?".
 - **Player top bar:** the channel or film, the time of day in the middle, the picture size on the right.
 - **Optional transcoding server** (`tools/vita_iptv_proxy.py`, needs Python 3 and ffmpeg on a PC or an Android
   phone): plays what the Vita cannot - HEVC, interlaced video, 1080p at 50/60 fps - by converting it to 720p
@@ -97,7 +110,7 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 | Single stream | A direct stream link; Referer and User-Agent only if the stream needs them |
 
 **Triangle** edits (*Delete playlist* is at the end of the edit form), **START** saves a form, **Select** opens the
-menu (Add playlist, Settings, Reload, About, Exit).
+menu (Add playlist, Reorder playlists, Reload playlists, Settings, Quit).
 
 **From a PC (many at once):**
 
@@ -126,18 +139,18 @@ The same buttons do the same things on every screen.
 | Button | Playlists | Channels / films | Playing | Guide | Forms |
 |---|---|---|---|---|---|
 | X | Open | Play (a series: open it) | Pause / play | Watch (a past programme: from the start or live) | Edit / choose |
-| O | - | Back (first leaves a search) | Back (a film's position is kept) | Close | Cancel |
+| O | Quit (asks first) | Back (first leaves a search) | Back (a film's position is kept) | Close | Cancel |
 | Triangle | Edit | Live: guide. Films: details. Series: open | Live: guide. Film: details. Archive: the schedule | Close | - |
 | Square | Add | Search (films / series: all of them) | Next picture size, the server, or (archive) back to live | The channel's schedule | - |
 | R | Page | Page | Information | A day on | - |
 | L | Page | Page | The channel before | A day back | - |
-| START | Favourite (to the top) | Favourite channel, film or series (episodes: their series) | Favourite channel or film (a single link: its playlist) | - | Save |
-| Select | Menu | Menu (live *Favorites*: *Reorder favourites* first) | Tabs: Picture, Audio, Subtitles, More (analysis, sleep timer, channel number) | Categories | - |
+| START | - | Favourite channel, film or series (episodes: their series) | Favourite channel or film | - | Save |
+| Select | Menu | Menu (live *Favorites* and My List: *Reorder* first) | Tabs: Picture, Audio, Subtitles, More (analysis, sleep timer, channel number) | Categories | - |
 | Up / Down, left stick | Move | Categories (left stick), channels (right stick) | Previous / next channel or film (archive: programme) | Channel | Move |
 | Left / Right | Page | Categories / channels | Hold to move through a film, let go to jump there | Time | Change a choice |
 
-In the series screen L / R change the season. While reordering favourites Up / Down moves the channel, X saves and
-O cancels.
+In the series screen L / R change the season. When reordering (*Favorites*, My List, playlists) X picks a channel up and puts it
+down, Up / Down moves it, START saves, O asks "Save the new order?".
 Moving through a film also works with the left stick sideways (further and longer = faster). In the Select menu
 L / R (or Left / Right) changes the tab; on the subtitle *Sync* row Left / Right moves the subtitles. In the stream
 analysis X runs it again and O goes back to the picture. Radio: Up / Down change station, Select the analysis.
@@ -168,8 +181,9 @@ instead of freezing; when the stream's segments come slower than they play, the 
 next smaller picture size by itself (not when a size was chosen with Select / Square or in the settings, except
 1080p). A film the connection cannot carry waits longer at once and
 shows the connection speed against what the film needs.
-The Vita decoder manages 1080p up to about 30 pictures a second. 1080p at 50/60 fps plays with the pictures no
-other picture needs left out (in time with the sound, at a lower frame rate); an HLS channel goes to its 720p
+The Vita decoder manages about 320 000 macroblocks a second (1080p up to about 40 pictures a second, 720p about
+90; measured with the test app in `tools/hwbench`). 1080p at 50/60 fps plays every second picture, evenly spaced
+(the pictures no other picture needs at the other places are left out; in time with the sound); an HLS channel goes to its 720p
 variant instead. The same happens when the decoder is measured to be slower than any other stream.
 When the picture falls behind the sound on live TV (a stream that sends the sound seconds ahead, a burst the
 decoder takes in at once), the sound waits until the picture has caught up.
