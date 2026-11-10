@@ -31,6 +31,7 @@ int main(int argc, char **argv)
     setvbuf(stdout, NULL, _IONBF, 0);
     assert(argc == 4);
     assert(a52_available());
+    if (getenv("DIALOG")) a52_set_dialog(1);                 /* 1.1: clear dialogue */
     FILE *f = fopen(argv[1], "rb"); assert(f);
     fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
     uint8_t *b = malloc((size_t)n); assert(fread(b, 1, (size_t)n, f) == (size_t)n); fclose(f);

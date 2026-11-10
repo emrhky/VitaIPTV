@@ -259,6 +259,31 @@ int main(void)
         assert(se.sub_size == 1 && se.sub_color == 0 && se.sub_pos == 0 && se.sub_bg == 0 && se.theme == 0);
         char tiny[40]; assert(settings_format(&sd, tiny, sizeof tiny) == -1);
     }
+    {   /* 1.1: sound settings: off by default and not written then; kept; out of range -> off */
+        Settings sd; settings_defaults(&sd);
+        assert(sd.snd_boost == 0 && sd.snd_speaker == 0 && sd.snd_dialog == 0);
+        char sdf[512]; settings_format(&sd, sdf, sizeof sdf); assert(!strstr(sdf, "snd_"));
+        settings_parse("snd_boost=2\nsnd_speaker=1\nsnd_dialog=1\nsub_size=3\ntheme=2\n", &sd);
+        assert(sd.snd_boost == 2 && sd.snd_speaker == 1 && sd.snd_dialog == 1 && sd.sub_size == 3 && sd.theme == 2);
+        assert(settings_format(&sd, sdf, sizeof sdf) > 0);
+        Settings se; settings_parse(sdf, &se);
+        assert(se.snd_boost == 2 && se.snd_speaker == 1 && se.snd_dialog == 1 && se.sub_size == 3 && se.theme == 2);
+        settings_parse("snd_boost=7\nsnd_speaker=2\nsnd_dialog=-1\n", &se);
+        assert(se.snd_boost == 0 && se.snd_speaker == 0 && se.snd_dialog == 0);
+        /* 1.1: the server turned off keeps its address; proxy_url refuses it */
+        Settings so; settings_defaults(&so);
+        snprintf(so.proxy, sizeof so.proxy, "http://192.168.1.20:8090");
+        so.proxy_off = 1;
+        char sof[512], pu[600];
+        settings_format(&so, sof, sizeof sof); assert(strstr(sof, "proxy_off=1") && strstr(sof, "192.168.1.20"));
+        Settings so2; settings_parse(sof, &so2); assert(so2.proxy_off == 1 && !strcmp(so2.proxy, so.proxy));
+        assert(proxy_url(&so2, "http://x/1.ts", pu, sizeof pu) != 0);
+        so2.proxy_off = 0; assert(proxy_url(&so2, "http://x/1.ts", pu, sizeof pu) == 0);
+        settings_format(&so2, sof, sizeof sof); assert(!strstr(sof, "proxy_off"));
+        /* (the 1.1 test's "fast_open=0" is read without harm: the fast list opening is always on) */
+        Settings sg; settings_parse("fast_open=0\ntheme=1\n", &sg); assert(sg.theme == 1);
+        settings_format(&sg, sdf, sizeof sdf); assert(!strstr(sdf, "fast_open"));
+    }
     char slf[256]; settings_format(&sl, slf, sizeof slf); Settings sl2; settings_parse(slf, &sl2); assert(sl2.lang == 2);
 
     /* adult filter */

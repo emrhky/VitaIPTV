@@ -72,6 +72,7 @@ void ui_footer(const UiHint *hints, int n, const char *status, int status_err);
 int  ui_button(int x, int cy, int btn);           /* draws a glyph starting at x, returns its width */
 int  ui_badge(int x, int y, const char *txt, unsigned col);   /* y = top; returns width */
 void ui_round_rect(int x, int y, int w, int h, int r, unsigned col);
+void ui_circle(float cx, float cy, float r, unsigned col);   /* 1.1: smooth edges */
 int  ui_tag(int x, int y, int w, int h, const char *txt, unsigned col);   /* big centred label, returns w */
 void ui_scrollbar(int x, int y, int h, int first, int visible, int total);
 void ui_spinner(int cx, int cy, unsigned t_ms);
