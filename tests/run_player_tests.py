@@ -204,6 +204,12 @@ for name, pre in (("hd", "h"), ("sd", "s")):
 # 1080p60 with B-pictures (more than the Vita decoder manages), 8 s
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=60 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 8 "
    f"-c:v libx264 -preset ultrafast -bf 2 -x264-params b-pyramid=0 -g 120 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/f1080_60.ts")
+# 1.1: 1080p50, P every third picture (as many sports channels): the "even half"
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=50 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 8 "
+   f"-c:v libx264 -preset ultrafast -bf 2 -x264-params b-pyramid=0:b-adapt=0 -g 100 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/f1080_50.ts")
+# 1.1: 1080p50 without B-pictures (every picture a reference), 1 s groups: the "group trim"
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=50 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 8 "
+   f"-c:v libx264 -preset ultrafast -bf 0 -refs 1 -g 50 -keyint_min 50 -sc_threshold 0 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/f1080_50p.ts")
 for name, ac in (("fast60", "-c:a aac -ac 2"), ("fast60_ac3", "-c:a ac3")):
     sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=60 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 8 "
        f"-c:v libx264 -preset ultrafast -bf 2 -x264-params b-pyramid=0 -g 60 -pix_fmt yuv420p {ac} -f mpegts {T}/{name}.ts")
@@ -259,6 +265,11 @@ sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavf
 for ext, fmt in (("ts", "mpegts"), ("mkv", "matroska"), ("mp4", "mp4")):
     sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 6 "
        f"-c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -ac 6 -b:a 256k -f {fmt} {T}/hls/aac51.{ext}")
+# 1.2: 5.1 AAC with six different tones (the Vita's 0x1008 decoder learns its channel order from them)
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 "
+   + "".join(f"-f lavfi -i sine=frequency={f}:sample_rate=48000 " for f in (300, 500, 700, 70, 1100, 1300)) +
+   f"-filter_complex \"[1:a][2:a][3:a][4:a][5:a][6:a]join=inputs=6:channel_layout=5.1[a]\" -map 0:v -map \"[a]\" -t 6 "
+   f"-c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -b:a 256k -f mpegts {T}/hls/aac51d.ts")
 # 0.7.0: a film with two text subtitle tracks (Turkish SRT, English ASS "SDH")
 open(f"{T}/hls/subs_tr.srt", "w").write("1\n00:00:01,000 --> 00:00:02,000\nBir\n\n2\n00:00:03,000 --> 00:00:04,000\nİki\n\n")
 open(f"{T}/hls/subs_en.ass", "w").write("[Script Info]\nScriptType: v4.00+\n\n[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding\n"
@@ -277,9 +288,9 @@ A52 = f"-DHAVE_A52 -I{FP}/include" if FP and os.path.exists(f"{FP}/lib/libavcode
 A52L = f"{FP}/lib/libavcodec.a {FP}/lib/libavutil.a" if A52 else ""
 print("AC-3 decoding:", "with FFmpeg from " + FP if A52 else "not built in")
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL {A52} -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
+   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
 r = subprocess.run(f"{T}/test_tsplayer {T}/s720.ts {T}/s1080.ts {T}/hevc.ts {T}/midgop.ts {T}/dropped.ts "
-                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4 {T}/f1080_60.ts {T}/wrap.ts",
+                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4 {T}/f1080_60.ts {T}/wrap.ts {T}/f1080_50.ts {T}/f1080_50p.ts",
                    shell=True, capture_output=True, text=True)
 print(r.stdout); print(r.stderr[-4000:])
 sys.exit(r.returncode)

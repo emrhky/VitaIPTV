@@ -22,6 +22,7 @@
 static int g_own_http;                      /* 0.6.0: "own socket (http)" was logged */
 static int g_net_slow, g_net_fast;          /* 0.6.0: "the network is slower than the film" / "the network is fast" */
 static int g_asked_again;                   /* 0.6.0: "the film does not come ...: asking the server again" */
+static int g51_took, g51_direct;            /* 1.2: the 5.1 AAC decoder learnt its order / opened at once */
 void plog(const char *fmt, ...)
 {
     char line[1024];
@@ -33,6 +34,8 @@ void plog(const char *fmt, ...)
     if (strstr(line, "network is slower than the film (")) g_net_slow = 1;   /* (the queues line, not "buffering (...: n pictures") */
     if (strstr(line, "network is fast")) g_net_fast = 1;
     if (strstr(line, "asking the server again")) g_asked_again = 1;
+    if (strstr(line, "AAC 5.1: the Vita's decoder gives")) g51_took = 1;             /* 1.2 */
+    if (strstr(line, "5.1: the Vita's decoder (0x1008)")) g51_direct = 1;
     if (getenv("VERBOSE")) puts(line);
 }
 extern int mock_mapped;
@@ -192,6 +195,8 @@ static int int_cfg, int_mode, int_creates, int_units, int_soft_every, int_full_e
 static int paint_mode;                   /* 1: a normal picture (a gradient top to bottom), 2: two fields one above the other */
 int sceVideodecSetConfigInternal(SceVideodecType c, SceInt32 cfg) { (void)c; int_cfg = cfg; return 0; }
 int sceAvcdecSetDecodeMode(SceVideodecType c, SceInt32 m) { (void)c; int_mode = m; return 0; }
+int mock_ilace;                                             /* 1.2: the decoder's interlaced mode */
+int sceAvcdecSetInterlacedStreamMode(SceVideodecType c, SceInt32 on) { (void)c; mock_ilace = on; return 0; }
 int sceVideodecQueryMemSizeInternal(SceVideodecType c, SceVideodecQueryInitInfo *q, SceUInt32 *size)
 { (void)c; if (q->hwAvc.size != sizeof q->hwAvc || q->hwAvc.numOfStreams != 1) return (int)0x80620802;
   *size = q->hwAvc.horizontal * q->hwAvc.vertical * 5 / 2 + 300000; return 0; }
@@ -280,13 +285,26 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
 static int mock_refuse_lc;
 static int alib_open, adec_open, ports_open, port_len, port_rate, port_ch;
 static uint64_t pcm_frames_out;
+/* 1.2: the multichannel AAC type 0x1008 (VNZBench): 6 channels out, here in AAC's own order C L R Ls Rs LFE
+ * (FFmpeg decodes it), mock51_lag: a frame late */
+static int mock51_lag, mock51_frames;
+static A52Dec *mock51_dec;
+static float mock51_pl[2][6 * 2048];
 SceInt32 sceAudiodecInitLibrary(SceUInt32 type, SceAudiodecInitParam *p)
-{ if (type != SCE_AUDIODEC_TYPE_AAC) return (int)0x807F0001; if (alib_open) return (int)0x807F0003;
+{ if (type != SCE_AUDIODEC_TYPE_AAC && !(type == 0x1008 && a52_aac_available())) return (int)0x807F0001; if (alib_open) return (int)0x807F0003;
   if (p->aac.size != sizeof p->aac || p->aac.totalStreams < 1) return (int)0x807F0002;
   alib_open = 1; return 0; }
 SceInt32 sceAudiodecTermLibrary(SceUInt32 type) { (void)type; alib_open = 0; return 0; }
 SceInt32 sceAudiodecCreateDecoder(SceAudiodecCtrl *c, SceUInt32 type)
-{ if (type != SCE_AUDIODEC_TYPE_AAC || !alib_open) return (int)0x807F0005;
+{ if (type == 0x1008 && alib_open) {
+    const uint32_t *in = (const uint32_t *)c->pInfo;
+    if (c->size != sizeof *c || c->wordLength != 16 || !in || in[0] != 0x18 || in[1] != 1) return (int)0x807F0002;
+    if (in[2] != 6 && in[2] != 2) return (int)0x807F3000;
+    a52_destroy(mock51_dec);
+    mock51_dec = a52_create_aac();
+    mock51_frames = 0;
+    c->handle = 8; c->maxEsSize = 4864; c->maxPcmSize = 12288; adec_open = 1; return 0; }
+  if (type != SCE_AUDIODEC_TYPE_AAC || !alib_open) return (int)0x807F0005;
   if (c->size != sizeof *c || c->wordLength != 16 || !c->pInfo || c->pInfo->aac.size != sizeof c->pInfo->aac || c->pInfo->aac.isAdts != 1) return (int)0x807F0002;
   if (c->pInfo->aac.ch < 1 || c->pInfo->aac.ch > 2) return (int)0x807F3000;
   c->handle = 7; c->maxEsSize = 1536; c->maxPcmSize = 2048 * 2 * 2; adec_open = 1; return 0; }
@@ -294,6 +312,22 @@ SceInt32 sceAudiodecDeleteDecoder(SceAudiodecCtrl *c) { (void)c; adec_open = 0; 
 SceInt32 sceAudiodecDecode(SceAudiodecCtrl *c)
 {
     const uint8_t *e = c->pEs;
+    if (c->handle == 8) {                                    /* 1.2: 0x1008 */
+        int n = a52_aac_raw6(mock51_dec, e, c->inputEsSize, mock51_pl[mock51_frames & 1], 2048);
+        if (n <= 0) return (int)0x807F0000;
+        const float *src = mock51_pl[(mock51_frames + (mock51_lag ? 1 : 0)) & 1];   /* (lag: the previous frame) */
+        if (mock51_lag && !mock51_frames) src = NULL;
+        static const int SLOT[6] = { 1, 2, 0, 5, 3, 4 };    /* FFmpeg's L R C LFE Ls Rs -> C L R Ls Rs LFE */
+        int16_t *o = (int16_t *)c->pPcm;
+        for (int k = 0; k < 6; k++)
+            for (int i = 0; i < n; i++) {
+                float v = src ? src[k * n + i] * 32767.0f : 0.0f;
+                o[i * 6 + SLOT[k]] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+            }
+        mock51_frames++;
+        c->outputPcmSize = (SceUInt32)(n * 6 * 2);
+        return 0;
+    }
     if (((uintptr_t)c->pEs & 0xFF) || ((uintptr_t)c->pPcm & 0xFF)) return (int)0x807F0008;   /* 256-byte alignment */
     if (e[0] != 0xFF || (e[1] & 0xF6) != 0xF0) return (int)0x807F0002;
     if ((e[2] >> 6) != 1) return (int)0x807F0000;           /* AAC-LC only, as on the Vita */
@@ -319,7 +353,8 @@ int sceAudioOutSetVolume(int port, int ch, int *vol) { (void)port; (void)ch; (vo
 /* ---- helpers ---- */
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 
-typedef struct { TspStatus st; int changes, nonmono, w, h, avn, av_bad, av_max, synced, av_last, avn2, av_bad2; double first_show, last_show, play_time, slow_at, wait_max, wait_t0, end_at; int64_t first_pts, last_pts; } Run;
+typedef struct { TspStatus st; int changes, nonmono, w, h, avn, av_bad, av_max, synced, av_last, avn2, av_bad2; double first_show, last_show, play_time, slow_at, wait_max, wait_t0, end_at; int64_t first_pts, last_pts;
+                 int gapn, gap2; } Run;   /* 1.1: steps between shown pictures, and how many were exactly 3600 (two at 50 fps) */
 
 static Run play(const char *path, double max_s)
 {
@@ -334,6 +369,7 @@ static Run play(const char *path, double max_s)
             int64_t pts; memcpy(&pts, tx->gxm_tex.data, 8);
             if (r.changes == 0) { r.first_show = now_s(); r.first_pts = pts; }
             else if (pts >= 0 && r.last_pts >= 0 && pts <= r.last_pts) r.nonmono++;
+            if (r.changes > 0 && pts > r.last_pts && r.last_pts >= 0) { int64_t d = pts - r.last_pts; r.gapn++; if (d > 3500 && d < 3700) r.gap2++; }
             r.last_pts = pts; r.last_show = now_s(); r.changes++; r.w = w; r.h = h; last = tx;
             int ms;
             if (tsp_av_offset(&ms)) {                        /* picture time vs. what is being heard */
@@ -562,7 +598,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33 || argc == 34 || argc == 35);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r;
@@ -728,6 +764,24 @@ int main(int argc, char **argv)
                 assert(ra.st.audio_frames > 100 && ra.st.audio_ch == 2 && ra.st.audio_src_ch == 6 && !ra.st.audio_msg[0] && !ra.st.audio_ac3 && ra.synced);
             else
                 assert(ra.st.audio_frames == 0 && strstr(ra.st.audio_msg, "6 channels") && ra.changes >= 100);   /* the picture plays */
+        }
+        /* 1.2: six different tones: the Vita's 5.1 decoder (0x1008) learns its order from FFmpeg and takes over;
+         * then the next file opens on it at once; a frame late too */
+        if (a52_aac_available()) {
+            for (int lag = 0; lag < 2; lag++) {
+                tsp_aac51_reset();
+                mock51_lag = lag;
+                g51_took = g51_direct = 0;
+                snprintf(pa, sizeof pa, "%s/aac51d.ts", argv[16]);
+                Run ra = play(pa, 6);
+                printf("               5.1 AAC, six tones%s: frames %u, learnt %d, synced %d\n", lag ? " (a frame late)" : "",
+                       (unsigned)ra.st.audio_frames, g51_took, ra.synced);
+                assert(g51_took && ra.st.audio_frames > 100 && ra.st.audio_ch == 2 && ra.st.audio_src_ch == 6 && ra.synced);
+                ra = play(pa, 4);
+                assert(g51_direct && ra.st.audio_frames > 60 && ra.synced);
+            }
+            mock51_lag = 0;
+            tsp_aac51_reset();
         }
     }
 subs:
@@ -1098,6 +1152,35 @@ limit:
         show("1080p60 HD", &r);
         printf("               shown %u, decoded %u, not decoded %u, last %d ms from the sound\n", r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.av_last);
         assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 150 && r.st.shown * 10 >= r.st.decoded * 7 && abs(r.av_last) < 200);
+        if (argc > 33) {
+            /* 1.1: 1080p50 with P every third picture (B-pictures nothing refers to: two thirds) from an HD decoder
+             * at about 45 pictures/s: "even half": the reference pictures and the other pictures at even places
+             * are decoded (2/3), every second picture is shown, evenly (before: only the reference pictures,
+             * 17 a second) */
+            decode_order = 1; int_delay = 5; int_out_us = 22000;
+            r = play(argv[33], 12);
+            decode_order = 0; int_delay = 2; int_out_us = 0;
+            show("1080p50 even", &r);
+            printf("               shown %u, decoded %u, not shown %u, steps of two pictures %d of %d, last %d ms from the sound\n",
+                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.gap2, r.gapn, r.av_last);
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 180 && r.st.shown <= 215 && abs(r.av_last) < 200);
+            assert(r.gap2 * 10 >= r.gapn * 9);
+        }
+        if (argc > 34) {
+            /* 1.1: 1080p50 without B-pictures (every picture is a reference: seen on the device, 0% left to leave
+             * out) from an HD decoder at about 42 pictures/s: "group trim": the first pictures of each 1 s group
+             * are decoded, the end of the group is left out; in time with the sound, no jumps to keyframes */
+            decode_order = 0; int_delay = 2; int_out_us = 24000;
+            r = play(argv[34], 12);
+            int_out_us = 0;
+            show("1080p50 all P", &r);
+            printf("               shown %u, decoded %u, left out %u, dropped %u, last %d ms from the sound\n",
+                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.st.dropped, r.av_last);
+            /* (the decoded run of a group plays a little behind the sound, at most about 150 ms with this decoder, and
+             * catches up while the end of the group is left out: no dropped pictures, no jumps) */
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 250 && r.st.skipped >= 50);
+            assert(r.st.dropped < 40 && r.av_max < 400);
+        }
         /* a file from the memory card (1080p25, HD decoder in decode order): plays to the end without the sound
          * waiting for pictures that will not come (0.2.7: 10 s of silence and a still picture at the end) */
         tsp_set_options(1, 720);
