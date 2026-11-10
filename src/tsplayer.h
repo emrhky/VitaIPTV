@@ -115,4 +115,7 @@ const TspStatus  *tsp_status(void);                  /* NULL if not started */
 /* Shown picture time minus audio time, in ms. Returns 0 if unknown. */
 int               tsp_av_offset(int *ms);
 
+/* 1.2: forget the Vita AAC 5.1 decoder's learnt channel order (PC tests) */
+void tsp_aac51_reset(void);
+
 #endif

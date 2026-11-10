@@ -26,6 +26,8 @@
 #include "tsdemux.h"
 #include "httpio.h"
 #include "memstat.h"
+#include "audiofx.h"
+#include "a52dec.h"
 #include "ui.h"
 #include "screens.h"
 #include <psp2/ime_dialog.h>
@@ -37,6 +39,8 @@
 #include <psp2/power.h>
 #include "lang.h"
 #include "fav.h"
+#include "mylist.h"
+#include "listcache.h"
 #include "epg.h"
 #include "guide.h"
 #include "catchup.h"
@@ -59,9 +63,12 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define RESUME_FILE   DATA_DIR "/resume.txt"
 #define WATCH_FILE    DATA_DIR "/watched.txt"     /* 0.7.0: watched episodes */
 #define FAV_FILE      DATA_DIR "/favorites.txt"
+#define MYLIST_FILE   DATA_DIR "/mylist.txt"
+#define ORDER_FILE    DATA_DIR "/order.txt"         /* 1.1: the playlists' order (Select > Reorder playlists) */
+#define CACHE_DIR     DATA_DIR "/cache"                  /* 1.1: saved copies of the playlists (listcache.h) */
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v1.0.0"
+#define APP_VERSION   "v1.2.0"
 #endif
 #ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
 #define APP_BUILD     __DATE__ " " __TIME__
@@ -91,6 +98,7 @@ static int status_err;
 static char search_q[96], search_fold[192];   /* channel search (empty = off) */
 static int cur_src;                          /* source whose channels are listed */
 static Settings settings;
+static int srv_on(void) { return settings.proxy[0] && !settings.proxy_off; }
 /* Xtream films and series: the channel screen lists their categories; a category's items are loaded when
  * it is opened, a series' episodes when the series is opened */
 enum { SEC_LIVE, SEC_FILMS, SEC_SERIES };
@@ -104,19 +112,30 @@ static char series_name[IPTV_NAME_MAX];
 static ResumeEntry resume[MAX_RESUME];      /* where films were left */
 static int nresume;
 static int via_proxy, auto_proxy_tried;     /* current channel goes through the transcoding server */
+static int srv_on(void);                    /* 1.1: a server address, not turned off */
 /* 0.5.0: favourites. Playlists: shown first (sorder: the screen's order -> sources[]). Live channels: a star
  * and a "Favorites" category at the top (g_fav, -1 when there are none); 0.6.0: they stay in their place in
  * their own category and in "All". Films and series (0.6.0): a star and a "Favorites" category before the
  * categories (g_fav 0; the categories are then vcats[group - 1]), built from favorites.txt alone. */
 static FavList favs;
+static MyList mylist;                       /* 1.1: My List (mylist.h) */
 static int sorder[MAX_SOURCES];
+static int src_sorting, src_held = -1, src_dirty, src_ask;   /* 1.1: Select > Reorder playlists (src_held: a screen row) */
+static int sorder_saved[MAX_SOURCES];
+static int quit_ask;                        /* 1.1: O on the playlists: "Quit Vita IPTV?" */
 static int *fav_rank, fav_rank_n;           /* per channel of chans: its place among the favourites, -1 = not one */
 static int nfav_ch;                         /* favourite channels in this list */
 static int g_fav = -1, g_all = 0;           /* the "Favorites" and "All" categories (live TV) */
 static int *rec_rank, nrec_ch, g_recent = -1;   /* 0.4.5: recently watched (rank 0 = last), its category */
-static int fav_moving, move_ci;             /* 0.4.5: Triangle in "Favorites": the channel chans[move_ci] is moved */
-static FavEntry *move_saved;                /* ... and the order before, for O */
+/* 1.1: the edit mode (Select > Edit list in "Favorites" or in My List): X picks a channel up and puts it down,
+ * any number of them; START saves; O asks "Save the new order?" when something moved */
+static int fav_moving, move_ci = -1;        /* the edit mode is on; the channel held (chans[] index), -1 none */
+static int edit_kind, edit_dirty, edit_ask; /* 1 favourites, 2 My List; something moved; the "Save?" box is open */
+static FavEntry *move_saved;                /* the order before (favourites), for "No" */
 static int move_saved_n;
+static MyEntry *my_saved;                   /* (My List: its entries and channels before) */
+static Channel *ch_saved;
+static int my_saved_n, ch_saved_n;
 static int fav_dirty;                       /* changed in the player: the list is sorted again on the way back */
 static int vod_fav_stale;                   /* 0.6.0: a film / series favourite changed in the player or in the episodes */
 static int series_ci_saved = -1;            /* 0.6.0: the series whose episodes are shown (in series_saved) */
@@ -677,7 +696,58 @@ static void add_local_files(void)
     sceIoDclose(d);
 }
 
-/* 0.5.0: favourite playlists first (in the order they were added), then the rest as in sources.txt */
+/* 1.1: the playlists' order: My List on top (while it has channels), then as in order.txt (the playlists' keys,
+ * one a line; written by Select > Reorder playlists), then the ones not in it (new) as in sources.txt. Without an
+ * order.txt (before 1.1) the favourite playlists come first, as they did, and that order is written. */
+static char (*ord_keys)[FAV_SRC_MAX];
+static int nord, ord_read;
+
+static int read_saved(const char *path, Mem *m);
+static int write_text_file(const char *path, const char *text);
+
+static void save_order(void)
+{
+    char *buf = malloc((size_t)nsources * (FAV_SRC_MAX + 2) + 128);
+    if (!buf) return;
+    size_t o = (size_t)sprintf(buf, "# Vita IPTV: the order of the playlists (written by the app)\n");
+    char (*keys)[FAV_SRC_MAX] = malloc(sizeof(*keys) * MAX_SOURCES);
+    int n = 0;
+    for (int d = 0; d < nsources; d++) {
+        const Source *src = &sources[sorder[d]];
+        if (src->type == SRC_MYLIST) continue;
+        char k[FAV_SRC_MAX];
+        fav_source_key(src, k, sizeof k);
+        o += (size_t)sprintf(buf + o, "%s\n", k);
+        if (keys) snprintf(keys[n++], FAV_SRC_MAX, "%s", k);
+    }
+    if (write_text_file(ORDER_FILE, buf) < 0) set_status(1, "Could not write %s", ORDER_FILE);
+    free(buf);
+    if (keys) { free(ord_keys); ord_keys = keys; nord = n; ord_read = 1; }
+    else free(keys);
+}
+
+static void load_order(void)
+{
+    Mem m = {0};
+    free(ord_keys);
+    ord_keys = NULL;
+    nord = 0;
+    ord_read = 0;
+    if (read_saved(ORDER_FILE, &m) != 0) return;            /* (none yet: made by sort_sources) */
+    ord_read = 1;
+    ord_keys = malloc(sizeof(*ord_keys) * MAX_SOURCES);
+    for (char *p = m.buf, *nl; ord_keys && p && *p && nord < MAX_SOURCES; p = nl ? nl + 1 : NULL) {
+        nl = strchr(p, '\n');
+        size_t n = nl ? (size_t)(nl - p) : strlen(p);
+        while (n && (p[n - 1] == '\r' || p[n - 1] == ' ')) n--;
+        if (!n || *p == '#' || n >= FAV_SRC_MAX) continue;
+        memcpy(ord_keys[nord], p, n);
+        ord_keys[nord++][n] = 0;
+    }
+    free(m.buf);
+}
+
+/* (before 1.1: favourite playlists first) */
 static int src_is_fav(int i)
 {
     char k[FAV_SRC_MAX];
@@ -688,10 +758,221 @@ static int src_is_fav(int i)
 static void sort_sources(void)
 {
     int n = 0, rank[MAX_SOURCES];
-    for (int i = 0; i < nsources; i++) rank[i] = src_is_fav(i);
-    for (int r = 0; r < favs.n; r++)                         /* (favs.n is small) */
-        for (int i = 0; i < nsources; i++) if (rank[i] == r) sorder[n++] = i;
-    for (int i = 0; i < nsources; i++) if (rank[i] < 0) sorder[n++] = i;
+    for (int i = 0; i < nsources; i++) if (sources[i].type == SRC_MYLIST) sorder[n++] = i;   /* 1.1: My List on top */
+    if (!ord_read) {                                         /* the first time: as before 1.1, then kept */
+        for (int i = 0; i < nsources; i++) rank[i] = sources[i].type == SRC_MYLIST ? -2 : src_is_fav(i);
+        for (int r = 0; r < favs.n; r++)                     /* (favs.n is small) */
+            for (int i = 0; i < nsources; i++) if (rank[i] == r) sorder[n++] = i;
+        for (int i = 0; i < nsources; i++) if (rank[i] == -1) sorder[n++] = i;
+        if (nsources > (n > 0 && sources[sorder[0]].type == SRC_MYLIST ? 1 : 0)) {
+            save_order();
+            plog("order: the playlists' order written (%d)", nord);
+        }
+        return;
+    }
+    for (int i = 0; i < nsources; i++) {
+        rank[i] = -2;
+        if (sources[i].type == SRC_MYLIST) continue;
+        char k[FAV_SRC_MAX];
+        fav_source_key(&sources[i], k, sizeof k);
+        rank[i] = -1;
+        for (int r = 0; r < nord; r++) if (!strcmp(ord_keys[r], k)) { rank[i] = r; break; }
+    }
+    for (int r = 0; r < nord; r++)
+        for (int i = 0; i < nsources; i++) if (rank[i] == r) { sorder[n++] = i; rank[i] = -3; }   /* (a key twice: once) */
+    for (int i = 0; i < nsources; i++) if (rank[i] == -1) sorder[n++] = i;
+}
+
+static int read_saved(const char *path, Mem *m);
+static int write_text_file(const char *path, const char *text);
+
+/* 1.1: Select > Reorder playlists: X picks a playlist up and puts it down, START saves, O asks (as the edit mode) */
+static int src_fixed(int d) { return d >= 0 && d < nsources && sources[sorder[d]].type == SRC_MYLIST; }   /* (My List stays on top) */
+
+static void src_sort_status(void)
+{
+    set_status(0, src_held >= 0 ? "Up / down moves the playlist, X puts it down" : "X picks a playlist up, START saves the order", NULL);
+}
+
+static void src_sort_begin(void)
+{
+    memcpy(sorder_saved, sorder, sizeof sorder);
+    src_sorting = 1;
+    src_held = -1;
+    src_dirty = src_ask = 0;
+    plog("order: reorder playlists");
+    src_sort_status();
+}
+
+static void src_sort_end(int save)
+{
+    if (save && src_dirty) {
+        save_order();
+        plog("order: playlists' order saved");
+        if (!status_err) set_status(0, "Order saved", NULL);
+    } else if (!save && src_dirty) {
+        int keep = sorder[sel];
+        memcpy(sorder, sorder_saved, sizeof sorder);
+        sel = 0;
+        for (int d = 0; d < nsources; d++) if (sorder[d] == keep) sel = d;
+        set_status(0, "Order not changed", NULL);
+    } else {
+        status[0] = 0;
+    }
+    src_sorting = src_ask = src_dirty = 0;
+    src_held = -1;
+}
+
+static void src_sort_input(unsigned p)
+{
+    if (src_ask) {
+        if (p & SCE_CTRL_CROSS) src_sort_end(1);
+        else if (p & SCE_CTRL_CIRCLE) src_sort_end(0);
+        return;
+    }
+    int dir = (p & SCE_CTRL_DOWN) ? 1 : (p & SCE_CTRL_UP) ? -1 : 0;
+    if (dir && src_held >= 0) {
+        int to = src_held + dir;
+        if (to >= 0 && to < nsources && !src_fixed(to)) {
+            int t = sorder[to];
+            sorder[to] = sorder[src_held];
+            sorder[src_held] = t;
+            src_held = sel = to;
+            src_dirty = 1;
+        }
+    } else if (dir && nsources) {
+        sel = (sel + dir + nsources) % nsources;
+    }
+    if (p & SCE_CTRL_START) src_sort_end(1);
+    else if (p & SCE_CTRL_CROSS) {
+        if (src_held >= 0) src_held = -1;
+        else if (src_fixed(sel)) { set_status(0, "My List stays on top", NULL); return; }
+        else src_held = sel;
+        src_sort_status();
+    } else if (p & SCE_CTRL_CIRCLE) {
+        src_held = -1;
+        if (src_dirty) src_ask = 1; else src_sort_end(0);
+    }
+}
+
+/* ---- 1.1: My List: live channels from any playlist (mylist.txt); a row "My List" on top of the playlists
+ * while it has any (an entry of sources[] that is never saved) ---- */
+static void load_mylist(void)
+{
+    Mem m = {0};
+    mylist_free(&mylist);
+    if (read_saved(MYLIST_FILE, &m) == 0) { mylist_parse(m.buf, &mylist); free(m.buf); }
+    plog("mylist: %d channels", mylist.n);
+}
+
+static int save_mylist(void)
+{
+    char *t = mylist_format(&mylist);
+    int r = t ? write_text_file(MYLIST_FILE, t) : -1;
+    free(t);
+    if (r < 0) set_status(1, "Could not write %s", MYLIST_FILE);
+    return r;
+}
+
+/* the "My List" row: there while it has channels (always the last entry of sources[]) */
+static void mylist_source_sync(void)
+{
+    if (nsources > 0 && sources[nsources - 1].type == SRC_MYLIST) nsources--;
+    if (mylist.n > 0 && nsources < MAX_SOURCES) {
+        Source *s = &sources[nsources++];
+        memset(s, 0, sizeof *s);
+        s->type = SRC_MYLIST;
+        s->auto_added = 1;
+        snprintf(s->name, sizeof s->name, "%s", T("My List"));
+    }
+}
+
+/* the playlist channel ci belongs to (in My List: the one it came from); -1 = none (deleted) */
+static int chan_src(int ci)
+{
+    if (cur_src < 0 || cur_src >= nsources) return -1;
+    if (sources[cur_src].type != SRC_MYLIST) return cur_src;
+    if (ci < 0 || ci >= chans.count) return -1;
+    int s = (int)chans.items[ci].src_ix - 1;
+    return s >= 0 && s < nsources && sources[s].type != SRC_MYLIST ? s : -1;
+}
+static int chan_xtream(int ci) { int s = chan_src(ci); return s >= 0 && sources[s].type == SRC_XTREAM; }
+
+/* My List as a channel list (nothing is downloaded): each channel under its playlist's name as its category */
+static int load_mylist_channels(ChannelList *out, char *err, size_t errsz)
+{
+    char (*keys)[FAV_SRC_MAX] = malloc(sizeof(*keys) * (size_t)(nsources ? nsources : 1));
+    if (!keys) { snprintf(err, errsz, "No memory"); return -1; }
+    for (int i = 0; i < nsources; i++) fav_source_key(&sources[i], keys[i], sizeof keys[i]);
+    out->items = malloc(sizeof(Channel) * (size_t)(mylist.n ? mylist.n : 1));
+    if (!out->items) { free(keys); snprintf(err, errsz, "No memory"); return -1; }
+    out->cap = mylist.n;
+    out->count = 0;
+    int gone = 0;
+    for (int k = 0; k < mylist.n; k++) {
+        const MyEntry *e = &mylist.e[k];
+        int si = -1;
+        for (int i = 0; i < nsources; i++) if (sources[i].type != SRC_MYLIST && !strcmp(keys[i], e->src)) { si = i; break; }
+        Channel *c = &out->items[out->count];
+        memset(c, 0, sizeof *c);
+        snprintf(c->name, sizeof c->name, "%s", e->name[0] ? e->name : e->ch);
+        snprintf(c->group, sizeof c->group, "%s", si >= 0 ? sources[si].name : T("Deleted playlists"));
+        if (mylist_url(e, si >= 0 ? &sources[si] : NULL, c->url, sizeof c->url) != 0) continue;
+        c->kind = CH_LIVE;
+        c->src_ix = (unsigned short)(si + 1);
+        c->episode = (unsigned short)(k + 1);
+        if (si < 0) gone++;
+        out->count++;
+    }
+    free(keys);
+    plog("mylist: %d channels%s", out->count, gone ? " (some from deleted playlists)" : "");
+    if (!out->count) { snprintf(err, errsz, "My List is empty"); return -1; }
+    return 0;
+}
+
+/* Select > Add to My List / Remove from My List (in a playlist or in My List; also from the player). Returns
+ * 1 added, 0 removed, -1 not possible, -2 full. */
+static int mylist_toggle(int ci)
+{
+    if (section != SEC_LIVE || in_episodes || ci < 0 || ci >= chans.count || cur_src < 0 || cur_src >= nsources) return -1;
+    const Channel *c = &chans.items[ci];
+    if (c->kind != CH_LIVE) return -1;
+    if (sources[cur_src].type == SRC_MYLIST) {               /* removed (at once, from the screen too) */
+        int k = (int)c->episode - 1;
+        if (k < 0 || k >= mylist.n) return -1;
+        plog("mylist: \"%s\" removed", mylist.e[k].name);
+        mylist_remove(&mylist, k);
+        save_mylist();
+        memmove(&chans.items[ci], &chans.items[ci + 1], sizeof(Channel) * (size_t)(chans.count - ci - 1));
+        chans.count--;
+        for (int i = 0; i < chans.count; i++) if (chans.items[i].episode > (unsigned short)(k + 1)) chans.items[i].episode--;
+        return 0;
+    }
+    char sk[FAV_SRC_MAX], ck[IPTV_URL_MAX];
+    fav_source_key(&sources[cur_src], sk, sizeof sk);
+    fav_channel_key(&sources[cur_src], c, ck, sizeof ck);
+    int k = mylist_find(&mylist, sk, ck);
+    if (k >= 0) {                                            /* (1.1: there already: out again; chans is not My List) */
+        plog("mylist: \"%s\" removed", mylist.e[k].name);
+        mylist_remove(&mylist, k);
+        save_mylist();
+        return 0;
+    }
+    int r = mylist_add(&mylist, sk, ck, c->name, c->group, c->url);
+    if (r < 0) return mylist.n >= MYLIST_MAX ? -2 : -1;
+    save_mylist();
+    plog("mylist: \"%s\" added (%d channels)", c->name, mylist.n);
+    return 1;
+}
+
+/* is chans[ci] in My List (a channel of a playlist) */
+static int in_mylist(int ci)
+{
+    if (ci < 0 || ci >= chans.count || cur_src < 0 || cur_src >= nsources || sources[cur_src].type == SRC_MYLIST) return 0;
+    char sk[FAV_SRC_MAX], ck[IPTV_URL_MAX];
+    fav_source_key(&sources[cur_src], sk, sizeof sk);
+    fav_channel_key(&sources[cur_src], &chans.items[ci], ck, sizeof ck);
+    return mylist_find(&mylist, sk, ck) >= 0;
 }
 
 static int src_at(int d) { return d >= 0 && d < nsources ? sorder[d] : 0; }      /* screen row -> sources[] */
@@ -724,13 +1005,16 @@ static void load_sources(void)
         set_status(0, "Press Square to add your first playlist.", NULL);
         nsources = 0;
         add_local_files();
+        mylist_source_sync();                                /* 1.1 */
         sort_sources();
         sel = scroll = 0;
         return;
     }
     nsources = sources_parse(m.buf, sources, MAX_SOURCES);
     free(m.buf);
+    load_order();                                            /* 1.1 */
     add_local_files();
+    mylist_source_sync();                                    /* 1.1 */
     if (nsources == 0) set_status(0, "Press Square to add your first playlist.", NULL);
     else status[0] = 0;
     sort_sources();
@@ -862,21 +1146,6 @@ static int fav_toggle_channel(int ci)
     return r;
 }
 
-/* START on a playlist (or a single stream that is playing) */
-static int fav_toggle_source(int i)
-{
-    if (i < 0 || i >= nsources) return -1;
-    char sk[FAV_SRC_MAX];
-    fav_source_key(&sources[i], sk, sizeof sk);
-    int r = fav_toggle(&favs, FAV_LIST, sk, NULL, NULL);
-    if (r >= 0) {
-        save_favorites();
-        plog("fav: playlist \"%s\" %s", sources[i].name, r ? "added" : "removed");
-        sort_sources();
-    }
-    return r;
-}
-
 static const char *fav_note(int r)
 {
     return T(r == 1 ? "Added to favorites" : r == 0 ? "Removed from favorites" : "The favorites list is full");
@@ -902,59 +1171,147 @@ static int clear_recent(void)
     return removed;
 }
 
-/* ---- 0.4.5: reordering the favourites (Triangle in the "Favorites" category) ---- */
-static void fav_move_begin(int ci)
-{
-    free(move_saved);
-    move_saved = malloc(sizeof(FavEntry) * (size_t)(favs.n ? favs.n : 1));
-    if (!move_saved) return;
-    memcpy(move_saved, favs.e, sizeof(FavEntry) * (size_t)favs.n);
-    move_saved_n = favs.n;
-    fav_moving = 1;
-    move_ci = ci;
-    set_status(0, "Up / down moves the channel, X saves the order", NULL);
-}
-
+/* ---- the edit mode (1.1; 0.4.5-1.0: one favourite at a time) ---------------------------------------- */
 static void select_ci(int ci)
 {
     for (int i = 0; i < nvis; i++) if (vis[i] == ci) { sel = i; return; }
 }
 
-static void fav_move_step(int dir)
+static void edit_free_saved(void)
 {
-    if (move_ci < 0 || move_ci >= chans.count || !fav_rank || fav_rank_n != chans.count) return;
-    char sk[FAV_SRC_MAX], ck[IPTV_URL_MAX];
-    fav_source_key(&sources[cur_src], sk, sizeof sk);
-    fav_channel_key(&sources[cur_src], &chans.items[move_ci], ck, sizeof ck);
-    if (!fav_move(&favs, sk, ck, dir)) return;
-    int r = fav_rank[move_ci];                               /* two places swap: no need to work them all out again */
-    for (int i = 0; i < chans.count; i++) {
-        if (fav_rank[i] == r) fav_rank[i] = r + dir;
-        else if (fav_rank[i] == r + dir) fav_rank[i] = r;
+    free(move_saved);
+    free(my_saved);
+    free(ch_saved);
+    move_saved = NULL;
+    my_saved = NULL;
+    ch_saved = NULL;
+    move_saved_n = my_saved_n = ch_saved_n = 0;
+}
+
+static void edit_status(void)
+{
+    set_status(0, move_ci >= 0 ? "Up / down moves the channel, X puts it down" : "X picks a channel up, START saves the order", NULL);
+}
+
+/* kind 1: the favourites ("Favorites" category); 2: My List (its order is mylist.txt's) */
+static int edit_begin(int kind)
+{
+    edit_free_saved();
+    if (kind == 1) {
+        move_saved = malloc(sizeof(FavEntry) * (size_t)(favs.n ? favs.n : 1));
+        if (!move_saved) return -1;
+        memcpy(move_saved, favs.e, sizeof(FavEntry) * (size_t)favs.n);
+        move_saved_n = favs.n;
+    } else {
+        my_saved = malloc(sizeof(MyEntry) * (size_t)(mylist.n ? mylist.n : 1));
+        ch_saved = malloc(sizeof(Channel) * (size_t)(chans.count ? chans.count : 1));
+        if (!my_saved || !ch_saved) { edit_free_saved(); return -1; }
+        memcpy(my_saved, mylist.e, sizeof(MyEntry) * (size_t)mylist.n);
+        memcpy(ch_saved, chans.items, sizeof(Channel) * (size_t)chans.count);
+        my_saved_n = mylist.n;
+        ch_saved_n = chans.count;
+        guide_reset();                                       /* (the guide's rows are the channels' places: again at the end) */
     }
+    edit_kind = kind;
+    fav_moving = 1;
+    move_ci = -1;
+    edit_dirty = edit_ask = 0;
+    focus = 1;
+    if (sel >= nvis) sel = 0;
+    plog("edit: %s", kind == 1 ? "favourites" : "My List");
+    edit_status();
+    return 0;
+}
+
+/* My List: chans[a] and chans[b] change places (and their entries in mylist.txt; each channel keeps its place's entry index) */
+static void my_swap(int a, int b)
+{
+    unsigned short ea = chans.items[a].episode, eb = chans.items[b].episode;
+    Channel t = chans.items[a];
+    chans.items[a] = chans.items[b];
+    chans.items[b] = t;
+    chans.items[a].episode = ea;
+    chans.items[b].episode = eb;
+    mylist_swap(&mylist, (int)ea - 1, (int)eb - 1);
+    if (fav_rank && fav_rank_n == chans.count) { int x = fav_rank[a]; fav_rank[a] = fav_rank[b]; fav_rank[b] = x; }
+    if (rec_rank && fav_rank_n == chans.count) { int x = rec_rank[a]; rec_rank[a] = rec_rank[b]; rec_rank[b] = x; }
+}
+
+/* the held channel one place up (-1) or down (1) */
+static void edit_step(int dir)
+{
+    if (move_ci < 0 || move_ci >= chans.count) return;
+    if (edit_kind == 1) {
+        if (!fav_rank || fav_rank_n != chans.count) return;
+        char sk[FAV_SRC_MAX], ck[IPTV_URL_MAX];
+        fav_source_key(&sources[cur_src], sk, sizeof sk);
+        fav_channel_key(&sources[cur_src], &chans.items[move_ci], ck, sizeof ck);
+        if (!fav_move(&favs, sk, ck, dir)) return;
+        int r = fav_rank[move_ci];                           /* two places swap: no need to work them all out again */
+        for (int i = 0; i < chans.count; i++) {
+            if (fav_rank[i] == r) fav_rank[i] = r + dir;
+            else if (fav_rank[i] == r + dir) fav_rank[i] = r;
+        }
+    } else {
+        int pos = -1;
+        for (int i = 0; i < nvis; i++) if (vis[i] == move_ci) { pos = i; break; }
+        if (pos < 0 || pos + dir < 0 || pos + dir >= nvis) return;
+        int other = vis[pos + dir];                          /* the next one shown (in a category: the next of that playlist) */
+        my_swap(move_ci, other);
+        move_ci = other;
+    }
+    edit_dirty = 1;
     int keep_scroll = scroll;
     rebuild_visible();
     scroll = keep_scroll;
     select_ci(move_ci);
 }
 
-static void fav_move_end(int save)
+/* START / "Yes": saved; "No": back as it was */
+static void edit_end(int save)
 {
-    if (save) {
-        save_favorites();
-        plog("fav: order changed (%d favourites)", favs.n);
+    int keep = move_ci >= 0 ? move_ci : nvis && sel < nvis ? vis[sel] : -1;
+    if (save && edit_dirty) {
+        if (edit_kind == 1) save_favorites();
+        else save_mylist();
+        plog("edit: order saved (%s)", edit_kind == 1 ? "favourites" : "My List");
         if (!status_err) set_status(0, "Order saved", NULL);
-    } else if (move_saved && move_saved_n <= favs.cap) {     /* O: as it was */
-        memcpy(favs.e, move_saved, sizeof(FavEntry) * (size_t)move_saved_n);
-        favs.n = move_saved_n;
+    } else if (!save && edit_dirty) {
+        char url[IPTV_URL_MAX] = "";
+        if (keep >= 0 && keep < chans.count) snprintf(url, sizeof url, "%s", chans.items[keep].url);
+        if (edit_kind == 1 && move_saved && move_saved_n <= favs.cap) {
+            memcpy(favs.e, move_saved, sizeof(FavEntry) * (size_t)move_saved_n);
+            favs.n = move_saved_n;
+        } else if (edit_kind == 2 && my_saved && ch_saved && my_saved_n == mylist.n && ch_saved_n == chans.count) {
+            memcpy(mylist.e, my_saved, sizeof(MyEntry) * (size_t)my_saved_n);
+            memcpy(chans.items, ch_saved, sizeof(Channel) * (size_t)ch_saved_n);
+        }
         fav_update_ranks();
+        int keep_scroll = scroll;
         rebuild_visible();
-        select_ci(move_ci);
+        scroll = keep_scroll;
+        keep = -1;
+        for (int i = 0; i < chans.count && url[0]; i++) if (!strcmp(chans.items[i].url, url)) { keep = i; break; }
+        plog("edit: order not saved");
         set_status(0, "Order not changed", NULL);
+    } else {
+        status[0] = 0;
     }
-    free(move_saved);
-    move_saved = NULL;
+    if (keep >= 0) select_ci(keep);
+    if (edit_kind == 2) guide_setup();
+    edit_free_saved();
     fav_moving = 0;
+    move_ci = -1;
+    edit_ask = edit_dirty = edit_kind = 0;
+}
+
+/* can the edit mode open here: 1 favourites, 2 My List, 0 no */
+static int edit_possible(void)
+{
+    if (state != ST_CHANNELS || section != SEC_LIVE || in_episodes || search_fold[0] || nvis < 2) return 0;
+    if (cur_group == g_fav && g_fav >= 0) return 1;
+    if (cur_src >= 0 && cur_src < nsources && sources[cur_src].type == SRC_MYLIST && cur_group != g_recent) return 2;
+    return 0;
 }
 
 /* 0.8.1: the theme and how subtitles look, from the settings */
@@ -962,6 +1319,8 @@ static void apply_look(void)
 {
     ui_set_theme(settings.theme);
     scr_sub_style(settings.sub_size, settings.sub_color, settings.sub_pos, settings.sub_bg);
+    afx_set_global(settings.snd_boost, settings.snd_speaker);   /* 1.1: sound */
+    a52_set_dialog(settings.snd_dialog);
 }
 
 static void load_settings(void)
@@ -1083,6 +1442,8 @@ typedef struct {
     int vi_ok;
     char query[96], folded[192];        /* 0.8.0: LOAD_SEARCH: what is searched for */
     int series;
+    int from_cache;                     /* 1.1: LOAD_LIVE opened from the saved copy (checked in the background) */
+    uint32_t ch0, ch1;                  /* ... the saved copy's parts (Xtream: categories, channels; M3U: the list) */
 } LoadJob;
 static LoadJob job;
 static int frames_after_fail = 99;          /* ... and the first frames after a list failed to load */
@@ -1117,6 +1478,78 @@ static void log_heap(const char *what, size_t bytes)
 {
     MemStat m = mem_stat();                                  /* 0.7.0: of the app's 96 MB, and the most so far */
     plog("list: %s %u KB (app memory %u KB of %u MB, peak %u KB)", what, (unsigned)(bytes / 1024), m.used_kb, m.total_kb >> 10, m.peak_kb);
+}
+
+/* ---- 1.1: fast list opening: a playlist opens from its saved copy at once; the background thread ("listref")
+ * downloads it again and the screen changes to the new list (same category and channel) when it differs ---- */
+static int64_t now_unix(void);
+static int list_gen;                        /* 1.1: changes with every list loaded (a late background answer is dropped) */
+static void refresh_start(const Source *s, uint32_t h0, uint32_t h1);
+static void refresh_cancel(void);
+
+static int cache_usable(const Source *s)
+{
+    return cio_available() && s && (s->type == SRC_XTREAM || s->type == SRC_M3U_URL);
+}
+
+static void cache_path(const Source *s, char *out, size_t cap)
+{
+    char k[FAV_SRC_MAX];
+    fav_source_key(s, k, sizeof k);
+    snprintf(out, cap, "%s/live_%08x.bin", CACHE_DIR, (unsigned)listcache_hash(k, strlen(k)));
+}
+
+static int cache_exists(const Source *s)
+{
+    char path[128];
+    SceIoStat st;
+    if (!cache_usable(s)) return 0;
+    cache_path(s, path, sizeof path);
+    return sceIoGetstat(path, &st) >= 0;
+}
+
+static void cache_save(const Source *s, const CachePart *parts, int n)
+{
+    if (!cache_usable(s)) return;
+    char path[128];
+    sceIoMkdir(CACHE_DIR, 0777);
+    cache_path(s, path, sizeof path);
+    if (listcache_write(path, now_unix(), xt_srv_off, xt_srv_known, parts, n) != 0) plog("list: could not write the saved copy");
+}
+
+/* The list from its saved copy (parsed like a download). 0 = opened; -1 = no usable copy (then downloaded) */
+static int cache_load(const Source *s, ChannelList *out, uint32_t *h0, uint32_t *h1, int newer)
+{
+    char path[128];
+    ListCache lc;
+    cache_path(s, path, sizeof path);
+    if (listcache_read(path, &lc) != 0) return -1;
+    int rc = -1;
+    size_t n0 = 0, n1 = 0;
+    if (s->type == SRC_XTREAM) {
+        const char *cj = listcache_part(&lc, "cats", &n0, h0), *lj = listcache_part(&lc, "live", &n1, h1);
+        XtCategory *cats = cj && lj ? malloc(sizeof(XtCategory) * XT_MAX_CATS) : NULL;
+        if (cats) {
+            int ncats = xtream_parse_categories(cj, n0, cats, XT_MAX_CATS);
+            xtream_parse_live(lj, n1, s, cats, ncats, out);
+            free(cats);
+            rc = out->count > 0 ? 0 : -1;
+        }
+        if (rc == 0) { xt_srv_off = lc.srv_off; xt_srv_known = lc.srv_known; }
+    } else {
+        const char *mj = listcache_part(&lc, "m3u", &n0, h0);
+        *h1 = 0;
+        if (mj && !m3u_is_hls(mj)) {
+            m3u_parse(mj, n0, out);
+            rc = out->count > 0 ? 0 : -1;
+        }
+    }
+    int64_t age = now_unix() - lc.made;
+    listcache_free(&lc);
+    if (rc != 0) { channel_list_free(out); channel_list_init(out); plog("list: the saved copy was not usable"); return -1; }
+    if (newer) plog("list: the newer list opened: %d channels", out->count);   /* (1.1: the background check's) */
+    else plog("list: opened from the saved copy (%lld min old): %d channels; checking for a newer one", (long long)(age / 60), out->count);
+    return 0;
 }
 
 /* Xtream: the account first (a wrong password or an expired account is said at once), then the
@@ -1158,19 +1591,24 @@ static int load_xtream(const Source *s, ChannelList *out, char *err, size_t errs
     if (cats && xtream_api_url(s, "get_live_categories", url, sizeof url) == 0 &&
         http_get(url, NULL, NULL, &mc, err, errsz) == 0)
         ncats = xtream_parse_categories(mc.buf, mc.len, cats, XT_MAX_CATS);
-    free(mc.buf);
-    if (net_cancel) { free(cats); snprintf(err, errsz, "Cancelled"); return -1; }
+    if (net_cancel) { free(mc.buf); free(cats); snprintf(err, errsz, "Cancelled"); return -1; }
 
     err[0] = 0;
     set_stage("Loading channels...");
     if (xtream_api_url(s, "get_live_streams", url, sizeof url) != 0) {
         snprintf(err, errsz, "URL too long");
+        free(mc.buf);
         free(cats);
         return -1;
     }
-    if (http_get(url, NULL, NULL, &ms, err, errsz) != 0) { free(ms.buf); free(cats); return -1; }
+    if (http_get(url, NULL, NULL, &ms, err, errsz) != 0) { free(mc.buf); free(ms.buf); free(cats); return -1; }
     log_heap("live streams downloaded", ms.len);
     xtream_parse_live(ms.buf, ms.len, s, cats, ncats, out);
+    if (out->count > 0) {                                    /* 1.1: the saved copy for the next time */
+        CachePart parts[2] = { { "cats", mc.buf ? mc.buf : "", mc.len }, { "live", ms.buf, ms.len } };
+        cache_save(s, parts, 2);
+    }
+    free(mc.buf);
     free(ms.buf);
     free(cats);
     log_heap("channels parsed", (size_t)out->count * sizeof(Channel));
@@ -1188,9 +1626,12 @@ static int load_list(const Source *s, ChannelList *out, char *err, size_t errsz,
 {
     Mem m = {0};
     int rc = -1;
+    if (cache_usable(s) && cache_load(s, out, &job.ch0, &job.ch1, 0) == 0) { job.from_cache = 1; return 0; }   /* 1.1 */
     switch (s->type) {
     case SRC_XTREAM:
         return load_xtream(s, out, err, errsz, note, notesz);
+    case SRC_MYLIST:                                         /* 1.1 */
+        return load_mylist_channels(out, err, errsz);
     case SRC_M3U_URL:
         set_stage("Loading channel list...");
         rc = http_get(s->url, s->user, s->pass, &m, err, errsz);
@@ -1214,6 +1655,10 @@ static int load_list(const Source *s, ChannelList *out, char *err, size_t errsz,
     } else {
         iptv_headers_dropped = 0;
         m3u_parse(m.buf, m.len, out);
+        if (out->count > 0 && s->type == SRC_M3U_URL) {      /* 1.1: the saved copy for the next time */
+            CachePart part = { "m3u", m.buf, m.len };
+            cache_save(s, &part, 1);
+        }
         if (iptv_headers_dropped) plog("list: %d links too long for their User-Agent/Referer (they play without them)", iptv_headers_dropped);
         log_heap("channels parsed", (size_t)out->count * sizeof(Channel));   /* (0.7.0: with the download still in memory: the most) */
         if (out->count >= IPTV_MAX_CHANNELS) plog("list: the list has more channels than %d: the rest is left out", IPTV_MAX_CHANNELS);
@@ -1312,7 +1757,12 @@ static int net_offline(const char *url)
 
 static void load_begin(const Source *s, int what, const char *arg, int group)
 {
-    if (s->type != SRC_M3U_FILE && net_offline(s->url)) { set_status(1, NO_NET_MSG, NULL); return; }
+    if (s->type != SRC_M3U_FILE && s->type != SRC_MYLIST && !(what == LOAD_LIVE && cache_exists(s)) && net_offline(s->url)) {
+        set_status(1, NO_NET_MSG, NULL);
+        return;
+    }
+    list_gen++;                                              /* 1.1: a background check of the old list is dropped */
+    refresh_cancel();
     if (what != LOAD_EPISODES) {
         guide_reset();                                       /* 0.8.0 (the guide belongs to the old list) */
         poster_drop();
@@ -1370,6 +1820,7 @@ static int load_poll(unsigned p)
         section = SEC_LIVE;
         build_groups();
         guide_setup();                                       /* 0.8.0 */
+        if (job.from_cache) refresh_start(&job.src, job.ch0, job.ch1);   /* 1.1 */
         break;
     case LOAD_FILM_CATS:
     case LOAD_SERIES_CATS:
@@ -1418,6 +1869,165 @@ static int load_poll(unsigned p)
     }
     if (job.note[0]) set_status(0, "%s", job.note);
     return 1;
+}
+
+/* ---- 1.1: the background check of a list opened from its saved copy ("listref" thread) ---- */
+typedef struct {
+    volatile int state;                 /* 0 free, 1 asked (the thread works), 2 answered */
+    volatile int cancel;
+    int gen, src;                       /* the list it is for (list_gen, cur_src) */
+    Source s;
+    uint32_t h0, h1;                    /* the saved copy's parts */
+    int ok, changed, have_off, srv_known;
+    int kb, ms;                         /* downloaded, how long it took (the log) */
+    long srv_off;
+    char err[128];
+} RefJob;
+static RefJob rjob;
+static SceUID ref_tid = -1;
+static volatile int ref_quit;
+
+static int ref_stop_cb(void *ctx) { (void)ctx; return rjob.cancel || ref_quit; }
+
+static int ref_get(const char *url, const char *user, const char *pass, Mem *m)
+{
+    CioRequest rq = { url, user, pass, 10, 20, mem_data, ref_stop_cb, m };
+    int st = 0;
+    char e[96];
+    int r = cio_get(&rq, &st, e, sizeof e);
+    if (rjob.cancel || ref_quit) { snprintf(rjob.err, sizeof rjob.err, "Cancelled"); return -1; }
+    if (st >= 400) { snprintf(rjob.err, sizeof rjob.err, "Server answered HTTP %d", st); return -1; }
+    if (m->overflow) { snprintf(rjob.err, sizeof rjob.err, "List is too large (over 24 MB)"); return -1; }
+    if (r < 0) { snprintf(rjob.err, sizeof rjob.err, "Connection failed (%s)", e); return -1; }
+    if (!m->buf) { snprintf(rjob.err, sizeof rjob.err, "Empty answer"); return -1; }
+    return 0;
+}
+
+/* (the thread only downloads and compares; a changed answer is written to the saved copy, and the main thread
+ *  opens that copy at a safe moment: no second parsed list in memory while a channel may be playing) */
+static const char *skip_ws(const char *p, size_t n, size_t *left)
+{
+    size_t i = 0;
+    while (i < n && (p[i] == ' ' || p[i] == '\t' || p[i] == '\r' || p[i] == '\n' || (unsigned char)p[i] == 0xEF ||
+                     (unsigned char)p[i] == 0xBB || (unsigned char)p[i] == 0xBF)) i++;
+    *left = n - i;
+    return p + i;
+}
+
+static void ref_run(void)
+{
+    const Source *s = &rjob.s;
+    char url[IPTV_URL_MAX + 160], path[128];
+    Mem ma = {0}, mc = {0}, ms = {0};
+    size_t left;
+    int64_t t0 = (int64_t)sceKernelGetProcessTimeWide();
+    rjob.ok = rjob.changed = rjob.have_off = 0;
+    rjob.err[0] = 0;
+    rjob.kb = 0;
+    cache_path(s, path, sizeof path);
+    if (s->type == SRC_XTREAM) {
+        if (xtream_api_url(s, NULL, url, sizeof url) != 0 || ref_get(url, NULL, NULL, &ma) != 0) goto done;
+        XtAccount a;
+        if (xtream_parse_account(ma.buf, ma.len, &a) == 0) {
+            if (!a.auth) { snprintf(rjob.err, sizeof rjob.err, "Wrong username or password"); goto done; }
+            if (a.status[0] && strcasecmp(a.status, "Active")) { snprintf(rjob.err, sizeof rjob.err, "Account %s", a.status); goto done; }
+            rjob.srv_off = a.srv_off;
+            rjob.srv_known = a.srv_known;
+            rjob.have_off = 1;
+        }
+        free(ma.buf);
+        ma.buf = NULL;
+        if (xtream_api_url(s, "get_live_categories", url, sizeof url) != 0) goto done;
+        if (ref_get(url, NULL, NULL, &mc) != 0) {
+            if (strcmp(rjob.err, "Empty answer")) goto done;  /* (no categories: as when the list was loaded) */
+            rjob.err[0] = 0;
+        }
+        if (xtream_api_url(s, "get_live_streams", url, sizeof url) != 0 || ref_get(url, NULL, NULL, &ms) != 0) goto done;
+        const char *mcb = mc.buf ? mc.buf : "";
+        if (listcache_hash(mcb, mc.len) == rjob.h0 && listcache_hash(ms.buf, ms.len) == rjob.h1) { rjob.ok = 1; goto done; }
+        const char *p = skip_ws(ms.buf, ms.len, &left);
+        if (!left || *p != '[') { snprintf(rjob.err, sizeof rjob.err, "The server's answer is not a channel list"); goto done; }
+        CachePart parts[2] = { { "cats", mcb, mc.len }, { "live", ms.buf, ms.len } };
+        long off = rjob.have_off ? rjob.srv_off : 0;
+        int known = rjob.have_off ? rjob.srv_known : 0;
+        if (listcache_write(path, now_unix(), off, known, parts, 2) != 0) { snprintf(rjob.err, sizeof rjob.err, "Could not write the saved copy"); goto done; }
+    } else {
+        if (ref_get(s->url, s->user, s->pass, &mc) != 0) goto done;
+        if (listcache_hash(mc.buf, mc.len) == rjob.h0) { rjob.ok = 1; goto done; }
+        if (m3u_is_hls(mc.buf) || (!strstr(mc.buf, "#EXTM3U") && !strstr(mc.buf, "#EXTINF"))) {
+            snprintf(rjob.err, sizeof rjob.err, "The server's answer is not a channel list");
+            goto done;
+        }
+        CachePart part = { "m3u", mc.buf, mc.len };
+        if (listcache_write(path, now_unix(), 0, 0, &part, 1) != 0) { snprintf(rjob.err, sizeof rjob.err, "Could not write the saved copy"); goto done; }
+    }
+    rjob.ok = rjob.changed = 1;
+done:
+    rjob.kb = (int)((ma.len + mc.len + ms.len + 512) / 1024);
+    rjob.ms = (int)(((int64_t)sceKernelGetProcessTimeWide() - t0) / 1000);
+    free(ma.buf);
+    free(mc.buf);
+    free(ms.buf);
+}
+
+static int ref_thread(SceSize args, void *argp)
+{
+    (void)args; (void)argp;
+    while (!ref_quit) {
+        if (rjob.state == 1) {
+            ref_run();
+            __sync_synchronize();
+            rjob.state = 2;
+        }
+        sceKernelDelayThread(50000);
+    }
+    return 0;
+}
+
+/* after a list opened from its saved copy: check it in the background */
+static struct { int on; Source s; uint32_t h0, h1; } ref_next;   /* (asked while an old check was still ending) */
+
+static void refresh_start(const Source *s, uint32_t h0, uint32_t h1)
+{
+    if (rjob.state == 1) {                                   /* (an old list's still runs: it ends and saves its copy; this one after it) */
+        ref_next.on = 1;
+        ref_next.s = *s;
+        ref_next.h0 = h0;
+        ref_next.h1 = h1;
+        return;
+    }
+    ref_next.on = 0;
+    if (rjob.state == 2) rjob.state = 0;
+    if (ref_tid < 0) {
+        ref_tid = sceKernelCreateThread("listref", ref_thread, 0x10000118, 256 * 1024, 0, 0, NULL);
+        if (ref_tid >= 0) sceKernelStartThread(ref_tid, 0, NULL);
+        else { plog("list: no background thread (0x%08X)", (unsigned)ref_tid); return; }
+    }
+    rjob.s = *s;
+    rjob.h0 = h0;
+    rjob.h1 = h1;
+    rjob.gen = list_gen;
+    rjob.src = cur_src;
+    rjob.cancel = 0;
+    __sync_synchronize();
+    rjob.state = 1;
+}
+
+static void refresh_cancel(void)
+{
+    ref_next.on = 0;                                         /* (1.1: one running is not stopped: it still updates its list's
+                                                              *  saved copy; only its answer is not put on the screen) */
+}
+
+static void refresh_stop(void)
+{
+    if (ref_tid < 0) return;
+    ref_quit = 1;
+    rjob.cancel = 1;
+    SceUInt to = 3000000;
+    sceKernelWaitThreadEnd(ref_tid, NULL, &to);
+    sceKernelDeleteThread(ref_tid);
+    ref_tid = -1;
 }
 
 /* ---- Xtream EPG, now / next (0.4.5) ----------------------------------------------------------------
@@ -1645,7 +2255,9 @@ static EpgSlot *epg_slot(int src, const char *id)
 static const char *epg_for(const Channel *c, int ask)
 {
     static char line[320];
-    if (epg_tid < 0 || cur_src < 0 || cur_src >= nsources || sources[cur_src].type != SRC_XTREAM || section != SEC_LIVE || in_episodes) return NULL;
+    if (epg_tid < 0 || cur_src < 0 || cur_src >= nsources || section != SEC_LIVE || in_episodes || !c) return NULL;
+    int es = chan_src((int)(c - chans.items));               /* 1.1: My List: the channel's own playlist */
+    if (es < 0 || sources[es].type != SRC_XTREAM) return NULL;
     char id[16];
     if (!c || c->kind != CH_LIVE || !epg_stream_id(c->url, id, sizeof id)) return NULL;
     if (epg_job == 2) {                                      /* an answer came: into the cache */
@@ -1659,16 +2271,16 @@ static const char *epg_for(const Channel *c, int ask)
         __sync_synchronize();
         epg_job = 0;
     }
-    EpgSlot *sl = epg_slot(cur_src, id);
+    EpgSlot *sl = epg_slot(es, id);
     unsigned nm = now_ms();
     int64_t now = now_unix();
     int stale = !sl || nm - sl->at > (sl->ok ? 300000u : 60000u) || (sl->ok && sl->e.has_now && now >= sl->e.now.end);
-    if (stale && ask && epg_job == 0 && !(epg_job_src == cur_src && !strcmp(epg_job_id, id) && sl && nm - sl->at < 5000)) {
+    if (stale && ask && epg_job == 0 && !(epg_job_src == es && !strcmp(epg_job_id, id) && sl && nm - sl->at < 5000)) {
         char action[64];
         snprintf(action, sizeof action, "get_short_epg&stream_id=%s&limit=4", id);
-        if (xtream_api_url(&sources[cur_src], action, epg_job_url, sizeof epg_job_url) == 0) {
+        if (xtream_api_url(&sources[es], action, epg_job_url, sizeof epg_job_url) == 0) {
             snprintf(epg_job_id, sizeof epg_job_id, "%s", id);
-            epg_job_src = cur_src;
+            epg_job_src = es;
             __sync_synchronize();
             epg_job = 1;
         }
@@ -1762,7 +2374,7 @@ static void guide_setup(void)
 {
     guide_reset();
     if (section != SEC_LIVE || in_episodes || chans.count < 1 || cur_src < 0 || cur_src >= nsources) return;
-    int xtream = sources[cur_src].type == SRC_XTREAM;
+    int xtream = sources[cur_src].type == SRC_XTREAM || sources[cur_src].type == SRC_MYLIST;   /* (1.1: My List: Xtream tables) */
     if (!xtream && (!chans.tvg_url[0] || !cio_available())) return;   /* 0.8.1: no guide address: no guide at all */
     if (guide_init(&guide, chans.count, GUIDE_LIMIT) != 0) return;
     guide_on = 1;
@@ -1788,7 +2400,7 @@ static void guide_setup(void)
 static void guide_want(int ci)
 {
     if (!guide_on || ci < 0 || ci >= guide.nch || ngwant >= (int)(sizeof gwant / sizeof gwant[0])) return;
-    if (sources[cur_src].type != SRC_XTREAM) return;
+    if (!chan_xtream(ci)) return;                            /* (1.1: My List: per channel) */
     const GChan *g = &guide.ch[ci];
     uint32_t now = (uint32_t)now_unix();
     if (g->state == GC_ASKED || ((g->state == GC_OK || g->state == GC_EMPTY) && now - g->used < (g->state == GC_OK ? 3600u : 600u))) return;
@@ -1896,9 +2508,10 @@ static void guide_tick(int playing)
             int c = gwant[0];
             memmove(gwant, gwant + 1, sizeof(int) * (size_t)--ngwant);
             char id[16], action[80];
-            if (c >= 0 && c < guide.nch && epg_stream_id(chans.items[c].url, id, sizeof id)) {
+            int cs = chan_src(c);                            /* (1.1: My List: the channel's own playlist) */
+            if (c >= 0 && c < guide.nch && cs >= 0 && epg_stream_id(chans.items[c].url, id, sizeof id)) {
                 snprintf(action, sizeof action, "get_simple_data_table&stream_id=%s", id);
-                if (xtream_api_url(&sources[cur_src], action, qjob.url, sizeof qjob.url) == 0) {
+                if (xtream_api_url(&sources[cs], action, qjob.url, sizeof qjob.url) == 0) {
                     if (guide_bytes(&guide) > GUIDE_LIMIT * 4 / 5) {   /* room: only the channels on the screen stay */
                         int keep[17], nk = 0;
                         for (int k = 0; k < ngwant; k++) keep[nk++] = gwant[k];
@@ -1992,13 +2605,31 @@ static const int SLEEP_MIN[] = { 0, 15, 30, 45, 60, 90, 120 };
 #define SLEEP_N 7
 /* 0.8.1: how subtitles look (Select > Subtitles): size, colour, place, background; saved when the menu closes */
 static const char *const SUB_LOOK_NAME[4] = { "Size", "Colour", "Place", "Background" };
-static int sub_look_dirty;
 static const char *sub_look_value(int k)
 {
     static const char *const V[4][4] = { { "Small", "Medium", "Large", "Very large" }, { "White", "Yellow", "Green", "Blue" },
                                          { "Bottom", "A little higher", "Top", "" }, { "Light band", "Dark box", "None", "" } };
     int v = k == 0 ? settings.sub_size : k == 1 ? settings.sub_color : k == 2 ? settings.sub_pos : settings.sub_bg;
     return V[k & 3][v & 3];
+}
+/* 1.1: sound (Select > Audio): volume boost, speaker mode, clear dialogue; saved when the menu closes */
+static const char *const SND_NAME[3] = { "Volume boost", "Clear sound", "Clear speech (5.1)" };
+static const char *snd_value(int k)
+{
+    static const char *const B[4] = { "Off", "+3 dB", "+6 dB", "+9 dB" };
+    if (k == 0) return B[settings.snd_boost & 3];
+    return (k == 1 ? settings.snd_speaker : settings.snd_dialog) ? "On" : "Off";
+}
+static int sub_look_dirty;
+static void snd_step(int k, int d)
+{
+    if (k == 0) settings.snd_boost = (settings.snd_boost + d + 4) % 4;
+    else if (k == 1) settings.snd_speaker = !settings.snd_speaker;
+    else settings.snd_dialog = !settings.snd_dialog;
+    sub_look_dirty = 1;
+    afx_set_global(settings.snd_boost, settings.snd_speaker);
+    a52_set_dialog(settings.snd_dialog);
+    plog("player: %s %s", SND_NAME[k], snd_value(k));
 }
 static void sub_look_step(int k, int d)
 {
@@ -2290,7 +2921,7 @@ static void play_channel_ex(int vi, int use_proxy)
  * memory card: the server cannot reach them). Square still switches to the direct stream and back. */
 static int proxy_always(const char *url)
 {
-    return settings.auto_proxy == 2 && settings.proxy[0] && strncasecmp(url, "ux0:", 4) != 0;
+    return settings.auto_proxy == 2 && srv_on() && strncasecmp(url, "ux0:", 4) != 0;
 }
 
 static void play_channel(int vi)
@@ -2425,7 +3056,7 @@ static int play_hints(UiHint *h, int radio, int film, int paused, const char *sq
 {
     int n = 0;
     int zap = return_state == ST_CHANNELS && nvis > 1;
-    int can_fav = return_state == ST_SOURCES || section == SEC_LIVE || section == SEC_FILMS || in_episodes;   /* 0.6.0: films, episodes (their series) */
+    int can_fav = return_state != ST_SOURCES && (section == SEC_LIVE || section == SEC_FILMS || in_episodes);   /* 0.6.0: films, episodes; 1.1: not a single link */
     int live_guide = return_state == ST_CHANNELS && section == SEC_LIVE && guide_on;
     if (!radio) h[n++] = (UiHint){ UI_BTN_CROSS, paused ? "Play" : "Pause" };
     if (!radio && square) h[n++] = (UiHint){ UI_BTN_SQUARE, square };
@@ -2596,7 +3227,7 @@ static void draw_probe_screen(void)
 /* 0.5.0: the star in the player: a favourite channel, or a single stream whose playlist is one */
 static int player_fav(void)
 {
-    if (return_state == ST_SOURCES) return cur_src >= 0 && cur_src < nsources && src_is_fav(cur_src) >= 0;
+    if (return_state == ST_SOURCES) return 0;                /* (1.1: playlists are not favourites any more) */
     return nvis && play_vis < nvis && ch_fav(vis[play_vis]) >= 0;
 }
 
@@ -2647,7 +3278,7 @@ static void draw_tsp_screen(int osd)
     static char sq_label[24];
     int sq_next = st && !via_proxy ? res_square_next(st) : -1;
     /* Square: the next picture size; else the server (or back from it); a film: 720p through the server */
-    const char *square = sq_next >= 0 ? res_name(st, sq_next, sq_label, sizeof sq_label) : settings.proxy[0] ? "Server" : NULL;
+    const char *square = sq_next >= 0 ? res_name(st, sq_next, sq_label, sizeof sq_label) : srv_on() ? "Server" : NULL;
     if (film_playing()) square = arch_on ? "Live" : via_proxy ? "Original" : "720p";
     int nh = play_hints(hints, 0, film_playing(), st && st->paused, square);
     if (film_playing()) {                                    /* films: pause, jumps, time line */
@@ -2730,7 +3361,7 @@ static void draw_tsp_screen(int osd)
             sp.center_title = "Cannot play this channel";
             sp.center_line = T_msg(st->msg);
             sp.center_col = UI_ERR;
-            if (st->err_kind == TSP_ERRK_FORMAT && !settings.proxy[0]) {
+            if (st->err_kind == TSP_ERRK_FORMAT && !srv_on()) {
                 sp.stats1 = T("Tip: a transcoding server on your PC can play this channel (channel list: Select > Settings, see README)");
                 sp.osd = 1;
             } else if (via_proxy) {
@@ -2741,7 +3372,7 @@ static void draw_tsp_screen(int osd)
         default: break;
         }
         if (st->audio_msg[0] && !show_info && st->state == TSP_PLAYING && osd)
-            sp.stats1 = settings.proxy[0] ? T("No sound: press Square to play through the server") : T_msg(st->audio_msg);
+            sp.stats1 = srv_on() ? T("No sound: press Square to play through the server") : T_msg(st->audio_msg);
         if (show_info) {
             /* Three rows of fixed columns (label left, value right-aligned at the column's end), new values
              * twice a second: 0.2.6 wrote one long line that moved left and right with every number and
@@ -2816,7 +3447,7 @@ static void draw_mp4_screen(int osd)
     sp.group = c->group;
     sp.fav = player_fav();
     static UiHint mh[10];
-    sp.nhints = play_hints(mh, 0, 0, 0, settings.proxy[0] ? "Server" : NULL);
+    sp.nhints = play_hints(mh, 0, 0, 0, srv_on() ? "Server" : NULL);
     sp.hints = mh;
     sp.t_ms = now_ms();
     sp.osd = osd || !got_frame;
@@ -2856,9 +3487,16 @@ static void src_row(int i, ScrRow *r, void *ctx)
     static char where[96];
     i = src_at(i);                                           /* 0.5.0: favourites first */
     const Source *s = &sources[i];
-    r->fav = src_is_fav(i) >= 0;
+    r->moving = src_sorting && src_held >= 0 && sorder[src_held] == i;   /* 1.1 */
     r->name = s->name;
     r->sub = src_where(s, where, sizeof where);
+    if (s->type == SRC_MYLIST) {                             /* 1.1 */
+        snprintf(where, sizeof where, T("%d channels from your playlists"), mylist.n);
+        r->sub = where;
+        r->badge = "MY";
+        r->badge_col = RGBA8(214, 160, 30, 255);
+        return;
+    }
     switch (s->type) {
     case SRC_XTREAM:   r->badge = "XTREAM"; r->badge_col = RGBA8(124, 77, 230, 255); break;
     case SRC_M3U_URL:  r->badge = "M3U";    r->badge_col = RGBA8(33, 120, 235, 255); break;
@@ -2894,12 +3532,18 @@ static void ch_row(int i, ScrRow *r, void *ctx)
 static void draw_sources(void)
 {
     static const UiHint H[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" },
-                                { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+                                { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Quit" } };
+    static const UiHint HMV[] = { { UI_BTN_UPDOWN, "Choose" }, { UI_BTN_CROSS, "Pick up" }, { UI_BTN_START, "Save" }, { UI_BTN_CIRCLE, "Back" } };
+    static const UiHint HMH[] = { { UI_BTN_UPDOWN, "Reorder" }, { UI_BTN_CROSS, "Put down" }, { UI_BTN_START, "Save" }, { UI_BTN_CIRCLE, "Back" } };
     char right[32];
     snprintf(right, sizeof right, T("%d playlists"), nsources);
-    ScrList l = { "Vita IPTV", T("Playlists"), right, nsources, sel, &scroll, src_row, NULL,
-                  T("No playlists yet: press Square to add one"), H, NH(H), status, status_err };
+    const UiHint *h = src_sorting ? (src_held >= 0 ? HMH : HMV) : H;
+    int nh = src_sorting ? (src_held >= 0 ? NH(HMH) : NH(HMV)) : NH(H);
+    ScrList l = { "Vita IPTV", T(src_sorting ? "Reorder playlists" : "Playlists"), right, nsources, sel, &scroll, src_row, NULL,
+                  T("No playlists yet: press Square to add one"), h, nh, status, status_err };
     scr_list(&l);
+    if (src_ask) scr_confirm(T("Save the new order?"), NULL);
+    if (quit_ask) scr_confirm(T("Quit Vita IPTV?"), NULL);
 }
 
 static void grp_row(int i, ScrRow *r, void *ctx)
@@ -2924,11 +3568,12 @@ static void draw_channels(void)
                                   { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
     static const UiHint HS[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "New search" }, { UI_BTN_CIRCLE, "Back" },
                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
-    static const UiHint HMV[] = { { UI_BTN_UPDOWN, "Up / down" }, { UI_BTN_CROSS, "Save" }, { UI_BTN_CIRCLE, "Cancel" } };   /* (0.8.0: X saves) */
+    static const UiHint HMV[] = { { UI_BTN_UPDOWN, "Choose" }, { UI_BTN_CROSS, "Pick up" }, { UI_BTN_START, "Save" }, { UI_BTN_CIRCLE, "Back" } };   /* 1.1: edit mode */
+    static const UiHint HMH[] = { { UI_BTN_UPDOWN, "Reorder" }, { UI_BTN_CROSS, "Put down" }, { UI_BTN_START, "Save" }, { UI_BTN_CIRCLE, "Back" } };
     static const UiHint HLV[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_CIRCLE, "Back" },
                                   { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
     static const UiHint HRV[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_TRIANGLE, "Details" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },   /* (0.6.0: START) */
-                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_START, "Fav." } };
+                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
     static const UiHint HRS[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
                                   { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
     char sub[160], right[48], title[IPTV_NAME_MAX + 32];
@@ -2958,7 +3603,7 @@ static void draw_channels(void)
                                              : "No channels");
     const UiHint *hr = vod ? (section == SEC_SERIES && !in_episodes ? HRS : HRV) : guide_on ? HR : HR0;
     int nhr = vod ? (section == SEC_SERIES && !in_episodes ? NH(HRS) : NH(HRV)) : guide_on ? NH(HR) : NH(HR0);
-    if (fav_moving) { hr = HMV; nhr = NH(HMV); }
+    if (fav_moving) { hr = move_ci >= 0 ? HMH : HMV; nhr = move_ci >= 0 ? NH(HMH) : NH(HMV); }
     d.hints = searching ? HS : focus == 0 ? (vod ? HLV : HL) : hr;
     d.nhints = searching ? NH(HS) : focus == 0 ? (vod ? NH(HLV) : NH(HL)) : nhr;
     d.status = status;
@@ -3187,9 +3832,13 @@ enum { FORM_NONE, FORM_SOURCE, FORM_SETTINGS };
 static int form_kind, form_sel, edit_index;              /* edit_index -1 = new source */
 static int f_type;                                        /* 0 Xtream, 1 M3U, 2 single stream */
 static char f_name[IPTV_NAME_MAX], f_url[IPTV_URL_MAX], f_user[IPTV_CRED_MAX], f_pass[IPTV_CRED_MAX], f_proxy[IPTV_URL_MAX];
-static int f_auto, f_lang, f_adult, f_hd, f_res;
+static int f_lang, f_adult, f_hd, f_res;
 static int f_theme;                                      /* 0.8.1: shown at once, back if the form is cancelled */
+static int f_srv, f_boost, f_clear, f_speech;            /* 1.1: server off / when needed / always; the sound */
+static int set_scroll, form_about;                       /* 1.1: the settings' first row shown; "About" asked */
+static int form_ask;                                     /* 1.1: O with changes: "Save the settings?" / "Save the playlist?" */
 static const char *const AUTO_NAMES[3] = { "Off", "When needed", "Always" };
+static const char *const BOOST_NAMES[4] = { "Off", "+3 dB", "+6 dB", "+9 dB" };
 static const char *const LANG_NAMES[3] = { "Automatic (system)", "English", "Türkçe" };
 static const char *const TYPE_NAMES[3] = { "Xtream (server + username + password)", "M3U playlist (link)", "Single stream (link)" };
 
@@ -3197,6 +3846,9 @@ static void open_source_form(int index)
 {
     form_kind = FORM_SOURCE;
     form_sel = 0;
+    set_scroll = 0;                                          /* (1.1: the cards' first row shown) */
+    form_ask = 0;
+    status[0] = 0;
     edit_index = index;
     f_type = 0;
     f_name[0] = f_url[0] = f_user[0] = f_pass[0] = 0;
@@ -3214,8 +3866,8 @@ static void open_settings_form(void)
 {
     form_kind = FORM_SETTINGS;
     form_sel = 0;
+    status[0] = 0;                                           /* (1.1: the help line of the row) */
     snprintf(f_proxy, sizeof f_proxy, "%s", settings.proxy);
-    f_auto = settings.auto_proxy;
     f_lang = settings.lang;
     f_adult = settings.hide_adult;
     f_hd = settings.hide_4k;
@@ -3224,6 +3876,12 @@ static void open_settings_form(void)
     f_res = 0;
     for (int i = 0; i < RES_N; i++) if (RES_VALUES[i] == settings.res_pref) f_res = i;
     f_theme = settings.theme;
+    f_srv = settings.proxy_off || !settings.proxy[0] ? 0 : settings.auto_proxy == 2 ? 2 : 1;   /* 1.1 */
+    f_boost = settings.snd_boost & 3;
+    f_clear = settings.snd_speaker;
+    f_speech = settings.snd_dialog;
+    set_scroll = 0;
+    form_about = 0;
 }
 
 /* fields 3 / 4 mean username / password, or Referer / User-Agent for a single stream: clear them when that changes */
@@ -3239,8 +3897,27 @@ static int source_field_enabled(int i)
     return 1;
 }
 
-#define SRC_FIELDS 7                                     /* (+1: "Delete playlist" when editing one) */
-#define SET_FIELDS 13                                    /* (0.5.0: + "Clear Recently Watched"; 0.7.0: + "Clear watched episodes"; 0.8.0: + PIN; 0.8.1: + theme) */
+#define SRC_FIELDS 5                                     /* (+1: "Delete playlist" when editing one; 1.1: no Save / Cancel rows) */
+/* 1.1: the settings' rows (the address and the test only while the server is on) */
+enum { SF_LANG, SF_THEME, SF_RES, SF_ADULT, SF_HD, SF_PIN, SF_BOOST, SF_CLEAR, SF_SPEECH, SF_SERVER, SF_ADDR, SF_TEST,
+       SF_CLR_RECENT, SF_CLR_WATCHED, SF_ABOUT, SF_N };
+static int set_rows(int *ids)
+{
+    int n = 0;
+    for (int k = 0; k < SF_N; k++) if (f_srv || (k != SF_ADDR && k != SF_TEST)) ids[n++] = k;
+    return n;
+}
+static int set_id(void)
+{
+    int ids[SF_N], n = set_rows(ids);
+    return form_sel >= 0 && form_sel < n ? ids[form_sel] : -1;
+}
+static int set_count(void) { int ids[SF_N]; return set_rows(ids); }
+static void set_go(int id)                                  /* the row of setting id selected */
+{
+    int ids[SF_N], n = set_rows(ids);
+    for (int i = 0; i < n; i++) if (ids[i] == id) form_sel = i;
+}
 static int confirm_delete;                               /* the edit form's "Delete playlist?" box */
 static int confirm_clear_recent;                         /* 0.5.0: the settings' "Clear recently watched?" box */
 static int confirm_clear_watched;                        /* 0.7.0: "Clear watched episodes?" */
@@ -3258,7 +3935,8 @@ static int field_enabled(int i)
 
 static void form_move(int dir)
 {
-    int n = form_kind == FORM_SOURCE ? src_field_count() : SET_FIELDS;
+    int n = form_kind == FORM_SOURCE ? src_field_count() : set_count();
+    if (form_kind == FORM_SETTINGS && status[0] && !status_err) status[0] = 0;   /* (1.1: the help line of the row instead) */
     for (int k = 0; k < n; k++) {
         form_sel = (form_sel + dir + n) % n;
         if (field_enabled(form_sel)) return;
@@ -3328,6 +4006,7 @@ static void test_server(void)
     if (!f_proxy[0]) { set_status(1, "Enter the server address first", NULL); return; }
     Settings tmp = settings;
     snprintf(tmp.proxy, sizeof tmp.proxy, "%s", f_proxy);
+    tmp.proxy_off = 0;
     if (proxy_url(&tmp, "x", url, sizeof url) != 0) { set_status(1, "Bad server address", NULL); return; }
     char *q = strstr(url, "/play?");
     if (q) strcpy(q, "/ping");
@@ -3341,11 +4020,16 @@ static void test_server(void)
 
 static void save_settings_form(void)
 {
+    if (f_srv && !f_proxy[0]) { set_go(SF_ADDR); set_status(1, "Enter the server address first", NULL); return; }   /* 1.1 */
     filters_changed = 0;
     if (settings.hide_adult != f_adult) filters_changed |= f_adult ? 1 : 2;
     if (settings.hide_4k != f_hd) filters_changed |= f_hd ? 4 : 8;
     snprintf(settings.proxy, sizeof settings.proxy, "%s", f_proxy);
-    settings.auto_proxy = f_auto;
+    settings.proxy_off = !f_srv;                             /* 1.1: off keeps the address */
+    if (f_srv) settings.auto_proxy = f_srv;
+    settings.snd_boost = f_boost;
+    settings.snd_speaker = f_clear;
+    settings.snd_dialog = f_speech;
     settings.lang = f_lang;
     settings.hide_adult = f_adult;
     settings.hide_4k = f_hd;
@@ -3356,6 +4040,8 @@ static void save_settings_form(void)
     apply_look();
     save_settings();
     apply_language();
+    if (nsources > 0 && sources[nsources - 1].type == SRC_MYLIST)   /* 1.1: (its name in the new language) */
+        snprintf(sources[nsources - 1].name, sizeof sources[0].name, "%s", T("My List"));
     form_kind = FORM_NONE;
     if (!status_err) set_status(0, "Settings saved", NULL);
 }
@@ -3364,10 +4050,55 @@ static void save_settings_form(void)
 static void delete_source(int i)
 {
     if (i < 0 || i >= nsources) return;
+    if (sources[i].type == SRC_XTREAM || sources[i].type == SRC_M3U_URL) {   /* 1.1: its saved copy goes too */
+        char path[128];
+        cache_path(&sources[i], path, sizeof path);
+        sceIoRemove(path);
+    }
     memmove(&sources[i], &sources[i + 1], sizeof(Source) * (size_t)(nsources - i - 1));
     nsources--;
     form_kind = FORM_NONE;
     if (save_sources(i < nsources ? i : nsources - 1) == 0) set_status(0, "Deleted", NULL);
+}
+
+static void ask_server_address(void)
+{
+    ime_open("Transcoding server (e.g. http://192.168.1.20:8090)", f_proxy, 0, IME_FIELD, f_proxy, sizeof f_proxy);
+}
+
+/* 1.1: a settings row changed: X (cross 1) or left / right (dir) */
+static void set_step(int dir, int cross)
+{
+    switch (set_id()) {
+    case SF_LANG: f_lang = (f_lang + (dir < 0 ? 2 : 1)) % 3; break;
+    case SF_THEME: f_theme = (f_theme + (dir < 0 ? UI_THEMES - 1 : 1)) % UI_THEMES; ui_set_theme(f_theme); break;   /* (seen at once) */
+    case SF_RES: f_res = (f_res + (dir < 0 ? RES_N - 1 : 1)) % RES_N; break;
+    case SF_ADULT:                                           /* (0.8.0: off only with the PIN; 0.8.1: always) */
+        if (f_adult && settings.pin[0] && !form_pin_ok) pin_ask(PA_ADULT_OFF, 0);
+        else f_adult = !f_adult;
+        break;
+    case SF_HD: f_hd = !f_hd; break;
+    case SF_PIN:                                             /* 0.8.0: the parental lock's PIN (X only) */
+        if (!cross) break;
+        if (settings.pin[0] && !form_pin_ok) pin_ask(PA_EDIT_PIN, 0);   /* 0.8.1: always the current PIN first */
+        else ime_open("New PIN (4-6 digits, empty: no lock)", "", 1, IME_NEWPIN, NULL, 0);
+        break;
+    case SF_BOOST: f_boost = (f_boost + (dir < 0 ? 3 : 1)) % 4; break;
+    case SF_CLEAR: f_clear = !f_clear; break;
+    case SF_SPEECH: f_speech = !f_speech; break;
+    case SF_SERVER: {
+        int was = f_srv;
+        f_srv = (f_srv + (dir < 0 ? 2 : 1)) % 3;
+        if (!was && f_srv && !f_proxy[0]) { set_go(SF_ADDR); ask_server_address(); }   /* turned on: its address */
+        break;
+    }
+    case SF_ADDR: if (cross) ask_server_address(); break;
+    case SF_TEST: if (cross) server_test_pending = 1; break; /* (0.5.0: not inside the frame: it crashed the app) */
+    case SF_CLR_RECENT: if (cross) confirm_clear_recent = 1; break;
+    case SF_CLR_WATCHED: if (cross) confirm_clear_watched = 1; break;
+    case SF_ABOUT: if (cross) form_about = 1; break;
+    default: break;
+    }
 }
 
 static void form_activate(void)
@@ -3379,77 +4110,119 @@ static void form_activate(void)
         case 2: ime_open(f_type == 0 ? "Server address (e.g. http://host:8080)" : "Link", f_url, 0, IME_FIELD, f_url, sizeof f_url); break;
         case 3: ime_open(f_type == 2 ? "Referer (e.g. https://site/page)" : "Username", f_user, 0, IME_FIELD, f_user, sizeof f_user); break;
         case 4: ime_open(f_type == 2 ? "User-Agent" : "Password", f_pass, f_type != 2, IME_FIELD, f_pass, sizeof f_pass); break;
-        case 5: save_source_form(); break;
-        case 7: confirm_delete = 1; break;                   /* Delete playlist: asks first */
-        default: form_kind = FORM_NONE; status[0] = 0; break;
+        case 5: if (edit_index >= 0) confirm_delete = 1; break;   /* Delete playlist: asks first */
+        default: break;
         }
     } else {
-        switch (form_sel) {
-        case 0: ime_open("Transcoding server (e.g. http://192.168.1.20:8090)", f_proxy, 0, IME_FIELD, f_proxy, sizeof f_proxy); break;
-        case 1: f_auto = (f_auto + 1) % 3; break;
-        case 2: f_lang = (f_lang + 1) % 3; break;
-        case 3:                                              /* (0.8.0: off only with the PIN) */
-            if (f_adult && settings.pin[0] && !form_pin_ok) pin_ask(PA_ADULT_OFF, 0);   /* (0.8.1: always) */
-            else f_adult = !f_adult;
-            break;
-        case 4:                                              /* 0.8.0: the parental lock's PIN */
-            if (settings.pin[0] && !form_pin_ok) pin_ask(PA_EDIT_PIN, 0);   /* 0.8.1: always the current PIN first */
-            else ime_open("New PIN (4-6 digits, empty: no lock)", "", 1, IME_NEWPIN, NULL, 0);
-            break;
-        case 5: f_hd = !f_hd; break;
-        case 6: f_res = (f_res + 1) % RES_N; break;
-        case 7: f_theme = (f_theme + 1) % UI_THEMES; ui_set_theme(f_theme); break;   /* 0.8.1: seen at once */
-        case 8: server_test_pending = 1; break;              /* (0.5.0: not inside the frame: it crashed the app) */
-        case 9: confirm_clear_recent = 1; break;
-        case 10: confirm_clear_watched = 1; break;
-        case 11: save_settings_form(); break;
-        default: form_kind = FORM_NONE; status[0] = 0; apply_look(); break;   /* (0.8.1: the theme as it was) */
-        }
+        set_step(1, 1);
     }
+}
+
+/* 1.1: has the open form been changed (O then asks whether to save) */
+static int form_changed(void)
+{
+    if (form_kind == FORM_SETTINGS) {
+        int srv0 = settings.proxy_off || !settings.proxy[0] ? 0 : settings.auto_proxy == 2 ? 2 : 1;
+        return f_lang != settings.lang || f_adult != settings.hide_adult || f_hd != settings.hide_4k || strcmp(f_pin, settings.pin) ||
+               RES_VALUES[f_res] != settings.res_pref || f_theme != settings.theme || strcmp(f_proxy, settings.proxy) ||
+               f_srv != srv0 || f_boost != (settings.snd_boost & 3) || f_clear != settings.snd_speaker || f_speech != settings.snd_dialog;
+    }
+    if (edit_index < 0) return f_name[0] || f_url[0] || f_user[0] || f_pass[0];
+    if (edit_index >= nsources) return 0;
+    const Source *o = &sources[edit_index];
+    int t0 = o->type == SRC_XTREAM ? 0 : o->type == SRC_STREAM ? 2 : 1;
+    return f_type != t0 || strcmp(f_name, o->name) || strcmp(f_url, o->url) || strcmp(f_user, o->user) || strcmp(f_pass, o->pass);
+}
+
+static void form_close(void)                                 /* (without saving) */
+{
+    if (form_kind == FORM_SETTINGS) apply_look();            /* (0.8.1: the theme as it was) */
+    form_kind = FORM_NONE;
+    form_ask = 0;
+    status[0] = 0;
 }
 
 static void draw_form(void)
 {
     static const UiHint H[] = { { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_CIRCLE, "Cancel" },
                                 { UI_BTN_SEP, "" }, { UI_BTN_START, "Save" } };
-    ScrField f[SET_FIELDS > SRC_FIELDS + 1 ? SET_FIELDS : SRC_FIELDS + 1];
+    ScrField f[SF_N > SRC_FIELDS + 1 ? SF_N : SRC_FIELDS + 1];
     char stars[IPTV_CRED_MAX];
     if (form_kind == FORM_SOURCE) {
         size_t np = strlen(f_pass);
         if (np >= sizeof stars) np = sizeof stars - 1;
         memset(stars, '*', np);
         stars[np] = 0;
-        f[0] = (ScrField){ T("Type"), T(TYPE_NAMES[f_type]), SCR_F_CHOICE, 1 };
-        f[1] = (ScrField){ T("Name"), f_name, SCR_F_TEXT, 1 };
-        f[2] = (ScrField){ T(f_type == 0 ? "Server address" : f_type == 1 ? "Playlist link" : "Stream link"), f_url, SCR_F_TEXT, 1 };
-        f[3] = (ScrField){ T(f_type == 2 ? "Referer (if needed)" : f_type == 1 ? "Username (if needed)" : "Username"), f_user, SCR_F_TEXT, 1 };
+        static const char *const TYPE_SHORT[3] = { "Xtream", "M3U playlist", "Single stream" };   /* 1.1: as cards */
+        f[0] = (ScrField){ T("Type"), T(TYPE_SHORT[f_type]), SCR_F_CHOICE, 1, 0 };
+        f[1] = (ScrField){ T("Name"), f_name, SCR_F_TEXT, 1, 0 };
+        f[2] = (ScrField){ T(f_type == 0 ? "Server address" : f_type == 1 ? "Playlist link" : "Stream link"), f_url, SCR_F_TEXT, 1, 0 };
+        f[3] = (ScrField){ T(f_type == 2 ? "Referer (if needed)" : f_type == 1 ? "Username (if needed)" : "Username"), f_user, SCR_F_TEXT, 1, 0 };
         f[4] = (ScrField){ T(f_type == 2 ? "User-Agent (if needed)" : f_type == 1 ? "Password (if needed)" : "Password"),
-                           f_type == 2 ? f_pass : stars, SCR_F_TEXT, 1 };
-        f[5] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
-        f[6] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
-        f[7] = (ScrField){ T("Delete playlist"), NULL, SCR_F_DANGER, 1 };
-        scr_form(T(edit_index >= 0 ? "Edit playlist" : "Add playlist"),
-                 f_type == 0 ? T("Tip: a pasted get.php link fills everything") : NULL, f, src_field_count(), form_sel, H, NH(H), status, status_err);
+                           f_type == 2 ? f_pass : stars, SCR_F_TEXT, 1, 0 };
+        f[5] = (ScrField){ T("Delete playlist"), NULL, SCR_F_DANGER, 1, 0 };
+        const char *info = NULL;
+        switch (form_sel) {
+        case 0: info = T(TYPE_NAMES[f_type]); break;
+        case 1: info = T("The name in the playlists (empty: made from the address)."); break;
+        case 2: info = f_type == 0 ? T("Tip: a pasted get.php link fills everything") : T("The address, http:// or https:// (short links work)."); break;
+        case 3: case 4: info = f_type == 0 ? T("The account's username and password.") : T("Only if the server or the stream asks for it."); break;
+        default: info = T("Removes this playlist (asks first)."); break;
+        }
+        scr_settings(T(edit_index >= 0 ? "Edit playlist" : "Add playlist"), f, src_field_count(), form_sel, &set_scroll, H, NH(H),
+                     status, status_err, info);
         if (confirm_delete && edit_index >= 0 && edit_index < nsources) {
             char line[160];
             snprintf(line, sizeof line, T("\"%s\" will be removed from the list."), sources[edit_index].name);
             scr_confirm(T("Delete this playlist?"), line);
         }
     } else {
-        f[0] = (ScrField){ T("Transcoding server"), f_proxy, SCR_F_TEXT, 1 };
-        f[1] = (ScrField){ T("Use automatically"), T(AUTO_NAMES[f_auto]), SCR_F_CHOICE, 1 };   /* 0.4.5: off / when needed / always */
-        f[2] = (ScrField){ T("Language"), T(LANG_NAMES[f_lang]), SCR_F_CHOICE, 1 };
-        f[3] = (ScrField){ T("Hide adult channels"), T(f_adult ? "On" : "Off"), SCR_F_TOGGLE, 1 };
-        f[4] = (ScrField){ T("Parental lock (PIN)"), f_pin[0] ? "****" : T("Off"), SCR_F_TEXT, 1 };   /* 0.8.0 */
-        f[5] = (ScrField){ T("Hide channels named 4K / UHD"), T(f_hd ? "On" : "Off"), SCR_F_TOGGLE, 1 };
-        f[6] = (ScrField){ T("Preferred resolution"), T(RES_NAMES[f_res]), SCR_F_CHOICE, 1 };
-        f[7] = (ScrField){ T("Theme"), T(ui_theme_name(f_theme)), SCR_F_CHOICE, 1 };   /* 0.8.1 */
-        f[8] = (ScrField){ T("Test server"), NULL, SCR_F_BUTTON, 1 };
-        f[9] = (ScrField){ T("Clear Recently Watched"), NULL, SCR_F_BUTTON, 1 };
-        f[10] = (ScrField){ T("Clear watched episodes"), NULL, SCR_F_BUTTON, 1 };
-        f[11] = (ScrField){ T("Save"), NULL, SCR_F_BUTTON, 1 };
-        f[12] = (ScrField){ T("Cancel"), NULL, SCR_F_BUTTON, 1 };
-        scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), f, SET_FIELDS, form_sel, H, NH(H), status, status_err);
+        static const UiHint HS[] = { { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_CIRCLE, "Cancel" },
+                                     { UI_BTN_SEP, "" }, { UI_BTN_START, "Save" } };
+        static const char *const INFO[SF_N] = {
+            "The language of the app. Automatic follows the console's language.",
+            "The colours of the app (seen at once).",
+            "Channels with several picture sizes open at this one.",
+            "Hides adult categories and channels. Turning it off asks for the PIN when one is set.",
+            "Hides the channels with 4K or UHD in their name (the Vita cannot play them).",
+            "A 4-6 digit PIN: asked before adult channels play and before the lock is changed.",
+            "For quiet channels; a limiter keeps it from distorting. Careful with loud sound on headphones.",
+            "For the Vita's speakers: less of the deep bass they cannot play, clearer voices.",
+            "5.1 films and channels: the voices louder in the stereo mix.",
+            "Plays what the Vita cannot (HEVC, 1080i, AC-3...) through tools/vita_iptv_proxy.py on a PC.",
+            "The server's address, e.g. http://192.168.1.20:8090",
+            "Checks that the server answers.",
+            "Removes the recently watched channels of every playlist. Favorites stay.",
+            "Removes the ticks of watched episodes. Where films stopped is kept.",
+            "Version, licence and the project's page.",
+        };
+        char ab[32];
+        snprintf(ab, sizeof ab, "%s", APP_VERSION);
+        int ids[SF_N], n = set_rows(ids);
+        for (int i = 0; i < n; i++) {
+            ScrField *x = &f[i];
+            memset(x, 0, sizeof *x);
+            x->enabled = 1;
+            switch (ids[i]) {
+            case SF_LANG: *x = (ScrField){ T("Language"), T(LANG_NAMES[f_lang]), SCR_F_CHOICE, 1, 0 }; break;
+            case SF_THEME: *x = (ScrField){ T("Theme"), T(ui_theme_name(f_theme)), SCR_F_CHOICE, 1, 0 }; break;
+            case SF_RES: *x = (ScrField){ T("Preferred resolution"), T(RES_NAMES[f_res]), SCR_F_CHOICE, 1, 0 }; break;
+            case SF_ADULT: *x = (ScrField){ T("Hide adult channels"), T(f_adult ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
+            case SF_HD: *x = (ScrField){ T("Hide channels named 4K / UHD"), T(f_hd ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
+            case SF_PIN: *x = (ScrField){ T("Parental lock (PIN)"), f_pin[0] ? "****" : T("Off"), SCR_F_TEXT, 1, 0 }; break;
+            case SF_BOOST: *x = (ScrField){ T("Volume boost"), T(BOOST_NAMES[f_boost]), SCR_F_CHOICE, 1, 0 }; break;
+            case SF_CLEAR: *x = (ScrField){ T("Clear sound"), T(f_clear ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
+            case SF_SPEECH: *x = (ScrField){ T("Clear speech (5.1)"), T(f_speech ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
+            case SF_SERVER: *x = (ScrField){ T("Transcoding server"), T(AUTO_NAMES[f_srv]), SCR_F_CHOICE, 1, 0 }; break;
+            case SF_ADDR: *x = (ScrField){ T("Server address"), f_proxy, SCR_F_TEXT, 1, 1 }; break;
+            case SF_TEST: *x = (ScrField){ T("Test server"), NULL, SCR_F_ACTION, 1, 1 }; break;
+            case SF_CLR_RECENT: *x = (ScrField){ T("Clear Recently Watched"), NULL, SCR_F_ACTION, 1, 0 }; break;
+            case SF_CLR_WATCHED: *x = (ScrField){ T("Clear watched episodes"), NULL, SCR_F_ACTION, 1, 0 }; break;
+            default: *x = (ScrField){ T("About"), ab, SCR_F_ACTION, 1, 0 }; break;
+            }
+        }
+        int id = set_id();
+        scr_settings(T("Settings"), f, n, form_sel, &set_scroll, HS, NH(HS), status, status_err, id >= 0 ? T(INFO[id]) : NULL);
         if (confirm_clear_recent) scr_confirm(T("Clear recently watched?"), T("The recently watched channels of every playlist are removed. Favorites stay."));
         if (confirm_clear_watched) scr_confirm(T("Clear watched episodes?"), T("The ticks of watched episodes are removed. Where films stopped is kept."));
     }
@@ -3519,7 +4292,7 @@ static void keep_awake(void)
 /* Channels the Vita cannot play go through the transcoding server by themselves. */
 static void auto_proxy_check(void)
 {
-    if (play_mode != 2 || via_proxy || auto_proxy_tried || !settings.proxy[0] || !settings.auto_proxy) return;
+    if (play_mode != 2 || via_proxy || auto_proxy_tried || !srv_on() || !settings.auto_proxy) return;
     const TspStatus *st = tsp_status();
     if (!st) return;
     int format = st->state == TSP_ERROR && st->err_kind == TSP_ERRK_FORMAT;
@@ -3749,7 +4522,7 @@ static void gd_row_fn(int i, ScrGuideRow *r, void *ctx)
     r->playing = guide_open == 2 && i == play_vis;
     r->sel = i == gd_row;
     guide_want(ci);
-    r->loading = guide.ch[ci].state == GC_ASKED || (guide.ch[ci].state == GC_NONE && sources[cur_src].type == SRC_XTREAM) || guide_xmltv == GX_READING;
+    r->loading = guide.ch[ci].state == GC_ASKED || (guide.ch[ci].state == GC_NONE && chan_xtream(ci)) || guide_xmltv == GX_READING;
     int n, k = guide_from(&guide, ci, gd_t0);
     const GProg *p = guide_progs(&guide, ci, &n);
     r->noguide = !r->loading && n == 0;                      /* 0.8.1: the channel has no guide at all */
@@ -3779,7 +4552,7 @@ static void draw_guide(void)
     int64_t now = now_unix();
     ScrGuide g;
     memset(&g, 0, sizeof g);
-    g.title = T("Guide");
+    g.title = T("Programme guide");
     g.subtitle = ngroups ? group_title(cur_group) : NULL;
     now_label(right, sizeof right);
     g.right = right;
@@ -3816,7 +4589,7 @@ static void draw_guide(void)
         g.sel_title = chans.items[vis[gd_row]].name;
         int nn = 0, ci0 = vis[gd_row];
         guide_progs(&guide, ci0, &nn);
-        int asked = guide.ch[ci0].state == GC_ASKED || (guide.ch[ci0].state == GC_NONE && sources[cur_src].type == SRC_XTREAM);
+        int asked = guide.ch[ci0].state == GC_ASKED || (guide.ch[ci0].state == GC_NONE && chan_xtream(ci0));
         g.sel_line = T(guide_xmltv == GX_READING || asked ? "Loading the guide..." :
                        nn ? "No programme information at this time" : "No programme guide for this channel");   /* (0.8.1) */
     }
@@ -4386,8 +5159,61 @@ static void splash_frame(const char *status_line)
 }
 
 /* ---- main -------------------------------------------------------------- */
-enum { MENU_ADD, MENU_SETTINGS, MENU_RELOAD, MENU_ABOUT, MENU_QUIT, MENU_N };
-static const char *const MENU_ITEMS[MENU_N] = { "Add playlist", "Settings", "Reload sources", "About", "Quit" };
+
+/* 1.1: the answer of the background check (refresh_start). A newer list is put in place only at a safe moment:
+ * on the live channel list with nothing open over it; the category and the selected channel stay. */
+static void refresh_take(int busy)
+{
+    if (rjob.state != 2) return;
+    if (rjob.gen != list_gen || rjob.src != cur_src || cur_src < 0 || cur_src >= nsources) {   /* (an old list's) */
+        plog("list: background check of \"%s\" (left already): %s, %d KB in %d.%d s", rjob.s.name,
+             !rjob.ok ? rjob.err : rjob.changed ? "newer list saved for the next time" : "not changed", rjob.kb, rjob.ms / 1000, rjob.ms / 100 % 10);
+        rjob.state = 0;
+        if (ref_next.on) refresh_start(&ref_next.s, ref_next.h0, ref_next.h1);
+        return;
+    }
+    if (!rjob.ok) {
+        plog("list: background check failed: %s (the saved copy stays), %d KB in %d.%d s", rjob.err, rjob.kb, rjob.ms / 1000, rjob.ms / 100 % 10);
+        if (state == ST_CHANNELS && strcmp(rjob.err, "Cancelled")) set_status(0, "List not checked: %s", rjob.err);
+        rjob.state = 0;
+        return;
+    }
+    if (!rjob.changed) {
+        if (rjob.have_off && state != ST_PLAYING) { xt_srv_off = rjob.srv_off; xt_srv_known = rjob.srv_known; }
+        else if (rjob.have_off) return;                      /* (the clock of a programme being played stays until it ends) */
+        plog("list: background check: the list has not changed, %d KB in %d.%d s", rjob.kb, rjob.ms / 1000, rjob.ms / 100 % 10);
+        rjob.state = 0;
+        return;
+    }
+    if (busy || state != ST_CHANNELS || section != SEC_LIVE || in_episodes || fav_moving || guide_open || cg_open || det_open ||
+        job_active || job_pending || search_fold[0] || filters_changed)
+        return;                                              /* (later) */
+    rjob.state = 0;
+    plog("list: background check: a newer list, %d KB in %d.%d s", rjob.kb, rjob.ms / 1000, rjob.ms / 100 % 10);
+    ChannelList nl;
+    uint32_t h0 = 0, h1 = 0;
+    channel_list_init(&nl);
+    const Source *s = &sources[cur_src];
+    if (cache_load(s, &nl, &h0, &h1, 1) != 0) { plog("list: the newer list could not be opened (the old one stays)"); return; }
+    char curl[IPTV_URL_MAX] = "";
+    if (nvis && sel >= 0 && sel < nvis) snprintf(curl, sizeof curl, "%s", chans.items[vis[sel]].url);
+    int was_focus = focus, before = chans.count;
+    group_remember();
+    guide_reset();
+    channel_list_free(&chans);
+    chans = nl;
+    fav_rank_n = nfav_ch = 0;
+    build_groups();
+    guide_setup();
+    group_restore();
+    rebuild_visible();
+    for (int i = 0; i < nvis; i++) if (!strcmp(chans.items[vis[i]].url, curl)) { sel = i; scroll = i > 3 ? i - 3 : 0; break; }
+    if (ngroups > 1) focus = nvis ? was_focus : 0;
+    else focus = 1;
+    plog("list: updated in the background: %d -> %d channels", before, chans.count);
+    snprintf(status, sizeof status, T("List updated (%d channels)"), chans.count);
+    status_err = 0;
+}
 
 int main(void)
 {
@@ -4442,7 +5268,7 @@ int main(void)
             plog("tai config: %s", strstr(cb, "reavplayer") ? "reAvPlayer is listed (remove it if 720p channels show no picture)" : "no reAvPlayer");
         }
     }
-    plog("settings: server %s", settings.proxy[0] ? settings.proxy : "none");
+    plog("settings: server %s%s", settings.proxy[0] ? settings.proxy : "none", settings.proxy_off ? " (off)" : "");
     plog("font: %s", ui_font_state() == 2 ? "Latin system font (Turkish letters as they are)" :
          ui_font_state() == 1 ? (settings.plain_letters ? "Latin system font, Turkish letters plain (plain_letters=1)" : "default font only (Turkish letters plain)") : "none");
     plog("clocks: cpu 444 -> 0x%08X, bus 222 -> 0x%08X, gpu 222 -> 0x%08X, xbar 166 -> 0x%08X",
@@ -4450,16 +5276,17 @@ int main(void)
     plog("https: %s", cio_available() ? "built-in TLS (mbedTLS)" : "system only (built without TLS)");
     channel_list_init(&chans);
     load_favorites();                                        /* (before the playlists: they are sorted by it) */
+    load_mylist();                                           /* 1.1 (its row among the playlists) */
     load_sources();
     while (now_ms() - t0 < 1500) splash_frame(T("Loading playlists..."));   /* let the logo be seen */
     if (splash_img) { vita2d_wait_rendering_done(); vita2d_free_texture(splash_img); splash_img = NULL; }
 
-    int menu_open = 0, menu_sel = 0, about_open = 0, quit = 0, section_menu = 0, section_sel = 0;
+    int menu_open = 0, menu_sel = 0, quit = 0, section_menu = 0, section_sel = 0;
     for (;;) {
         unsigned p = read_pressed();
         {   /* the left stick up / down moves like the d-pad in the playlists, forms and menus (the channel
              * screen uses it for the categories) */
-            int menus = form_kind != FORM_NONE || menu_open || about_open || section_menu ||
+            int menus = form_kind != FORM_NONE || menu_open || quit_ask || src_ask || section_menu ||
                         (state == ST_CHANNELS && resume_ask) || (state == ST_PLAYING && res_menu);
             if (lstick_ud && (menus || state == ST_SOURCES)) { p |= lstick_ud > 0 ? SCE_CTRL_DOWN : SCE_CTRL_UP; lstick_ud = 0; }
         }
@@ -4471,6 +5298,8 @@ int main(void)
             load_run();
             p = 0;
         }
+        refresh_take(form_kind != FORM_NONE || menu_open || section_menu || ime_active ||
+                     (state == ST_CHANNELS && resume_ask));   /* 1.1: a newer list from the background check */
         if (server_test_pending) {                           /* 0.5.0: "Test server" too (it draws its own "busy" frame) */
             server_test_pending = 0;
             test_server();
@@ -4528,6 +5357,28 @@ int main(void)
             } else if (p & SCE_CTRL_CIRCLE) confirm_clear_watched = 0;
             draw_form();
         }
+        else if (form_kind == FORM_SETTINGS && form_about) { /* 1.1: "About" from the settings */
+            if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_CROSS)) form_about = 0;
+            draw_form();
+            if (form_about) {
+                char ab[96];
+                snprintf(ab, sizeof ab, "%s  \xC2\xB7  %s %s", APP_VERSION, T("built"), APP_BUILD);
+                scr_about(ab);
+            }
+        }
+        else if (form_kind != FORM_NONE && form_ask) {      /* 1.1: "Save the settings?" / "Save the playlist?" */
+            if (p & SCE_CTRL_CROSS) {
+                form_ask = 0;
+                if (form_kind == FORM_SOURCE) save_source_form(); else save_settings_form();   /* (an error: the form stays) */
+            } else if (p & SCE_CTRL_CIRCLE) form_close();
+            if (form_kind != FORM_NONE) {
+                draw_form();
+                if (form_ask) scr_confirm(T(form_kind == FORM_SETTINGS ? "Save the settings?" : "Save the playlist?"), NULL);
+            } else {
+                if (filters_changed) apply_filters_now();
+                if (state == ST_CHANNELS && !job_active && !job_pending) draw_channels(); else draw_sources();
+            }
+        }
         else if (form_kind != FORM_NONE && confirm_delete) {      /* "Delete this playlist?" over the edit form */
             if (p & SCE_CTRL_CROSS) { confirm_delete = 0; delete_source(edit_index); }
             else if (p & SCE_CTRL_CIRCLE) confirm_delete = 0;
@@ -4538,80 +5389,91 @@ int main(void)
             if (p & SCE_CTRL_UP) form_move(-1);
             if (form_kind == FORM_SOURCE && form_sel == 0 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
                 set_form_type((f_type + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3);
-            if (form_kind == FORM_SETTINGS && form_sel == 1 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
-                f_auto = (f_auto + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3;
-            if (form_kind == FORM_SETTINGS && form_sel == 3 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {
-                if (f_adult && settings.pin[0] && !form_pin_ok) pin_ask(PA_ADULT_OFF, 0);   /* 0.8.0 (0.8.1: always) */
-                else f_adult = !f_adult;
-            }
-            if (form_kind == FORM_SETTINGS && form_sel == 5 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) f_hd = !f_hd;
-            if (form_kind == FORM_SETTINGS && form_sel == 6 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
-                f_res = (f_res + ((p & SCE_CTRL_LEFT) ? RES_N - 1 : 1)) % RES_N;
-            if (form_kind == FORM_SETTINGS && form_sel == 2 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT)))
-                f_lang = (f_lang + ((p & SCE_CTRL_LEFT) ? 2 : 1)) % 3;
-            if (form_kind == FORM_SETTINGS && form_sel == 7 && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {   /* 0.8.1: the theme */
-                f_theme = (f_theme + ((p & SCE_CTRL_LEFT) ? UI_THEMES - 1 : 1)) % UI_THEMES;
-                ui_set_theme(f_theme);
+            if (form_kind == FORM_SETTINGS && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {   /* 1.1: by the row's setting */
+                int id = set_id();
+                if (id != SF_PIN && id != SF_ADDR && id < SF_TEST) set_step((p & SCE_CTRL_LEFT) ? -1 : 1, 0);
             }
             if (p & SCE_CTRL_START) {                        /* START saves (like the Save button) */
                 if (form_kind == FORM_SOURCE) save_source_form(); else save_settings_form();
             } else if (p & SCE_CTRL_CROSS) form_activate();
-            if (p & SCE_CTRL_CIRCLE) { if (form_kind == FORM_SETTINGS) apply_look(); form_kind = FORM_NONE; status[0] = 0; }   /* (0.8.1: theme back) */
+            if (p & SCE_CTRL_CIRCLE) { if (form_changed()) form_ask = 1; else form_close(); }   /* 1.1: asks when changed */
             if (form_kind != FORM_NONE) draw_form();
             else {
                 if (filters_changed) apply_filters_now();
                 if (state == ST_CHANNELS && !job_active && !job_pending) draw_channels(); else draw_sources();
             }
         }
-        else if (about_open || menu_open) {                  /* Select's menu over the playlists or the channels */
-            /* 0.8.0: in the live "Favorites" category the menu starts with "Reorder favourites" (was Triangle) */
-            int mx = state == ST_CHANNELS && section == SEC_LIVE && !in_episodes && cur_group == g_fav && g_fav >= 0 && nvis > 1 && !search_fold[0];
-            int mn = MENU_N + mx;
-            if (about_open) {
-                if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_CROSS)) about_open = 0;
+        else if (menu_open) {                                /* Select's menu over the playlists or the channels */
+            /* 1.1: by the screen: the playlists: add, reorder, reload, settings, quit; the channels: reorder (favourites,
+             * My List), Add to / Remove from My List, settings, quit (About is in the settings) */
+            enum { MI_EDIT, MI_MY, MI_ADD, MI_SORT, MI_RELOAD, MI_SETTINGS, MI_QUIT };
+            int acts[8], mn = 0;
+            const char *labels[8];
+            int ek = state == ST_CHANNELS ? edit_possible() : 0;
+            int my_ci = state == ST_CHANNELS && section == SEC_LIVE && !in_episodes && focus == 1 && nvis > 0 && sel < nvis &&
+                        chans.items[vis[sel]].kind == CH_LIVE && cur_src >= 0 && cur_src < nsources && sources[cur_src].type != SRC_STREAM ? vis[sel] : -1;
+            if (state == ST_SOURCES) {
+                acts[mn] = MI_ADD; labels[mn++] = T("Add playlist");
+                int movable = 0;
+                for (int i = 0; i < nsources; i++) movable += sources[i].type != SRC_MYLIST;
+                if (movable > 1) { acts[mn] = MI_SORT; labels[mn++] = T("Reorder playlists"); }
+                acts[mn] = MI_RELOAD; labels[mn++] = T("Reload playlists");
             } else {
-                if (p & SCE_CTRL_DOWN) menu_sel = (menu_sel + 1) % mn;
-                if (p & SCE_CTRL_UP) menu_sel = (menu_sel + mn - 1) % mn;
-                if (menu_sel >= mn) menu_sel = 0;
-                if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) menu_open = 0;
-                else if ((p & SCE_CTRL_CROSS) && mx && menu_sel == 0) {
-                    menu_open = 0;
-                    focus = 1;
-                    if (sel >= nvis) sel = 0;
-                    fav_move_begin(vis[sel]);
+                if (ek) { acts[mn] = MI_EDIT; labels[mn++] = T(ek == 1 ? "Reorder favourites" : "Reorder My List"); }
+                if (my_ci >= 0) {
+                    acts[mn] = MI_MY;
+                    labels[mn++] = T(sources[cur_src].type == SRC_MYLIST || in_mylist(my_ci) ? "Remove from My List" : "Add to My List");
                 }
-                else if (p & SCE_CTRL_CROSS) {
-                    menu_open = 0;
-                    menu_sel -= mx;
-                    /* adding a playlist and reading them again happen on the playlists screen */
-                    if (state == ST_CHANNELS && (menu_sel == MENU_ADD || menu_sel == MENU_RELOAD)) {
-                        leave_episodes();
-                        state = ST_SOURCES; sel = src_disp(cur_src); scroll = 0;
+            }
+            acts[mn] = MI_SETTINGS; labels[mn++] = T("Settings");
+            acts[mn] = MI_QUIT; labels[mn++] = T("Quit");
+            if (p & SCE_CTRL_DOWN) menu_sel = (menu_sel + 1) % mn;
+            if (p & SCE_CTRL_UP) menu_sel = (menu_sel + mn - 1) % mn;
+            if (menu_sel >= mn) menu_sel = 0;
+            if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_SELECT)) menu_open = 0;
+            else if (p & SCE_CTRL_CROSS) {
+                menu_open = 0;
+                switch (acts[menu_sel]) {
+                case MI_EDIT:
+                    if (edit_begin(ek) != 0) set_status(1, "No memory", NULL);
+                    break;
+                case MI_MY: {                                /* 1.1: My List */
+                    int in_my = sources[cur_src].type == SRC_MYLIST;
+                    int r = mylist_toggle(my_ci);
+                    if (r == 0 && in_my) {                   /* taken out of the open My List: off the screen too */
+                        if (chans.count == 0) {
+                            mylist_source_sync();
+                            sort_sources();
+                            channel_list_free(&chans);
+                            channel_list_init(&chans);
+                            nvis = 0;
+                            guide_reset();
+                            state = ST_SOURCES;
+                            cur_src = 0;
+                            sel = 0;
+                        } else {
+                            guide_setup();
+                            fav_regroup(-1);
+                        }
+                    } else if (r >= 0) {                     /* (the "My List" row comes or goes) */
+                        mylist_source_sync();
+                        sort_sources();
                     }
-                    switch (menu_sel) {
-                    case MENU_ADD: open_source_form(-1); break;
-                    case MENU_SETTINGS: open_settings_form(); break;
-                    case MENU_RELOAD: load_favorites(); load_sources(); load_settings(); break;
-                    case MENU_ABOUT: about_open = 1; break;
-                    default: quit = 1; break;
-                    }
+                    set_status(r < 0, r == 1 ? "Added to My List" : r == 0 ? "Removed from My List"
+                               : r == -2 ? "My List is full" : "Could not change My List", NULL);
+                    break;
+                }
+                case MI_ADD: open_source_form(-1); break;
+                case MI_SORT: src_sort_begin(); break;
+                case MI_RELOAD: load_favorites(); load_mylist(); load_sources(); load_settings(); break;
+                case MI_SETTINGS: open_settings_form(); break;
+                default: quit = 1; break;
                 }
             }
             if (form_kind != FORM_NONE) draw_form();
             else {
                 if (state == ST_CHANNELS) draw_channels(); else draw_sources();
-                if (menu_open) {
-                    const char *items[MENU_N + 1];
-                    int k0 = 0;
-                    if (mx) items[k0++] = T("Reorder favourites");
-                    for (int k = 0; k < MENU_N; k++) items[k0 + k] = T(MENU_ITEMS[k]);
-                    scr_menu(T("Menu"), items, mn, menu_sel);
-                }
-                if (about_open) {                            /* 0.4.5: with the build time (which build is running) */
-                    char ab[96];
-                    snprintf(ab, sizeof ab, "%s  \xC2\xB7  %s %s", APP_VERSION, T("built"), APP_BUILD);
-                    scr_about(ab);
-                }
+                if (menu_open) scr_menu(T("Menu"), labels, mn, menu_sel);
             }
         }
         else if (cg_open) {                                  /* 0.8.0: a channel's schedule */
@@ -4634,7 +5496,11 @@ int main(void)
             else draw_current();
         }
         else if (state == ST_SOURCES) {
-            if (section_menu) {                       /* Xtream: live TV, films or series */
+            if (src_sorting) src_sort_input(p);              /* 1.1: Select > Reorder playlists */
+            else if (quit_ask) {                             /* 1.1: "Quit Vita IPTV?" */
+                if (p & SCE_CTRL_CROSS) { quit_ask = 0; quit = 1; }
+                else if (p & SCE_CTRL_CIRCLE) quit_ask = 0;
+            } else if (section_menu) {                /* Xtream: live TV, films or series */
                 if (p & SCE_CTRL_DOWN) section_sel = (section_sel + 1) % 3;
                 if (p & SCE_CTRL_UP) section_sel = (section_sel + 2) % 3;
                 if (p & SCE_CTRL_CIRCLE) section_menu = 0;
@@ -4645,15 +5511,12 @@ int main(void)
             } else {
                 move_sel(p, nsources);
                 if (p & SCE_CTRL_SELECT) { menu_open = 1; menu_sel = 0; }
+                if (p & SCE_CTRL_CIRCLE) quit_ask = 1;       /* 1.1 */
                 if (p & SCE_CTRL_SQUARE) open_source_form(-1);
                 if ((p & SCE_CTRL_TRIANGLE) && nsources) {      /* edit (deleting is at the end of the form) */
-                    if (sources[src_at(sel)].auto_added) set_status(0, "This entry is a file in ux0:data/VitaIPTV (delete or rename it there)", NULL);
+                    if (sources[src_at(sel)].type == SRC_MYLIST) set_status(0, "My List: Select > Add to My List on a channel; Select > Remove from My List in it", NULL);
+                    else if (sources[src_at(sel)].auto_added) set_status(0, "This entry is a file in ux0:data/VitaIPTV (delete or rename it there)", NULL);
                     else open_source_form(src_at(sel));
-                }
-                if ((p & SCE_CTRL_START) && nsources) {         /* 0.5.0: a favourite playlist goes to the top */
-                    int i = src_at(sel), r = fav_toggle_source(i);
-                    sel = src_disp(i);
-                    set_status(r < 0, fav_note(r), NULL);
                 }
                 if ((p & SCE_CTRL_CROSS) && nsources) {
                     const Source *s = &sources[src_at(sel)];
@@ -4716,11 +5579,23 @@ int main(void)
                 p = 0;
                 rstick_ud = lstick_ud = 0;
             }
-            if (fav_moving) {                                /* 0.4.5: moving a favourite: only up / down, X (0.8.0; was Triangle), O */
+            if (fav_moving && edit_ask) {                    /* 1.1: "Save the new order?" */
+                if (p & SCE_CTRL_CROSS) edit_end(1);
+                else if (p & SCE_CTRL_CIRCLE) edit_end(0);
+                p = 0;
+                rstick_ud = lstick_ud = 0;
+            } else if (fav_moving) {                         /* 1.1: the edit mode: up / down, X picks up / puts down, START, O */
                 int dir = (p & SCE_CTRL_DOWN) || rstick_ud > 0 ? 1 : (p & SCE_CTRL_UP) || rstick_ud < 0 ? -1 : 0;
-                if (dir) fav_move_step(dir);
-                if (p & (SCE_CTRL_CROSS | SCE_CTRL_TRIANGLE)) fav_move_end(1);
-                else if (p & SCE_CTRL_CIRCLE) fav_move_end(0);
+                if (dir && move_ci >= 0) edit_step(dir);
+                else if (dir && nvis) sel = (sel + dir + nvis) % nvis;
+                if (p & SCE_CTRL_START) edit_end(1);
+                else if (p & SCE_CTRL_CROSS) {
+                    move_ci = move_ci >= 0 ? -1 : nvis && sel < nvis ? vis[sel] : -1;
+                    edit_status();
+                } else if (p & SCE_CTRL_CIRCLE) {
+                    move_ci = -1;
+                    if (edit_dirty) edit_ask = 1; else edit_end(0);
+                }
                 p = 0;
                 rstick_ud = lstick_ud = 0;
             }
@@ -4811,6 +5686,7 @@ int main(void)
             }
             if (state == ST_CHANNELS && !job_active) {
                 draw_channels();
+                if (fav_moving && edit_ask) scr_confirm(T("Save the new order?"), NULL);   /* 1.1 */
                 if (resume_ask && resume_vi < nvis) {
                     char t1[64], when[24];
                     fmt_time(when, sizeof when, resume_pos);
@@ -4839,9 +5715,9 @@ int main(void)
             if (res_menu) {
                 /* Select (0.7.0: in tabs, so it stays short): Picture (the HLS sizes, newest first, or the one size it
                  * has), Audio (the tracks), Subtitles (off, the tracks, the sync), More (the server, the analysis) */
-                enum { MA_NONE, MA_AUTO, MA_VARIANT, MA_SERVER, MA_AUDIO, MA_ANALYSIS, MA_SUB_OFF, MA_SUB, MA_SUB_SYNC, MA_SLEEP, MA_ZAP, MA_SUB_LOOK };
+                enum { MA_NONE, MA_AUTO, MA_VARIANT, MA_SERVER, MA_AUDIO, MA_ANALYSIS, MA_SUB_OFF, MA_SUB, MA_SUB_SYNC, MA_SLEEP, MA_ZAP, MA_SUB_LOOK, MA_SND, MA_MYLIST };
                 enum { TAB_PIC, TAB_AUDIO, TAB_SUB, TAB_MORE, NTABS };
-                #define MENU_MAX (TSP_MAX_VARIANTS + TSP_MAX_AUDIO + TSP_MAX_SUBS + 8)
+                #define MENU_MAX (TSP_MAX_VARIANTS + TSP_MAX_AUDIO + TSP_MAX_SUBS + 12)
                 static char names[MENU_MAX][96];
                 const char *items[MENU_MAX];
                 int act[MENU_MAX], arg[MENU_MAX], dim[MENU_MAX];
@@ -4885,6 +5761,10 @@ int main(void)
                             MENU_ADD(ms->a_n > 1 ? MA_AUDIO : MA_NONE, k, ms->a_n < 2);
                         }
                     else { snprintf(names[n], sizeof names[n], "%s", T(via_proxy ? "Chosen by the server" : "No other sound")); MENU_ADD(MA_NONE, 0, 1); }
+                    for (int k = 0; k < 3; k++) {            /* 1.1: volume boost, speaker mode, clear dialogue */
+                        snprintf(names[n], sizeof names[n], "%s:  < %s >", T(SND_NAME[k]), T(snd_value(k)));
+                        MENU_ADD(MA_SND, k, 0);
+                    }
                 } else if (menu_tab == TAB_SUB) {
                     if (ms && ms->s_n > 0) {
                         snprintf(names[n], sizeof names[n], "%s%s", ms->s_cur < 0 ? "> " : "", T("Off"));
@@ -4909,7 +5789,7 @@ int main(void)
                         MENU_ADD(MA_NONE, 0, 1);
                     }
                 } else {
-                    if (settings.proxy[0] && play_mode == 2 && !radio) {   /* this channel through the server, or back */
+                    if (srv_on() && play_mode == 2 && !radio) {   /* this channel through the server, or back */
                         snprintf(names[n], sizeof names[n], "%s", T(via_proxy ? "Direct (without the server)" : "Through the Server"));
                         MENU_ADD(MA_SERVER, 0, 0);
                     }
@@ -4924,15 +5804,22 @@ int main(void)
                         snprintf(names[n], sizeof names[n], "%s", T("Channel number..."));
                         MENU_ADD(MA_ZAP, 0, 0);
                     }
+                    if (return_state == ST_CHANNELS && section == SEC_LIVE && !in_episodes && play_vis >= 0 && play_vis < nvis &&
+                        chans.items[vis[play_vis]].kind == CH_LIVE && cur_src >= 0 && cur_src < nsources &&
+                        sources[cur_src].type != SRC_STREAM && sources[cur_src].type != SRC_MYLIST) {   /* 1.1 */
+                        snprintf(names[n], sizeof names[n], "%s", T(in_mylist(vis[play_vis]) ? "Remove from My List" : "Add to My List"));
+                        MENU_ADD(MA_MYLIST, 0, 0);
+                    }
                 }
                 #undef MENU_ADD
                 if (menu_fresh) { res_menu_sel = cur >= 0 ? cur : 0; menu_fresh = 0; }
                 if (res_menu_sel >= n) res_menu_sel = n - 1;
                 if (res_menu_sel < 0) res_menu_sel = 0;
                 int on_sync = act[res_menu_sel] == MA_SUB_SYNC, on_sleep = act[res_menu_sel] == MA_SLEEP;
-                int on_look = act[res_menu_sel] == MA_SUB_LOOK;
-                if (on_look && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {   /* 0.8.1: how subtitles look */
-                    sub_look_step(arg[res_menu_sel], (p & SCE_CTRL_RIGHT) ? 1 : -1);
+                int on_look = act[res_menu_sel] == MA_SUB_LOOK || act[res_menu_sel] == MA_SND;
+                if (on_look && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {   /* 0.8.1: how subtitles look (1.1: sound) */
+                    if (act[res_menu_sel] == MA_SND) snd_step(arg[res_menu_sel], (p & SCE_CTRL_RIGHT) ? 1 : -1);
+                    else sub_look_step(arg[res_menu_sel], (p & SCE_CTRL_RIGHT) ? 1 : -1);
                     p &= ~(unsigned)(SCE_CTRL_LEFT | SCE_CTRL_RIGHT);
                 }
                 if (p & SCE_CTRL_DOWN) res_menu_sel = (res_menu_sel + 1) % n;
@@ -4965,8 +5852,9 @@ int main(void)
                     if (sub_look_dirty) { sub_look_dirty = 0; save_settings(); }   /* 0.8.1 */
                 } else if (p & SCE_CTRL_CROSS) {
                     int a = act[res_menu_sel], g = arg[res_menu_sel];
-                    if (a != MA_NONE && a != MA_SUB_SYNC && a != MA_SLEEP && a != MA_SUB_LOOK) res_menu = 0;
+                    if (a != MA_NONE && a != MA_SUB_SYNC && a != MA_SLEEP && a != MA_SUB_LOOK && a != MA_SND && a != MA_MYLIST) res_menu = 0;
                     if (a == MA_SUB_LOOK) sub_look_step(g, 1);  /* 0.8.1: X: the next value */
+                    if (a == MA_SND) snd_step(g, 1);            /* 1.1 */
                     if (a == MA_SUB_SYNC) { sub_delay_ms = 0; tsp_set_sub_delay(0); }   /* X: back to 0 */
                     else if (a == MA_SLEEP) {                    /* 0.8.0: X: the next value */
                         sleep_idx = (sleep_idx + 1) % SLEEP_N;
@@ -4974,6 +5862,11 @@ int main(void)
                         plog("player: sleep timer %d min", SLEEP_MIN[sleep_idx]);
                     }
                     else if (a == MA_ZAP) ime_open("Channel number", "", 0, IME_ZAP, NULL, 0);   /* 0.8.0 */
+                    else if (a == MA_MYLIST) {                   /* 1.1: the menu stays open: its line says what it is now */
+                        int r = mylist_toggle(vis[play_vis]);
+                        if (r >= 0) { mylist_source_sync(); sort_sources(); }   /* (the "My List" row comes or goes) */
+                        if (r == -2) plog("mylist: full");
+                    }
                     else if (a == MA_SUB_OFF || a == MA_SUB) {   /* at once, and for the next films */
                         tsp_sub_choose(a == MA_SUB ? g : -1);
                         sub_off = a == MA_SUB_OFF;
@@ -5023,10 +5916,10 @@ int main(void)
                     if (res_menu) {
                         on_sync = act[res_menu_sel] == MA_SUB_SYNC;
                         on_sleep = act[res_menu_sel] == MA_SLEEP;
-                        on_look = act[res_menu_sel] == MA_SUB_LOOK;
+                        on_look = act[res_menu_sel] == MA_SUB_LOOK || act[res_menu_sel] == MA_SND;
                         scr_tabmenu(tabs, NTABS, menu_tab, items, dim, n, res_menu_sel,
                                     T(on_sync ? "Left / Right: earlier / later   X: back to 0   O: close"
-                                              : on_sleep || on_look ? "Left / Right / X: change   O: close" : "L / R: tab   X: choose   O: close"));
+                                              : on_sleep || on_look ? "Left / Right / X: change   O: close" : "X: choose   O: close   L / R: tab"));
                     }
                 }
                 #undef MENU_MAX
@@ -5147,10 +6040,9 @@ int main(void)
                     fs = play_mode == 2 ? tsp_status() : NULL;
                 }
                 if ((p & SCE_CTRL_CROSS) && fs) tsp_pause(!fs->paused);
-                if (p & SCE_CTRL_START) {                        /* 0.5.0: favourite (a single stream: its playlist) */
+                if ((p & SCE_CTRL_START) && return_state != ST_SOURCES) {   /* 0.5.0: favourite (1.1: not a single stream's playlist) */
                     int r = -1;
-                    if (return_state == ST_SOURCES) r = fav_toggle_source(cur_src);
-                    else if (section == SEC_LIVE && !in_episodes) r = fav_toggle_channel(vis[play_vis]);
+                    if (section == SEC_LIVE && !in_episodes) r = fav_toggle_channel(vis[play_vis]);
                     else if (in_episodes) r = series_ci_saved >= 0 && series_ci_saved < series_saved.count
                                               ? fav_toggle_vod(&series_saved.items[series_ci_saved]) : -1;   /* 0.6.0: its series */
                     else if (play_vis < nvis) r = fav_toggle_vod(&chans.items[vis[play_vis]]);         /* 0.6.0: the film */
@@ -5189,7 +6081,7 @@ int main(void)
                 if ((p & SCE_CTRL_SQUARE) && film && fs) {
                     /* a film file has one picture size; a smaller one needs the transcoding server, which
                      * converts it to 720p from where it is now */
-                    if (settings.proxy[0]) {
+                    if (srv_on()) {
                         save_film_position();
                         film_start_ms = pos;
                         seek_target = -1;
@@ -5212,7 +6104,7 @@ int main(void)
                         film_note_until = now_ms() + 3000;
                         play_channel_ex(play_vis, 0);
                         fs = tsp_status();
-                    } else if (settings.proxy[0]) { auto_proxy_tried = 1; play_channel_ex(play_vis, !via_proxy); }
+                    } else if (srv_on()) { auto_proxy_tried = 1; play_channel_ex(play_vis, !via_proxy); }
                     else {
                         snprintf(film_note, sizeof film_note, "%s", T("This channel has one picture size. Another needs the transcoding server (channel list: Select > Settings)"));
                         film_note_until = now_ms() + 4000;
@@ -5312,6 +6204,7 @@ int main(void)
     }
 
     stop_all();
+    refresh_stop();                                          /* 1.1 */
     epg_stop();
     plog("exit: the players are stopped");
     ui_shutdown();
