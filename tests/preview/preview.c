@@ -22,7 +22,8 @@ static const char *src_badge[] = { "XTREAM", "XTREAM", "M3U", "STREAM", "FILE" }
 static const char *src_sub[] = { "tv.example.net:8080", "spor.example.com", "raw.example.org", "trt.example.tr", "Turkiye_IP_TV.m3u" };
 static const unsigned src_col[] = { RGBA8(124, 77, 230, 255), RGBA8(124, 77, 230, 255), RGBA8(33, 120, 235, 255), RGBA8(22, 160, 105, 255), RGBA8(222, 128, 30, 255) };
 static int fav_demo;                                         /* 0.5.0: favourites in the sample data */
-static void src_row(int i, ScrRow *r, void *c) { (void)c; r->name = src_names[i]; r->badge = src_badge[i]; r->badge_col = src_col[i]; r->sub = src_sub[i]; r->fav = fav_demo && i < 2; }
+static int src_moving = -1;                                  /* 1.1: reorder playlists */
+static void src_row(int i, ScrRow *r, void *c) { (void)c; r->name = src_names[i]; r->badge = src_badge[i]; r->badge_col = src_col[i]; r->sub = src_sub[i]; r->fav = fav_demo && i < 2; r->moving = i == src_moving; }
 
 /* channels */
 static const char *ch_names[] = { "TRT 1 HD", "Kanal D HD", "Show TV HD", "Star TV HD", "ATV HD", "TV8 HD", "FOX HD", "TRT Haber HD",
@@ -175,7 +176,7 @@ int main(int argc, char **argv)
     /* new screens */
     UiHint hs2[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" }, { UI_BTN_SELECT, "Menu" } };
     ScrList sl2 = { "Vita IPTV", T("Playlists"), "5 playlists", 5, 1, &scroll, src_row, NULL, T("No playlists"), hs2, 4, T("Saved as Xtream (faster, live channels only)"), 0 };
-    const char *menu[] = { T("Add playlist"), T("Settings"), T("Reload sources"), T("About"), T("Quit") };
+    const char *menu[] = { T("Add playlist"), T("Settings"), T("Reload playlists"), T("About"), T("Quit") };
     preview_clear(UI_BG); scroll = 0; scr_list(&sl2); scr_menu(T("Menu"), menu, 5, 1); shot("a_menu");
     UiHint hf2[] = { { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_CIRCLE, "Cancel" }, { UI_BTN_SEP, "" }, { UI_BTN_START, "Save" } };
     UiHint hf[] = { { UI_BTN_UPDOWN, "Move" }, { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_START, "Save" }, { UI_BTN_CIRCLE, T("Cancel") } };
@@ -196,6 +197,51 @@ int main(int argc, char **argv)
                       { T("Save"), NULL, SCR_F_BUTTON, 1 }, { T("Cancel"), NULL, SCR_F_BUTTON, 1 } };
     preview_clear(UI_BG); scr_form(T("Settings"), T("Server: plays HEVC, 1080i, AC-3 and other formats (tools/vita_iptv_proxy.py)"), fs, 13, 2, hf2, 4, T("Server is running"), 0); shot("d_settings");
     preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 13, 7, hf2, 4, NULL, 0); shot("d_settings_end");
+    {   /* 1.1: the playlist form as cards */
+        static const UiHint hf3[] = { { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_CIRCLE, "Cancel" }, { UI_BTN_SEP, "" }, { UI_BTN_START, "Save" } };
+        ScrField pf[] = { { T("Type"), "Xtream", SCR_F_CHOICE, 1, 0 }, { T("Name"), "Ev internet", SCR_F_TEXT, 1, 0 },
+                          { T("Server address"), "http://tv.example.net:8080", SCR_F_TEXT, 1, 0 }, { T("Username"), "emre", SCR_F_TEXT, 1, 0 },
+                          { T("Password"), "********", SCR_F_TEXT, 1, 0 }, { T("Delete playlist"), NULL, SCR_F_DANGER, 1, 0 } };
+        int sc2 = 0;
+        preview_clear(UI_BG); scr_settings(T("Edit playlist"), pf, 6, 2, &sc2, hf3, 4, NULL, 0, T("Tip: a pasted get.php link fills everything")); shot("n_playlist_form");
+        scr_confirm(T("Save the playlist?"), NULL); shot("n_playlist_form_ask");
+        const char *mi[] = { T("Add playlist"), T("Reorder playlists"), T("Reload playlists"), T("Settings"), T("Quit") };
+        ScrList sl3 = { "Vita IPTV", T("Playlists"), "5 playlists", 5, 1, &scroll, src_row, NULL, "", hf3, 4, NULL, 0 };
+        scroll = 0;
+        preview_clear(UI_BG); scr_list(&sl3); scr_menu(T("Menu"), mi, 5, 1); shot("n_menu");
+    }
+    {   /* 1.1: reorder playlists, the quit question */
+        static const UiHint hm[] = { { UI_BTN_UPDOWN, "Reorder" }, { UI_BTN_CROSS, "Put down" }, { UI_BTN_START, "Save" }, { UI_BTN_CIRCLE, "Back" } };
+        ScrList so = { "Vita IPTV", T("Reorder playlists"), "5 playlists", 5, 2, &scroll, src_row, NULL, "", hm, 4,
+                       T("Up / down moves the playlist, X puts it down"), 0 };
+        src_moving = 2; scroll = 0;
+        preview_clear(UI_BG); scr_list(&so); shot("n_reorder_playlists");
+        src_moving = -1;
+        so.subtitle = T("Playlists");
+        so.status = NULL;
+        preview_clear(UI_BG); scr_list(&so); scr_confirm(T("Quit Vita IPTV?"), NULL); shot("n_quit");
+    }
+    {   /* 1.1: the new settings */
+        ScrField ns[] = { { T("Language"), T("Automatic (system)"), SCR_F_CHOICE, 1, 0 }, { T("Theme"), T("Blue"), SCR_F_CHOICE, 1, 0 },
+                          { T("Preferred resolution"), T("Automatic"), SCR_F_CHOICE, 1, 0 },
+                          { T("Hide adult channels"), T("On"), SCR_F_TOGGLE, 1, 0 }, { T("Hide channels named 4K / UHD"), T("Off"), SCR_F_TOGGLE, 1, 0 },
+                          { T("Parental lock (PIN)"), "****", SCR_F_TEXT, 1, 0 },
+                          { T("Volume boost"), "+6 dB", SCR_F_CHOICE, 1, 0 }, { T("Clear sound"), T("On"), SCR_F_TOGGLE, 1, 0 },
+                          { T("Clear speech (5.1)"), T("Off"), SCR_F_TOGGLE, 1, 0 },
+                          { T("Transcoding server"), T("When needed"), SCR_F_CHOICE, 1, 0 },
+                          { T("Server address"), "http://192.168.1.20:8090", SCR_F_TEXT, 1, 1 }, { T("Test server"), NULL, SCR_F_ACTION, 1, 1 },
+                          { T("Clear Recently Watched"), NULL, SCR_F_ACTION, 1, 0 }, { T("Clear watched episodes"), NULL, SCR_F_ACTION, 1, 0 },
+                          { T("About"), "1.1.0", SCR_F_ACTION, 1, 0 } };
+        static const UiHint hs[] = { { UI_BTN_CROSS, "Edit / choose" }, { UI_BTN_CIRCLE, "Cancel" }, { UI_BTN_SEP, "" }, { UI_BTN_START, "Save" } };
+        int sc = 0;
+        preview_clear(UI_BG); scr_settings(T("Settings"), ns, 15, 3, &sc, hs, 4, NULL, 0,
+            T("Hides adult categories and channels. Turning it off asks for the PIN when one is set.")); shot("n_settings_top");
+        sc = 0;
+        preview_clear(UI_BG); scr_settings(T("Settings"), ns, 15, 9, &sc, hs, 4, NULL, 0,
+            T("Plays what the Vita cannot (HEVC, 1080i, AC-3...) through tools/vita_iptv_proxy.py on a PC.")); shot("n_settings_mid");
+        sc = 0;
+        preview_clear(UI_BG); scr_settings(T("Settings"), ns, 15, 14, &sc, hs, 4, NULL, 0, T("Version, licence and the project's page.")); shot("n_settings_end");
+    }
     scr_confirm(T("Clear watched episodes?"), T("The ticks of watched episodes are removed. Where films stopped is kept.")); shot("d3_clear_watched");
     preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 11, 7, hf2, 4, NULL, 0);
     scr_confirm(T("Clear recently watched?"), T("The recently watched channels of every playlist are removed. Favorites stay.")); shot("d2_clear_recent");

@@ -100,10 +100,17 @@ void scr_sub_style(int size, int color, int pos, int bg);
 void scr_radio(const char *name, const char *group, const char *audio_info, int level, unsigned t_ms,
                const UiHint *hints, int nhints, const char *note, int fav);
 
-enum { SCR_F_TEXT, SCR_F_CHOICE, SCR_F_TOGGLE, SCR_F_BUTTON, SCR_F_DANGER };   /* DANGER: a red button */
-typedef struct { const char *label; const char *value; int kind; int enabled; } ScrField;
+enum { SCR_F_TEXT, SCR_F_CHOICE, SCR_F_TOGGLE, SCR_F_BUTTON, SCR_F_DANGER,   /* DANGER: a red button */
+       SCR_F_ACTION };                  /* 1.1 (scr_settings): a row that does something (an arrow on the right) */
+typedef struct { const char *label; const char *value; int kind; int enabled; int indent; } ScrField;
 void scr_form(const char *title, const char *subtitle, const ScrField *f, int n, int sel,
               const UiHint *hints, int nhints, const char *status, int status_err);
+/* 1.1: the settings as a list of cards like the playlists (rows scroll): the label on the left, the value on the
+ * right (a choice with arrows, a switch, an arrow for an action); the help line of the selected row (info) at the
+ * bottom, unless there is a status. */
+#define SCR_SET_ROWS 7
+void scr_settings(const char *title, const ScrField *f, int n, int sel, int *scroll,
+                  const UiHint *hints, int nhints, const char *status, int status_err, const char *info);
 /* small menu box over the current screen */
 void scr_menu(const char *title, const char *const *items, int n, int sel);
 /* 0.7.0: the player's Select menu: tabs on top (L / R), the tab's rows under them, a help line at the bottom;

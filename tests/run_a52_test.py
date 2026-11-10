@@ -44,4 +44,26 @@ for name, layout, nch in (("aac_51.aac", "5.1", 6), ("aac_71.aac", "7.1", 8)):
     r = subprocess.run(f"{T}/t {T}/{name} {T}/{name}.s16 48000", shell=True, capture_output=True, text=True)
     print(r.stdout, r.stderr[-3000:])
     if r.returncode: sys.exit(1)
+# 1.1: "clear dialogue": all channels from the decoder, mixed with the centre at full level, the surrounds at
+# half, scaled by 0.6 and peaks above 0.9 rounded off (as src/a52dec.c does it then)
+def mix_dialog(f32, out, nch):
+    a = array.array("f"); a.frombytes(open(f32, "rb").read())
+    sl, sr = (6, 7) if nch == 8 else (4, 5)
+    def soft(v):
+        x = abs(v)
+        if x <= 0.9: return v
+        y = 0.9 + 0.1 * math.tanh((x - 0.9) / 0.1)
+        return -y if v < 0 else y
+    o = array.array("h")
+    for i in range(0, len(a) - nch + 1, nch):
+        c = a[i + 2]
+        for v in ((a[i] + c + a[i + sl] * 0.5) * 0.6, (a[i + 1] + c + a[i + sr] * 0.5) * 0.6):
+            x = int(round(soft(v) * 32767)); o.append(max(-32768, min(32767, x)))
+    open(out, "wb").write(o.tobytes())
+for name, nch, rate in (("ac3_51.ac3", 6, 48000), ("eac3_51.eac3", 6, 48000), ("aac_51.aac", 6, 48000)):
+    sh(f"ffmpeg -loglevel error -y -i {T}/{name} -f f32le -acodec pcm_f32le {T}/{name}.all.f32")
+    mix_dialog(f"{T}/{name}.all.f32", f"{T}/{name}.dlg.s16", nch)
+    r = subprocess.run(f"DIALOG=1 {T}/t {T}/{name} {T}/{name}.dlg.s16 {rate}", shell=True, capture_output=True, text=True)
+    print("clear dialogue:", r.stdout, r.stderr[-3000:])
+    if r.returncode: sys.exit(1)
 print("ALL A52 TESTS PASSED")

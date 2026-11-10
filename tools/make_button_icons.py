@@ -27,21 +27,21 @@ def glyph(kind,S=30):
         d.ellipse([0,0,S*k-1,S*k-1],fill=DARK)
     sw=2.9*k
     if kind=="cross":
-        h=7.3*k
+        h=5.7*k   # (1.1: the four symbols the same size: about 15 px across)
         line(d,(c-h,c-h),(c+h,c+h),sw,BLUE); line(d,(c+h,c-h),(c-h,c+h),sw,BLUE)
     elif kind=="circle":
-        R=8.5*k; d.ellipse([c-R,c-R,c+R,c+R],outline=RED,width=int(sw))
+        R=7.6*k; d.ellipse([c-R,c-R,c+R,c+R],outline=RED,width=int(sw))
     elif kind=="square":
-        a=7.7*k; rrect_outline(d,[c-a,c-a,c+a,c+a],1.6*k,sw,PINK)
+        a=7.0*k; rrect_outline(d,[c-a,c-a,c+a,c+a],1.6*k,sw,PINK)
     elif kind=="triangle":
         # centreline so that outer width ~15.5 and height ~14
-        p=tri_pts((c,c+0.5*k),16.2*k,14.4*k); rounded_poly(d,p,sw,GREEN)
+        p=tri_pts((c,c+0.5*k),15.0*k,13.2*k); rounded_poly(d,p,sw,GREEN)
     elif kind in("dpad","updown","leftright"):
         d.ellipse([0,0,S*k-1,S*k-1],fill=DARK)
         if kind in("dpad","updown"):
-            d.rounded_rectangle([c-1.6*k,c-7*k,c+1.6*k,c+7*k],radius=1.2*k,fill=GREY)
+            d.rounded_rectangle([c-1.6*k,c-6.6*k,c+1.6*k,c+6.6*k],radius=1.2*k,fill=GREY)
         if kind=="dpad":
-            d.rounded_rectangle([c-7*k,c-1.6*k,c+7*k,c+1.6*k],radius=1.2*k,fill=GREY)
+            d.rounded_rectangle([c-6.6*k,c-1.6*k,c+6.6*k,c+1.6*k],radius=1.2*k,fill=GREY)
         if kind=="leftright":
             for s in(-1,1):
                 d.polygon([(c+s*8.6*k,c),(c+s*1.8*k,c-5.8*k),(c+s*1.8*k,c+5.8*k)],fill=GREY)
