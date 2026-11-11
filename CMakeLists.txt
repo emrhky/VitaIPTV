@@ -43,6 +43,7 @@ add_executable(${PROJECT_NAME}.elf
   src/probe.c
   src/tsplayer.c
   src/ui.c
+  src/sharptext.c
   src/screens.c
   src/lang.c
   src/mpadec.c
@@ -55,6 +56,7 @@ add_executable(${PROJECT_NAME}.elf
   src/a52dec.c
   src/audiofx.c
   src/aac51.c
+  src/bars.c
   src/mylist.c
   src/listcache.c
   src/guide.c
