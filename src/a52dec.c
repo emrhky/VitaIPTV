@@ -40,10 +40,8 @@ A52Dec *a52_create(void)
     if (!d->ctx || !d->parser || !d->pkt || !d->frame) { a52_destroy(d); return NULL; }
     d->ctx->thread_count = 1;
     d->dialog = g_dialog;
-    if (!d->dialog) {                                                /* the decoder mixes 5.1 down itself */
-        AVChannelLayout stereo = AV_CHANNEL_LAYOUT_STEREO;
-        av_opt_set_chlayout(d->ctx->priv_data, "downmix", &stereo, 0);
-    }                                                                /* (clear dialogue: all channels, mixed below) */
+    /* 1.2: all channels, mixed below as AAC is (before: the decoder's own mix down, which follows the stream's
+     * mix levels: some films leave the surrounds out of the stereo mix, and it sounded narrow on the Vita) */
     if (avcodec_open2(d->ctx, c, NULL) < 0) { a52_destroy(d); return NULL; }
     d->next_pts = -1;
     d->last_pp = AV_NOPTS_VALUE;

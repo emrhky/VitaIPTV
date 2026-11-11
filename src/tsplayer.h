@@ -63,6 +63,8 @@ typedef struct {
     volatile unsigned net_read_kbs;     /* 0.6.0: the line's speed, last measured while the reader read most of the time
                                          * (with full queues net_kbs is what is played), 0 = same as net_kbs */
     volatile int audio_src_ch;          /* 0.6.0: the stream's channels when more than played (5.1 -> stereo: 6) */
+    volatile int audio_sw;              /* 1.2: AAC decoded by FFmpeg on the ARM (5.1 / 7.1 not on the Vita's decoder) */
+    volatile int core_hot;              /* 1.2: a CPU core was 65% busy or more in the last stats period (5 s) */
     int a_n, a_cur;                     /* a_cur -1 = none */
     int a_id[TSP_MAX_AUDIO];            /* PID / MKV track number (tsp_set_audio) */
     int a_codec[TSP_MAX_AUDIO];         /* TsCodec */

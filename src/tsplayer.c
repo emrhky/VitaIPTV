@@ -288,12 +288,7 @@ typedef struct {
     /* 1.2: 5.1 AAC on the Vita's own decoder (type 0x1008; aac51.h) */
     int alib_type;                      /* the sceAudiodec library opened (0x1005 AAC, 0x1008 multichannel AAC) */
     int hw51;                           /* actrl decodes 5.1 (0x1008): mixed down here */
-    int cal_on, cal_errs, cal_have_prev;/* learning its channel order (while FFmpeg plays) */
-    A52Dec *calref;                     /* ... FFmpeg's labelled channels to compare with */
-    Aac51Cal cal[2];                    /* ... same frame, one frame later */
-    float *cal_cur, *cal_prev;
     int16_t *dmx51;                     /* stereo mixed down from 0x1008's output */
-    int hw51_skip;                      /* (a frame late: its first frame was already played by FFmpeg) */
     uint32_t ainfo51[8] __attribute__((aligned(16)));   /* its 24-byte info: { 0x18, isAdts, ch, rate, isSbr, 0 } */
     /* 0.6.0: HLS sound from an audio playlist of its own (#EXT-X-MEDIA:TYPE=AUDIO) */
     TsDemux *adm;                       /* its MPEG-TS segments */
@@ -894,6 +889,13 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
     t->dh = ALIGN(h, 16);
     int mbs = (t->dw / 16) * (t->dh / 16);
     t->internal = mbs > MBS_720P || t->force_internal;
+    if (t->internal && t->dh > 720 && t->dh < 1088 && t->dw <= 1920) {
+        /* 1.2: a film of 1920x1038 (coded 1040) on the HD decoder opened at 1920x1040 failed again and again
+         * (0x80620003, "holds 12 units but gives no picture"); 1080p, opened at 1088, plays. Opened at 1088, the
+         * rows below the picture are cut off as with 1080p. */
+        plog("tsp: %dx%d: the HD decoder opened at %dx1088", w, h, t->dw);
+        t->dh = 1088;
+    }
     if (t->internal) {
         /* 4 pictures, or what the stream asks for when that is more and fits the level (1920x720 with 5 refs:
          * with 4 nearly every picture failed "out of memory") */
@@ -1823,7 +1825,7 @@ static void video_packet(Tsp *t, Pkt *p)
         }
         if (t->frame_us && t->frame_us < 30000) {
             unsigned fps = (1000000u + t->frame_us / 2) / t->frame_us;
-            unsigned mbs = (unsigned)(((t->dw + 15) / 16) * ((t->dh + 15) / 16));
+            unsigned mbs = (unsigned)(((t->dw + 15) / 16) * ((t->vh + 15) / 16));   /* (1.2: the picture, not the 1088 opened) */
             unsigned rate = mbs * fps;
             if (i->interlaced) {                            /* as before 1.1: 1080i only */
                 if (i->height >= 1000) {
@@ -2375,10 +2377,12 @@ static void alt_feed_packed(Tsp *t, const uint8_t *b, size_t n)
 
 /* ------------------------------------------------------------------ audio */
 
-/* 1.2: the 0x1008 decoder's channel order, learnt once per run: 0 not yet, 1 known (g51_map, g51_lag frames
- * late), -1 it did not match or failed (FFmpeg for 5.1 AAC until the app starts again) */
-static int g51_state, g51_map[6], g51_lag;
-void tsp_aac51_reset(void) { g51_state = 0; }               /* (the PC tests: learn it again) */
+/* 1.2: the 0x1008 decoder gives AAC's own channel order, C L R Ls Rs LFE (learnt on the device by comparing it with
+ * FFmpeg, 2026-11-11: no delay); map[k] = its slot of L R C LFE Ls Rs. g51_off: it failed (FFmpeg for 5.1 AAC until
+ * the app starts again) */
+static const int g51_map[6] = { 1, 2, 0, 5, 3, 4 };
+static int g51_off;
+void tsp_aac51_reset(void) { g51_off = 0; }                 /* (the PC tests) */
 
 static const int ADTS_RATES[13] = { 96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350 };
 
@@ -2395,13 +2399,10 @@ static void audio_close(Tsp *t)
     if (t->aport >= 0) { sceAudioOutReleasePort(t->aport); t->aport = -1; }
     if (t->adec) { sceAudiodecDeleteDecoder(&t->actrl); t->adec = 0; }
     if (t->aacsw) { a52_destroy(t->aacsw); t->aacsw = NULL; t->asw_rate = t->asw_ch = 0; }
-    if (t->calref) { a52_destroy(t->calref); t->calref = NULL; }
-    free(t->cal_cur);
-    free(t->cal_prev);
     free(t->dmx51);
-    t->cal_cur = t->cal_prev = NULL;
     t->dmx51 = NULL;
-    t->cal_on = t->hw51 = 0;
+    t->hw51 = 0;
+    t->st.audio_sw = 0;
     free(t->aes);
     free(t->apcm);
     free(t->asil);
@@ -2559,90 +2560,13 @@ static void aacsw_frame(void *ctx, const int16_t *pcm, int samples, int rate, in
     t->st.audio_rate = rate;
     t->st.audio_ch = ch;
     t->st.audio_src_ch = src_ch;
+    t->st.audio_sw = !eac3 && t->aacsw;                      /* 1.2 (AC-3 / E-AC-3 show in audio_ac3) */
     audio_out(t, t->a52pcm, samples, rate, ch, pts);
 }
 
 /* one ADTS frame's channel configuration that only the software decoder plays (3 .. 7: 3.0 up to 7.1) */
 static int aac_needs_sw(int ch) { return ch >= 3 && ch <= 7; }
 
-/* 1.2: 5.1 AAC: the Vita's own decoder (0x1008) beside FFmpeg until its channel order is known (aac51.h) */
-static void cal_stop(Tsp *t, const char *why, int for_good)
-{
-    if (why) {
-        if (for_good) g51_state = -1;
-        plog("tsp: AAC 5.1 on the Vita's decoder: %s; FFmpeg plays %s", why, for_good ? "5.1 AAC" : "this stream");
-    }
-    if (t->adec) { sceAudiodecDeleteDecoder(&t->actrl); t->adec = 0; }
-    if (t->calref) { a52_destroy(t->calref); t->calref = NULL; }
-    t->cal_on = 0;
-}
-
-static void cal_start(Tsp *t, int rate)
-{
-    if (g51_state != 0 || t->cal_on || !t->aacsw) return;
-    int r = audio_open(t, rate, 6);
-    if (r < 0) { cal_stop(t, "the decoder did not open", 1); return; }
-    t->calref = a52_create_aac();
-    if (!t->cal_cur) t->cal_cur = malloc(sizeof(float) * 6 * A52_MAX_SAMPLES);
-    if (!t->cal_prev) t->cal_prev = malloc(sizeof(float) * 6 * A52_MAX_SAMPLES);
-    if (!t->calref || !t->cal_cur || !t->cal_prev) { cal_stop(t, NULL, 0); return; }
-    memset(t->cal, 0, sizeof t->cal);
-    t->cal_errs = t->cal_have_prev = 0;
-    t->cal_on = 1;
-    plog("tsp: AAC 5.1: the Vita's decoder runs beside FFmpeg to learn its channel order");
-}
-
-/* one 5.1 frame through both; when the order is found, the Vita's decoder takes over (from the next frame) */
-static void cal_step(Tsp *t, const uint8_t *d, uint32_t len)
-{
-    if (!t->cal_on || len > t->aes_cap) return;
-    memcpy(t->aes, d, len);
-    if (((d[2] >> 6) & 3) == 0) t->aes[2] = (uint8_t)((t->aes[2] & 0x3F) | 0x40);   /* (AAC Main as LC, as below) */
-    t->actrl.pEs = t->aes;
-    t->actrl.inputEsSize = len;
-    t->actrl.pPcm = t->apcm;
-    int r = sceAudiodecDecode(&t->actrl);
-    if (r < 0) {
-        if (++t->cal_errs <= 3) plog("tsp: AAC 5.1 (Vita decoder) error 0x%08X", (unsigned)r);
-        if (t->cal_errs >= 50 && t->cal_errs > t->cal[0].frames) cal_stop(t, "it failed", 1);
-        return;
-    }
-    int n = (int)(t->actrl.outputPcmSize / 12u);
-    int m = a52_aac_raw6(t->calref, d, len, t->cal_cur, A52_MAX_SAMPLES);
-    if (n <= 0 || n != m) return;
-    aac51_cal_add(&t->cal[0], (const int16_t *)t->apcm, t->cal_cur, n);
-    if (t->cal_have_prev) aac51_cal_add(&t->cal[1], (const int16_t *)t->apcm, t->cal_prev, n);
-    float *x = t->cal_prev;
-    t->cal_prev = t->cal_cur;
-    t->cal_cur = x;
-    t->cal_have_prev = 1;
-    if (t->cal[0].frames % 8) return;
-    int m0[6], m1[6];
-    int r0 = aac51_cal_map(&t->cal[0], m0), r1 = aac51_cal_map(&t->cal[1], m1);
-    if (r0 == 1 || r1 == 1) {
-        memcpy(g51_map, r0 == 1 ? m0 : m1, sizeof g51_map);
-        g51_lag = r0 == 1 ? 0 : 1;
-        g51_state = 1;
-        static const char *const NM[6] = { "L", "R", "C", "LFE", "Ls", "Rs" };
-        char ord[64];
-        int o = 0;
-        for (int slot = 0; slot < 6; slot++)
-            for (int k = 0; k < 6; k++) if (g51_map[k] == slot) o += snprintf(ord + o, sizeof ord - (size_t)o, "%s%s", slot ? " " : "", NM[k]);
-        plog("tsp: AAC 5.1: the Vita's decoder gives %s%s (%d frames compared): it plays from now on", ord,
-             g51_lag ? ", one frame late" : "", t->cal[0].frames);
-        a52_destroy(t->aacsw);
-        t->aacsw = NULL;
-        t->asw_rate = t->asw_ch = 0;
-        a52_destroy(t->calref);
-        t->calref = NULL;
-        t->cal_on = 0;
-        t->hw51 = 1;
-        t->hw51_skip = g51_lag;                              /* (its next frame is the one FFmpeg just played) */
-        return;
-    }
-    if (r0 < 0 && r1 < 0 && t->cal[0].frames >= 64) cal_stop(t, "its output did not match FFmpeg's", 1);
-    else if (t->cal[0].frames >= 2600) cal_stop(t, "the channels could not be told apart in a minute (silent or alike)", 0);
-}
 
 /* One ADTS frame. Runs on the audio thread; sceAudioOutOutput blocks in real time. */
 static void audio_packet(Tsp *t, Pkt *p)
@@ -2662,7 +2586,6 @@ static void audio_packet(Tsp *t, Pkt *p)
     if (t->aacsw && rate == t->asw_rate && ch == t->asw_ch) {           /* 0.6.0: 5.1 / 7.1 in software */
         t->aparam_new = 0;
         a52_feed_frame(t->aacsw, d, p->len, p->pts, aacsw_frame, t);
-        if (t->cal_on) cal_step(t, d, p->len);                         /* 1.2 */
         return;
     }
     if ((!t->adec && !t->aacsw) || t->aacsw || rate != t->arate || ch != t->ach) {
@@ -2684,12 +2607,11 @@ static void audio_packet(Tsp *t, Pkt *p)
         t->aparam_new = 0;
         audio_close(t);
         int hw = 0;
-        if (ch == 6 && g51_state == 1 && out_rate_ok(rate)) {            /* 1.2: 5.1 on the Vita's decoder (order known) */
+        if (ch == 6 && !g51_off && out_rate_ok(rate)) {                  /* 1.2: 5.1 on the Vita's decoder */
             if (audio_open(t, rate, 6) >= 0) {
                 hw = t->hw51 = 1;
-                t->hw51_skip = 0;
                 plog("tsp: AAC %d Hz, 5.1: the Vita's decoder (0x1008), mixed down to stereo", rate);
-            } else { g51_state = -1; audio_close(t); plog("tsp: AAC 5.1: the Vita's decoder did not open; FFmpeg"); }
+            } else { g51_off = 1; audio_close(t); plog("tsp: AAC 5.1: the Vita's decoder did not open; FFmpeg"); }
         }
         if (!hw && aac_needs_sw(ch) && out_rate_ok(rate)) {              /* 0.6.0: the Vita's decoder takes 1-2 channels */
             t->aacsw = a52_create_aac();
@@ -2700,7 +2622,6 @@ static void audio_packet(Tsp *t, Pkt *p)
             plog("tsp: AAC %d Hz, %s: software decoder (FFmpeg), played as stereo", rate,
                  ch == 6 ? "5.1" : ch == 7 ? "7.1" : ch == 5 ? "5.0" : ch == 4 ? "4.0" : "3.0");
             a52_feed_frame(t->aacsw, d, p->len, p->pts, aacsw_frame, t);
-            if (ch == 6) { cal_start(t, rate); if (t->cal_on) cal_step(t, d, p->len); }   /* 1.2 */
             return;
         }
         if (!hw) {
@@ -2731,7 +2652,7 @@ static void audio_packet(Tsp *t, Pkt *p)
         t->st.audio_errors++;
         if (t->st.audio_errors <= 5) plog("tsp: audio decode error 0x%08X", (unsigned)r);
         if (t->hw51 && t->st.audio_frames == 0 && t->st.audio_errors >= 20) {   /* 1.2: back to FFmpeg */
-            g51_state = -1;
+            g51_off = 1;
             plog("tsp: AAC 5.1: the Vita's decoder fails here; FFmpeg plays 5.1 AAC");
             audio_close(t);
             return;
@@ -2745,15 +2666,12 @@ static void audio_packet(Tsp *t, Pkt *p)
     int samples = (int)(t->actrl.outputPcmSize / (2u * (unsigned)ch));
     if (samples <= 0 || samples % 64) { t->st.audio_errors++; return; }
     if (t->hw51) {                                           /* 1.2: 5.1 from the Vita's decoder: mixed down here */
-        if (t->hw51_skip) { t->hw51_skip = 0; return; }
         if (!t->dmx51) t->dmx51 = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
         if (!t->dmx51 || samples > A52_MAX_SAMPLES) { t->st.audio_errors++; return; }
         aac51_downmix((const int16_t *)t->apcm, samples, g51_map, a52_get_dialog(), t->dmx51);
-        int64_t pts = p->pts;
-        if (g51_lag && pts >= 0) pts -= (int64_t)samples * 90000 / rate;   /* (its output is the frame before) */
         t->st.audio_ch = 2;
         t->st.audio_src_ch = 6;
-        audio_out(t, (uint8_t *)t->dmx51, samples, rate, 2, pts);
+        audio_out(t, (uint8_t *)t->dmx51, samples, rate, 2, p->pts);
         return;
     }
     audio_out(t, t->apcm, samples, rate, ch, p->pts);
@@ -2935,7 +2853,7 @@ static void cpu_line(Tsp *t, uint64_t now, int loud)
         }
         if (sr >= 0) {
             size_t c = 0;
-            unsigned sum = 0, n = 0;
+            unsigned sum = 0, n = 0, top = 0;
             unsigned mask = si.activeCpuMask;
             if (mask >= 0x10000) mask >>= 16;               /* the Vita gives it as 0x10000 << core (0.2.7 printed nothing) */
             for (int k = 0; k < 4; k++) {
@@ -2943,11 +2861,13 @@ static void cpu_line(Tsp *t, uint64_t now, int loud)
                 uint64_t id = si.cpuInfo[k].idleClock, d = id >= t->idle_prev[k] ? id - t->idle_prev[k] : 0;
                 unsigned busy = d >= dt ? 0 : (unsigned)(100 - d * 100 / dt);
                 sum += busy;
+                if (busy > top) top = busy;
                 n++;
                 c += (size_t)snprintf(co + c, sizeof co - c, "%s%u%%", c ? " " : "", busy);
                 if (c >= sizeof co) break;
             }
             if (n) snprintf(co + (c < sizeof co ? c : sizeof co - 1), sizeof co - (c < sizeof co ? c : sizeof co - 1), " (avg %u%%)", sum / n);
+            t->st.core_hot = top >= 65;                      /* 1.2: the app's ARM speed (main.c) */
         }
         if (loud) plog("tsp: cpu: %s%s%s", th, co[0] ? "; cores busy " : "", co);
     }

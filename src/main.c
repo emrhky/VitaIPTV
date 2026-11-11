@@ -40,6 +40,7 @@
 #include "lang.h"
 #include "fav.h"
 #include "mylist.h"
+#include "bars.h"
 #include "listcache.h"
 #include "epg.h"
 #include "guide.h"
@@ -173,6 +174,7 @@ static unsigned now_ms(void) { return (unsigned)(sceKernelGetProcessTimeWide() /
 static void frame_begin(void)
 {
     vita2d_wait_rendering_done();
+    ui_frame_start();                                        /* 1.2: (the sharp text, while the GPU is idle) */
     vita2d_start_drawing();
     vita2d_clear_screen();
 }
@@ -2586,6 +2588,8 @@ static const char *guide_now_title(int ci)
 
 /* ---- playback ---------------------------------------------------------- */
 static unsigned play_started_us, osd_until_us;
+static Bars g_bars;                         /* 1.2: the picture's black bars (bars.h) */
+static int play_hot;                        /* 1.2: a core was 65% busy on this channel: full speed for it */
 static int got_frame;
 static char play_err[128];
 static int play_mode;               /* 0 = SceAvPlayer (MP4), 1 = stream analysis, 2 = live TS player */
@@ -2843,6 +2847,8 @@ static void play_channel_ex(int vi, int use_proxy)
 {
     play_vis = vi;
     got_frame = 0;
+    bars_reset(&g_bars);                                     /* 1.2 */
+    play_hot = 0;
     decoder_note_done = 0;
     play_started_us = now_ms();
     osd_until_us = play_started_us + 5000;
@@ -2972,6 +2978,8 @@ static void start_probe(void)
     probe_cancel();
     play_err[0] = 0;
     got_frame = 0;
+    bars_reset(&g_bars);                                     /* 1.2 */
+    play_hot = 0;
     play_mode = 1;
     if (probe_start(chans.items[vis[play_vis]].url) != 0) snprintf(play_err, sizeof play_err, "Cannot start analysis");
 }
@@ -3188,15 +3196,38 @@ static void activate_item(int vi)
     }
 }
 
-static void draw_video_texture(vita2d_texture *t, int w, int h, int fields)
+/* 1.2: the black bars inside the picture (bars.h), looked at twice a second, painted pure black (OLED) */
+static void video_bars(vita2d_texture *t, int w, int h, float x0, float y0, float s)
+{
+    static int lw, lh;
+    static unsigned next;
+    if (w != lw || h != lh) { bars_reset(&g_bars); lw = w; lh = h; next = 0; }
+    unsigned now = now_ms();
+    if ((int)(now - next) >= 0) {
+        int det[4];
+        next = now + 500;
+        bars_detect((const uint32_t *)vita2d_texture_get_datap(t), (int)(vita2d_texture_get_stride(t) / 4), w, h, det);
+        bars_update(&g_bars, det);
+    }
+    const int *b = g_bars.cur;
+    unsigned k = RGBA8(0, 0, 0, 255);
+    if (b[BAR_L] > 1) vita2d_draw_rectangle(x0, y0, (b[BAR_L] - 1) * s, h * s, k);   /* (a pixel short: never the picture) */
+    if (b[BAR_R] > 1) vita2d_draw_rectangle(x0 + (w - b[BAR_R] + 1) * s, y0, (b[BAR_R] - 1) * s, h * s, k);
+    if (b[BAR_T] > 1) vita2d_draw_rectangle(x0, y0, w * s, (b[BAR_T] - 1) * s, k);
+    if (b[BAR_B] > 1) vita2d_draw_rectangle(x0, y0 + (h - b[BAR_B] + 1) * s, w * s, (b[BAR_B] - 1) * s, k);
+}
+
+static void draw_video_texture(vita2d_texture *t, int w, int h, int fields, int bars)
 {
     float sx = 960.0f / w, sy = 544.0f / h, s = sx < sy ? sx : sy;
+    float x0 = (960.0f - w * s) / 2, y0 = (544.0f - h * s) / 2;
     vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 255));   /* black around the picture (the menus' colour showed; OLED) */
     if (fields) {                                    /* two fields one above the other: the top one, stretched */
-        vita2d_draw_texture_part_scale(t, (960.0f - w * s) / 2, (544.0f - h * s) / 2, 0, 0, w, h / 2, s, s * 2);
+        vita2d_draw_texture_part_scale(t, x0, y0, 0, 0, w, h / 2, s, s * 2);
         return;
     }
-    vita2d_draw_texture_part_scale(t, (960.0f - w * s) / 2, (544.0f - h * s) / 2, 0, 0, w, h, s, s);
+    vita2d_draw_texture_part_scale(t, x0, y0, 0, 0, w, h, s, s);
+    if (bars) video_bars(t, w, h, x0, y0, s);
 }
 
 /* 0.6.0: "mono", "stereo", or "5.1 > stereo" when more channels were mixed down */
@@ -3251,7 +3282,7 @@ static void draw_tsp_screen(int osd)
                   st->state == TSP_ENDED ? T("Stream ended") : now_ms() < film_note_until ? film_note : NULL, player_fav());
         return;
     }
-    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields); got_frame = 1; }
+    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields, 1); got_frame = 1; }
     {                                                    /* (where a start stopped, if it ever does: one crash in 0.2.7) */
         static int last_state = -1;
         int sv = st ? st->state : -1;
@@ -3437,7 +3468,7 @@ static void draw_mp4_screen(int osd)
 {
     const Channel *c = cur_channel();
     vita2d_texture *t = player_poll();
-    if (t) { got_frame = 1; draw_video_texture(t, vita2d_texture_get_width(t), vita2d_texture_get_height(t), 0); }
+    if (t) { got_frame = 1; draw_video_texture(t, vita2d_texture_get_width(t), vita2d_texture_get_height(t), 0, 0); }
     ScrPlayer sp;
     memset(&sp, 0, sizeof sp);
     sp.backdrop = !got_frame;
@@ -5127,26 +5158,44 @@ static void player_keep_going(void)
 /* ---- start-up -------------------------------------------------------------- */
 static vita2d_texture *splash_img, *wait_img;
 static int clocks_rc[4];
-static int clocks_fast = 1;                 /* started fast (loading the playlists) */
-static unsigned clocks_busy_ms;
+static int clocks_fast = 2;                 /* 0 menus, 1 playing on the hardware, 2 full speed (started so) */
+static unsigned clocks_busy_ms, clocks_play_ms;
 
-/* Full speed (444 MHz) while something plays, loads or is analysed; the normal speed (333) in the menus:
- * less heat and battery. It goes down only after 5 s in the menus, so zapping does not switch back and forth. */
-static void update_clocks(int busy)
+/* The menus at the normal speed (333 MHz, bus 166, GPU 111): less heat and battery; down only after 5 s in the
+ * menus, so zapping does not switch back and forth. Loading and analysing at full speed (444, 222, 222).
+ * 1.2: playing at 333 (bus and GPU 222) while the hardware does the work - the picture on the Vita's decoder,
+ * stereo AAC or 5.1 AAC on its audio decoder: the cores were 10-30% busy at 444 - and at 444 when the ARM has work:
+ * AC-3 / E-AC-3 / MPEG audio or AAC by FFmpeg, https (TLS), 1080i, 50 / 60 pictures a second, starting or
+ * buffering, a core 65% busy or more, films on the system player. Up at once, down after 15 s without. */
+static int play_heavy(void)
+{
+    if (play_mode != 2) return 1;
+    const TspStatus *st = tsp_status();
+    if (!st || st->state != TSP_PLAYING) return 1;
+    const Channel *c = cur_channel();
+    if (st->core_hot) play_hot = 1;                          /* (then for the rest of the channel: no back and forth) */
+    return st->audio_sw || st->audio_ac3 || st->audio_mpeg || st->fields || st->fps10 > 310 || play_hot ||
+           (c && !strncasecmp(c->url, "https:", 6));
+}
+
+static void update_clocks(int busy, int playing)
 {
     unsigned now = now_ms();
-    if (busy) clocks_busy_ms = now;
-    int fast = busy || now - clocks_busy_ms < 5000;
-    if (fast == clocks_fast) return;
-    clocks_fast = fast;
-    int a = scePowerSetArmClockFrequency(fast ? 444 : 333);
-    int b = scePowerSetBusClockFrequency(fast ? 222 : 166);
-    int g = scePowerSetGpuClockFrequency(fast ? 222 : 111);
-    static int logged;                                       /* 0.8.1: once each way, and when one fails */
-    if (logged < 2 || a < 0 || b < 0 || g < 0) {
+    int heavy = busy && (!playing || play_heavy());
+    if (heavy) clocks_busy_ms = now;
+    if (busy) clocks_play_ms = now;
+    int mode = heavy || now - clocks_busy_ms < (playing ? 15000u : 5000u) ? 2 : busy || now - clocks_play_ms < 5000 ? 1 : 0;
+    if (mode == clocks_fast) return;
+    clocks_fast = mode;
+    static const int ARM[3] = { 333, 333, 444 }, BUS[3] = { 166, 222, 222 }, GPU[3] = { 111, 222, 222 };
+    int a = scePowerSetArmClockFrequency(ARM[mode]);
+    int b = scePowerSetBusClockFrequency(BUS[mode]);
+    int g = scePowerSetGpuClockFrequency(GPU[mode]);
+    static int logged;                                       /* 0.8.1: the first few, and when one fails */
+    if (logged < 6 || a < 0 || b < 0 || g < 0) {
         logged++;
-        plog("clocks: %s (cpu %d) -> 0x%08X 0x%08X 0x%08X", fast ? "playing / loading" : "menus", fast ? 444 : 333,
-             (unsigned)a, (unsigned)b, (unsigned)g);
+        plog("clocks: %s (cpu %d) -> 0x%08X 0x%08X 0x%08X", mode == 2 ? "playing (CPU work) / loading" : mode ? "playing (hardware)" : "menus",
+             ARM[mode], (unsigned)a, (unsigned)b, (unsigned)g);
     }
 }
 
@@ -5292,7 +5341,7 @@ int main(void)
         }
         if (ime_active) p = 0;                               /* the keyboard owns the buttons */
         keep_awake();
-        update_clocks(state == ST_PLAYING || job_active || job_pending);
+        update_clocks(state == ST_PLAYING || job_active || job_pending, state == ST_PLAYING && !job_active && !job_pending);
         if (job_pending) {                                   /* load the list now, outside a frame */
             job_pending = 0;
             load_run();
