@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "lang.h"
 #include "btn_icons.h"
+#include "sharptext.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -60,28 +61,44 @@ void ui_init(vita2d_pgf *pgf, int plain_letters)
     cfg[0].in_font_group = in_latin;
     cfg[1].code = SCE_PVF_DEFAULT_LANGUAGE_CODE;
     cfg[1].in_font_group = NULL;
-    g_pvf = vita2d_load_system_pvf(2, cfg);
-    g_turkish = g_pvf != NULL && !plain_letters;
-    if (!g_pvf) g_pvf = vita2d_load_default_pvf();          /* (as before 0.4.5) */
+    /* 1.2: sharp text: the same two fonts, each size made at its own size (src/sharptext.c); vita2d's text only
+     * when that cannot start */
+    static int sharp_latin = -1;                             /* (ui_init may come again: opened once) */
+    if (sharp_latin < 0) {
+        SharpFont sf[2] = { { SCE_PVF_LANGUAGE_LATIN, in_latin }, { SCE_PVF_DEFAULT_LANGUAGE_CODE, NULL } };
+        sharp_latin = sharp_init(2, sf) ? 1 : sharp_init(1, sf + 1) ? 0 : 0;
+    }
+    if (sharp_ready()) {
+        g_turkish = sharp_latin && !plain_letters;
+    } else {
+        g_pvf = vita2d_load_system_pvf(2, cfg);
+        g_turkish = g_pvf != NULL && !plain_letters;
+        if (!g_pvf) g_pvf = vita2d_load_default_pvf();      /* (as before 0.4.5) */
+    }
     if (!g_btn_tex) btn_icons_load();
 }
 
-int ui_font_state(void) { return g_turkish ? 2 : g_pvf ? 1 : 0; }
+void ui_frame_start(void) { sharp_frame_start(); }
+
+int ui_font_state(void) { return g_turkish ? 2 : g_pvf || sharp_ready() ? 1 : 0; }
 
 void ui_shutdown(void)
 {
-    if (g_pvf) vita2d_free_pvf(g_pvf);
+    if (sharp_ready()) sharp_shutdown();
+    else if (g_pvf) vita2d_free_pvf(g_pvf);
     g_pvf = NULL;
 }
 
 static void raw_text(int x, int y, unsigned col, float scale, const char *s)
 {
-    if (g_pvf) vita2d_pvf_draw_text(g_pvf, x, y, col, scale, s);
+    if (sharp_ready()) sharp_draw(x, y, col, scale, s);
+    else if (g_pvf) vita2d_pvf_draw_text(g_pvf, x, y, col, scale, s);
     else vita2d_pgf_draw_text(g_pgf, x, y, col, scale, s);
 }
 
 static int raw_w(float scale, const char *s)
 {
+    if (sharp_ready()) return sharp_width(scale, s);
     return g_pvf ? vita2d_pvf_text_width(g_pvf, scale, s) : vita2d_pgf_text_width(g_pgf, scale, s);
 }
 

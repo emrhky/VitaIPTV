@@ -43,6 +43,7 @@ typedef struct { int btn; const char *label; } UiHint;
 void ui_init(vita2d_pgf *pgf, int plain_letters);
 /* 2 = the Latin system font is used (Turkish letters as they are), 1 = the default font only, 0 = none */
 int  ui_font_state(void);
+void ui_frame_start(void);                 /* 1.2: at each frame's start, the GPU idle (the sharp text's letters) */
 /* 0.4.5: a short label with every word starting with a capital ("Liste ekle" -> "Liste Ekle"; Turkish i -> İ),
  * small joining words left as they are (of, the, ve...). Returns buf. */
 const char *ui_title(const char *s, char *buf, size_t cap);
