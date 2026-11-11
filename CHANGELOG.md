@@ -5,14 +5,33 @@
 ### From the Venezia measurements (VNZBench)
 - **5.1 AAC on the Vita's own decoder:** the firmware has a second, multichannel AAC decoder (sceAudiodec type
   0x1008) that runs on a Venezia core with about 5% of the ARM. 5.1 AAC channels and films now use it instead of
-  FFmpeg's decoder on the ARM. Its channel order is not documented, so the first time 5.1 AAC plays the app
-  decodes it with both for a moment, finds the order by comparing them (the log says which) and then lets the
-  Vita's decoder play; if they do not match, FFmpeg plays as before. 7.1 AAC stays on FFmpeg (the decoder stops at
-  5.1). The mix down and *Clear speech* are the same as before.
+  FFmpeg's decoder on the ARM. Its channel order was measured on a Vita (C L R Ls Rs LFE) and is now fixed, so it
+  starts at once. If the decoder cannot open or gives no sound, FFmpeg plays as before. 7.1 AAC stays on FFmpeg
+  (the decoder stops at 5.1). The mix down and *Clear speech* are the same as before.
 - **1080i:** the decoder is switched to its interlaced mode before an interlaced stream, as Sony's own player does
   (`sceAvcdecSetInterlacedStreamMode`).
 
+### Picture and sound
+- **Films of 1920 x 1038 / 1040 and the like** (heights between 720 and 1088): the Vita's HD decoder is opened at
+  1088 lines, the size it is made for. It failed at such heights before and the film stuttered.
+- **Black bars:** the bars inside the picture (a 4:3 show in a 16:9 picture, a cinema film's bands) are painted pure
+  black. Their "black" was dark grey (video's black), which lit the OLED screen. The bars are looked for twice a
+  second; a bar gets narrower at once and wider only when two looks agree, so the picture is never covered.
+- **AC-3 / E-AC-3 5.1:** mixed down to stereo by the app, like 5.1 AAC (left / right + centre and surrounds at
+  -3 dB). FFmpeg's own mix follows the stream's mix levels and often left the surrounds out: no left / right
+  effect.
 
+### Speed and battery
+- **Clock speeds while playing:** channels and films that the Vita's decoders play alone (H.264 with AAC or MP3 sound)
+  run the ARM at 333 MHz with the bus and the GPU at 222. Everything else (AC-3, software decoding, 1080i, high
+  frame rates, https, a busy core) gets 444 MHz at once, as before; it goes back down only after 15 s.
+
+### Look
+- **Sharper text:** the system font's letters are made at the size they are drawn at, and drawn 1:1 on whole
+  pixels. Before, they were made at one size and stretched for the bigger sizes (1.1x-1.7x), which made them soft
+  and blocky. Same fonts (the Latin one with the Turkish letters, the default one for other scripts), same widths.
+
+## 1.1.0
 
 ### Highlights
 - **Smoother 50 / 60 fps channels:** 720p at 50 / 60 fps now plays every picture (it was 25-30 a second). 1080p at
