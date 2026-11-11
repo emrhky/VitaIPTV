@@ -22,7 +22,7 @@
 static int g_own_http;                      /* 0.6.0: "own socket (http)" was logged */
 static int g_net_slow, g_net_fast;          /* 0.6.0: "the network is slower than the film" / "the network is fast" */
 static int g_asked_again;                   /* 0.6.0: "the film does not come ...: asking the server again" */
-static int g51_took, g51_direct;            /* 1.2: the 5.1 AAC decoder learnt its order / opened at once */
+static int g51_direct;                      /* 1.2: the 5.1 AAC decoder (0x1008) opened */
 void plog(const char *fmt, ...)
 {
     char line[1024];
@@ -34,7 +34,6 @@ void plog(const char *fmt, ...)
     if (strstr(line, "network is slower than the film (")) g_net_slow = 1;   /* (the queues line, not "buffering (...: n pictures") */
     if (strstr(line, "network is fast")) g_net_fast = 1;
     if (strstr(line, "asking the server again")) g_asked_again = 1;
-    if (strstr(line, "AAC 5.1: the Vita's decoder gives")) g51_took = 1;             /* 1.2 */
     if (strstr(line, "5.1: the Vita's decoder (0x1008)")) g51_direct = 1;
     if (getenv("VERBOSE")) puts(line);
 }
@@ -286,8 +285,8 @@ static int mock_refuse_lc;
 static int alib_open, adec_open, ports_open, port_len, port_rate, port_ch;
 static uint64_t pcm_frames_out;
 /* 1.2: the multichannel AAC type 0x1008 (VNZBench): 6 channels out, here in AAC's own order C L R Ls Rs LFE
- * (FFmpeg decodes it), mock51_lag: a frame late */
-static int mock51_lag, mock51_frames;
+ * (FFmpeg decodes it) */
+static int mock51_frames;
 static A52Dec *mock51_dec;
 static float mock51_pl[2][6 * 2048];
 SceInt32 sceAudiodecInitLibrary(SceUInt32 type, SceAudiodecInitParam *p)
@@ -315,8 +314,7 @@ SceInt32 sceAudiodecDecode(SceAudiodecCtrl *c)
     if (c->handle == 8) {                                    /* 1.2: 0x1008 */
         int n = a52_aac_raw6(mock51_dec, e, c->inputEsSize, mock51_pl[mock51_frames & 1], 2048);
         if (n <= 0) return (int)0x807F0000;
-        const float *src = mock51_pl[(mock51_frames + (mock51_lag ? 1 : 0)) & 1];   /* (lag: the previous frame) */
-        if (mock51_lag && !mock51_frames) src = NULL;
+        const float *src = mock51_pl[mock51_frames & 1];
         static const int SLOT[6] = { 1, 2, 0, 5, 3, 4 };    /* FFmpeg's L R C LFE Ls Rs -> C L R Ls Rs LFE */
         int16_t *o = (int16_t *)c->pPcm;
         for (int k = 0; k < 6; k++)
@@ -765,23 +763,16 @@ int main(int argc, char **argv)
             else
                 assert(ra.st.audio_frames == 0 && strstr(ra.st.audio_msg, "6 channels") && ra.changes >= 100);   /* the picture plays */
         }
-        /* 1.2: six different tones: the Vita's 5.1 decoder (0x1008) learns its order from FFmpeg and takes over;
-         * then the next file opens on it at once; a frame late too */
+        /* 1.2: six different tones on the Vita's 5.1 decoder (0x1008, the mock gives AAC's order C L R Ls Rs LFE):
+         * it opens at once, and the mix down puts each tone where FFmpeg's would */
         if (a52_aac_available()) {
-            for (int lag = 0; lag < 2; lag++) {
-                tsp_aac51_reset();
-                mock51_lag = lag;
-                g51_took = g51_direct = 0;
-                snprintf(pa, sizeof pa, "%s/aac51d.ts", argv[16]);
-                Run ra = play(pa, 6);
-                printf("               5.1 AAC, six tones%s: frames %u, learnt %d, synced %d\n", lag ? " (a frame late)" : "",
-                       (unsigned)ra.st.audio_frames, g51_took, ra.synced);
-                assert(g51_took && ra.st.audio_frames > 100 && ra.st.audio_ch == 2 && ra.st.audio_src_ch == 6 && ra.synced);
-                ra = play(pa, 4);
-                assert(g51_direct && ra.st.audio_frames > 60 && ra.synced);
-            }
-            mock51_lag = 0;
             tsp_aac51_reset();
+            g51_direct = 0;
+            snprintf(pa, sizeof pa, "%s/aac51d.ts", argv[16]);
+            Run ra = play(pa, 6);
+            printf("               5.1 AAC, six tones: frames %u, Vita decoder %d, synced %d\n",
+                   (unsigned)ra.st.audio_frames, g51_direct, ra.synced);
+            assert(g51_direct && ra.st.audio_frames > 100 && ra.st.audio_ch == 2 && ra.st.audio_src_ch == 6 && ra.synced);
         }
     }
 subs:
