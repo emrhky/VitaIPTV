@@ -78,8 +78,8 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   open until the console sleeps. Changing or removing the PIN, or turning *Hide adult channels* off, always asks
   for the current one. **Forgot the PIN?** Delete the `pin=` line in `ux0:data/VitaIPTV/settings.txt` (with
   VitaShell, for example); the lock is then off.
-- **Two-pane channel browser:** categories on the left, channels on the right. Left stick scrolls categories,
-  right stick scrolls channels. Search across all channels (case- and accent-insensitive).
+- **Two-pane channel browser:** categories on the left, channels on the right. The left stick scrolls the list in
+  use and opens (right) or leaves (left) a category. Search across all channels (case- and accent-insensitive).
 - **Settings** (**Select** on the playlists or the channels; the line at the bottom says what the chosen one does):
   language (English / Turkish, follows the console by default), theme (blue, green, purple, orange), preferred
   resolution (automatic, 1080p, 720p, 540p, 480p, lowest), hide adult channels, hide channels named 4K / UHD (the
