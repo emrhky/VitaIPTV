@@ -31,6 +31,13 @@
   pixels. Before, they were made at one size and stretched for the bigger sizes (1.1x-1.7x), which made them soft
   and blocky. Same fonts (the Latin one with the Turkish letters, the default one for other scripts), same widths.
 
+### Test (for 1.2 test builds only)
+- **Memory test for the HD decoder** (`ux0:data/VitaIPTV/memtest.txt`): where the decoder above 720p keeps its
+  reference pictures and writes the pictures it hands out: video memory (CDRAM, as always) or main memory. `0`-`3`
+  picks one mode, `auto` changes the mode every 40 s at a keyframe. Every 40 s a `memtest:` line in log.txt gives
+  the pictures decoded and shown a second, the decoder's time a call and the errors. While the file is there every
+  picture is decoded (no leaving out at 1080p50), so the decoder's own speed shows. No file: as always.
+
 ## 1.1.0
 
 ### Highlights
