@@ -460,6 +460,16 @@ void scr_settings(const char *title, const ScrField *f, int n, int sel, int *scr
     ui_footer(hints, nhints, line, status && status[0] ? status_err : 0);
 }
 
+/* 1.2: a line in the middle of cx, shortened ("...") to maxw as ui_text_fit does */
+static void text_fit_mid(int cx, int y, unsigned col, float sc, const char *t, int maxw, int bold)
+{
+    char buf[256];
+    ui_fit_copy(buf, sizeof buf, sc, t, maxw);
+    int x = cx - ui_text_w(sc, buf) / 2;
+    ui_text(x, y, col, sc, buf);
+    if (bold) ui_text(x + 1, y, col, sc, buf);
+}
+
 void scr_menu(const char *title, const char *const *items, int n, int sel)
 {
     /* 0.5.0: long menus (sizes, the server, audio tracks) get lower rows; the box is as wide as the longest item */
@@ -476,8 +486,7 @@ void scr_menu(const char *title, const char *const *items, int n, int sel)
     if (y < 4) y = 4;
     vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 120));
     ui_panel(x, y, w, h, RGBA8(24, 28, 42, 245));
-    ui_text_fit(x + 26, y + 36, UI_TEXT, 1.25f, title, w - 52);   /* (1.1: on the left, as the rows) */
-    ui_text_fit(x + 27, y + 36, UI_TEXT, 1.25f, title, w - 52);
+    text_fit_mid(x + w / 2, y + 36, UI_TEXT, 1.25f, title, w - 52, 1);   /* (1.2: in the middle, as the rows) */
     vita2d_draw_rectangle(x + 20, y + 50, w - 40, 1, UI_LINE);
     for (int i = 0; i < n; i++) {
         int ry = y + 58 + i * rh;
@@ -487,8 +496,7 @@ void scr_menu(const char *title, const char *const *items, int n, int sel)
         }
         const char *t = ui_title(items[i], tb, sizeof tb);
         int ty = ry + (rh - 6) / 2 + (int)(9 * sc);
-        ui_text_fit(x + 30, ty, UI_TEXT, sc, t, w - 60);   /* (0.4.5: capitals) */
-        if (i == sel) ui_text_fit(x + 31, ty, UI_TEXT, sc, t, w - 60);
+        text_fit_mid(x + w / 2, ty, UI_TEXT, sc, t, w - 60, i == sel);   /* (0.4.5: capitals; 1.2: in the middle) */
     }
 }
 

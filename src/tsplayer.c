@@ -268,13 +268,9 @@ typedef struct {
     uint64_t first_show_us;             /* when the first picture went on screen */
     uint32_t pub_fed, pub_nopic, pub_nopic_nonref;     /* public decoder: units given, of them without a picture */
     int hd60, hd60_pending;             /* 720p above 30 fps through the HD decoder (0.2.10 experiment) */
-    /* 1.2 test: where the HD decoder's memory lives (see memtest_*) */
-    int mt_mode, mt_running, mt_units;
-    int yuv;                            /* 1.2 test: the HD decoder's pictures in YUV 4:2:0 (2: Y + UV, 3: Y + U + V) */
-    uint32_t mt_calls;
-    uint64_t mt_us;
-    uint64_t mt_t0;
-    uint32_t mt_open_dec, mt_dec0, mt_shown0, mt_late0, mt_drop0, mt_err0;
+    /* 1.2: the HD decoder's pictures as YUV 4:2:0 (see yuv_wanted) */
+    int yuv, yuv_off, yuv_units;
+    uint32_t yuv_open_dec;
     uint8_t sps_src[256], sps_fix[300]; /* the last SPS seen and its fixed form (spsfix.c); fix_len 0 = as it is */
     size_t sps_src_len, sps_fix_len;
     int sps_fix_logged;
@@ -537,76 +533,14 @@ static int is_mem_error(int r)
     return u == 0x80620009u || u == 0x80620007u || u == 0x80620809u || u == 0x80620807u;
 }
 
-/* 1.2 test (ux0:data/VitaIPTV/memtest.txt): the HD decoder (above 720p) at 1080p50. With all pictures decoded it
- * gave about 35 a second; with its frame memory in main memory instead of CDRAM its calls took 3x as long, so it
- * waits on memory. Its pictures are written as RGBA, 8.4 MB each at 1080p (420 MB/s at 50 fps); as YUV 4:2:0 they
- * are 3.1 MB, and the GPU turns YUV into colour by itself when it reads the texture. Does that get it to 50?
- *   mode 0: as always (RGBA)
- *   mode 1: frame memory in main memory first (measured: slower; kept for the record)
- *   mode 2: pictures YUV 4:2:0, Y then U and V interleaved (YUV420_PACKED_RASTER, GPU YUV420P2, BT.709)
- *   mode 3: pictures YUV 4:2:0, Y then U then V (YUV420_RASTER, GPU YUV420P3, BT.709)
- * "0".."3" or "yuv" (= 2): that mode; "auto": 0, 2, 3, 0... switched every MT_SECS seconds at a keyframe. While
- * the file is there every picture is decoded (nothing left out), so the decoder's own speed shows; each period
- * ends with a "memtest:" line in the log. A mode whose decoder gives no picture in its first 30 units goes back
- * to mode 0 at the next keyframe. Progressive streams only (YUV: no 1080i field check, no black bars). */
-int tsp_mt_force = -1;                   /* (PC tests: a mode without the file) */
-int tsp_mt_secs = 40;                    /* (PC tests: shorter) */
-#define MT_SECS tsp_mt_secs
-static int g_memtest = -1;               /* -1 off, 0..3 a mode, 4 auto */
-static int g_mt_auto_mode;               /* (auto: carried from channel to channel, so each film starts on the next one) */
-
-static const char *memtest_name(int m)
-{
-    static const char *n[4] = { "RGBA pictures (as always)", "frame memory in main memory", "YUV pictures, Y + UV (NV12)",
-                                "YUV pictures, Y + U + V" };
-    return n[m & 3];
-}
-
-static void memtest_read(void)
-{
-    static int said;
-    g_memtest = tsp_mt_force;
-    if (g_memtest >= 0) return;
-    FILE *f = fopen("ux0:data/VitaIPTV/memtest.txt", "r");
-    if (!f) f = fopen("ux0:data/VitaIPTV/memtest.txt.txt", "r");   /* (Windows hides the .txt it adds) */
-    if (!f) {
-        if (!said++) plog("memtest: off (no ux0:data/VitaIPTV/memtest.txt)");
-        return;
-    }
-    char b[32] = "";
-    size_t n = fread(b, 1, sizeof b - 1, f);
-    fclose(f);
-    b[n] = 0;
-    char *c = b;
-    if ((unsigned char)c[0] == 0xEF && (unsigned char)c[1] == 0xBB && (unsigned char)c[2] == 0xBF) c += 3;   /* (Notepad's BOM) */
-    while (*c == ' ' || *c == '\t' || *c == '\r' || *c == '\n') c++;
-    if (!strncasecmp(c, "auto", 4)) g_memtest = 4;
-    else if (!strncasecmp(c, "yuv", 3)) g_memtest = 2;
-    else if (c[0] >= '0' && c[0] <= '3') g_memtest = c[0] - '0';
-    if (g_memtest >= 0) plog("memtest: on (%s)", g_memtest == 4 ? "auto: modes 0, 2, 3 in turn, 40 s each" : memtest_name(g_memtest));
-    else {
-        for (char *e = c; *e; e++) if ((unsigned char)*e < 32) *e = ' ';
-        plog("memtest: the file is there but says '%s' (auto, yuv or 0-3): off", c);
-    }
-}
-
-static int g_mt_bad;                     /* modes whose decoder gave no picture (bit per mode): mode 0 instead */
-
-static int memtest_mode(void)
-{
-    int m = g_memtest < 0 ? 0 : g_memtest == 4 ? g_mt_auto_mode : g_memtest;
-    return (g_mt_bad >> m) & 1 ? 0 : m;
-}
-
-static int memtest_next(int m)           /* auto: 0, 2, 3, 0... (mode 1 was measured: slower) */
-{
-    for (int k = 0; k < 3; k++) {
-        m = m == 0 ? 2 : m == 2 ? 3 : 0;
-        if (!((g_mt_bad >> m) & 1)) return m;
-    }
-    return 0;
-}
-
+/* 1.2: the HD decoder (above 720p, and 720p above 30 fps) hands its pictures out as YUV 4:2:0, Y then U then V
+ * (YUV420_RASTER); the GPU turns them into colour itself when it draws them (YUV420P3, BT.709). Measured on the
+ * device (the memtest builds): RGBA pictures are 8.4 MB at 1080p, YUV 3.1 MB; the decoder's time a picture fell
+ * from 9.1 to 4.6 ms at 1080p25 and it gave about 7% more pictures at 1080p50 (37 instead of 35 a second: the
+ * decoding itself is the limit there). The colours were right with Y + U + V (Y + UV had red and blue swapped).
+ * Not for interlaced streams (the field check reads RGBA). If the decoder gives no picture in its first units
+ * this way, RGBA again for this channel. */
+static int yuv_wanted(const Tsp *t) { return t->internal && !t->open_interlaced && !t->yuv_off; }
 
 /* Where the compressed data (ES) and the decoded pictures live. */
 static const struct { int es, pic; } PLANS[] = {
@@ -663,7 +597,7 @@ static void free_plan(Tsp *t)
 static int slot_init(Tsp *t, Slot *s)
 {
     memset(&s->tex, 0, sizeof s->tex);
-    int fmt = t->yuv == 2 ? SCE_GXM_TEXTURE_FORMAT_YUV420P2_CSC1 : t->yuv == 3 ? SCE_GXM_TEXTURE_FORMAT_YUV420P3_CSC1 : TEX_FORMAT;
+    int fmt = t->yuv ? SCE_GXM_TEXTURE_FORMAT_YUV420P3_CSC1 : TEX_FORMAT;
     int r = sceGxmTextureInitLinear(&s->tex.gxm_tex, s->data, fmt, (unsigned)t->dw, (unsigned)t->dh, 0);
     if (r < 0) { plog("tsp: texture init 0x%08X", (unsigned)r); return r; }
     vita2d_texture_set_filters(&s->tex, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
@@ -694,7 +628,7 @@ static int set_plan(Tsp *t, int p)
     /* 4 pictures in flight; 3 when memory is short. The HD decoder gets 4 too when CDRAM has room: with 3
      * a stream whose pictures come out of order loses about a third of them (seen at 1080p). */
     int n = ((t->dw * t->dh > 1280 * 736 && !t->internal) || pk == MEM_PHYCONT) ? 3 : 4;
-    uint32_t psize = t->yuv ? (uint32_t)(t->dw * t->dh * 3 / 2) : (uint32_t)(t->dw * t->dh * 4);   /* (1.2 test: YUV) */
+    uint32_t psize = t->yuv ? (uint32_t)(t->dw * t->dh * 3 / 2) : (uint32_t)(t->dw * t->dh * 4);   /* (1.2: YUV 1.5 bytes a pixel) */
     for (int i = 0; i < n; i++) {
         Slot *s = &t->slots[i];
         s->data = mem_alloc(pk, psize, &s->uid, 1);
@@ -843,7 +777,7 @@ static int decoder_core_open_internal(Tsp *t, int nref)
     r = -1;
     static const int kinds[2] = { MEM_CDRAM, MEM_MAIN_NC };   /* PHYCONT is too small for 1080p frames */
     for (int i = 0; i < 2; i++) {
-        int k = kinds[t->mt_mode == 1 ? 1 - i : i];         /* (1.2 test: main memory first) */
+        int k = kinds[i];
         void *fb = mem_alloc(k, di.frameMemSize, &t->fb_uid, 0);
         if (!fb) continue;
         memset(&t->ctrl, 0, sizeof t->ctrl);
@@ -975,9 +909,7 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
         plog("tsp: %dx%d: the HD decoder opened at %dx1088", w, h, t->dw);
         t->dh = 1088;
     }
-    t->mt_mode = t->internal && !t->open_interlaced ? memtest_mode() : 0;
-    t->yuv = t->mt_mode >= 2 ? t->mt_mode : 0;
-    if (t->internal && g_memtest >= 0) plog("memtest: mode %d: %s", t->mt_mode, memtest_name(t->mt_mode));
+    t->yuv = yuv_wanted(t);
     if (t->internal) {
         /* 4 pictures, or what the stream asks for when that is more and fits the level (1920x720 with 5 refs:
          * with 4 nearly every picture failed "out of memory") */
@@ -1008,9 +940,8 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
     t->st.width = w;
     t->st.hd = t->internal;
     t->st.height = h;
-    t->mt_running = 0;
-    t->mt_units = 0;
-    t->mt_open_dec = t->st.decoded;
+    t->yuv_units = 0;
+    t->yuv_open_dec = t->st.decoded;
     __sync_synchronize();
     t->ready = 1;
     return 0;
@@ -1060,47 +991,22 @@ static void switch_to_hd_oom(Tsp *t)
     t->st.errors++;
 }
 
-/* 1.2 test: a period of MT_SECS seconds (from the 25th picture after the decoder opened) ends: its numbers to the
- * log; with "auto" the decoder is closed here and opened again at this keyframe in the next mode (as hd60 does) */
-static void memtest_tick(Tsp *t, int start_ok)
+/* 1.2: the HD decoder with YUV pictures gave no picture in its first 60 units: RGBA again for this channel, from
+ * the next keyframe (closed here, opened again below as hd60 does). (Not seen on the device with YUV itself: a
+ * safety net, as a stream that gives nothing at all goes on to the other remedies.) */
+static void yuv_check(Tsp *t, int start_ok)
 {
-    if (g_memtest < 0 || !t->internal || !t->dec_open) return;
-    uint64_t now = now_us();
-    t->mt_units++;
-    int bad = !t->mt_running && t->mt_mode && t->mt_units >= 30 && t->st.decoded == t->mt_open_dec;
-    if (bad && !start_ok) return;                           /* (back to mode 0 at the next keyframe) */
-    if (bad) {
-        g_mt_bad |= 1 << t->mt_mode;
-        plog("memtest: mode %d (%s): no picture in %d units: mode 0 for it from now on", t->mt_mode, memtest_name(t->mt_mode), t->mt_units);
-        if (g_memtest == 4) g_mt_auto_mode = 0;
-        goto reopen;
-    }
-    if (!t->mt_running) {
-        if (t->st.decoded < t->mt_open_dec + 25) return;
-        t->mt_running = 1;
-        t->mt_t0 = now;
-        t->mt_dec0 = t->st.decoded; t->mt_shown0 = t->st.shown; t->mt_late0 = t->st.late;
-        t->mt_drop0 = t->st.dropped; t->mt_err0 = t->st.errors;
-        t->mt_calls = 0; t->mt_us = 0;
-        return;
-    }
-    if (now - t->mt_t0 < (uint64_t)MT_SECS * 1000000ULL || !start_ok || t->paused) return;
-    double secs = (double)(now - t->mt_t0) / 1e6;
-    plog("memtest: mode %d (%s), %dx%d, %.0f s: decoded %.1f/s, shown %.1f/s, decoder call avg %u us, late %u, dropped %u, errors %u "
-         "(frame memory %s, pictures %s)%s",
-         t->mt_mode, memtest_name(t->mt_mode), t->vw, t->vh, secs, (t->st.decoded - t->mt_dec0) / secs, (t->st.shown - t->mt_shown0) / secs,
-         t->mt_calls ? (unsigned)(t->mt_us / t->mt_calls) : 0u,
-         (unsigned)(t->st.late - t->mt_late0), (unsigned)(t->st.dropped - t->mt_drop0), (unsigned)(t->st.errors - t->mt_err0),
-         mem_name(t->fb_kind), mem_name(PLANS[t->plan].pic), t->yuv ? ": are the colours right?" : "");
-    if (g_memtest != 4) { t->mt_running = 0; t->mt_open_dec = t->st.decoded; return; }   /* (a fixed mode: the next period) */
-    g_mt_auto_mode = memtest_next(t->mt_mode);
-reopen:
+    if (!t->yuv || !t->dec_open) return;
+    if (t->st.decoded != t->yuv_open_dec) { t->yuv_units = -1000000; return; }   /* (pictures came: no more checks) */
+    if (++t->yuv_units < 60 || !start_ok) return;
+    plog("tsp: no picture from the HD decoder in %d units with YUV pictures: RGBA pictures for this channel", t->yuv_units);
+    t->yuv_off = 1;
     sceKernelLockMutex(t->lock, 1, NULL);
     t->ready = 0;
     sceKernelUnlockMutex(t->lock, 1);
     wait_ui_release(t);
     free_plan(t);
-    decoder_core_close(t);                                  /* (opened again below, at this keyframe) */
+    decoder_core_close(t);
     t->no_out = 0;
     t->grow_pending = 0;
     t->reopen_pending = 0;
@@ -1187,7 +1093,7 @@ static void pic_frame(Tsp *t, SceAvcdecFrame *f, void *data)
     f->frameHeight = (uint32_t)t->dh;
     f->pPicture[0] = data;
     if (t->yuv) {
-        f->pixelType = t->yuv == 2 ? SCE_AVCDEC_PIXELFORMAT_YUV420_PACKED_RASTER : SCE_AVCDEC_PIXELFORMAT_YUV420_RASTER;
+        f->pixelType = SCE_AVCDEC_PIXELFORMAT_YUV420_RASTER;
         f->pPicture[1] = (uint8_t *)data + (size_t)t->dw * (size_t)t->dh;
     } else {
         f->pixelType = SCE_AVCDEC_PIXELFORMAT_RGBA8888;
@@ -1275,8 +1181,6 @@ static int decode_au(Tsp *t, int s0, int s1, size_t n, int64_t pts, int pts_retr
         uint32_t dus = (uint32_t)(now_us() - d0);
         t->dcalls++;
         t->dus_sum += dus;
-        t->mt_calls++;                                       /* (1.2 test) */
-        t->mt_us += dus;
         if (dus > t->dus_max) t->dus_max = dus;
         if (r >= 0 || !pts_retry_ok || !t->use_pts || t->pts_retry_done || !is_param_error(r)) break;   /* only a parameter error can be the timestamps */
         /* The SDK note says timestamps must be 0xFFFFFFFF: retry once that way. */
@@ -1735,7 +1639,7 @@ static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int st
         t->st.dropped++;
         return 1;
     }
-    if (now - t->cu_t0 >= CU_WINDOW_US && t->full_rate && !t->pre_skip && !(g_memtest >= 0 && t->internal)) {
+    if (now - t->cu_t0 >= CU_WINDOW_US && t->full_rate && !t->pre_skip) {
         /* 1.1 safety: every picture is decoded above 30 fps, but if the screen drops many of them (it could
          * not keep up after all), show every second one, evenly, instead */
         uint32_t dr = t->st.dropped + t->st.late;
@@ -1762,7 +1666,6 @@ static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int st
          * pictures by the hundred, which never helps: the next one does not come any sooner. */
         int want = covered < secs * 0.85 ? 2 : covered < secs * 0.96 ? 1 : 0;
         if (t->catchup == 1 && want >= 1) want = 2;         /* half was not enough */
-        if (g_memtest >= 0 && t->internal) want = 0;        /* (1.2 test: every picture decoded, to measure) */
         if (t->cu_minq >= 1000 && want > t->catchup) {
             int was = t->catchup;
             t->catchup = want;
@@ -1863,7 +1766,7 @@ static void video_packet(Tsp *t, Pkt *p)
         switch_to_hd_oom(t);
         t->st.errors--;                                     /* (not an error) */
     }
-    memtest_tick(t, start_ok);                              /* (1.2 test; a switch only at a keyframe) */
+    yuv_check(t, start_ok);                                 /* (1.2; a switch only at a keyframe) */
     if (!t->dec_open) {
         if (!start_ok || i->width == 0 || i->sps_len == 0 || i->pps_len == 0) {
             if (!t->err_set) t->st.state = TSP_WAIT_KEY;
@@ -1976,7 +1879,7 @@ static void video_packet(Tsp *t, Pkt *p)
                     t->st.decoder_slow = 1;
                     plog("tsp: interlaced 1080 at %u fields a second: pictures nothing refers to are left out", fps);
                 }
-            } else if (rate <= MB_RATE_FULL || (g_memtest >= 0 && t->internal)) {   /* (1.2 test: all, to measure) */
+            } else if (rate <= MB_RATE_FULL) {
                 t->full_rate = 1;
                 plog("tsp: %dx%d at %u fps (%u macroblocks a second): every picture decoded", t->dw, t->dh, fps, rate);
             } else {
@@ -2056,7 +1959,7 @@ static void video_packet(Tsp *t, Pkt *p)
             if (now_us() - w0 < 1000) { uint64_t b0 = now_us(); sceKernelDelayThread(1500); t->w_busy_us += now_us() - b0; }
             r = decode_au(t, s, -1, n, pts, 1);
         }
-        if (r >= 0 || t->st.decoded > 0 || !is_mem_error(r) || t->plan + 1 >= NPLANS || t->yuv) break;   /* (YUV test: memtest_tick) */
+        if (r >= 0 || t->st.decoded > 0 || !is_mem_error(r) || t->plan + 1 >= NPLANS || t->yuv) break;   /* (YUV: yuv_check) */
         plog("tsp: decode 0x%08X with memory plan %d, trying the next one", (unsigned)r, t->plan);
         int np = t->plan + 1;
         while (np < NPLANS && set_plan(t, np) < 0) np++;
@@ -2090,6 +1993,11 @@ static void video_packet(Tsp *t, Pkt *p)
      * a keyframe of waiting lost: it gets more units, and each restart that brings nothing back doubles the
      * wait. Units given while paused do not count (the screen holds the pictures). */
     int no_out_max = i->interlaced ? 200 : t->internal ? 120 : 40;
+    /* 1.2: the HD decoder ran out of picture memory on a stream without bitstream_restriction (1920x1038 film and
+     * a 1080p50 channel, both 4 references: pictures for a while, then "out of memory" and none, and restarts
+     * that only froze again): sooner, and with the header adjusted (below) */
+    int hd_restr = t->internal && !i->interlaced && t->oom_errs > 0 && !t->timing_tried && (t->hdr_no_restr || t->hdr_timing || t->sei_timing);
+    if (hd_restr) no_out_max = 40;
     no_out_max <<= t->dry_restarts > 3 ? 3 : t->dry_restarts;
     if (t->st.decoded != out_before) {
         t->no_out = 0;
@@ -2103,6 +2011,14 @@ static void video_packet(Tsp *t, Pkt *p)
         if (t->oom_errs > 0 && !t->internal && !t->oom_hd && g_hd1080 && !i->interlaced) {
             plog("tsp: decoder out of picture memory (%d times); switching to the HD decoder with more pictures", t->oom_errs);
             switch_to_hd_oom(t);
+            return;
+        }
+        if (hd_restr) {
+            plog("tsp: no picture from the HD decoder for %d units after running out of memory (%d times); trying it again with "
+                 "the header adjusted (bitstream_restriction, no HRD / SEI timing)", t->no_out, t->oom_errs);
+            restart_without_timing(t);                       /* (opened again at the next keyframe) */
+            t->dry_restarts++;
+            t->good_since = 0;
             return;
         }
         plog("tsp: no picture from the decoder for %d units; restarting it at the next keyframe", t->no_out);
@@ -4937,7 +4853,6 @@ static SceUID start_thread(const char *name, SceKernelThreadEntry fn, int prio, 
 static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offset_ms)
 {
     tsp_stop();
-    memtest_read();                                         /* (1.2 test: read at each start, so it can change without a restart) */
     Tsp *t = calloc(1, sizeof *t);
     if (!t) return -1;
     snprintf(t->url, sizeof t->url, "%s", url);

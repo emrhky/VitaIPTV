@@ -3206,7 +3206,9 @@ static void video_bars(vita2d_texture *t, int w, int h, float x0, float y0, floa
     if ((int)(now - next) >= 0) {
         int det[4];
         next = now + 500;
-        bars_detect((const uint32_t *)vita2d_texture_get_datap(t), (int)(vita2d_texture_get_stride(t) / 4), w, h, det);
+        if (((unsigned)vita2d_texture_get_format(t) & 0xFE000000u) == 0x90000000u)   /* (YUV: its Y plane, one byte a pixel) */
+            bars_detect_y((const uint8_t *)vita2d_texture_get_datap(t), (int)vita2d_texture_get_width(t), w, h, det);
+        else bars_detect((const uint32_t *)vita2d_texture_get_datap(t), (int)(vita2d_texture_get_stride(t) / 4), w, h, det);
         bars_update(&g_bars, det);
     }
     const int *b = g_bars.cur;
@@ -3217,18 +3219,41 @@ static void video_bars(vita2d_texture *t, int w, int h, float x0, float y0, floa
     if (b[BAR_B] > 1) vita2d_draw_rectangle(x0, y0 + (h - b[BAR_B] + 1) * s, w * s, (b[BAR_B] - 1) * s, k);
 }
 
+/* fields: 0 a whole picture; 1 / 2 the top / bottom of two fields one above the other (1080i), stretched */
 static void draw_video_texture(vita2d_texture *t, int w, int h, int fields, int bars)
 {
     float sx = 960.0f / w, sy = 544.0f / h, s = sx < sy ? sx : sy;
     float x0 = (960.0f - w * s) / 2, y0 = (544.0f - h * s) / 2;
     vita2d_draw_rectangle(0, 0, 960, 544, RGBA8(0, 0, 0, 255));   /* black around the picture (the menus' colour showed; OLED) */
-    if (fields) {                                    /* two fields one above the other: the top one, stretched */
+    if (fields == 1) {
         vita2d_draw_texture_part_scale(t, x0, y0, 0, 0, w, h / 2, s, s * 2);
         return;
     }
+    if (fields == 2) {                               /* 1.2: the bottom field starts half the texture down (1088 / 2), and its
+                                                      * lines sit one picture line lower than the top field's */
+        vita2d_draw_texture_part_scale(t, x0, y0 + s, 0, (float)(vita2d_texture_get_height(t) / 2), w, h / 2, s, s * 2);
+        return;
+    }
     vita2d_draw_texture_part_scale(t, x0, y0, 0, 0, w, h, s, s);
-    /* (not on the 1.2 YUV test's pictures, planes rather than pixels: base formats YUV420P2 0x90.., P3 0x91..) */
-    if (bars && ((unsigned)vita2d_texture_get_format(t) & 0xFE000000u) != 0x90000000u) video_bars(t, w, h, x0, y0, s);
+    if (bars) video_bars(t, w, h, x0, y0, s);
+}
+
+/* 1.2: 1080i "bob": the decoder gives each picture as its two fields one above the other; both are shown, the
+ * top one first and the bottom one half a picture later, as a television does: 50 movements a second from 25
+ * pictures (before: the top field alone, 25). Half a picture: from the time between the last pictures. */
+static int bob_field(const TspStatus *st)
+{
+    static uint32_t last_shown;
+    static unsigned t0, iv = 40;
+    unsigned now = now_ms();
+    if (st->shown != last_shown) {
+        unsigned d = now - t0;
+        if (st->shown == last_shown + 1 && d >= 25 && d <= 60) iv = (iv * 3 + d) / 4;   /* (a new picture right after the last) */
+        last_shown = st->shown;
+        t0 = now;
+    }
+    /* the screen changes every 16.7 ms: the bottom field from a little before half way, so both get about as long */
+    return now - t0 + 5 >= iv / 2 ? 2 : 1;
 }
 
 /* 0.6.0: "mono", "stereo", or "5.1 > stereo" when more channels were mixed down */
@@ -3283,7 +3308,7 @@ static void draw_tsp_screen(int osd)
                   st->state == TSP_ENDED ? T("Stream ended") : now_ms() < film_note_until ? film_note : NULL, player_fav());
         return;
     }
-    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields, 1); got_frame = 1; }
+    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields ? bob_field(st) : 0, 1); got_frame = 1; }
     {                                                    /* (where a start stopped, if it ever does: one crash in 0.2.7) */
         static int last_state = -1;
         int sv = st ? st->state : -1;
