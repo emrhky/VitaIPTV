@@ -190,6 +190,7 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
 
 /* ---- fake Internal decoder (above 720p): pictures come out two units after they go in ---- */
 typedef struct { SceAvcdecBuf memBuf; SceUID memBufUid; SceUIntVAddr vaContext; SceUInt32 contextSize; } MockVdCtrl;
+static int int_yuv_seen, int_no_yuv;
 static int int_cfg, int_mode, int_creates, int_units, int_soft_every, int_full_every, int_full_left, int_full_hits, int_delay = 2, int_hold_every, int_gets, int_max_pend;
 static int paint_mode;                   /* 1: a normal picture (a gradient top to bottom), 2: two fields one above the other */
 int sceVideodecSetConfigInternal(SceVideodecType c, SceInt32 cfg) { (void)c; int_cfg = cfg; return 0; }
@@ -241,6 +242,11 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
     if (arr->numOfElm != 1) return (int)0x80620002;
     SceAvcdecPicture *p = arr->pPicture[0];
     if (!p || p->size != sizeof *p || !p->frame.pPicture[0] || p->frame.framePitch < lib_w || p->frame.frameHeight < lib_h) return (int)0x80620002;
+    int yuv = p->frame.pixelType == SCE_AVCDEC_PIXELFORMAT_YUV420_RASTER || p->frame.pixelType == SCE_AVCDEC_PIXELFORMAT_YUV420_PACKED_RASTER;
+    if (yuv) int_yuv_seen = p->frame.pixelType;
+    if (int_no_yuv && yuv) return (int)0x80620002;          /* (a decoder that does not take this format) */
+    if (yuv && p->frame.pPicture[1] != (uint8_t *)p->frame.pPicture[0] + (size_t)p->frame.framePitch * p->frame.frameHeight)
+        return (int)0x80620002;                             /* (the colour planes right after the Y plane, as the GPU wants) */
     arr->numOfOutput = 0;
     if (npend > int_max_pend) int_max_pend = npend;
     if (npend < int_delay + 1 && !(int_flush && npend > 0)) return 0;   /* two units of delay, as on the device */
@@ -272,7 +278,8 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
         }
     }
     memcpy(pix, &o, 8);
-    pix[(size_t)p->frame.framePitch * p->frame.frameHeight * 4 - 1] = 0x5A;
+    size_t psz = (size_t)p->frame.framePitch * p->frame.frameHeight;
+    pix[(yuv ? psz * 3 / 2 : psz * 4) - 1] = 0x5A;          /* touches the last byte (1.2 test: YUV 1.5 bytes a pixel) */
     p->info.pts.upper = o < 0 ? 0xFFFFFFFFu : (uint32_t)((uint64_t)o >> 32);
     p->info.pts.lower = o < 0 ? 0xFFFFFFFFu : (uint32_t)o;
     p->frame.horizontalSize = lib_w; p->frame.verticalSize = lib_h;
@@ -651,12 +658,19 @@ int main(int argc, char **argv)
      * again at a keyframe; the film plays on to the end, in order, nearly whole */
     {
         extern int tsp_mt_force, tsp_mt_secs;
-        tsp_mt_force = 4; tsp_mt_secs = 1; int_creates = 0;
+        tsp_mt_force = 4; tsp_mt_secs = 1; int_creates = 0; int_yuv_seen = 0;
         r = play(argv[2], 10);
-        tsp_mt_force = -1; tsp_mt_secs = 40;
         show("1080p memtest", &r);
-        printf("               decoder opened %d times\n", int_creates);
+        printf("               decoder opened %d times, YUV format 0x%X\n", int_creates, (unsigned)int_yuv_seen);
         assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates >= 2 && r.st.decoded >= 110 && r.st.errors == 0);
+        assert(int_yuv_seen == SCE_AVCDEC_PIXELFORMAT_YUV420_PACKED_RASTER);   /* (mode 2 came second) */
+        /* a decoder that does not take YUV: no picture in that mode, back to mode 0 at a keyframe; plays on */
+        tsp_mt_force = 2; int_no_yuv = 1; int_creates = 0;
+        r = play(argv[2], 10);
+        int_no_yuv = 0; tsp_mt_force = -1; tsp_mt_secs = 40;
+        show("1080p YUV no", &r);
+        printf("               decoder opened %d times\n", int_creates);
+        assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates >= 2 && r.st.decoded >= 20);   /* (a short clip: the next keyframe) */
     }
     if (argc > 22) {                                         /* 1080i: fields one above the other are found */
         paint_mode = 2;
