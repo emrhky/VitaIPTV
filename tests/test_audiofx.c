@@ -27,7 +27,7 @@ static double gain_db(int boost, int speaker, double f, double amp, int ch, doub
 {
     AudioFx fx;
     afx_init(&fx);
-    afx_set(&fx, boost, speaker);
+    afx_set(&fx, boost, speaker, 0);
     int16_t b[N * 2], o[N * 2];
     double ph = 0, ph2 = 0, rin = 0, rout = 0;
     *peak = 0;
@@ -71,7 +71,7 @@ int main(void)
     {
         AudioFx fx;
         afx_init(&fx);
-        afx_set(&fx, 3, 0);
+        afx_set(&fx, 3, 0, 0);
         int16_t o[N * 2];
         double ph = 0, worst = 0;
         for (int k = 0; k < 100; k++) { sine(o, N, 2, 500, 0.05, &ph); afx_process(&fx, o, N, 2, RATE); }
@@ -97,21 +97,50 @@ int main(void)
         assert(g > 5.0 && g < 7.5);
         AudioFx fx;
         afx_init(&fx);
-        afx_set(&fx, 1, 1);
+        afx_set(&fx, 1, 1, 0);
         int16_t o[441 * 2];
         double ph = 0;
         sine(o, 441, 2, 440, 0.5, &ph);
         afx_process(&fx, o, 441, 2, 44100);
-        afx_set(&fx, 0, 0);
+        afx_set(&fx, 0, 0, 0);
         afx_process(&fx, o, 441, 2, 44100);
     }
     /* the shared setting */
     {
-        int b, s;
-        afx_set_global(9, 5);
-        afx_get_global(&b, &s);
-        assert(b == 3 && s == 1);
-        afx_set_global(0, 0);
+        int b, s, l;
+        afx_set_global(9, 5, 7);
+        afx_get_global(&b, &s, &l);
+        assert(b == 3 && s == 1 && l == 1);
+        afx_set_global(0, 0, 0);
+    }
+    /* 1.2: one level: quiet, middle and loud sound end up near -20 dBFS (within -6 / +12 dB); silence is not
+     * lifted; a channel change (a new AudioFx) settles within a few seconds */
+    {
+        static const double AMP[3] = { 0.02, 0.07, 0.6 };   /* RMS -37, -26, -7 dBFS */
+        static const double WANT[3] = { -25.0, -20.0, -13.0 };   /* (+12 at most, -6 at most) */
+        for (int k = 0; k < 3; k++) {
+            AudioFx fx;
+            afx_init(&fx);
+            afx_set(&fx, 0, 0, 1);
+            int16_t b[N * 2];
+            double ph = 0, r3 = 0, r10 = 0;
+            for (int i = 0; i < 470; i++) {                  /* 10 s */
+                sine(b, N, 2, 440, AMP[k], &ph);
+                afx_process(&fx, b, N, 2, RATE);
+                double db = 20.0 * log10(rms_of(b, N * 2));
+                if (i == 140) r3 = db;                       /* about 3 s */
+                if (i == 469) r10 = db;
+            }
+            printf("one level, %.2f in: %+.1f dBFS after 3 s, %+.1f after 10 s\n", AMP[k], r3, r10);
+            assert(fabs(r10 - WANT[k]) < 1.5);
+            assert(fabs(r3 - WANT[k]) < 4.0);                /* (most of the way within 3 s) */
+            assert(peak_of(b, N * 2) <= 0.95);               /* (the limiter: no clipping) */
+            /* silence after it: the gain stays (nothing lifted towards a pause), then the sound comes back */
+            float g = fx.lv_gain;
+            memset(b, 0, sizeof b);
+            for (int i = 0; i < 100; i++) afx_process(&fx, b, N, 2, RATE);
+            assert(fabsf(fx.lv_gain - g) < 1e-6f);
+        }
     }
     puts("audiofx: all tests passed");
     return 0;
