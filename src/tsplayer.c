@@ -268,6 +268,12 @@ typedef struct {
     uint64_t first_show_us;             /* when the first picture went on screen */
     uint32_t pub_fed, pub_nopic, pub_nopic_nonref;     /* public decoder: units given, of them without a picture */
     int hd60, hd60_pending;             /* 720p above 30 fps through the HD decoder (0.2.10 experiment) */
+    /* 1.2 test: where the HD decoder's memory lives (see memtest_*) */
+    int mt_mode, mt_running, mt_pic_kind;
+    uint32_t mt_calls;
+    uint64_t mt_us;
+    uint64_t mt_t0;
+    uint32_t mt_open_dec, mt_dec0, mt_shown0, mt_late0, mt_drop0, mt_err0;
     uint8_t sps_src[256], sps_fix[300]; /* the last SPS seen and its fixed form (spsfix.c); fix_len 0 = as it is */
     size_t sps_src_len, sps_fix_len;
     int sps_fix_logged;
@@ -530,6 +536,56 @@ static int is_mem_error(int r)
     return u == 0x80620009u || u == 0x80620007u || u == 0x80620809u || u == 0x80620807u;
 }
 
+/* 1.2 test (ux0:data/VitaIPTV/memtest.txt): where the HD decoder (above 720p) writes. The HD decoder writes about
+ * 8.4 MB of picture a frame at 1080p (RGBA), 420 MB/s at 50 fps, into CDRAM; Venezia's own cores could not write
+ * CDRAM faster than about 230 MB/s in VNZBench (main memory: 560-780 MB/s). Is that what stops 1080p50?
+ *   bit 0: the decoder's frame memory (its reference pictures) in main memory first, then CDRAM
+ *   bit 1: the pictures it hands out in main memory (MAIN_NC) instead of CDRAM
+ * "0".."3": that mode; "auto": 0, 1, 2, 3, 0... switched every MT_SECS seconds at a keyframe. Each period ends with
+ * a "memtest:" line in the log (pictures a second, shown, late, dropped, errors). No file: as always (mode 0). */
+int tsp_mt_force = -1;                   /* (PC tests: a mode without the file) */
+int tsp_mt_secs = 40;                    /* (PC tests: shorter) */
+#define MT_SECS tsp_mt_secs
+static int g_memtest = -1;               /* -1 off, 0..3 a mode, 4 auto */
+static int g_mt_auto_mode;               /* (auto: carried from channel to channel, so each film starts on the next one) */
+
+static const char *memtest_name(int m)
+{
+    static const char *n[4] = { "frame memory CDRAM, pictures CDRAM (as always)", "frame memory MAIN, pictures CDRAM",
+                                "frame memory CDRAM, pictures MAIN", "frame memory MAIN, pictures MAIN" };
+    return n[m & 3];
+}
+
+static void memtest_read(void)
+{
+    static int said;
+    g_memtest = tsp_mt_force;
+    if (g_memtest >= 0) return;
+    FILE *f = fopen("ux0:data/VitaIPTV/memtest.txt", "r");
+    if (!f) f = fopen("ux0:data/VitaIPTV/memtest.txt.txt", "r");   /* (Windows hides the .txt it adds) */
+    if (!f) {
+        if (!said++) plog("memtest: off (no ux0:data/VitaIPTV/memtest.txt)");
+        return;
+    }
+    char b[32] = "";
+    size_t n = fread(b, 1, sizeof b - 1, f);
+    fclose(f);
+    b[n] = 0;
+    char *c = b;
+    if ((unsigned char)c[0] == 0xEF && (unsigned char)c[1] == 0xBB && (unsigned char)c[2] == 0xBF) c += 3;   /* (Notepad's BOM) */
+    while (*c == ' ' || *c == '\t' || *c == '\r' || *c == '\n') c++;
+    if (!strncasecmp(c, "auto", 4)) g_memtest = 4;
+    else if (c[0] >= '0' && c[0] <= '3') g_memtest = c[0] - '0';
+    if (g_memtest >= 0) plog("memtest: on (%s)", g_memtest == 4 ? "auto: modes 0-3 in turn, 40 s each" : memtest_name(g_memtest));
+    else {
+        for (char *e = c; *e; e++) if ((unsigned char)*e < 32) *e = ' ';
+        plog("memtest: the file is there but says '%s' (auto or 0-3): off", c);
+    }
+}
+
+static int memtest_mode(void) { return g_memtest < 0 ? 0 : g_memtest == 4 ? g_mt_auto_mode : g_memtest; }
+
+
 /* Where the compressed data (ES) and the decoded pictures live. */
 static const struct { int es, pic; } PLANS[] = {
     { MEM_PHYCONT, MEM_CDRAM }, { MEM_CDRAM, MEM_CDRAM }, { MEM_MAIN_NC, MEM_CDRAM },
@@ -601,6 +657,7 @@ static int mem_room(int kind, uint32_t size)
     if (sceKernelGetFreeMemorySize(&fm) < 0) return 0;
     if (kind == MEM_CDRAM) return (uint64_t)fm.size_cdram >= (uint64_t)size + 6u * 1024 * 1024;
     if (kind == MEM_PHYCONT) return (uint64_t)fm.size_phycont >= (uint64_t)size + 8u * 1024 * 1024;
+    if (kind == MEM_MAIN_NC) return (uint64_t)fm.size_user >= (uint64_t)size + 24u * 1024 * 1024;   /* (1.2 test) */
     return 0;
 }
 
@@ -610,6 +667,9 @@ static int set_plan(Tsp *t, int p)
     free_plan(t);
     t->plan = p;
     int pk = PLANS[p].pic;
+    int mt_main = t->internal && p == 0 && (t->mt_mode & 2);   /* (1.2 test; refused: plan 1 as always) */
+    if (mt_main) pk = MEM_MAIN_NC;
+    t->mt_pic_kind = pk;
     t->es = mem_alloc(PLANS[p].es, ES_CAP, &t->es_uid, 0);
     if (!t->es) return -1;
     /* 4 pictures in flight; 3 when memory is short. The HD decoder gets 4 too when CDRAM has room: with 3
@@ -634,7 +694,7 @@ static int set_plan(Tsp *t, int p)
     t->base_slots = n;
     while (n < want) {
         int got = 0;
-        for (int pass = 0; pass < 2 && !got; pass++) {
+        for (int pass = 0; pass < (mt_main ? 1 : 2) && !got; pass++) {   /* (the test: no CDRAM mixed in) */
             int k = pass == 0 ? pk : (pk == MEM_CDRAM ? MEM_PHYCONT : MEM_CDRAM);
             if (!mem_room(k, psize)) continue;
             Slot *s = &t->slots[n];
@@ -764,7 +824,7 @@ static int decoder_core_open_internal(Tsp *t, int nref)
     r = -1;
     static const int kinds[2] = { MEM_CDRAM, MEM_MAIN_NC };   /* PHYCONT is too small for 1080p frames */
     for (int i = 0; i < 2; i++) {
-        int k = kinds[i];
+        int k = kinds[(t->mt_mode & 1) ? 1 - i : i];       /* (1.2 test: main memory first) */
         void *fb = mem_alloc(k, di.frameMemSize, &t->fb_uid, 0);
         if (!fb) continue;
         memset(&t->ctrl, 0, sizeof t->ctrl);
@@ -896,6 +956,8 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
         plog("tsp: %dx%d: the HD decoder opened at %dx1088", w, h, t->dw);
         t->dh = 1088;
     }
+    t->mt_mode = t->internal ? memtest_mode() : 0;
+    if (t->internal && g_memtest >= 0) plog("memtest: mode %d: %s", t->mt_mode, memtest_name(t->mt_mode));
     if (t->internal) {
         /* 4 pictures, or what the stream asks for when that is more and fits the level (1920x720 with 5 refs:
          * with 4 nearly every picture failed "out of memory") */
@@ -926,6 +988,8 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
     t->st.width = w;
     t->st.hd = t->internal;
     t->st.height = h;
+    t->mt_running = 0;
+    t->mt_open_dec = t->st.decoded;
     __sync_synchronize();
     t->ready = 1;
     return 0;
@@ -973,6 +1037,43 @@ static void switch_to_hd_oom(Tsp *t)
     t->grow_pending = 0;
     t->need_key = 1;
     t->st.errors++;
+}
+
+/* 1.2 test: a period of MT_SECS seconds (from the 25th picture after the decoder opened) ends: its numbers to the
+ * log; with "auto" the decoder is closed here and opened again at this keyframe in the next mode (as hd60 does) */
+static void memtest_tick(Tsp *t, int start_ok)
+{
+    if (g_memtest < 0 || !t->internal || !t->dec_open) return;
+    uint64_t now = now_us();
+    if (!t->mt_running) {
+        if (t->st.decoded < t->mt_open_dec + 25) return;
+        t->mt_running = 1;
+        t->mt_t0 = now;
+        t->mt_dec0 = t->st.decoded; t->mt_shown0 = t->st.shown; t->mt_late0 = t->st.late;
+        t->mt_drop0 = t->st.dropped; t->mt_err0 = t->st.errors;
+        t->mt_calls = 0; t->mt_us = 0;
+        return;
+    }
+    if (now - t->mt_t0 < (uint64_t)MT_SECS * 1000000ULL || !start_ok || t->paused) return;
+    double secs = (double)(now - t->mt_t0) / 1e6;
+    plog("memtest: mode %d (%s), %dx%d, %.0f s: decoded %.1f/s, shown %.1f/s, decoder call avg %u us, late %u, dropped %u, errors %u "
+         "(frame memory %s, pictures %s)",
+         t->mt_mode, memtest_name(t->mt_mode), t->vw, t->vh, secs, (t->st.decoded - t->mt_dec0) / secs, (t->st.shown - t->mt_shown0) / secs,
+         t->mt_calls ? (unsigned)(t->mt_us / t->mt_calls) : 0u,
+         (unsigned)(t->st.late - t->mt_late0), (unsigned)(t->st.dropped - t->mt_drop0), (unsigned)(t->st.errors - t->mt_err0),
+         mem_name(t->fb_kind), mem_name(t->mt_pic_kind));
+    if (g_memtest != 4) { t->mt_running = 0; t->mt_open_dec = t->st.decoded; return; }   /* (a fixed mode: the next period) */
+    g_mt_auto_mode = (t->mt_mode + 1) & 3;
+    sceKernelLockMutex(t->lock, 1, NULL);
+    t->ready = 0;
+    sceKernelUnlockMutex(t->lock, 1);
+    wait_ui_release(t);
+    free_plan(t);
+    decoder_core_close(t);                                  /* (opened again below, at this keyframe) */
+    t->no_out = 0;
+    t->grow_pending = 0;
+    t->reopen_pending = 0;
+    t->need_params = 1;
 }
 
 /* 0.4.0: the public decoder gave no picture from the start and the stream carries timing information
@@ -1131,6 +1232,8 @@ static int decode_au(Tsp *t, int s0, int s1, size_t n, int64_t pts, int pts_retr
         uint32_t dus = (uint32_t)(now_us() - d0);
         t->dcalls++;
         t->dus_sum += dus;
+        t->mt_calls++;                                       /* (1.2 test) */
+        t->mt_us += dus;
         if (dus > t->dus_max) t->dus_max = dus;
         if (r >= 0 || !pts_retry_ok || !t->use_pts || t->pts_retry_done || !is_param_error(r)) break;   /* only a parameter error can be the timestamps */
         /* The SDK note says timestamps must be 0xFFFFFFFF: retry once that way. */
@@ -1721,6 +1824,7 @@ static void video_packet(Tsp *t, Pkt *p)
         switch_to_hd_oom(t);
         t->st.errors--;                                     /* (not an error) */
     }
+    memtest_tick(t, start_ok);                              /* (1.2 test; a switch only at a keyframe) */
     if (!t->dec_open) {
         if (!start_ok || i->width == 0 || i->sps_len == 0 || i->pps_len == 0) {
             if (!t->err_set) t->st.state = TSP_WAIT_KEY;
@@ -1833,7 +1937,7 @@ static void video_packet(Tsp *t, Pkt *p)
                     t->st.decoder_slow = 1;
                     plog("tsp: interlaced 1080 at %u fields a second: pictures nothing refers to are left out", fps);
                 }
-            } else if (rate <= MB_RATE_FULL) {
+            } else if (rate <= MB_RATE_FULL || (g_memtest >= 0 && t->internal)) {   /* (1.2 test: all, to measure) */
                 t->full_rate = 1;
                 plog("tsp: %dx%d at %u fps (%u macroblocks a second): every picture decoded", t->dw, t->dh, fps, rate);
             } else {
@@ -4794,6 +4898,7 @@ static SceUID start_thread(const char *name, SceKernelThreadEntry fn, int prio, 
 static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offset_ms)
 {
     tsp_stop();
+    memtest_read();                                         /* (1.2 test: read at each start, so it can change without a restart) */
     Tsp *t = calloc(1, sizeof *t);
     if (!t) return -1;
     snprintf(t->url, sizeof t->url, "%s", url);
