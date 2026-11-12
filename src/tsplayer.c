@@ -253,7 +253,7 @@ typedef struct {
     uint32_t fr_drop0;                  /* ... pictures dropped / late when the last 3 s window began */
     int fr_set;
     AudioFx afx;                        /* 1.1: volume boost / speaker mode (Select > Audio) */
-    int afx_boost, afx_speaker;         /* ... as last applied (-1 = not yet; a change is written to the log) */
+    int afx_boost, afx_speaker, afx_level;         /* ... as last applied (-1 = not yet; a change is written to the log) */
     int a52_dlg, aacsw_dlg;             /* 1.1: "clear dialogue" when the software decoders were created */
     volatile int av_started;            /* audio thread: the first picture is there (or there is none to wait for) */
     volatile int64_t first_pic_pts;     /* time of the first decoded picture (-1 = none yet) */
@@ -1921,14 +1921,19 @@ static void video_packet(Tsp *t, Pkt *p)
                  * evenly spaced in such streams: P every 3rd picture gives 20 a second). */
                 double nr = (double)t->pre_nonref / t->pre_units;
                 double need = fps * ((1.0 - nr) + nr / 2.0);
-                double can = 320000.0 / mbs;                /* what it gives (1080p: 39), 10% kept free */
+                /* what it gives (1080p: 39), 10% kept free. 1.2: measured with every picture decoded (the memtest
+                 * builds): about 39 a second at 1080p with 2 references, 35 with 4 (a 1080p50 channel with 4: the
+                 * even half needed 35, fell behind in its first seconds - few pictures, the sound paused - and
+                 * only then went to leaving out the pictures nothing refers to; now that from the start) */
+                double can = (i->refs >= 3 ? 290000.0 : 320000.0) / mbs;
                 double refs = fps * (1.0 - nr);              /* the reference pictures alone */
                 t->pre_skip = need <= can * 0.9 ? 2 : refs <= can * 0.95 ? 1 : 3;
                 t->tr_fps = fps;
                 t->tr_cap = can * 0.95;
                 if (i->height >= 1000) t->st.decoder_slow = 1;
                 plog("tsp: %dx%d at %u fps (%u macroblocks a second) is more than the Vita decoder manages (about "
-                     "320 000): %s (%.0f%% not referenced, needs %.0f pictures a second)", t->dw, t->dh, fps, rate,
+                     "%s with %d references): %s (%.0f%% not referenced, needs %.0f pictures a second)", t->dw, t->dh, fps, rate,
+                     i->refs >= 3 ? "290 000" : "320 000", i->refs,
                      t->pre_skip == 2 ? "every second picture shown, evenly" : t->pre_skip == 1 ? "pictures nothing refers to are left out"
                      : "the reference pictures alone are too many: the end of each group of pictures is left out",
                      nr * 100.0, need);
@@ -2583,14 +2588,17 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
         t->port_rate = rate;
         t->port_ch = ch;
     }
-    {                                                       /* 1.1: volume boost / speaker mode */
-        int b, sp;
-        afx_get_global(&b, &sp);
-        if (b != t->afx_boost || sp != t->afx_speaker) {
-            if (t->afx_boost >= 0 || b || sp) plog("tsp: sound: boost %s, speaker mode %s", b ? (b == 1 ? "+3 dB" : b == 2 ? "+6 dB" : "+9 dB") : "off", sp ? "on" : "off");
+    {                                                       /* 1.1: volume boost / speaker mode; 1.2: one level */
+        int b, sp, lv;
+        afx_get_global(&b, &sp, &lv);
+        if (b != t->afx_boost || sp != t->afx_speaker || lv != t->afx_level) {
+            if (t->afx_boost >= 0 || b || sp || lv)
+                plog("tsp: sound: boost %s, speaker mode %s, one level %s", b ? (b == 1 ? "+3 dB" : b == 2 ? "+6 dB" : "+9 dB") : "off",
+                     sp ? "on" : "off", lv ? "on" : "off");
             t->afx_boost = b;
             t->afx_speaker = sp;
-            afx_set(&t->afx, b, sp);
+            t->afx_level = lv;
+            afx_set(&t->afx, b, sp, lv);
         }
         afx_process(&t->afx, (int16_t *)pcm, samples, ch, rate);
     }
@@ -3171,14 +3179,18 @@ static void check_stall(Tsp *t)
 /* One HTTP connection. Returns 1 if it may be retried (read error / server closed),
  * 0 when stopping or after a fatal error (already reported). *got counts bytes received. */
 /* 407/429/503/509: IPTV servers say this when the account is already watching (the channel we just
- * left may not be closed on their side yet). Wait a moment and ask again before giving up.
- * Returns 1 to try again. */
+ * left may not be closed on their side yet). 1.2: also 405 and 512, which a server gave for one film and
+ * episode after another while its account showed "connections 1 of 1" (switching quickly). Wait a moment
+ * and ask again before giving up. Returns 1 to try again. */
+static int busy_status(int s) { return s == 405 || s == 407 || s == 429 || s == 503 || s == 509 || s == 512; }
+
 static int http_refused(Tsp *t, int status)
 {
-    int busy = status == 407 || status == 429 || status == 503 || status == 509;
-    if (busy && t->st.bytes == 0 && t->status_retries++ < 1) {
-        plog("tsp: server answered %d, asking once more in 1.5 s", status);
-        for (int k = 0; k < 75 && !stopping(t); k++) sceKernelDelayThread(20000);
+    int busy = busy_status(status);
+    if (busy && t->st.bytes == 0 && t->status_retries < 2) {   /* (1.2: twice, after 1.5 and 3 s: it lets go in a few seconds) */
+        int ms = t->status_retries++ ? 3000 : 1500;
+        plog("tsp: server answered %d (the account may still be counted on the last channel), asking again in %.1f s", status, ms / 1000.0);
+        for (int k = 0; k < ms / 20 && !stopping(t); k++) sceKernelDelayThread(20000);
         return 1;
     }
     /* 1.0: reconnecting a stream that played: a one-connection account is refused while the server still
@@ -3197,6 +3209,8 @@ static int http_refused(Tsp *t, int status)
     }
     if (status == 407)
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP 407 (the provider refuses: account busy or channel not in the package)");
+    else if (busy)
+        set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d (the provider refuses: account busy?)", status);
     else
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d", status);
     return 0;
@@ -4235,6 +4249,15 @@ static void read_vod(Tsp *t, uint8_t *buf)
     } else if (!t->vod_stream) tsp_vod_cache_clear();       /* another film: free the old one first */
     t->vc_rec = 1;
     int n = vio_read(&io, 0, head, sizeof head);
+    /* 1.2: refused as busy (the last film or episode still counted): asked again after 1.5 and 3 s */
+    for (int k = 0; k < 2 && n <= 0 && busy_status(vod_status) && !stopping(t); k++) {
+        int ms = k ? 3000 : 1500;
+        plog("tsp: VOD: server answered %d (the account may still be counted on the last film), asking again in %.1f s", vod_status, ms / 1000.0);
+        for (int j = 0; j < ms / 20 && !stopping(t); j++) sceKernelDelayThread(20000);
+        if (stopping(t)) break;
+        vod_status = 0;
+        n = vio_read(&io, 0, head, sizeof head);
+    }
     if (stopping(t)) { free(io.win); return; }
     if (n > 0 && t->vod_last_status == 200) {               /* the whole file came instead of a part */
         if (vod_container(head, (size_t)n) == VOD_MP4) {
@@ -4253,7 +4276,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
     }
     if (n <= 0) {
         free(io.win);
-        if (vod_status == 407 || vod_status == 429 || vod_status == 503 || vod_status == 509)
+        if (busy_status(vod_status))
             set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d (the provider refuses: account busy?)", vod_status);
         else if (vod_status) set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d", vod_status);
         else set_error_kind(t, TSP_ERRK_NET, "The server did not answer");
@@ -4911,7 +4934,7 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     t->frame_us = 40000;
     t->ev_anchor = t->ev_prev_in = -1;
     afx_init(&t->afx);
-    t->afx_boost = t->afx_speaker = -1;
+    t->afx_boost = t->afx_speaker = t->afx_level = -1;
     t->last_out_pts = t->shown_pts = -1;
     t->fb_uid = t->es_uid = -1;
     t->cm_uid = t->unmap = -1;

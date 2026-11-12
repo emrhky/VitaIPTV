@@ -429,7 +429,7 @@ void ui_footer(const UiHint *hints_in, int n_in, const char *status, int status_
         int h = 30 + (w.n - 1) * 24;
         vita2d_draw_rectangle(0, UI_FOOTER_Y - h, 960, h, RGBA8(20, 22, 32, 230));
         for (int i = 0; i < w.n; i++)
-            ui_text(18, UI_FOOTER_Y - h + 21 + i * 24, status_err ? UI_ERR : UI_DIM, 1.0f, w.line[i]);
+            ui_text(18, UI_FOOTER_Y - h + 21 + i * 24, status_err ? UI_ERR : UI_WARN, 1.0f, w.line[i]);   /* (1.2: amber, was grey) */
     }
     vita2d_draw_rectangle(0, UI_FOOTER_Y, 960, 544 - UI_FOOTER_Y, UI_PANEL);
     vita2d_draw_rectangle(0, UI_FOOTER_Y, 960, 1, UI_LINE);

@@ -143,9 +143,9 @@ static int audio_main(SceSize args, void *argp)
                 }
                 cur_len = len; cur_freq = freq; cur_mode = mode;
                 if (g_audio_port >= 0) {
-                    int b, sp;
-                    afx_get_global(&b, &sp);
-                    afx_set(&fx, b, sp);
+                    int b, sp, lv;
+                    afx_get_global(&b, &sp, &lv);
+                    afx_set(&fx, b, sp, lv);
                     if (ch == 1 || ch == 2) afx_process(&fx, (int16_t *)ai.pData, len, ch, freq);
                     sceAudioOutOutput(g_audio_port, ai.pData);
                 }

@@ -14,6 +14,7 @@ static const Pair FIXED[] = {
     { "Volume boost", "Ses yükseltme" },
     { "Clear sound", "Ses netleştirme" },
     { "Clear speech (5.1)", "Konuşma netleştirme (5.1)" },
+    { "Same volume on every channel", "Kanallar arası ses eşitleme" },
     /* 1.1: My List and the fast list opening */
     { "My List", "Listem" },
     { "Add to My List", "Listeme ekle" },
@@ -112,6 +113,8 @@ static const Pair FIXED[] = {
     { "For the Vita's speakers: less of the deep bass they cannot play, clearer voices.",
       "Vita hoparlörü için: çalamadığı boğuk bası azaltır, sesleri netleştirir." },
     { "5.1 films and channels: the voices louder in the stereo mix.", "5.1 film ve kanallarda konuşmaları stereo karışımda öne çıkarır." },
+    { "Quiet and loud channels come out about as loud as each other (the level follows over a few seconds).",
+      "Kısık ve yüksek sesli kanallar yaklaşık aynı seviyede duyulur (seviye birkaç saniyede ayarlanır)." },
     { "Plays what the Vita cannot (HEVC, 1080i, AC-3...) through tools/vita_iptv_proxy.py on a PC.",
       "Vita'nın oynatamadığı yayınları (HEVC, 1080i, AC-3...) bilgisayardaki tools/vita_iptv_proxy.py ile oynatır." },
     { "The server's address, e.g. http://192.168.1.20:8090", "Sunucunun adresi, örneğin http://192.168.1.20:8090" },
