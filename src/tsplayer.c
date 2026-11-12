@@ -544,8 +544,16 @@ static int is_mem_error(int r)
 /* (widths whose YUV pictures the decoder refused, for the rest of this run: a 1478x1080 film, coded 1488 wide,
  * gave 0x80620005; each seek in it waited for the fallback again) */
 static int g_yuv_bad_w[8], g_yuv_bad_n;
+/* 1.2: the last stream that needed its header adjusted (no bitstream_restriction, out of memory): a film is opened
+ * again at each jump; adjusted from the start then, without the freeze before it */
+static char g_adj_url[512];
 static int yuv_bad_width(int w) { for (int i = 0; i < g_yuv_bad_n; i++) if (g_yuv_bad_w[i] == w) return 1; return 0; }
-static int yuv_wanted(const Tsp *t) { return t->internal && !t->open_interlaced && !t->yuv_off && !yuv_bad_width(t->dw); }
+/* (the width a multiple of 32: the colour planes are half as wide, and their rows start every 16 bytes then; 1488
+ * wide, 744 for the colour, was refused - known from the stream's header before the decoder opens) */
+static int yuv_wanted(const Tsp *t)
+{
+    return t->internal && !t->open_interlaced && !t->yuv_off && t->dw % 32 == 0 && !yuv_bad_width(t->dw);
+}
 
 /* Where the compressed data (ES) and the decoded pictures live. */
 static const struct { int es, pic; } PLANS[] = {
@@ -2040,6 +2048,7 @@ static void video_packet(Tsp *t, Pkt *p)
         if (hd_restr) {
             plog("tsp: no picture from the HD decoder for %d units after running out of memory (%d times); trying it again with "
                  "the header adjusted (bitstream_restriction, no HRD / SEI timing)", t->no_out, t->oom_errs);
+            snprintf(g_adj_url, sizeof g_adj_url, "%s", t->url);
             restart_without_timing(t);                       /* (opened again at the next keyframe) */
             t->dry_restarts++;
             t->good_since = 0;
@@ -4883,6 +4892,11 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     if (url_split_headers(t->url, t->url, sizeof t->url, t->hdr_ua, sizeof t->hdr_ua, t->hdr_ref, sizeof t->hdr_ref))
         plog("tsp: link headers:%s%s%s%s", t->hdr_ua[0] ? " User-Agent " : "", t->hdr_ua, t->hdr_ref[0] ? " Referer " : "", t->hdr_ref);
     t->vod = vod;
+    if (g_adj_url[0] && !strcmp(g_adj_url, t->url)) {      /* (1.2: as it ended up the last time) */
+        t->timing_tried = 1;
+        t->drop_timing = 1;
+        plog("tsp: this stream needed its header adjusted before: adjusted from the start");
+    }
     t->vod_start_ms = start_ms > 0 ? start_ms : 0;
     t->vod_first_pts = -1;
     t->first_pic_pts = -1;
