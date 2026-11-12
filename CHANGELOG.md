@@ -31,13 +31,33 @@
   opened again sooner, with the header adjusted (the restriction added, timing taken out). A film that needed it
   gets it from the start when it is opened again (after a jump).
 
+- **1080p50 / 60 with 4 references** (a 1080p50 channel): the decoder gives fewer pictures with them (35 a second
+  instead of 39, measured); such channels leave out the pictures nothing refers to from the start, instead of
+  falling behind in their first seconds (few pictures, the sound paused) and only then.
+- **Same volume on every channel** (Settings and Select > Audio, off unless turned on): quiet and loud channels
+  come out about as loud as each other. The level is measured over a few seconds and brought towards -20 dBFS
+  (between -6 and +12 dB, a few dB a second at most, quicker in a channel's first seconds); pauses do not count.
+
+### Network
+- **"Account busy" answers** (405, 407, 429, 503, 509, 512 before anything came, as a one-connection account gives
+  while the server still counts the last channel or film): asked again after 1.5 s and 3 s, also for films and
+  episodes (they were not asked again at all); then the message says the account may be busy.
+
 ### Speed and battery
 - **Clock speeds while playing:** channels and films that the Vita's decoders play alone (H.264 with AAC or MP3 sound)
   run the ARM at 333 MHz with the bus and the GPU at 222. Everything else (AC-3, software decoding, 1080i, high
   frame rates, https, a busy core) gets 444 MHz at once, as before; it goes back down only after 15 s.
 
 ### Look
-- **Menus centred:** the Select menu's title and rows are in the middle of the box.
+- **Menus centred:** the Select menus' titles and rows (also the player's) are in the middle of the box.
+- **Notes in amber:** the notes above the bottom bar (and the settings' help line) are amber instead of grey, so
+  they are seen.
+
+### Controls
+- **The left stick only:** up / down moves like the d-pad in every list and menu (on the channel screen the list
+  with the highlight); pushed to the right from the middle it opens the category, to the left it goes back. A
+  slanted push does not count, so scrolling never opens a category by mistake. Films: sideways still moves through
+  the film. The right stick does nothing now (it moved the channel list).
 - **Sharper text:** the system font's letters are made at the size they are drawn at, and drawn 1:1 on whole
   pixels. Before, they were made at one size and stretched for the bigger sizes (1.1x-1.7x), which made them soft
   and blocky. Same fonts (the Latin one with the Turkish letters, the default one for other scripts), same widths.
