@@ -647,6 +647,17 @@ int main(int argc, char **argv)
     printf("               decoder busy %d time(s)\n", int_full_hits);
     assert(int_full_hits >= 6 && r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.dropped <= 3 && r.changes >= 115);
     int_full_every = 0;
+    /* 1.2 test (memtest.txt "auto"): the HD decoder's memory changes every period, the decoder closed and opened
+     * again at a keyframe; the film plays on to the end, in order, nearly whole */
+    {
+        extern int tsp_mt_force, tsp_mt_secs;
+        tsp_mt_force = 4; tsp_mt_secs = 1; int_creates = 0;
+        r = play(argv[2], 10);
+        tsp_mt_force = -1; tsp_mt_secs = 40;
+        show("1080p memtest", &r);
+        printf("               decoder opened %d times\n", int_creates);
+        assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates >= 2 && r.st.decoded >= 110 && r.st.errors == 0);
+    }
     if (argc > 22) {                                         /* 1080i: fields one above the other are found */
         paint_mode = 2;
         r = play(argv[22], 8);
