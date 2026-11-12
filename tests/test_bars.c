@@ -50,6 +50,23 @@ int main(void)
         assert(d[BAR_L] == 80 && d[BAR_R] == 80);
     }
 
+    /* 1.2: the Y plane of a YUV picture (the HD decoder's pictures) */
+    {
+        static uint8_t yp[W * H];
+        picture(0, 0, 45, 45, 1);
+        for (int i = 0; i < W * H; i++) yp[i] = (uint8_t)(px[i] & 0xFF);
+        bars_detect_y(yp, W, W, H, d);
+        assert(d[BAR_L] == 0 && d[BAR_R] == 0 && d[BAR_T] == 45 && d[BAR_B] == 45);
+        picture(80, 80, 0, 0, 1);
+        for (int i = 0; i < W * H; i++) yp[i] = (uint8_t)(px[i] & 0xFF);
+        bars_detect_y(yp, W, W, H, d);
+        assert(d[BAR_L] == 80 && d[BAR_R] == 80);
+        picture(0, 0, 0, 0, 0);
+        for (int i = 0; i < W * H; i++) yp[i] = (uint8_t)(px[i] & 0xFF);
+        bars_detect_y(yp, W, W, H, d);
+        assert(d[0] == -1);
+    }
+
     /* what is painted */
     Bars b;
     bars_reset(&b);
