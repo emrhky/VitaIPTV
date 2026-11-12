@@ -271,7 +271,7 @@ typedef struct {
     int hd60, hd60_pending;             /* 720p above 30 fps through the HD decoder (0.2.10 experiment) */
     /* 1.2: the HD decoder's pictures as YUV 4:2:0 (see yuv_wanted) */
     int yuv, yuv_off, yuv_units, yuv_h_logged;
-    uint32_t yuv_open_dec;
+    uint32_t yuv_open_dec, yuv_open_err;
     uint8_t sps_src[256], sps_fix[300]; /* the last SPS seen and its fixed form (spsfix.c); fix_len 0 = as it is */
     size_t sps_src_len, sps_fix_len;
     int sps_fix_logged;
@@ -541,7 +541,11 @@ static int is_mem_error(int r)
  * decoding itself is the limit there). The colours were right with Y + U + V (Y + UV had red and blue swapped).
  * Not for interlaced streams (the field check reads RGBA). If the decoder gives no picture in its first units
  * this way, RGBA again for this channel. */
-static int yuv_wanted(const Tsp *t) { return t->internal && !t->open_interlaced && !t->yuv_off; }
+/* (widths whose YUV pictures the decoder refused, for the rest of this run: a 1478x1080 film, coded 1488 wide,
+ * gave 0x80620005; each seek in it waited for the fallback again) */
+static int g_yuv_bad_w[8], g_yuv_bad_n;
+static int yuv_bad_width(int w) { for (int i = 0; i < g_yuv_bad_n; i++) if (g_yuv_bad_w[i] == w) return 1; return 0; }
+static int yuv_wanted(const Tsp *t) { return t->internal && !t->open_interlaced && !t->yuv_off && !yuv_bad_width(t->dw); }
 
 /* Where the compressed data (ES) and the decoded pictures live. */
 static const struct { int es, pic; } PLANS[] = {
@@ -944,6 +948,7 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
     t->st.height = h;
     t->yuv_units = 0;
     t->yuv_open_dec = t->st.decoded;
+    t->yuv_open_err = t->st.errors;
     __sync_synchronize();
     t->ready = 1;
     return 0;
@@ -1000,9 +1005,14 @@ static void yuv_check(Tsp *t, int start_ok)
 {
     if (!t->yuv || !t->dec_open) return;
     if (t->st.decoded != t->yuv_open_dec) { t->yuv_units = -1000000; return; }   /* (pictures came: no more checks) */
-    if (++t->yuv_units < 60 || !start_ok) return;
-    plog("tsp: no picture from the HD decoder in %d units with YUV pictures: RGBA pictures for this channel", t->yuv_units);
+    /* no picture yet and an error already (0x80620005 at 1488 wide, with "taking out a picture failed"): at the next
+     * keyframe, not after 60 units */
+    int failed = t->no_drain || t->st.errors != t->yuv_open_err;
+    if ((++t->yuv_units < 60 && !failed) || !start_ok) return;
+    plog("tsp: no picture from the HD decoder in %d units with YUV pictures (%dx%d): RGBA pictures for this width", t->yuv_units, t->dw, t->dh);
     t->yuv_off = 1;
+    if (!yuv_bad_width(t->dw) && g_yuv_bad_n < 8) g_yuv_bad_w[g_yuv_bad_n++] = t->dw;
+    t->no_drain = 0;                                         /* (set by the YUV failure; RGBA may take pictures out) */
     sceKernelLockMutex(t->lock, 1, NULL);
     t->ready = 0;
     sceKernelUnlockMutex(t->lock, 1);
