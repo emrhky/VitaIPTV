@@ -14,9 +14,6 @@
 ### Picture and sound
 - **Films of 1920 x 1038 / 1040 and the like** (heights between 720 and 1088): the Vita's HD decoder is opened at
   1088 lines, the size it is made for. It failed at such heights before and the film stuttered.
-- **Black bars:** the bars inside the picture (a 4:3 show in a 16:9 picture, a cinema film's bands) are painted pure
-  black. Their "black" was dark grey (video's black), which lit the OLED screen. The bars are looked for twice a
-  second; a bar gets narrower at once and wider only when two looks agree, so the picture is never covered.
 - **AC-3 / E-AC-3 5.1:** mixed down to stereo by the app, like 5.1 AAC (left / right + centre and surrounds at
   -3 dB). FFmpeg's own mix follows the stream's mix levels and often left the surrounds out: no left / right
   effect.
@@ -27,10 +24,12 @@
   and the GPU turns them into colour when it draws them. Measured on a Vita: the decoder's time a picture is halved
   (1080p25: 9.1 -> 4.6 ms), 1080p50 gets about 7% more pictures decoded (35 -> 37 a second; the decoding itself is
   the limit there, so every second picture is still shown) and each picture takes 3.1 MB of video memory instead of
-  8.4. If a decoder gives no picture this way, the channel goes back to RGBA pictures.
+  8.4. Only for widths that are a multiple of 32 (a 1478x1080 film, coded 1488 wide, was refused); if a decoder
+  gives no picture this way, that width goes back to RGBA pictures.
 - **Streams with 4 references and no bitstream_restriction** (a 1920x1038 film, a 1080p50 channel): the HD decoder
   gave pictures for a while, then ran out of memory and gave none, and restarting it only froze again. Now it is
-  opened again sooner, with the header adjusted (the restriction added, timing taken out).
+  opened again sooner, with the header adjusted (the restriction added, timing taken out). A film that needed it
+  gets it from the start when it is opened again (after a jump).
 
 ### Speed and battery
 - **Clock speeds while playing:** channels and films that the Vita's decoders play alone (H.264 with AAC or MP3 sound)
