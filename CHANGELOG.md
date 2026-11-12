@@ -20,6 +20,17 @@
 - **AC-3 / E-AC-3 5.1:** mixed down to stereo by the app, like 5.1 AAC (left / right + centre and surrounds at
   -3 dB). FFmpeg's own mix follows the stream's mix levels and often left the surrounds out: no left / right
   effect.
+- **1080i at 50 movements a second:** the Vita's decoder gives each 1080i picture as its two fields one above the
+  other; until now only the top one was shown (25 a second). Now both are shown, the top one first and the bottom
+  one half a picture later, as a television does ("bob").
+- **HD decoder pictures as YUV:** above 720p (and 720p above 30 fps) the decoder hands its pictures out as YUV 4:2:0
+  and the GPU turns them into colour when it draws them. Measured on a Vita: the decoder's time a picture is halved
+  (1080p25: 9.1 -> 4.6 ms), 1080p50 gets about 7% more pictures decoded (35 -> 37 a second; the decoding itself is
+  the limit there, so every second picture is still shown) and each picture takes 3.1 MB of video memory instead of
+  8.4. If a decoder gives no picture this way, the channel goes back to RGBA pictures.
+- **Streams with 4 references and no bitstream_restriction** (a 1920x1038 film, a 1080p50 channel): the HD decoder
+  gave pictures for a while, then ran out of memory and gave none, and restarting it only froze again. Now it is
+  opened again sooner, with the header adjusted (the restriction added, timing taken out).
 
 ### Speed and battery
 - **Clock speeds while playing:** channels and films that the Vita's decoders play alone (H.264 with AAC or MP3 sound)
@@ -27,22 +38,10 @@
   frame rates, https, a busy core) gets 444 MHz at once, as before; it goes back down only after 15 s.
 
 ### Look
+- **Menus centred:** the Select menu's title and rows are in the middle of the box.
 - **Sharper text:** the system font's letters are made at the size they are drawn at, and drawn 1:1 on whole
   pixels. Before, they were made at one size and stretched for the bigger sizes (1.1x-1.7x), which made them soft
   and blocky. Same fonts (the Latin one with the Turkish letters, the default one for other scripts), same widths.
-
-### Test (for 1.2 test builds only)
-- **HD decoder test** (`ux0:data/VitaIPTV/memtest.txt`), progressive streams above 720p only:
-  - `0`: as always; `1`: the decoder's frame memory in main memory (measured: its calls take 3x as long);
-    `2` or `yuv`: pictures as YUV 4:2:0 with the colour as Y + UV (NV12), `3`: as Y + U + V. YUV pictures are 3.1 MB
-    instead of 8.4 MB at 1080p; the GPU turns them into colour when it draws them. No black bars in modes 2 and 3.
-  - `auto`: modes 0, 2 and 3 in turn, 40 s each, changed at a keyframe. A mode whose decoder gives no picture goes
-    back to mode 0.
-  - While the file is there every picture is decoded (nothing left out), so the decoder's own speed shows. Every
-    40 s a `memtest:` line in log.txt gives the pictures decoded and shown a second, the decoder's time a call and
-    the errors. No file: as always.
-  - Measured (1080p50, mode 0): about 35 pictures a second when all are decoded; pictures in main memory: refused
-    by the decoder (0x80620007, removed from the test).
 
 ## 1.1.0
 
