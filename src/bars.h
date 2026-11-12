@@ -11,6 +11,8 @@ enum { BAR_L, BAR_R, BAR_T, BAR_B };
 /* one look at a picture: out[] = the width of each bar in pixels (0: none), -1: cannot tell (the whole picture
  * is dark, e.g. a night scene or a fade) */
 void bars_detect(const uint32_t *px, int stride, int w, int h, int out[4]);
+/* the same on the Y (brightness) plane of a YUV picture, one byte a pixel (1.2: the HD decoder's pictures) */
+void bars_detect_y(const uint8_t *y, int stride, int w, int h, int out[4]);
 
 /* what is painted: a bar gets narrower at once (the picture must never be covered), wider only when two looks in
  * a row agree */
