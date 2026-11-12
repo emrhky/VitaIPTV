@@ -32,11 +32,17 @@
   and blocky. Same fonts (the Latin one with the Turkish letters, the default one for other scripts), same widths.
 
 ### Test (for 1.2 test builds only)
-- **Memory test for the HD decoder** (`ux0:data/VitaIPTV/memtest.txt`): where the decoder above 720p keeps its
-  reference pictures and writes the pictures it hands out: video memory (CDRAM, as always) or main memory. `0`-`3`
-  picks one mode, `auto` changes the mode every 40 s at a keyframe. Every 40 s a `memtest:` line in log.txt gives
-  the pictures decoded and shown a second, the decoder's time a call and the errors. While the file is there every
-  picture is decoded (no leaving out at 1080p50), so the decoder's own speed shows. No file: as always.
+- **HD decoder test** (`ux0:data/VitaIPTV/memtest.txt`), progressive streams above 720p only:
+  - `0`: as always; `1`: the decoder's frame memory in main memory (measured: its calls take 3x as long);
+    `2` or `yuv`: pictures as YUV 4:2:0 with the colour as Y + UV (NV12), `3`: as Y + U + V. YUV pictures are 3.1 MB
+    instead of 8.4 MB at 1080p; the GPU turns them into colour when it draws them. No black bars in modes 2 and 3.
+  - `auto`: modes 0, 2 and 3 in turn, 40 s each, changed at a keyframe. A mode whose decoder gives no picture goes
+    back to mode 0.
+  - While the file is there every picture is decoded (nothing left out), so the decoder's own speed shows. Every
+    40 s a `memtest:` line in log.txt gives the pictures decoded and shown a second, the decoder's time a call and
+    the errors. No file: as always.
+  - Measured (1080p50, mode 0): about 35 pictures a second when all are decoded; pictures in main memory: refused
+    by the decoder (0x80620007, removed from the test).
 
 ## 1.1.0
 
