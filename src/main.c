@@ -40,7 +40,6 @@
 #include "lang.h"
 #include "fav.h"
 #include "mylist.h"
-#include "bars.h"
 #include "listcache.h"
 #include "epg.h"
 #include "guide.h"
@@ -2588,7 +2587,6 @@ static const char *guide_now_title(int ci)
 
 /* ---- playback ---------------------------------------------------------- */
 static unsigned play_started_us, osd_until_us;
-static Bars g_bars;                         /* 1.2: the picture's black bars (bars.h) */
 static int play_hot;                        /* 1.2: a core was 65% busy on this channel: full speed for it */
 static int got_frame;
 static char play_err[128];
@@ -2847,7 +2845,6 @@ static void play_channel_ex(int vi, int use_proxy)
 {
     play_vis = vi;
     got_frame = 0;
-    bars_reset(&g_bars);                                     /* 1.2 */
     play_hot = 0;
     decoder_note_done = 0;
     play_started_us = now_ms();
@@ -2978,7 +2975,6 @@ static void start_probe(void)
     probe_cancel();
     play_err[0] = 0;
     got_frame = 0;
-    bars_reset(&g_bars);                                     /* 1.2 */
     play_hot = 0;
     play_mode = 1;
     if (probe_start(chans.items[vis[play_vis]].url) != 0) snprintf(play_err, sizeof play_err, "Cannot start analysis");
@@ -3196,31 +3192,8 @@ static void activate_item(int vi)
     }
 }
 
-/* 1.2: the black bars inside the picture (bars.h), looked at twice a second, painted pure black (OLED) */
-static void video_bars(vita2d_texture *t, int w, int h, float x0, float y0, float s)
-{
-    static int lw, lh;
-    static unsigned next;
-    if (w != lw || h != lh) { bars_reset(&g_bars); lw = w; lh = h; next = 0; }
-    unsigned now = now_ms();
-    if ((int)(now - next) >= 0) {
-        int det[4];
-        next = now + 500;
-        if (((unsigned)vita2d_texture_get_format(t) & 0xFE000000u) == 0x90000000u)   /* (YUV: its Y plane, one byte a pixel) */
-            bars_detect_y((const uint8_t *)vita2d_texture_get_datap(t), (int)vita2d_texture_get_width(t), w, h, det);
-        else bars_detect((const uint32_t *)vita2d_texture_get_datap(t), (int)(vita2d_texture_get_stride(t) / 4), w, h, det);
-        bars_update(&g_bars, det);
-    }
-    const int *b = g_bars.cur;
-    unsigned k = RGBA8(0, 0, 0, 255);
-    if (b[BAR_L] > 1) vita2d_draw_rectangle(x0, y0, (b[BAR_L] - 1) * s, h * s, k);   /* (a pixel short: never the picture) */
-    if (b[BAR_R] > 1) vita2d_draw_rectangle(x0 + (w - b[BAR_R] + 1) * s, y0, (b[BAR_R] - 1) * s, h * s, k);
-    if (b[BAR_T] > 1) vita2d_draw_rectangle(x0, y0, w * s, (b[BAR_T] - 1) * s, k);
-    if (b[BAR_B] > 1) vita2d_draw_rectangle(x0, y0 + (h - b[BAR_B] + 1) * s, w * s, (b[BAR_B] - 1) * s, k);
-}
-
 /* fields: 0 a whole picture; 1 / 2 the top / bottom of two fields one above the other (1080i), stretched */
-static void draw_video_texture(vita2d_texture *t, int w, int h, int fields, int bars)
+static void draw_video_texture(vita2d_texture *t, int w, int h, int fields)
 {
     float sx = 960.0f / w, sy = 544.0f / h, s = sx < sy ? sx : sy;
     float x0 = (960.0f - w * s) / 2, y0 = (544.0f - h * s) / 2;
@@ -3235,7 +3208,6 @@ static void draw_video_texture(vita2d_texture *t, int w, int h, int fields, int 
         return;
     }
     vita2d_draw_texture_part_scale(t, x0, y0, 0, 0, w, h, s, s);
-    if (bars) video_bars(t, w, h, x0, y0, s);
 }
 
 /* 1.2: 1080i "bob": the decoder gives each picture as its two fields one above the other; both are shown, the
@@ -3308,7 +3280,7 @@ static void draw_tsp_screen(int osd)
                   st->state == TSP_ENDED ? T("Stream ended") : now_ms() < film_note_until ? film_note : NULL, player_fav());
         return;
     }
-    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields ? bob_field(st) : 0, 1); got_frame = 1; }
+    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields ? bob_field(st) : 0); got_frame = 1; }
     {                                                    /* (where a start stopped, if it ever does: one crash in 0.2.7) */
         static int last_state = -1;
         int sv = st ? st->state : -1;
@@ -3494,7 +3466,7 @@ static void draw_mp4_screen(int osd)
 {
     const Channel *c = cur_channel();
     vita2d_texture *t = player_poll();
-    if (t) { got_frame = 1; draw_video_texture(t, vita2d_texture_get_width(t), vita2d_texture_get_height(t), 0, 0); }
+    if (t) { got_frame = 1; draw_video_texture(t, vita2d_texture_get_width(t), vita2d_texture_get_height(t), 0); }
     ScrPlayer sp;
     memset(&sp, 0, sizeof sp);
     sp.backdrop = !got_frame;
