@@ -127,6 +127,7 @@ typedef struct { Pkt *head, *tail; int count, max_count; size_t bytes, max_bytes
 
 typedef struct {
     vita2d_texture tex;
+    int tex_h;                          /* 1.2: the texture's height (YUV: the picture's coded height, see take_picture) */
     SceUID uid;
     void *data;
     volatile int state;
@@ -269,7 +270,7 @@ typedef struct {
     uint32_t pub_fed, pub_nopic, pub_nopic_nonref;     /* public decoder: units given, of them without a picture */
     int hd60, hd60_pending;             /* 720p above 30 fps through the HD decoder (0.2.10 experiment) */
     /* 1.2: the HD decoder's pictures as YUV 4:2:0 (see yuv_wanted) */
-    int yuv, yuv_off, yuv_units;
+    int yuv, yuv_off, yuv_units, yuv_h_logged;
     uint32_t yuv_open_dec;
     uint8_t sps_src[256], sps_fix[300]; /* the last SPS seen and its fixed form (spsfix.c); fix_len 0 = as it is */
     size_t sps_src_len, sps_fix_len;
@@ -601,6 +602,7 @@ static int slot_init(Tsp *t, Slot *s)
     int r = sceGxmTextureInitLinear(&s->tex.gxm_tex, s->data, fmt, (unsigned)t->dw, (unsigned)t->dh, 0);
     if (r < 0) { plog("tsp: texture init 0x%08X", (unsigned)r); return r; }
     vita2d_texture_set_filters(&s->tex, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
+    s->tex_h = t->dh;
     s->state = SLOT_FREE;
     return 0;
 }
@@ -1232,6 +1234,18 @@ static void take_picture(Tsp *t, SceAvcdecPicture *p, int si)
          * (not while catching up, when only reference pictures are decoded anyway) */
         int hide = t->pre_skip == 2 && !t->catchup && t->st.decoded > 0 && opts >= 0 && !even_place(t, opts);
         if (t->cur_interlaced && !t->yuv) field_check(t, (const uint8_t *)sl->data);
+        /* 1.2: YUV: the decoder puts the colour planes after the Y plane of the picture's own coded height, not
+         * after the height the decoder was opened at (1088): films of 1920x800 / 818 / 1040 were green (the GPU
+         * read the colour from the wrong place); 1080 lines (coded 1088) were right. The texture gets that height
+         * (only its description changes; the slot is not on the screen now). */
+        unsigned ch = p->frame.verticalSize;
+        if (t->yuv && ch >= 16 && ch <= (unsigned)t->dh && (int)ch != sl->tex_h) {
+            if (sceGxmTextureInitLinear(&sl->tex.gxm_tex, sl->data, SCE_GXM_TEXTURE_FORMAT_YUV420P3_CSC1, (unsigned)t->dw, ch, 0) >= 0) {
+                vita2d_texture_set_filters(&sl->tex, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
+                if (!t->yuv_h_logged++) plog("tsp: YUV pictures %ux%u: the colour planes after %u lines", (unsigned)t->dw, ch, ch);
+                sl->tex_h = (int)ch;
+            }
+        }
         if (t->st.decoded == 0 && t->cur_interlaced)
             plog("tsp: interlaced picture: pic struct %u/%u, ct type %u", p->info.picStruct[0], p->info.picStruct[1], p->info.ctType);
         sceKernelLockMutex(t->lock, 1, NULL);
