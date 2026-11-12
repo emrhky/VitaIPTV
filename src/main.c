@@ -1320,7 +1320,7 @@ static void apply_look(void)
 {
     ui_set_theme(settings.theme);
     scr_sub_style(settings.sub_size, settings.sub_color, settings.sub_pos, settings.sub_bg);
-    afx_set_global(settings.snd_boost, settings.snd_speaker);   /* 1.1: sound */
+    afx_set_global(settings.snd_boost, settings.snd_speaker, settings.snd_level);   /* 1.1: sound; 1.2: one level */
     a52_set_dialog(settings.snd_dialog);
 }
 
@@ -2614,22 +2614,25 @@ static const char *sub_look_value(int k)
     int v = k == 0 ? settings.sub_size : k == 1 ? settings.sub_color : k == 2 ? settings.sub_pos : settings.sub_bg;
     return V[k & 3][v & 3];
 }
-/* 1.1: sound (Select > Audio): volume boost, speaker mode, clear dialogue; saved when the menu closes */
-static const char *const SND_NAME[3] = { "Volume boost", "Clear sound", "Clear speech (5.1)" };
+/* 1.1: sound (Select > Audio): volume boost, speaker mode, clear dialogue; 1.2: the same level on every channel;
+ * saved when the menu closes */
+#define SND_N 4
+static const char *const SND_NAME[SND_N] = { "Volume boost", "Clear sound", "Clear speech (5.1)", "Same volume on every channel" };
 static const char *snd_value(int k)
 {
     static const char *const B[4] = { "Off", "+3 dB", "+6 dB", "+9 dB" };
     if (k == 0) return B[settings.snd_boost & 3];
-    return (k == 1 ? settings.snd_speaker : settings.snd_dialog) ? "On" : "Off";
+    return (k == 1 ? settings.snd_speaker : k == 2 ? settings.snd_dialog : settings.snd_level) ? "On" : "Off";
 }
 static int sub_look_dirty;
 static void snd_step(int k, int d)
 {
     if (k == 0) settings.snd_boost = (settings.snd_boost + d + 4) % 4;
     else if (k == 1) settings.snd_speaker = !settings.snd_speaker;
-    else settings.snd_dialog = !settings.snd_dialog;
+    else if (k == 2) settings.snd_dialog = !settings.snd_dialog;
+    else settings.snd_level = !settings.snd_level;
     sub_look_dirty = 1;
-    afx_set_global(settings.snd_boost, settings.snd_speaker);
+    afx_set_global(settings.snd_boost, settings.snd_speaker, settings.snd_level);
     a52_set_dialog(settings.snd_dialog);
     plog("player: %s %s", SND_NAME[k], snd_value(k));
 }
@@ -3863,7 +3866,7 @@ static int f_type;                                        /* 0 Xtream, 1 M3U, 2 
 static char f_name[IPTV_NAME_MAX], f_url[IPTV_URL_MAX], f_user[IPTV_CRED_MAX], f_pass[IPTV_CRED_MAX], f_proxy[IPTV_URL_MAX];
 static int f_lang, f_adult, f_hd, f_res;
 static int f_theme;                                      /* 0.8.1: shown at once, back if the form is cancelled */
-static int f_srv, f_boost, f_clear, f_speech;            /* 1.1: server off / when needed / always; the sound */
+static int f_srv, f_boost, f_clear, f_speech, f_level;            /* 1.1: server off / when needed / always; the sound */
 static int set_scroll, form_about;                       /* 1.1: the settings' first row shown; "About" asked */
 static int form_ask;                                     /* 1.1: O with changes: "Save the settings?" / "Save the playlist?" */
 static const char *const AUTO_NAMES[3] = { "Off", "When needed", "Always" };
@@ -3909,6 +3912,7 @@ static void open_settings_form(void)
     f_boost = settings.snd_boost & 3;
     f_clear = settings.snd_speaker;
     f_speech = settings.snd_dialog;
+    f_level = settings.snd_level;
     set_scroll = 0;
     form_about = 0;
 }
@@ -3928,7 +3932,7 @@ static int source_field_enabled(int i)
 
 #define SRC_FIELDS 5                                     /* (+1: "Delete playlist" when editing one; 1.1: no Save / Cancel rows) */
 /* 1.1: the settings' rows (the address and the test only while the server is on) */
-enum { SF_LANG, SF_THEME, SF_RES, SF_ADULT, SF_HD, SF_PIN, SF_BOOST, SF_CLEAR, SF_SPEECH, SF_SERVER, SF_ADDR, SF_TEST,
+enum { SF_LANG, SF_THEME, SF_RES, SF_ADULT, SF_HD, SF_PIN, SF_BOOST, SF_CLEAR, SF_SPEECH, SF_LEVEL, SF_SERVER, SF_ADDR, SF_TEST,
        SF_CLR_RECENT, SF_CLR_WATCHED, SF_ABOUT, SF_N };
 static int set_rows(int *ids)
 {
@@ -4059,6 +4063,7 @@ static void save_settings_form(void)
     settings.snd_boost = f_boost;
     settings.snd_speaker = f_clear;
     settings.snd_dialog = f_speech;
+    settings.snd_level = f_level;
     settings.lang = f_lang;
     settings.hide_adult = f_adult;
     settings.hide_4k = f_hd;
@@ -4115,6 +4120,7 @@ static void set_step(int dir, int cross)
     case SF_BOOST: f_boost = (f_boost + (dir < 0 ? 3 : 1)) % 4; break;
     case SF_CLEAR: f_clear = !f_clear; break;
     case SF_SPEECH: f_speech = !f_speech; break;
+    case SF_LEVEL: f_level = !f_level; break;
     case SF_SERVER: {
         int was = f_srv;
         f_srv = (f_srv + (dir < 0 ? 2 : 1)) % 3;
@@ -4154,7 +4160,7 @@ static int form_changed(void)
         int srv0 = settings.proxy_off || !settings.proxy[0] ? 0 : settings.auto_proxy == 2 ? 2 : 1;
         return f_lang != settings.lang || f_adult != settings.hide_adult || f_hd != settings.hide_4k || strcmp(f_pin, settings.pin) ||
                RES_VALUES[f_res] != settings.res_pref || f_theme != settings.theme || strcmp(f_proxy, settings.proxy) ||
-               f_srv != srv0 || f_boost != (settings.snd_boost & 3) || f_clear != settings.snd_speaker || f_speech != settings.snd_dialog;
+               f_srv != srv0 || f_boost != (settings.snd_boost & 3) || f_clear != settings.snd_speaker || f_speech != settings.snd_dialog || f_level != settings.snd_level;
     }
     if (edit_index < 0) return f_name[0] || f_url[0] || f_user[0] || f_pass[0];
     if (edit_index >= nsources) return 0;
@@ -4218,6 +4224,7 @@ static void draw_form(void)
             "For quiet channels; a limiter keeps it from distorting. Careful with loud sound on headphones.",
             "For the Vita's speakers: less of the deep bass they cannot play, clearer voices.",
             "5.1 films and channels: the voices louder in the stereo mix.",
+            "Quiet and loud channels come out about as loud as each other (the level follows over a few seconds).",
             "Plays what the Vita cannot (HEVC, 1080i, AC-3...) through tools/vita_iptv_proxy.py on a PC.",
             "The server's address, e.g. http://192.168.1.20:8090",
             "Checks that the server answers.",
@@ -4242,6 +4249,7 @@ static void draw_form(void)
             case SF_BOOST: *x = (ScrField){ T("Volume boost"), T(BOOST_NAMES[f_boost]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_CLEAR: *x = (ScrField){ T("Clear sound"), T(f_clear ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
             case SF_SPEECH: *x = (ScrField){ T("Clear speech (5.1)"), T(f_speech ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
+            case SF_LEVEL: *x = (ScrField){ T("Same volume on every channel"), T(f_level ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
             case SF_SERVER: *x = (ScrField){ T("Transcoding server"), T(AUTO_NAMES[f_srv]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_ADDR: *x = (ScrField){ T("Server address"), f_proxy, SCR_F_TEXT, 1, 1 }; break;
             case SF_TEST: *x = (ScrField){ T("Test server"), NULL, SCR_F_ACTION, 1, 1 }; break;
@@ -4337,10 +4345,25 @@ static void auto_proxy_check(void)
 static unsigned prev_btn;
 static int hold;
 
-/* Analog sticks as repeating up/down.  lstick_ud / rstick_ud: -1 up, 0 none, +1 down.
- * On the channel screen the left stick scrolls categories and the right stick channels. */
-static int lstick_ud, rstick_ud;
+/* 1.2: the left stick only (the right one does nothing): up / down as the d-pad, repeating, in every list and
+ * menu; on the channel screen a push to the right from the middle opens the category, to the left leaves it.
+ * lstick_ud: -1 up, 0 none, +1 down. stick_lr: -1 / +1 once per push (see stick_side). */
+static int lstick_ud, stick_lr;
 static int stick_x;                 /* sideways push of the left stick, -128..127 (films: scrubbing) */
+
+/* a push to one side, once: from the middle (both axes near it), far enough, and straight (the stick at most half
+ * as far up or down as sideways): a slanted push while scrolling a list never opens a category; a push up or
+ * down first needs the stick back in the middle before a sideways one counts */
+static int stick_side(int x, int y)
+{
+    static int armed = 1;
+    int dx = x - 128, dy = y - 128, ax = dx < 0 ? -dx : dx, ay = dy < 0 ? -dy : dy;
+    if (ax < 32 && ay < 32) { armed = 1; return 0; }
+    if (!armed) return 0;
+    if (ay >= 64) { armed = 0; return 0; }                    /* (up / down: not sideways until the middle again) */
+    if (ax >= 100 && ay * 2 <= ax) { armed = 0; return dx > 0 ? 1 : -1; }
+    return 0;
+}
 
 static int stick_dir(int v, int *hold_count)      /* v is 0..255, 128 is centre */
 {
@@ -4354,7 +4377,7 @@ static int stick_dir(int v, int *hold_count)      /* v is 0..255, 128 is centre 
 
 static unsigned read_pressed(void)
 {
-    static int lhold, rhold;
+    static int lhold;
     SceCtrlData pad;
     sceCtrlPeekBufferPositive(0, &pad, 1);
     unsigned pressed = pad.buttons & ~prev_btn;
@@ -4362,7 +4385,7 @@ static unsigned read_pressed(void)
     if (ud) { hold++; if (hold > 20 && hold % 3 == 0) pressed |= ud; } else hold = 0;
     prev_btn = pad.buttons;
     lstick_ud = stick_dir(pad.ly, &lhold);
-    rstick_ud = stick_dir(pad.ry, &rhold);
+    stick_lr = stick_side(pad.lx, pad.ly);
     stick_x = (int)pad.lx - 128;                             /* 0.4.0: only the left stick moves through a film */
     return pressed;
 }
@@ -4726,8 +4749,6 @@ static void guide_input(unsigned p)
     }
     if (p & SCE_CTRL_DOWN) { if (gd_row + 1 < nvis) gd_row++; }
     if (p & SCE_CTRL_UP) { if (gd_row > 0) gd_row--; }
-    if (rstick_ud > 0 && gd_row + 1 < nvis) gd_row++;
-    if (rstick_ud < 0 && gd_row > 0) gd_row--;
     int dir = 0;                                             /* left / right, repeating while held */
     unsigned now = now_ms();
     if (p & SCE_CTRL_RIGHT) { dir = 1; gd_lr_t0 = gd_lr_last = now; }
@@ -4869,8 +4890,6 @@ static void chan_guide_input(unsigned p)
     if (cg_n == 0) cg_fill();                                /* (the guide may have come meanwhile) */
     if ((p & SCE_CTRL_DOWN) && cg_sel + 1 < cg_n) cg_sel++;
     if ((p & SCE_CTRL_UP) && cg_sel > 0) cg_sel--;
-    if (rstick_ud > 0 && cg_sel + 1 < cg_n) cg_sel++;
-    if (rstick_ud < 0 && cg_sel > 0) cg_sel--;
     if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_TRIANGLE)) { cg_open = 0; return; }
     if ((p & SCE_CTRL_CROSS) && cg_sel < cg_n) {
         int n, ci = vis[cg_vi];
@@ -5331,11 +5350,12 @@ int main(void)
     int menu_open = 0, menu_sel = 0, quit = 0, section_menu = 0, section_sel = 0;
     for (;;) {
         unsigned p = read_pressed();
-        {   /* the left stick up / down moves like the d-pad in the playlists, forms and menus (the channel
-             * screen uses it for the categories) */
+        {   /* the left stick up / down moves like the d-pad everywhere but over the playing picture itself (1.2: the
+             * channel screen too, the list that has the highlight; the right stick does nothing) */
             int menus = form_kind != FORM_NONE || menu_open || quit_ask || src_ask || section_menu ||
                         (state == ST_CHANNELS && resume_ask) || (state == ST_PLAYING && res_menu);
-            if (lstick_ud && (menus || state == ST_SOURCES)) { p |= lstick_ud > 0 ? SCE_CTRL_DOWN : SCE_CTRL_UP; lstick_ud = 0; }
+            int over_picture = state == ST_PLAYING && !menus && !guide_open && !cg_open;
+            if (lstick_ud && !over_picture) { p |= lstick_ud > 0 ? SCE_CTRL_DOWN : SCE_CTRL_UP; lstick_ud = 0; }
         }
         if (ime_active) p = 0;                               /* the keyboard owns the buttons */
         keep_awake();
@@ -5624,15 +5644,13 @@ int main(void)
                 }
                 if (p & SCE_CTRL_CIRCLE) resume_ask = 0;
                 p = 0;
-                rstick_ud = lstick_ud = 0;
             }
             if (fav_moving && edit_ask) {                    /* 1.1: "Save the new order?" */
                 if (p & SCE_CTRL_CROSS) edit_end(1);
                 else if (p & SCE_CTRL_CIRCLE) edit_end(0);
                 p = 0;
-                rstick_ud = lstick_ud = 0;
             } else if (fav_moving) {                         /* 1.1: the edit mode: up / down, X picks up / puts down, START, O */
-                int dir = (p & SCE_CTRL_DOWN) || rstick_ud > 0 ? 1 : (p & SCE_CTRL_UP) || rstick_ud < 0 ? -1 : 0;
+                int dir = (p & SCE_CTRL_DOWN) ? 1 : (p & SCE_CTRL_UP) ? -1 : 0;
                 if (dir && move_ci >= 0) edit_step(dir);
                 else if (dir && nvis) sel = (sel + dir + nvis) % nvis;
                 if (p & SCE_CTRL_START) edit_end(1);
@@ -5644,21 +5662,10 @@ int main(void)
                     if (edit_dirty) edit_ask = 1; else edit_end(0);
                 }
                 p = 0;
-                rstick_ud = lstick_ud = 0;
             }
-            /* the right stick always moves the channel list and the left stick the categories, wherever the
-             * blue highlight is; the highlight follows the stick that was used (so X acts on that list) */
+            /* 1.2: the left stick pushed to the right opens the category, to the left goes back to it (as the d-pad) */
+            if (state == ST_CHANNELS && !fav_moving && !resume_ask && stick_lr) p |= stick_lr > 0 ? SCE_CTRL_RIGHT : SCE_CTRL_LEFT;
             unsigned chan_p = p, cat_p = p;
-            if (state == ST_CHANNELS && rstick_ud && nvis) {
-                focus = 1;
-                sel = rstick_ud > 0 ? (sel + 1) % nvis : (sel + nvis - 1) % nvis;
-            }
-            if (state == ST_CHANNELS && !searching && ngroups > 1 && lstick_ud) {
-                focus = 0;
-                leave_episodes();
-                if (lstick_ud > 0) { cur_group = (cur_group + 1) % ngroups; rebuild_visible(); }
-                else { cur_group = (cur_group + ngroups - 1) % ngroups; rebuild_visible(); }
-            }
             if (state != ST_CHANNELS) {
                 /* a film started from the resume box */
             } else if (searching || focus == 1) {            /* channel list */
@@ -5808,7 +5815,7 @@ int main(void)
                             MENU_ADD(ms->a_n > 1 ? MA_AUDIO : MA_NONE, k, ms->a_n < 2);
                         }
                     else { snprintf(names[n], sizeof names[n], "%s", T(via_proxy ? "Chosen by the server" : "No other sound")); MENU_ADD(MA_NONE, 0, 1); }
-                    for (int k = 0; k < 3; k++) {            /* 1.1: volume boost, speaker mode, clear dialogue */
+                    for (int k = 0; k < SND_N; k++) {        /* 1.1: volume boost, speaker mode, clear dialogue; 1.2: one level */
                         snprintf(names[n], sizeof names[n], "%s:  < %s >", T(SND_NAME[k]), T(snd_value(k)));
                         MENU_ADD(MA_SND, k, 0);
                     }

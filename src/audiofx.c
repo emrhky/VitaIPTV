@@ -10,34 +10,47 @@
 #define CHUNK 256                       /* samples per channel the limiter looks at together (5 ms at 48 kHz) */
 #define CEIL 0.93f                      /* the limiter keeps peaks below this (about -0.6 dB) */
 
-static volatile int g_boost, g_speaker;
+/* 1.2 level: where the sound is brought, and how far and how fast */
+#define LV_TARGET 0.1f                  /* -20 dBFS average (RMS) */
+#define LV_MIN    0.5f                  /* -6 dB */
+#define LV_MAX    4.0f                  /* +12 dB */
+#define LV_SILENT 0.003f                /* -50 dBFS: a pause, not measured */
+#define LV_TAU    3.0f                  /* seconds the average looks back */
+#define LV_DBS    3.0f                  /* dB a second the gain moves at most (6 in the first 3 s) */
 
-void afx_set_global(int boost, int speaker)
+static volatile int g_boost, g_speaker, g_level;
+
+void afx_set_global(int boost, int speaker, int level)
 {
     g_boost = boost < 0 ? 0 : boost > 3 ? 3 : boost;
     g_speaker = speaker ? 1 : 0;
+    g_level = level ? 1 : 0;
 }
 
-void afx_get_global(int *boost, int *speaker)
+void afx_get_global(int *boost, int *speaker, int *level)
 {
     *boost = g_boost;
     *speaker = g_speaker;
+    *level = g_level;
 }
 
 void afx_init(AudioFx *fx)
 {
     memset(fx, 0, sizeof *fx);
     fx->gain = 1.0f;
+    fx->lv_gain = 1.0f;
 }
 
-void afx_set(AudioFx *fx, int boost, int speaker)
+void afx_set(AudioFx *fx, int boost, int speaker, int level)
 {
     if (speaker != fx->speaker) memset(fx->z, 0, sizeof fx->z);
+    if (level != fx->level) { fx->lv_pow = 0; fx->lv_gain = 1.0f; fx->lv_n = 0; }
     fx->boost = boost;
     fx->speaker = speaker;
+    fx->level = level;
 }
 
-int afx_active(const AudioFx *fx) { return fx->boost > 0 || fx->speaker; }
+int afx_active(const AudioFx *fx) { return fx->boost > 0 || fx->speaker || fx->level; }
 
 /* RBJ audio EQ cookbook biquads, normalised (a0 = 1) */
 static void design(AudioFx *fx, int rate)
@@ -90,6 +103,7 @@ void afx_process(AudioFx *fx, int16_t *pcm, int samples, int ch, int rate)
     float target = fx->boost ? powf(10.0f, 3.0f * (float)fx->boost / 20.0f) : 1.0f;
     float rel = powf(10.0f, 6.0f * (float)CHUNK / (float)rate / 20.0f);   /* gain back up: about 6 dB a second */
     float buf[CHUNK * 2];
+    float csec = (float)CHUNK / (float)rate;                 /* (a chunk's length in seconds) */
     for (int off = 0; off < samples; off += CHUNK) {
         int n = samples - off < CHUNK ? samples - off : CHUNK;
         int16_t *p = pcm + (size_t)off * (size_t)ch;
@@ -106,6 +120,26 @@ void afx_process(AudioFx *fx, int16_t *pcm, int samples, int ch, int rate)
             if (a > peak) peak = a;
         }
         float want = target;
+        if (fx->level) {                                     /* 1.2: the channel's loudness towards one level */
+            float ms = 0.0f;
+            for (int i = 0; i < n * ch; i++) ms += buf[i] * buf[i];
+            ms /= (float)(n * ch);
+            if (ms > LV_SILENT * LV_SILENT) {                /* (pauses do not count) */
+                int early = fx->lv_n * csec < 3.0f;
+                float a = csec / (early ? 0.5f : LV_TAU);
+                if (a > 1.0f) a = 1.0f;
+                fx->lv_pow = fx->lv_n ? fx->lv_pow + a * (ms - fx->lv_pow) : ms;
+                fx->lv_n++;
+                float g = sqrtf(LV_TARGET * LV_TARGET / fx->lv_pow);
+                if (g < LV_MIN) g = LV_MIN;
+                if (g > LV_MAX) g = LV_MAX;
+                float stepmax = powf(10.0f, (early ? 2.0f : 1.0f) * LV_DBS * csec / 20.0f);
+                if (g > fx->lv_gain * stepmax) g = fx->lv_gain * stepmax;
+                if (g < fx->lv_gain / stepmax) g = fx->lv_gain / stepmax;
+                fx->lv_gain = g;
+            }
+            want *= fx->lv_gain;
+        }
         if (peak * want > CEIL) want = CEIL / peak;
         float g0 = fx->gain, g1;
         if (want < g0) g0 = g1 = want;                      /* down at once: this chunk's peak is known before */

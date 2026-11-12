@@ -527,8 +527,8 @@ void scr_tabmenu(const char *const *tabs, int ntabs, int tab, const char *const 
             ui_round_rect(x + 14, ry, w - 28, rh - 6, 9, UI_SEL);
             vita2d_draw_rectangle(x + 14, ry + 8, 4, rh - 22, UI_ACCENT);
         }
-        ui_text_fit(x + 34, ry + (rh - 6) / 2 + 10, dim && dim[i] ? UI_DIM : UI_TEXT, LIST_FS, items[i], w - 68);
-        if (i == sel && !(dim && dim[i])) ui_text_fit(x + 35, ry + (rh - 6) / 2 + 10, UI_TEXT, LIST_FS, items[i], w - 68);
+        text_fit_mid(x + w / 2, ry + (rh - 6) / 2 + 10, dim && dim[i] ? UI_DIM : UI_TEXT, LIST_FS, items[i], w - 68,
+                     i == sel && !(dim && dim[i]));         /* (1.2: in the middle, as the Select menu) */
     }
     if (top > 0) ui_fill_triangle(x + w - 30, y + 80, x + w - 22, y + 70, x + w - 14, y + 80, UI_DIM);   /* more above / below */
     if (top + SCR_TAB_ROWS < n) {
