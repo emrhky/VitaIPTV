@@ -3227,7 +3227,8 @@ static void draw_video_texture(vita2d_texture *t, int w, int h, int fields, int 
         return;
     }
     vita2d_draw_texture_part_scale(t, x0, y0, 0, 0, w, h, s, s);
-    if (bars) video_bars(t, w, h, x0, y0, s);
+    /* (not on the 1.2 YUV test's pictures, planes rather than pixels: base formats YUV420P2 0x90.., P3 0x91..) */
+    if (bars && ((unsigned)vita2d_texture_get_format(t) & 0xFE000000u) != 0x90000000u) video_bars(t, w, h, x0, y0, s);
 }
 
 /* 0.6.0: "mono", "stereo", or "5.1 > stereo" when more channels were mixed down */
