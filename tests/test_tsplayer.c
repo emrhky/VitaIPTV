@@ -77,9 +77,11 @@ static int sps_unrestricted;
 /* 0.4.0: like the Vita with Ciftci TV: a stream with timing information (HRD / pic_struct in the SPS, or
  * SEI units) gets no picture from either decoder ("out of memory" for every unit) */
 static int refuse_timing, sps_timing, refuse_unrestricted, sps_norestr;
+static int refuse_unr_after, unr_units;    /* 1.2: "out of memory" for an SPS without restriction after this many units */
 static int int_refuse_all;                  /* 0.4.1: the HD decoder takes every unit and gives nothing ("out of memory") */
 static int timing_refused(const uint8_t *b, size_t n)
-{ return (refuse_timing && (sps_timing || has_nal(b, n, 6))) || (refuse_unrestricted && sps_norestr); }
+{ return (refuse_timing && (sps_timing || has_nal(b, n, 6))) || (refuse_unrestricted && sps_norestr) ||
+         (refuse_unr_after && sps_norestr && ++unr_units > refuse_unr_after); }
 static void check_sps(const uint8_t *b, size_t n)
 {
     for (size_t i = 0; i + 3 < n; i++) {
@@ -603,7 +605,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33 || argc == 34 || argc == 35);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33 || argc == 34 || argc == 35 || argc == 36);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r;
@@ -654,20 +656,17 @@ int main(int argc, char **argv)
     printf("               decoder busy %d time(s)\n", int_full_hits);
     assert(int_full_hits >= 6 && r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.dropped <= 3 && r.changes >= 115);
     int_full_every = 0;
-    /* 1.2 test (memtest.txt "auto"): the HD decoder's memory changes every period, the decoder closed and opened
-     * again at a keyframe; the film plays on to the end, in order, nearly whole */
+    /* 1.2: the HD decoder hands out YUV pictures (Y, then U, then V); one that does not take them gives no picture:
+     * RGBA again at a keyframe, and the film plays on */
     {
-        extern int tsp_mt_force, tsp_mt_secs;
-        tsp_mt_force = 4; tsp_mt_secs = 1; int_creates = 0; int_yuv_seen = 0;
+        int_yuv_seen = 0; int_creates = 0;
         r = play(argv[2], 10);
-        show("1080p memtest", &r);
-        printf("               decoder opened %d times, YUV format 0x%X\n", int_creates, (unsigned)int_yuv_seen);
-        assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates >= 2 && r.st.decoded >= 110 && r.st.errors == 0);
-        assert(int_yuv_seen == SCE_AVCDEC_PIXELFORMAT_YUV420_PACKED_RASTER);   /* (mode 2 came second) */
-        /* a decoder that does not take YUV: no picture in that mode, back to mode 0 at a keyframe; plays on */
-        tsp_mt_force = 2; int_no_yuv = 1; int_creates = 0;
+        show("1080p YUV", &r);
+        assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates == 1 && r.st.decoded >= 118 && r.st.errors == 0);
+        assert(int_yuv_seen == SCE_AVCDEC_PIXELFORMAT_YUV420_RASTER);
+        int_no_yuv = 1; int_creates = 0;
         r = play(argv[2], 10);
-        int_no_yuv = 0; tsp_mt_force = -1; tsp_mt_secs = 40;
+        int_no_yuv = 0;
         show("1080p YUV no", &r);
         printf("               decoder opened %d times\n", int_creates);
         assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates >= 2 && r.st.decoded >= 20);   /* (a short clip: the next keyframe) */
@@ -1196,6 +1195,17 @@ limit:
              * catches up while the end of the group is left out: no dropped pictures, no jumps) */
             assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 250 && r.st.skipped >= 50);
             assert(r.st.dropped < 40 && r.av_max < 400);
+        }
+        if (argc > 35) {
+            /* 1.2: 1080p25, 4 references, no bitstream_restriction: the HD decoder gives pictures, then runs out of
+             * memory and gives none (the 1920x1038 film): it is opened again with the restriction added, and plays */
+            tsp_set_options(1, 720);
+            refuse_unr_after = 60; unr_units = 0; sps_norestr = 0; sps_unrestricted = 0; int_creates = 0;
+            r = play(argv[35], 14);
+            refuse_unr_after = 0; sps_norestr = 0;
+            show("1080p no restr", &r);
+            printf("               decoder opened %d times, %d SPS without restriction reached it\n", int_creates, sps_unrestricted);
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates == 2 && r.st.decoded >= 130);
         }
         /* a file from the memory card (1080p25, HD decoder in decode order): plays to the end without the sound
          * waiting for pictures that will not come (0.2.7: 10 s of silence and a still picture at the end) */
