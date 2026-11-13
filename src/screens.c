@@ -256,7 +256,7 @@ void scr_player(const ScrPlayer *p)
     if (p->fav) { ui_star(nx + 11, 23, 11, UI_FAV); nx += 30; name_w -= 30; }   /* 0.5.0: a favourite */
     ui_text_fit(nx, 30, UI_TEXT, 1.25f, p->name, name_w);
     ui_text_fit(nx + 1, 30, UI_TEXT, 1.25f, p->name, name_w);
-    if (p->group && p->group[0]) ui_text_fit(20, 52, UI_DIM, 0.9f, p->group, 920);   /* (0.4.5: wider, the EPG line) */
+    if (p->group && p->group[0]) ui_text_fit(20, 52, UI_WARN, 0.9f, p->group, 920);  /* (0.4.5: wider, the EPG line; 1.2: amber) */
     if (p->info && p->info[0]) ui_text(940 - iw, 30, UI_DIM, 0.9f, p->info);
     int y = UI_FOOTER_Y;
     if (p->film) y = time_line(p, y);
@@ -268,10 +268,10 @@ void scr_player(const ScrPlayer *p)
             vita2d_draw_rectangle(0, y, 960, 26, UI_SHADE);
             stat_row(y + 19, rows[r]);
         }
-        note_band(y, p->stats_note, UI_DIM);
+        note_band(y, p->stats_note, UI_WARN);                /* (1.2: the notes amber, as the lists' notes) */
     } else {
-        y = note_band(y, p->stats2, UI_DIM);
-        note_band(y, p->stats1, UI_DIM);
+        y = note_band(y, p->stats2, UI_WARN);
+        note_band(y, p->stats1, UI_WARN);
     }
     ui_footer(p->hints, p->nhints, NULL, 0);
 }
@@ -290,7 +290,7 @@ void scr_radio(const char *name, const char *group, const char *audio_info, int 
     ui_meter(160, 196, 640, 170, level, t_ms);
     vita2d_draw_rectangle(160, 368, 640, 2, UI_LINE);
     if (audio_info && audio_info[0]) ui_text_center(480, 404, UI_DIM, 1.0f, audio_info);
-    if (note && note[0]) ui_text_wrap(60, 436, UI_DIM, 0.9f, note, 840, 24, 2, 1);   /* 0.5.0: two lines if long */
+    if (note && note[0]) ui_text_wrap(60, 436, UI_WARN, 0.9f, note, 840, 24, 2, 1);  /* 0.5.0: two lines if long; 1.2: amber */
     ui_footer(hints, nhints, NULL, 0);
 }
 

@@ -1805,7 +1805,12 @@ static void video_packet(Tsp *t, Pkt *p)
             t->st.dropped++;
             return;
         }
-        if (i->bit_depth != 8 || i->chroma != 1) { set_error_kind(t, TSP_ERRK_FORMAT, "H.264 %d-bit / chroma %d: not supported", i->bit_depth, i->chroma); return; }
+        if (i->bit_depth != 8 || i->chroma != 1) {           /* (1.2: the colour as people know it, "4:4:4", not "chroma 3") */
+            static const char *const cf[4] = { "4:0:0", "4:2:0", "4:2:2", "4:4:4" };
+            set_error_kind(t, TSP_ERRK_FORMAT, "H.264 %d-bit, colour %s (the Vita decodes 8-bit 4:2:0 only)", i->bit_depth,
+                           i->chroma >= 0 && i->chroma <= 3 ? cf[i->chroma] : "?");
+            return;
+        }
         plog("tsp: first %s after %u skipped pictures, %dx%d%s, level %d, %d refs", (flags & TS_FLAG_KEYFRAME) ? "keyframe" : "I-picture",
              t->st.dropped, i->width, i->height, i->interlaced ? " interlaced" : "", i->level, i->refs);
         int mbs = ((i->width + 15) / 16) * ((i->height + 15) / 16);

@@ -356,7 +356,7 @@ static const Pair PATTERNS[] = {
     { "Decoder rejects this stream (0x%08X)", "Çözücü bu yayını kabul etmiyor (0x%s)" },
     { "No memory layout accepted by the decoder (0x%08X)", "Çözücü hiçbir bellek düzenini kabul etmedi (0x%s)" },
     { "Video is %s: not supported", "Görüntü %s: desteklenmiyor" },
-    { "H.264 %d-bit / chroma %d: not supported", "H.264 %s-bit / renk %s: desteklenmiyor" },
+    { "H.264 %d-bit, colour %s (the Vita decodes 8-bit 4:2:0 only)", "H.264 %s-bit, renk %s (Vita yalnız 8-bit 4:2:0 çözer)" },
     { "Picture size changed to %dx%d (not supported yet)", "Görüntü boyutu %sx%s oldu (henüz desteklenmiyor)" },
     { "Audio %s: not supported", "Ses %s: desteklenmiyor" },
     { "Audio has %d channels: not supported", "Ses %s kanallı: desteklenmiyor" },
