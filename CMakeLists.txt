@@ -56,6 +56,7 @@ add_executable(${PROJECT_NAME}.elf
   src/a52dec.c
   src/audiofx.c
   src/aac51.c
+  src/vsurr.c
   src/mylist.c
   src/listcache.c
   src/guide.c

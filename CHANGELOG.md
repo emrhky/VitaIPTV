@@ -37,6 +37,13 @@
 - **Same volume on every channel** (Settings and Select > Audio, off unless turned on): quiet and loud channels
   come out about as loud as each other. The level is measured over a few seconds and brought towards -20 dBFS
   (between -6 and +12 dB, a few dB a second at most, quicker in a channel's first seconds); pauses do not count.
+- **Sound field** (Settings and Select > Audio, off unless turned on):
+  - *Speakers:* wider stereo for the Vita's speakers, which sit close together (the difference between the sides,
+    above about 300 Hz, about 5 dB louder). What is in the middle (voices, mono sound) is not changed.
+  - *Headphones:* crossfeed: each ear also hears the other side's low and middle sounds at about -7 dB, as from
+    speakers in a room, so hard left / right sound is less tiring. Mono sound is not changed. On 5.1 / 7.1
+    sound (AC-3, E-AC-3, AAC) also virtual surround: a rear channel comes to the other ear too, 0.6 ms later and
+    duller, with a quiet echo (13 / 17 ms). A light version, not a measured head model (HRTF).
 
 ### Network
 - **"Account busy" answers** (405, 407, 429, 503, 509, 512 before anything came, as a one-connection account gives
