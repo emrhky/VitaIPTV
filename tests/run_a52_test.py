@@ -10,7 +10,7 @@ if not P or not os.path.exists(os.path.join(P, "lib", "libavcodec.a")):
 T = tempfile.mkdtemp(prefix="a52_")
 def sh(c): subprocess.run(c, shell=True, check=True)
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -DHAVE_A52 -I{ROOT}/src -I{P}/include {ROOT}/tests/test_a52.c "
-   f"{ROOT}/src/a52dec.c {P}/lib/libavcodec.a {P}/lib/libavutil.a -lm -lpthread -o {T}/t")
+   f"{ROOT}/src/a52dec.c {ROOT}/src/vsurr.c {P}/lib/libavcodec.a {P}/lib/libavutil.a -lm -lpthread -o {T}/t")
 # 0.6.0: 5.1 and 7.1 AAC (ADTS) through FFmpeg's aac decoder. The reference: ffmpeg's decode of all channels,
 # mixed here like src/a52dec.c does it (left / right + centre and surrounds at -3 dB, LFE left out, scaled by
 # 1 / (1 + 2 * 0.7071)); 7.1 takes the side channels as the surrounds

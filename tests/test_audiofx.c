@@ -142,6 +142,44 @@ int main(void)
             assert(fabsf(fx.lv_gain - g) < 1e-6f);
         }
     }
+    /* 1.3: the sound field. Mono (both sides equal) is never changed; speakers: a sound only on the left gets
+     * more of the difference (the right goes negative, the left louder); headphones: a sound only on the left is
+     * heard a little on the right too (low / middle sounds), and less of it on the left */
+    {
+        afx_set_field(7);
+        assert(afx_get_field() == 0);
+        afx_set_field(2);
+        assert(afx_get_field() == 2);
+        afx_set_field(0);
+        for (int f = 1; f <= 2; f++) {
+            AudioFx fx;
+            afx_init(&fx);
+            afx_field(&fx, f);
+            assert(afx_active(&fx));
+            int16_t b[N * 2], ref[N * 2];
+            double ph = 0;
+            for (int i = 0; i < 20; i++) {                   /* mono: equal sides, the same out */
+                sine(b, N, 2, 1000, 0.3, &ph);
+                memcpy(ref, b, sizeof b);
+                afx_process(&fx, b, N, 2, RATE);
+                for (int k = 0; k < N * 2; k++) assert(abs(b[k] - ref[k]) <= 1);
+            }
+            double lin = 0, rin = 0, lo = 0, ro = 0;
+            for (int i = 0; i < 20; i++) {                   /* left only, 400 Hz */
+                sine(b, N, 2, 400, 0.3, &ph);
+                for (int k = 0; k < N; k++) b[2 * k + 1] = 0;
+                if (i == 19) for (int k = 0; k < N; k++) lin += (double)b[2 * k] * b[2 * k];
+                afx_process(&fx, b, N, 2, RATE);
+                if (i == 19) for (int k = 0; k < N; k++) { lo += (double)b[2 * k] * b[2 * k]; ro += (double)b[2 * k + 1] * b[2 * k + 1]; }
+            }
+            double l_db = 10 * log10(lo / lin), r_db = ro > 0 ? 10 * log10(ro / lin) : -200;
+            printf("sound field %s, left only: left %+.1f dB, right %+.1f dB\n", f == 1 ? "speakers" : "headphones", l_db, r_db);
+            (void)rin;
+            if (f == 1) assert(l_db > 1.0 && r_db > -12.0);  /* wider: the left louder, the right the other way */
+            else assert(l_db < 0.0 && l_db > -4.0 && r_db > -14.0 && r_db < -5.0);   /* crossfeed */
+            assert(peak_of(b, N * 2) <= 0.95);
+        }
+    }
     puts("audiofx: all tests passed");
     return 0;
 }
