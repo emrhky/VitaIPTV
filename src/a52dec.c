@@ -1,4 +1,5 @@
 #include "a52dec.h"
+#include "vsurr.h"
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
@@ -19,13 +20,16 @@ struct A52Dec {
     int aac;                            /* 0.6.0: FFmpeg's AAC decoder (whole ADTS frames, no parser) */
     int dialog;                         /* 1.1: "clear dialogue" mix (set when created) */
     uint32_t frames, errors;
+    VSurr vs;                           /* 1.3: virtual surround on headphones (followed at once) */
 };
 
 int a52_available(void) { return 1; }
 
-static volatile int g_dialog;
+static volatile int g_dialog, g_vsurr;
 void a52_set_dialog(int on) { g_dialog = on ? 1 : 0; }
 int  a52_get_dialog(void) { return g_dialog; }
+void a52_set_vsurr(int on) { g_vsurr = on ? 1 : 0; }
+int  a52_get_vsurr(void) { return g_vsurr; }
 
 A52Dec *a52_create(void)
 {
@@ -128,10 +132,14 @@ static int to_pcm(A52Dec *d, int *out_ch)
      * quiet films); peaks that would clip are rounded off instead */
     const float k = 0.7071f, kc = d->dialog ? 1.0f : k, ks = d->dialog ? 0.5f : k;
     const float norm = d->dialog ? 0.6f : 1.0f / (1.0f + k + k);
+    int vs = g_vsurr && sl >= 0 && sr >= 0;                   /* 1.3: headphones: virtual surround */
+    if (vs) vsurr_prepare(&d->vs, f->sample_rate);
     for (int i = 0; i < n; i++) {
         float c = fc >= 0 ? SAMPLE(fc, i) * kc : 0.0f;
-        float l = (SAMPLE(fl, i) + c + (sl >= 0 ? SAMPLE(sl, i) * ks : 0.0f)) * norm;
-        float r = (SAMPLE(fr, i) + c + (sr >= 0 ? SAMPLE(sr, i) * ks : 0.0f)) * norm;
+        float ls = sl >= 0 ? SAMPLE(sl, i) : 0.0f, rs = sr >= 0 ? SAMPLE(sr, i) : 0.0f;
+        if (vs) vsurr_rear(&d->vs, ls, rs, &ls, &rs);
+        float l = (SAMPLE(fl, i) + c + ls * ks) * norm;
+        float r = (SAMPLE(fr, i) + c + rs * ks) * norm;
         if (d->dialog) { l = soft16(l); r = soft16(r); }
         d->pcm[2 * i] = clip16(l);
         d->pcm[2 * i + 1] = clip16(r);
@@ -235,6 +243,8 @@ void a52_stats(const A52Dec *d, uint32_t *frames, uint32_t *errors)
 int     a52_available(void) { return 0; }
 void    a52_set_dialog(int on) { (void)on; }
 int     a52_get_dialog(void) { return 0; }
+void    a52_set_vsurr(int on) { (void)on; }
+int     a52_get_vsurr(void) { return 0; }
 A52Dec *a52_create(void) { return NULL; }
 void    a52_destroy(A52Dec *d) { (void)d; }
 void    a52_feed(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out out, void *ctx)

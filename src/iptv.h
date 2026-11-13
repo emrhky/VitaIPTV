@@ -76,6 +76,7 @@ typedef struct {
     /* 1.1: sound: boost 0-3 (off, +3, +6, +9 dB), speaker mode 0/1, clear dialogue for 5.1 0/1 (audiofx.h,
      * a52dec.h); written only when not off */
     int snd_boost, snd_speaker, snd_dialog, snd_level;   /* (1.2: snd_level, one level on every channel) */
+    int snd_field;                      /* 1.3: sound field: 0 off, 1 speakers, 2 headphones */
 } Settings;
 
 void channel_list_init(ChannelList *l);

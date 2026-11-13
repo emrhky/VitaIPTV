@@ -34,6 +34,9 @@ int     a52_aac_raw6(A52Dec *d, const uint8_t *frame, size_t len, float *planes,
  * created after the call (the player opens a new one when it changes) */
 void    a52_set_dialog(int on);
 int     a52_get_dialog(void);
+/* 1.3: virtual surround for 5.1 / 7.1 on headphones (vsurr.h; Sound field: Headphones), followed at once */
+void    a52_set_vsurr(int on);
+int     a52_get_vsurr(void);
 /* frames decoded, frames that failed */
 void    a52_stats(const A52Dec *d, uint32_t *frames, uint32_t *errors);
 

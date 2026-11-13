@@ -146,6 +146,7 @@ static int audio_main(SceSize args, void *argp)
                     int b, sp, lv;
                     afx_get_global(&b, &sp, &lv);
                     afx_set(&fx, b, sp, lv);
+                    afx_field(&fx, afx_get_field());         /* 1.3 */
                     if (ch == 1 || ch == 2) afx_process(&fx, (int16_t *)ai.pData, len, ch, freq);
                     sceAudioOutOutput(g_audio_port, ai.pData);
                 }
