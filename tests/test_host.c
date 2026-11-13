@@ -233,6 +233,7 @@ int main(void)
     assert(!strcmp(T_msg("Audio mpeg_audio: not supported"), "Ses mpeg_audio: desteklenmiyor"));
     assert(!strcmp(T_msg("Failed: Out of memory"), "Başarısız: Bellek yetersiz"));       /* the inner text is translated too */
     assert(!strcmp(T_msg("HEVC (H.265) video: the Vita cannot decode it"), "HEVC (H.265) görüntü: Vita bunu çözemiyor"));
+    assert(!strcmp(T_msg("H.264 8-bit, colour 4:4:4 (the Vita decodes 8-bit 4:2:0 only)"), "H.264 8-bit, renk 4:4:4 (Vita yalnız 8-bit 4:2:0 çözer)"));
     assert(!strcmp(T_msg("Server answered HTTP"), "Server answered HTTP"));             /* no number: left alone */
     char fmt_out[64]; snprintf(fmt_out, sizeof fmt_out, T("%d channels"), 16); assert(!strcmp(fmt_out, "16 kanal"));
     lang_set(LANG_EN);
