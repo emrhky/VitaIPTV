@@ -293,6 +293,7 @@ typedef struct {
     int alib_type;                      /* the sceAudiodec library opened (0x1005 AAC, 0x1008 multichannel AAC) */
     int hw51;                           /* actrl decodes 5.1 (0x1008): mixed down here */
     int16_t *dmx51;                     /* stereo mixed down from 0x1008's output */
+    VSurr vs51;                         /* 1.3: its virtual surround (headphones) */
     uint32_t ainfo51[8] __attribute__((aligned(16)));   /* its 24-byte info: { 0x18, isAdts, ch, rate, isSbr, 0 } */
     /* 0.6.0: HLS sound from an audio playlist of its own (#EXT-X-MEDIA:TYPE=AUDIO) */
     TsDemux *adm;                       /* its MPEG-TS segments */
@@ -2605,6 +2606,11 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
             t->afx_level = lv;
             afx_set(&t->afx, b, sp, lv);
         }
+        int fd = afx_get_field();                            /* 1.3: the sound field */
+        if (fd != t->afx.field) {
+            plog("tsp: sound field %s", fd == 1 ? "speakers (wider)" : fd == 2 ? "headphones (crossfeed, 5.1: virtual surround)" : "off");
+            afx_field(&t->afx, fd);
+        }
         afx_process(&t->afx, (int16_t *)pcm, samples, ch, rate);
     }
     {                                                       /* loudness for the radio screen */
@@ -2773,7 +2779,9 @@ static void audio_packet(Tsp *t, Pkt *p)
     if (t->hw51) {                                           /* 1.2: 5.1 from the Vita's decoder: mixed down here */
         if (!t->dmx51) t->dmx51 = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
         if (!t->dmx51 || samples > A52_MAX_SAMPLES) { t->st.audio_errors++; return; }
-        aac51_downmix((const int16_t *)t->apcm, samples, g51_map, a52_get_dialog(), t->dmx51);
+        VSurr *vs = a52_get_vsurr() ? &t->vs51 : NULL;      /* 1.3: headphones: virtual surround */
+        if (vs) vsurr_prepare(vs, rate);
+        aac51_downmix((const int16_t *)t->apcm, samples, g51_map, a52_get_dialog(), vs, t->dmx51);
         t->st.audio_ch = 2;
         t->st.audio_src_ch = 6;
         audio_out(t, (uint8_t *)t->dmx51, samples, rate, 2, p->pts);

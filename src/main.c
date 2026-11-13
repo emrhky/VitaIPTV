@@ -1322,6 +1322,8 @@ static void apply_look(void)
     scr_sub_style(settings.sub_size, settings.sub_color, settings.sub_pos, settings.sub_bg);
     afx_set_global(settings.snd_boost, settings.snd_speaker, settings.snd_level);   /* 1.1: sound; 1.2: one level */
     a52_set_dialog(settings.snd_dialog);
+    afx_set_field(settings.snd_field);                       /* 1.3: the sound field; 5.1 on headphones: virtual surround */
+    a52_set_vsurr(settings.snd_field == 2);
 }
 
 static void load_settings(void)
@@ -2616,12 +2618,15 @@ static const char *sub_look_value(int k)
 }
 /* 1.1: sound (Select > Audio): volume boost, speaker mode, clear dialogue; 1.2: the same level on every channel;
  * saved when the menu closes */
-#define SND_N 4
-static const char *const SND_NAME[SND_N] = { "Volume boost", "Clear sound", "Clear speech (5.1)", "Same volume on every channel" };
+#define SND_N 5
+static const char *const SND_NAME[SND_N] = { "Volume boost", "Clear sound", "Clear speech (5.1)", "Same volume on every channel",
+                                             "Sound field" };
+static const char *const FIELD_NAMES[3] = { "Off", "Speakers", "Headphones" };   /* 1.3 */
 static const char *snd_value(int k)
 {
     static const char *const B[4] = { "Off", "+3 dB", "+6 dB", "+9 dB" };
     if (k == 0) return B[settings.snd_boost & 3];
+    if (k == 4) return FIELD_NAMES[settings.snd_field < 0 || settings.snd_field > 2 ? 0 : settings.snd_field];
     return (k == 1 ? settings.snd_speaker : k == 2 ? settings.snd_dialog : settings.snd_level) ? "On" : "Off";
 }
 static int sub_look_dirty;
@@ -2630,10 +2635,13 @@ static void snd_step(int k, int d)
     if (k == 0) settings.snd_boost = (settings.snd_boost + d + 4) % 4;
     else if (k == 1) settings.snd_speaker = !settings.snd_speaker;
     else if (k == 2) settings.snd_dialog = !settings.snd_dialog;
-    else settings.snd_level = !settings.snd_level;
+    else if (k == 3) settings.snd_level = !settings.snd_level;
+    else settings.snd_field = (settings.snd_field + d + 3) % 3;   /* 1.3 */
     sub_look_dirty = 1;
     afx_set_global(settings.snd_boost, settings.snd_speaker, settings.snd_level);
     a52_set_dialog(settings.snd_dialog);
+    afx_set_field(settings.snd_field);
+    a52_set_vsurr(settings.snd_field == 2);
     plog("player: %s %s", SND_NAME[k], snd_value(k));
 }
 static void sub_look_step(int k, int d)
@@ -3866,7 +3874,7 @@ static int f_type;                                        /* 0 Xtream, 1 M3U, 2 
 static char f_name[IPTV_NAME_MAX], f_url[IPTV_URL_MAX], f_user[IPTV_CRED_MAX], f_pass[IPTV_CRED_MAX], f_proxy[IPTV_URL_MAX];
 static int f_lang, f_adult, f_hd, f_res;
 static int f_theme;                                      /* 0.8.1: shown at once, back if the form is cancelled */
-static int f_srv, f_boost, f_clear, f_speech, f_level;            /* 1.1: server off / when needed / always; the sound */
+static int f_srv, f_boost, f_clear, f_speech, f_level, f_field;            /* 1.1: server off / when needed / always; the sound */
 static int set_scroll, form_about;                       /* 1.1: the settings' first row shown; "About" asked */
 static int form_ask;                                     /* 1.1: O with changes: "Save the settings?" / "Save the playlist?" */
 static const char *const AUTO_NAMES[3] = { "Off", "When needed", "Always" };
@@ -3913,6 +3921,7 @@ static void open_settings_form(void)
     f_clear = settings.snd_speaker;
     f_speech = settings.snd_dialog;
     f_level = settings.snd_level;
+    f_field = settings.snd_field;                            /* 1.3 */
     set_scroll = 0;
     form_about = 0;
 }
@@ -3932,7 +3941,7 @@ static int source_field_enabled(int i)
 
 #define SRC_FIELDS 5                                     /* (+1: "Delete playlist" when editing one; 1.1: no Save / Cancel rows) */
 /* 1.1: the settings' rows (the address and the test only while the server is on) */
-enum { SF_LANG, SF_THEME, SF_RES, SF_ADULT, SF_HD, SF_PIN, SF_BOOST, SF_CLEAR, SF_SPEECH, SF_LEVEL, SF_SERVER, SF_ADDR, SF_TEST,
+enum { SF_LANG, SF_THEME, SF_RES, SF_ADULT, SF_HD, SF_PIN, SF_BOOST, SF_CLEAR, SF_SPEECH, SF_LEVEL, SF_FIELD, SF_SERVER, SF_ADDR, SF_TEST,
        SF_CLR_RECENT, SF_CLR_WATCHED, SF_ABOUT, SF_N };
 static int set_rows(int *ids)
 {
@@ -4064,6 +4073,7 @@ static void save_settings_form(void)
     settings.snd_speaker = f_clear;
     settings.snd_dialog = f_speech;
     settings.snd_level = f_level;
+    settings.snd_field = f_field;
     settings.lang = f_lang;
     settings.hide_adult = f_adult;
     settings.hide_4k = f_hd;
@@ -4121,6 +4131,7 @@ static void set_step(int dir, int cross)
     case SF_CLEAR: f_clear = !f_clear; break;
     case SF_SPEECH: f_speech = !f_speech; break;
     case SF_LEVEL: f_level = !f_level; break;
+    case SF_FIELD: f_field = (f_field + (dir < 0 ? 2 : 1)) % 3; break;   /* 1.3 */
     case SF_SERVER: {
         int was = f_srv;
         f_srv = (f_srv + (dir < 0 ? 2 : 1)) % 3;
@@ -4160,7 +4171,8 @@ static int form_changed(void)
         int srv0 = settings.proxy_off || !settings.proxy[0] ? 0 : settings.auto_proxy == 2 ? 2 : 1;
         return f_lang != settings.lang || f_adult != settings.hide_adult || f_hd != settings.hide_4k || strcmp(f_pin, settings.pin) ||
                RES_VALUES[f_res] != settings.res_pref || f_theme != settings.theme || strcmp(f_proxy, settings.proxy) ||
-               f_srv != srv0 || f_boost != (settings.snd_boost & 3) || f_clear != settings.snd_speaker || f_speech != settings.snd_dialog || f_level != settings.snd_level;
+               f_srv != srv0 || f_boost != (settings.snd_boost & 3) || f_clear != settings.snd_speaker || f_speech != settings.snd_dialog || f_level != settings.snd_level ||
+               f_field != settings.snd_field;
     }
     if (edit_index < 0) return f_name[0] || f_url[0] || f_user[0] || f_pass[0];
     if (edit_index >= nsources) return 0;
@@ -4225,6 +4237,7 @@ static void draw_form(void)
             "For the Vita's speakers: less of the deep bass they cannot play, clearer voices.",
             "5.1 films and channels: the voices louder in the stereo mix.",
             "Quiet and loud channels come out about as loud as each other (the level follows over a few seconds).",
+            "Speakers: wider stereo. Headphones: more natural stereo, and 5.1 sound around you (virtual surround).",
             "Plays what the Vita cannot (HEVC, 1080i, AC-3...) through tools/vita_iptv_proxy.py on a PC.",
             "The server's address, e.g. http://192.168.1.20:8090",
             "Checks that the server answers.",
@@ -4250,6 +4263,7 @@ static void draw_form(void)
             case SF_CLEAR: *x = (ScrField){ T("Clear sound"), T(f_clear ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
             case SF_SPEECH: *x = (ScrField){ T("Clear speech (5.1)"), T(f_speech ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
             case SF_LEVEL: *x = (ScrField){ T("Same volume on every channel"), T(f_level ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
+            case SF_FIELD: *x = (ScrField){ T("Sound field"), T(FIELD_NAMES[f_field]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_SERVER: *x = (ScrField){ T("Transcoding server"), T(AUTO_NAMES[f_srv]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_ADDR: *x = (ScrField){ T("Server address"), f_proxy, SCR_F_TEXT, 1, 1 }; break;
             case SF_TEST: *x = (ScrField){ T("Test server"), NULL, SCR_F_ACTION, 1, 1 }; break;
