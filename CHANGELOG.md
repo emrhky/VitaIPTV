@@ -51,7 +51,11 @@
 ### Look
 - **Menus centred:** the Select menus' titles and rows (also the player's) are in the middle of the box.
 - **Notes in amber:** the notes above the bottom bar (and the settings' help line) are amber instead of grey, so
-  they are seen.
+  they are seen. While watching too: the notes at the bottom ("the Vita plays at most 30 fps"...), the programme
+  line at the top (now / next) and the radio screen's note.
+- **4:4:4 channels:** "H.264 8-bit / chroma 3: not supported" is now "H.264 8-bit, colour 4:4:4 (the Vita
+  decodes 8-bit 4:2:0 only)": the hardware decodes only the usual 4:2:0 colour; the transcoding server plays
+  such a channel.
 
 ### Controls
 - **The left stick only:** up / down moves like the d-pad in every list and menu (on the channel screen the list
