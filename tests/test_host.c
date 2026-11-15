@@ -271,13 +271,15 @@ int main(void)
         assert(se.snd_boost == 2 && se.snd_speaker == 1 && se.snd_dialog == 1 && se.sub_size == 3 && se.theme == 2);
         settings_parse("snd_boost=7\nsnd_speaker=2\nsnd_dialog=-1\n", &se);
         assert(se.snd_boost == 0 && se.snd_speaker == 0 && se.snd_dialog == 0);
-        {   /* 1.3: the sound field: off by default, kept (1, 2), out of range -> off */
+        {   /* 1.3: the sound field: auto (3) by default, kept (0, 1, 2), out of range -> auto */
             Settings sf; settings_defaults(&sf);
-            assert(sf.snd_field == 0);
+            assert(sf.snd_field == 3);
+            char f0[512]; assert(settings_format(&sf, f0, sizeof f0) > 0 && !strstr(f0, "snd_field"));
+            sf.snd_field = 0; assert(settings_format(&sf, f0, sizeof f0) > 0 && strstr(f0, "snd_field=0"));
             settings_parse("snd_field=2\nsnd_level=1\n", &sf);
             char ff[512]; assert(settings_format(&sf, ff, sizeof ff) > 0 && strstr(ff, "snd_field=2"));
             Settings sg; settings_parse(ff, &sg); assert(sg.snd_field == 2 && sg.snd_level == 1);
-            settings_parse("snd_field=3\n", &sg); assert(sg.snd_field == 0);
+            settings_parse("snd_field=9\n", &sg); assert(sg.snd_field == 3);
         }
         /* 1.1: the server turned off keeps its address; proxy_url refuses it */
         Settings so; settings_defaults(&so);
