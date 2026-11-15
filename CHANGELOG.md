@@ -37,7 +37,9 @@
 - **Same volume on every channel** (Settings and Select > Audio, off unless turned on): quiet and loud channels
   come out about as loud as each other. The level is measured over a few seconds and brought towards -20 dBFS
   (between -6 and +12 dB, a few dB a second at most, quicker in a channel's first seconds); pauses do not count.
-- **Sound field** (Settings and Select > Audio, off unless turned on):
+- **Sound field** (Settings and Select > Audio). *Auto* (the default): Headphones when headphones are plugged in,
+  else Speakers; it follows at once when they are plugged in or out (the system tells where the sound goes, no
+  plugin; the log shows the value it gives: "audio out: device ..."). Off, Speakers and Headphones can be chosen too.
   - *Speakers:* wider stereo for the Vita's speakers, which sit close together (the difference between the sides,
     above about 300 Hz, about 5 dB louder). What is in the middle (voices, mono sound) is not changed.
   - *Headphones:* crossfeed: each ear also hears the other side's low and middle sounds at about -7 dB, as from
@@ -63,6 +65,12 @@
 - **4:4:4 channels:** "H.264 8-bit / chroma 3: not supported" is now "H.264 8-bit, colour 4:4:4 (the Vita
   decodes 8-bit 4:2:0 only)": the hardware decodes only the usual 4:2:0 colour; the transcoding server plays
   such a channel.
+- **Sharper button symbols:** drawn at the size they are shown (the cover of each pixel from its distance to the
+  line), not drawn big and scaled down; the straight lines on whole pixels; bare, in their colours, without the
+  dark disc. Drawn 1:1 (no smoothing of the texture).
+- **Square only when it does something:** a film without the transcoding server has one picture size, so the
+  bar no longer shows Square for it.
+- **"Detay"** instead of "Detaylar" next to Triangle (Turkish), a shorter bar.
 
 ### Controls
 - **The left stick only:** up / down moves like the d-pad in every list and menu (on the channel screen the list
