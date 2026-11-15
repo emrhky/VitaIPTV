@@ -1,67 +1,126 @@
 #!/usr/bin/env python3
 """Makes src/btn_icons.h: the footer's button symbols (cross, circle, triangle, square, d-pad, up / down,
-left / right), drawn 24 times bigger and scaled down, so the edges are smooth on the Vita's screen. The four
-face-button symbols take the same space (a little wider triangle, a little shorter cross: they look the same).
-Needs Pillow:  python3 tools/make_button_icons.py"""
-import os
-from PIL import Image, ImageDraw
-SS=24  # supersample
-def canvas(S):
-    return Image.new("RGBA",(S*SS,S*SS),(0,0,0,0))
-DARK=(64,70,96,255); BLUE=(124,178,232,255); RED=(255,102,102,255); GREEN=(64,226,160,255); PINK=(255,105,220,255); GREY=(200,205,220,255)
-def line(d,p0,p1,w,col):
-    d.line([p0,p1],fill=col,width=int(w))
-    r=w/2
-    for x,y in (p0,p1): d.ellipse([x-r,y-r,x+r,y+r],fill=col)
-def rrect_outline(d,box,r,w,col):
-    d.rounded_rectangle(box,radius=r,outline=col,width=int(w))
-def tri_pts(c,wd,ht):
-    # equilateral-ish, optical centre slightly lower
-    cx,cy=c; return [(cx,cy-ht*0.58),(cx-wd/2,cy+ht*0.42),(cx+wd/2,cy+ht*0.42)]
-def rounded_poly(d,pts,w,col):
-    for i in range(3): line(d,pts[i],pts[(i+1)%3],w,col)
-def glyph(kind,S=30):
-    im=canvas(S); d=ImageDraw.Draw(im); k=SS
-    c=S/2*k
-    if kind in("cross","circle","triangle","square"):
-        d.ellipse([0,0,S*k-1,S*k-1],fill=DARK)
-    sw=2.9*k
-    if kind=="cross":
-        h=5.7*k   # (1.1: the four symbols the same size: about 15 px across)
-        line(d,(c-h,c-h),(c+h,c+h),sw,BLUE); line(d,(c+h,c-h),(c-h,c+h),sw,BLUE)
-    elif kind=="circle":
-        R=7.6*k; d.ellipse([c-R,c-R,c+R,c+R],outline=RED,width=int(sw))
-    elif kind=="square":
-        a=7.0*k; rrect_outline(d,[c-a,c-a,c+a,c+a],1.6*k,sw,PINK)
-    elif kind=="triangle":
-        # centreline so that outer width ~15.5 and height ~14
-        p=tri_pts((c,c+0.5*k),15.0*k,13.2*k); rounded_poly(d,p,sw,GREEN)
-    elif kind in("dpad","updown","leftright"):
-        d.ellipse([0,0,S*k-1,S*k-1],fill=DARK)
-        if kind in("dpad","updown"):
-            d.rounded_rectangle([c-1.6*k,c-6.6*k,c+1.6*k,c+6.6*k],radius=1.2*k,fill=GREY)
-        if kind=="dpad":
-            d.rounded_rectangle([c-6.6*k,c-1.6*k,c+6.6*k,c+1.6*k],radius=1.2*k,fill=GREY)
-        if kind=="leftright":
-            for s in(-1,1):
-                d.polygon([(c+s*8.6*k,c),(c+s*1.8*k,c-5.8*k),(c+s*1.8*k,c+5.8*k)],fill=GREY)
-    return im.resize((S,S),Image.LANCZOS)
+left / right), 30 x 30 pixels each.
+
+1.2: drawn at the size they are shown, as vita-turbo-vpn draws its symbols: each pixel's cover is worked out
+from its distance to the line (a line 3 px wide: full inside, a 1 px soft edge), so nothing is scaled down and
+the edges are not blurred. The straight lines sit on whole pixels (the square, the triangle's base, the d-pad),
+so they are fully sharp. The symbols are bare, in their colours, without the dark disc (as on the Vita's own
+screens): bigger and with more contrast in the same 30 px.
+No Pillow needed:  python3 tools/make_button_icons.py"""
+import math, os
+
+S = 30                                  # the cell
+C = S / 2.0                             # its centre
+SW = 3.0                                # the line width
+BLUE = (124, 178, 232); RED = (255, 102, 102); GREEN = (64, 226, 160); PINK = (255, 105, 220); GREY = (200, 205, 220)
+
+
+def seg_dist(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    l2 = dx * dx + dy * dy
+    t = 0.0 if l2 == 0 else max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / l2))
+    ex, ey = ax + t * dx - px, ay + t * dy - py
+    return math.hypot(ex, ey)
+
+
+def stroke(segs, w=SW):
+    """cover of a stroke along the segments (round ends and joins), at each pixel's centre"""
+    def cov(x, y):
+        d = min(seg_dist(x, y, *s) for s in segs)
+        return max(0.0, min(1.0, w / 2 - d + 0.5))
+    return cov
+
+
+def ring(cx, cy, r, w=SW):
+    def cov(x, y):
+        d = abs(math.hypot(x - cx, y - cy) - r)
+        return max(0.0, min(1.0, w / 2 - d + 0.5))
+    return cov
+
+
+def fill(inside, n=8):
+    """cover of a filled shape: n x n samples in each pixel"""
+    def cov(x, y):
+        k = 0
+        for sy in range(n):
+            for sx in range(n):
+                if inside(x - 0.5 + (sx + 0.5) / n, y - 0.5 + (sy + 0.5) / n):
+                    k += 1
+        return k / (n * n)
+    return cov
+
+
+def in_rect(x0, y0, x1, y1):
+    return lambda x, y: x0 <= x < x1 and y0 <= y < y1
+
+
+def in_tri(p):
+    def f(x, y):
+        s = []
+        for i in range(3):
+            (ax, ay), (bx, by) = p[i], p[(i + 1) % 3]
+            s.append((bx - ax) * (y - ay) - (by - ay) * (x - ax))
+        return all(v >= 0 for v in s) or all(v <= 0 for v in s)
+    return f
+
+
+def poly_segs(pts, closed=True):
+    n = len(pts)
+    return [(*pts[i], *pts[(i + 1) % n]) for i in range(n if closed else n - 1)]
+
+
+def glyph(kind):
+    """(cover function, colour)"""
+    if kind == "cross":                 # 15 px across, round ends
+        h = 6.0
+        return stroke([(C - h, C - h, C + h, C + h), (C + h, C - h, C - h, C + h)]), BLUE
+    if kind == "circle":                # 17 px across (the line's outside)
+        return ring(C, C, 7.0), RED
+    if kind == "square":                # 16 px (a square looks bigger than a circle), lines on whole pixels: 7..10, 20..23
+        a = 6.5
+        return stroke(poly_segs([(C - a, C - a), (C + a, C - a), (C + a, C + a), (C - a, C + a)])), PINK
+    if kind == "triangle":              # 19 px wide, 16 high; the base on whole pixels (20..23)
+        top, base, hw = C - 7.5, C + 6.5, 8.5
+        return stroke(poly_segs([(C, top), (C + hw, base), (C - hw, base)])), GREEN
+    if kind in ("dpad", "updown"):      # bars 4 px wide (13..17), 16 long
+        bars = [in_rect(C - 2, C - 8, C + 2, C + 8)]
+        if kind == "dpad":
+            bars.append(in_rect(C - 8, C - 2, C + 8, C + 2))
+        return fill(lambda x, y: any(b(x, y) for b in bars)), GREY
+    if kind == "leftright":             # two arrow heads
+        l = in_tri([(C - 9, C), (C - 2, C - 6), (C - 2, C + 6)])
+        r = in_tri([(C + 9, C), (C + 2, C - 6), (C + 2, C + 6)])
+        return fill(lambda x, y: l(x, y) or r(x, y)), GREY
+    raise ValueError(kind)
+
 
 ORDER = ["cross", "circle", "triangle", "square", "dpad", "updown", "leftright"]   # (ui.c: BTN_I_*)
 
-def main():
-    W = 30 * len(ORDER)
-    at = Image.new("RGBA", (W, 30), (0, 0, 0, 0))
+
+def render():
+    """rows of (r, g, b, a) for the whole strip"""
+    W = S * len(ORDER)
+    px = [(0, 0, 0, 0)] * (W * S)
     for i, k in enumerate(ORDER):
-        at.alpha_composite(glyph(k, 30), (i * 30, 0))
-    px = [at.getpixel((x, y)) for y in range(30) for x in range(W)]
-    out = ["/* Button symbols for the footer (0.6.0), made by tools/make_button_icons.py: drawn anti-aliased,",
-           " * 30 x 30 pixels each, side by side: cross, circle, triangle, square, d-pad, up / down, left / right.",
-           " * RGBA8 as vita2d takes it (0xAABBGGRR), not premultiplied. */",
+        cov, (r, g, b) = glyph(k)
+        for y in range(S):
+            for x in range(S):
+                a = int(round(cov(x + 0.5, y + 0.5) * 255))
+                if a:
+                    px[y * W + i * S + x] = (r, g, b, a)
+    return W, px
+
+
+def main():
+    W, px = render()
+    out = ["/* Button symbols for the footer, made by tools/make_button_icons.py (1.2: drawn at their size, sharp,",
+           " * without the disc), 30 x 30 pixels each, side by side: cross, circle, triangle, square, d-pad, up / down,",
+           " * left / right. RGBA8 as vita2d takes it (0xAABBGGRR), not premultiplied: the colour, the cover in alpha. */",
            "#ifndef BTN_ICONS_H", "#define BTN_ICONS_H", "#include <stdint.h>",
-           "#define BTN_ICON_SIZE 30", "#define BTN_ICON_COUNT %d" % len(ORDER),
-           "static const uint32_t BTN_ICONS[%d] = {" % (30 * W)]
-    for y in range(30):
+           "#define BTN_ICON_SIZE %d" % S, "#define BTN_ICON_COUNT %d" % len(ORDER),
+           "static const uint32_t BTN_ICONS[%d] = {" % (S * W)]
+    for y in range(S):
         row = px[y * W:(y + 1) * W]
         vals = ["0x%08x" % (a << 24 | b << 16 | g << 8 | r) if a else "0" for (r, g, b, a) in row]
         for i in range(0, len(vals), 14):
@@ -70,6 +129,7 @@ def main():
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(os.path.join(root, "src", "btn_icons.h"), "w") as f:
         f.write("\n".join(out))
+
 
 if __name__ == "__main__":
     main()
