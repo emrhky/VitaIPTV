@@ -18,6 +18,7 @@ static void btn_icons_load(void)
     const int w = BTN_ICON_SIZE * BTN_ICON_COUNT, h = BTN_ICON_SIZE;
     g_btn_tex = vita2d_create_empty_texture(w, h);
     if (!g_btn_tex) return;                                  /* (then drawn from shapes as before) */
+    vita2d_texture_set_filters(g_btn_tex, SCE_GXM_TEXTURE_FILTER_POINT, SCE_GXM_TEXTURE_FILTER_POINT);   /* (1.2: 1:1, whole pixels) */
     uint8_t *dst = vita2d_texture_get_datap(g_btn_tex);
     unsigned stride = vita2d_texture_get_stride(g_btn_tex);
     for (int y = 0; y < h; y++) memcpy(dst + (size_t)y * stride, BTN_ICONS + (size_t)y * w, (size_t)w * 4);

@@ -1227,6 +1227,7 @@ void settings_defaults(Settings *st)
     memset(st, 0, sizeof *st);
     st->auto_proxy = 1;
     st->sub_size = 1;                                        /* 0.8.1 */
+    st->snd_field = 3;                                       /* 1.2: the sound field follows the headphones */
 }
 
 /* 0.8.1: a small number setting, kept within 0..max (else the default) */
@@ -1272,7 +1273,7 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "snd_speaker")) st->snd_speaker = small_num(v, 1, 0);
             else if (!strcmp(k, "snd_dialog")) st->snd_dialog = small_num(v, 1, 0);
             else if (!strcmp(k, "snd_level")) st->snd_level = small_num(v, 1, 0);
-            else if (!strcmp(k, "snd_field")) st->snd_field = small_num(v, 2, 0);
+            else if (!strcmp(k, "snd_field")) st->snd_field = small_num(v, 3, 3);
             else if (!strcmp(k, "proxy_off")) st->proxy_off = small_num(v, 1, 0);   /* 1.1 */
             /* hide_1080p= (before v0.4.0): that filter is gone, the 4K one starts off */
             else if (!strcmp(k, "resolution")) {
@@ -1306,7 +1307,7 @@ int settings_format(const Settings *st, char *out, size_t outsz)
     if (st->snd_speaker) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_speaker=1\n");
     if (st->snd_dialog) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_dialog=1\n");
     if (st->snd_level) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_level=1\n");
-    if (st->snd_field) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_field=%d\n", st->snd_field);
+    if (st->snd_field != 3) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_field=%d\n", st->snd_field);
     if ((size_t)w + (size_t)e >= outsz) return -1;
     memcpy(out + w, ex, (size_t)e + 1);
     return w + e;
