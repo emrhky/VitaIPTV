@@ -29,4 +29,6 @@ void vita2d_draw_texture_part_scale(const vita2d_texture *t, float x, float y, f
 void vita2d_draw_texture_scale(const vita2d_texture *t, float x, float y, float sx, float sy);   /* 0.8.0 */
 unsigned int vita2d_texture_get_width(const vita2d_texture *t);
 unsigned int vita2d_texture_get_height(const vita2d_texture *t);
+#define SCE_GXM_TEXTURE_FILTER_POINT 0
+static inline void vita2d_texture_set_filters(vita2d_texture *t, int min, int mag) { (void)t; (void)min; (void)mag; }   /* (1:1 here) */
 #endif
