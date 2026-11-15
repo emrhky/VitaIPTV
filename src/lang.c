@@ -15,7 +15,7 @@ static const Pair FIXED[] = {
     { "Clear sound", "Ses netleştirme" },
     { "Clear speech (5.1)", "Konuşma netleştirme (5.1)" },
     { "Same volume on every channel", "Kanallar arası ses eşitleme" },
-    { "Sound field", "Ses alanı" }, { "Speakers", "Hoparlör" }, { "Headphones", "Kulaklık" },   /* 1.3 */
+    { "Sound field", "Ses alanı" }, { "Speakers", "Hoparlör" }, { "Headphones", "Kulaklık" }, { "Auto", "Otomatik" },   /* 1.3 */
     /* 1.1: My List and the fast list opening */
     { "My List", "Listem" },
     { "Add to My List", "Listeme ekle" },
@@ -62,7 +62,7 @@ static const Pair FIXED[] = {
     { "Purple", "Mor" },
     { "Orange", "Turuncu" },
     /* 0.8.0: guide, catch-up, details, series, PIN, sleep timer, number zap, search */
-    { "Guide", "Reh." }, { "Programme guide", "Yayın rehberi" }, { "Schedule", "Yayın Akışı" }, { "Details", "Detaylar" }, { "Live", "Canlı" },
+    { "Guide", "Reh." }, { "Programme guide", "Yayın rehberi" }, { "Schedule", "Yayın Akışı" }, { "Details", "Detay" }, { "Live", "Canlı" },
     { "Today", "Bugün" }, { "Tomorrow", "Yarın" }, { "Yesterday", "Dün" }, { "NOW", "ŞİMDİ" }, { "ARCHIVE", "ARŞİV" },
     { "Loading...", "Yükleniyor..." }, { "Loading the guide...", "Rehber yükleniyor..." },
     { "No programme information", "Program bilgisi yok" }, { "No programme information at this time", "Bu saat için program bilgisi yok" },
@@ -116,8 +116,8 @@ static const Pair FIXED[] = {
     { "5.1 films and channels: the voices louder in the stereo mix.", "5.1 film ve kanallarda konuşmaları stereo karışımda öne çıkarır." },
     { "Quiet and loud channels come out about as loud as each other (the level follows over a few seconds).",
       "Kısık ve yüksek sesli kanallar yaklaşık aynı seviyede duyulur (seviye birkaç saniyede ayarlanır)." },
-    { "Speakers: wider stereo. Headphones: more natural stereo, and 5.1 sound around you (virtual surround).",
-      "Hoparlör: daha geniş stereo. Kulaklık: daha doğal stereo, 5.1 seste çevreleyen ses (sanal çevresel ses)." },
+    { "Speakers: wider stereo. Headphones: more natural stereo, and 5.1 sound around you (virtual surround). Auto: headphones when they are plugged in.",
+      "Hoparlör: daha geniş stereo. Kulaklık: daha doğal stereo, 5.1 seste çevreleyen ses (sanal çevresel ses). Otomatik: kulaklık takılıysa kulaklık." },
     { "Plays what the Vita cannot (HEVC, 1080i, AC-3...) through tools/vita_iptv_proxy.py on a PC.",
       "Vita'nın oynatamadığı yayınları (HEVC, 1080i, AC-3...) bilgisayardaki tools/vita_iptv_proxy.py ile oynatır." },
     { "The server's address, e.g. http://192.168.1.20:8090", "Sunucunun adresi, örneğin http://192.168.1.20:8090" },

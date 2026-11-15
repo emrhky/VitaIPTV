@@ -170,10 +170,12 @@ static unsigned now_ms(void) { return (unsigned)(sceKernelGetProcessTimeWide() /
 /* Every frame starts once the GPU has finished the previous one. vita2d reuses one vertex pool for every
  * frame: a frame started while the GPU still reads the last one overwrites what it is drawing. That can
  * crash the GPU, most likely right after a quick screen change (a list that fails to load at once). */
+static void snd_auto_poll(void);
 static void frame_begin(void)
 {
     vita2d_wait_rendering_done();
     ui_frame_start();                                        /* 1.2: (the sharp text, while the GPU is idle) */
+    snd_auto_poll();                                         /* 1.2: the sound field's Auto */
     vita2d_start_drawing();
     vita2d_clear_screen();
 }
@@ -1315,6 +1317,54 @@ static int edit_possible(void)
     return 0;
 }
 
+/* 1.2: the sound field's Auto: headphones when they are plugged in, else speakers. The system tells where the
+ * sound goes (no plugin needed); vita-headers does not declare the call, the SceAVConfig stub has its NID.
+ * The value is written to the log as it is (each change), so what it holds on this console can be checked. */
+int sceAVConfigGetConnectedAudioDevice(unsigned int *device);
+static int g_hp = -1;                                        /* the headphones: -1 not asked yet, 0 no, 1 yes */
+static unsigned int g_avdev = 0xFFFFFFFFu;
+static unsigned g_avdev_next;
+/* the value as an output route (SceAVConfig's: 0x0400 headphones, 0x0500 the dock's output, 0x1100 the speaker),
+ * else as a list of devices (bit 0: the speaker; any other bit: something plugged in) */
+static int avdev_headphones(unsigned int v)
+{
+    if (v & 0xFF00u) return (v & 0x0400u) && !(v & 0x1000u);
+    return (v & ~1u) != 0;
+}
+static int field_effective(void)
+{
+    if (settings.snd_field != 3) return settings.snd_field;
+    return g_hp == 1 ? 2 : 1;
+}
+static void snd_field_apply(void)
+{
+    int f = field_effective();
+    afx_set_field(f);
+    a52_set_vsurr(f == 2);
+}
+/* once a second: where the sound goes now (with Auto, the field follows at once) */
+static void snd_auto_poll(void)
+{
+    unsigned now = now_ms();
+    if (g_hp >= 0 && (int)(now - g_avdev_next) < 0) return;
+    g_avdev_next = now + 1000;
+    unsigned int v = 0;
+    int r = sceAVConfigGetConnectedAudioDevice(&v);
+    if (r < 0) {
+        if (g_avdev != 0xFFFFFFFEu) plog("audio out: device unknown (0x%08X): speakers assumed", (unsigned)r);
+        g_avdev = 0xFFFFFFFEu;
+        v = 0;
+    } else if (v != g_avdev) {
+        g_avdev = v;
+        plog("audio out: device 0x%X: %s", v, avdev_headphones(v) ? "headphones" : "speakers");
+    }
+    int hp = r >= 0 && avdev_headphones(v);
+    if (hp != g_hp) {
+        g_hp = hp;
+        if (settings.snd_field == 3) snd_field_apply();
+    }
+}
+
 /* 0.8.1: the theme and how subtitles look, from the settings */
 static void apply_look(void)
 {
@@ -1322,8 +1372,7 @@ static void apply_look(void)
     scr_sub_style(settings.sub_size, settings.sub_color, settings.sub_pos, settings.sub_bg);
     afx_set_global(settings.snd_boost, settings.snd_speaker, settings.snd_level);   /* 1.1: sound; 1.2: one level */
     a52_set_dialog(settings.snd_dialog);
-    afx_set_field(settings.snd_field);                       /* 1.3: the sound field; 5.1 on headphones: virtual surround */
-    a52_set_vsurr(settings.snd_field == 2);
+    snd_field_apply();                                       /* 1.3: the sound field; 5.1 on headphones: virtual surround */
 }
 
 static void load_settings(void)
@@ -2621,12 +2670,21 @@ static const char *sub_look_value(int k)
 #define SND_N 5
 static const char *const SND_NAME[SND_N] = { "Volume boost", "Clear sound", "Clear speech (5.1)", "Same volume on every channel",
                                              "Sound field" };
-static const char *const FIELD_NAMES[3] = { "Off", "Speakers", "Headphones" };   /* 1.3 */
+static const char *const FIELD_NAMES[4] = { "Off", "Speakers", "Headphones", "Auto" };   /* 1.3 */
+/* Auto shows what it chose: "Auto: Headphones" */
+static const char *field_name(int v)
+{
+    static char b[64];
+    if (v < 0 || v > 3) v = 3;
+    if (v != 3) return T(FIELD_NAMES[v]);
+    snprintf(b, sizeof b, "%s: %s", T("Auto"), T(FIELD_NAMES[field_effective()]));
+    return b;
+}
 static const char *snd_value(int k)
 {
     static const char *const B[4] = { "Off", "+3 dB", "+6 dB", "+9 dB" };
     if (k == 0) return B[settings.snd_boost & 3];
-    if (k == 4) return FIELD_NAMES[settings.snd_field < 0 || settings.snd_field > 2 ? 0 : settings.snd_field];
+    if (k == 4) return field_name(settings.snd_field);
     return (k == 1 ? settings.snd_speaker : k == 2 ? settings.snd_dialog : settings.snd_level) ? "On" : "Off";
 }
 static int sub_look_dirty;
@@ -2636,12 +2694,11 @@ static void snd_step(int k, int d)
     else if (k == 1) settings.snd_speaker = !settings.snd_speaker;
     else if (k == 2) settings.snd_dialog = !settings.snd_dialog;
     else if (k == 3) settings.snd_level = !settings.snd_level;
-    else settings.snd_field = (settings.snd_field + d + 3) % 3;   /* 1.3 */
+    else settings.snd_field = (settings.snd_field + d + 4) % 4;   /* 1.3 (Auto: 3) */
     sub_look_dirty = 1;
     afx_set_global(settings.snd_boost, settings.snd_speaker, settings.snd_level);
     a52_set_dialog(settings.snd_dialog);
-    afx_set_field(settings.snd_field);
-    a52_set_vsurr(settings.snd_field == 2);
+    snd_field_apply();
     plog("player: %s %s", SND_NAME[k], snd_value(k));
 }
 static void sub_look_step(int k, int d)
@@ -3319,7 +3376,8 @@ static void draw_tsp_screen(int osd)
     int sq_next = st && !via_proxy ? res_square_next(st) : -1;
     /* Square: the next picture size; else the server (or back from it); a film: 720p through the server */
     const char *square = sq_next >= 0 ? res_name(st, sq_next, sq_label, sizeof sq_label) : srv_on() ? "Server" : NULL;
-    if (film_playing()) square = arch_on ? "Live" : via_proxy ? "Original" : "720p";
+    /* (1.2: a film's 720p only with the server on: a film file has one size, so no Square without it) */
+    if (film_playing()) square = arch_on ? "Live" : via_proxy ? "Original" : srv_on() ? "720p" : NULL;
     int nh = play_hints(hints, 0, film_playing(), st && st->paused, square);
     if (film_playing()) {                                    /* films: pause, jumps, time line */
         int pos = 0, dur = 0;
@@ -4131,7 +4189,7 @@ static void set_step(int dir, int cross)
     case SF_CLEAR: f_clear = !f_clear; break;
     case SF_SPEECH: f_speech = !f_speech; break;
     case SF_LEVEL: f_level = !f_level; break;
-    case SF_FIELD: f_field = (f_field + (dir < 0 ? 2 : 1)) % 3; break;   /* 1.3 */
+    case SF_FIELD: f_field = (f_field + (dir < 0 ? 3 : 1)) % 4; break;   /* 1.3 (Auto: 3) */
     case SF_SERVER: {
         int was = f_srv;
         f_srv = (f_srv + (dir < 0 ? 2 : 1)) % 3;
@@ -4237,7 +4295,7 @@ static void draw_form(void)
             "For the Vita's speakers: less of the deep bass they cannot play, clearer voices.",
             "5.1 films and channels: the voices louder in the stereo mix.",
             "Quiet and loud channels come out about as loud as each other (the level follows over a few seconds).",
-            "Speakers: wider stereo. Headphones: more natural stereo, and 5.1 sound around you (virtual surround).",
+            "Speakers: wider stereo. Headphones: more natural stereo, and 5.1 sound around you (virtual surround). Auto: headphones when they are plugged in.",
             "Plays what the Vita cannot (HEVC, 1080i, AC-3...) through tools/vita_iptv_proxy.py on a PC.",
             "The server's address, e.g. http://192.168.1.20:8090",
             "Checks that the server answers.",
@@ -4263,7 +4321,7 @@ static void draw_form(void)
             case SF_CLEAR: *x = (ScrField){ T("Clear sound"), T(f_clear ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
             case SF_SPEECH: *x = (ScrField){ T("Clear speech (5.1)"), T(f_speech ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
             case SF_LEVEL: *x = (ScrField){ T("Same volume on every channel"), T(f_level ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
-            case SF_FIELD: *x = (ScrField){ T("Sound field"), T(FIELD_NAMES[f_field]), SCR_F_CHOICE, 1, 0 }; break;
+            case SF_FIELD: *x = (ScrField){ T("Sound field"), field_name(f_field), SCR_F_CHOICE, 1, 0 }; break;
             case SF_SERVER: *x = (ScrField){ T("Transcoding server"), T(AUTO_NAMES[f_srv]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_ADDR: *x = (ScrField){ T("Server address"), f_proxy, SCR_F_TEXT, 1, 1 }; break;
             case SF_TEST: *x = (ScrField){ T("Test server"), NULL, SCR_F_ACTION, 1, 1 }; break;
