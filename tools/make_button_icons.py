@@ -72,16 +72,16 @@ def poly_segs(pts, closed=True):
 
 def glyph(kind):
     """(cover function, colour)"""
-    if kind == "cross":                 # 15 px across, round ends
-        h = 6.0
+    if kind == "cross":                 # 1.3: 16 px high like the others (ends +-6.5, line 3, round ends)
+        h = 6.5
         return stroke([(C - h, C - h, C + h, C + h), (C + h, C - h, C - h, C + h)]), BLUE
-    if kind == "circle":                # 17 px across (the line's outside)
-        return ring(C, C, 7.0), RED
+    if kind == "circle":                # 1.3: 16 px across (the line's outside; was 17)
+        return ring(C, C, 6.5), RED
     if kind == "square":                # 16 px (a square looks bigger than a circle), lines on whole pixels: 7..10, 20..23
         a = 6.5
         return stroke(poly_segs([(C - a, C - a), (C + a, C - a), (C + a, C + a), (C - a, C + a)])), PINK
-    if kind == "triangle":              # 19 px wide, 16 high; the base on whole pixels (20..23)
-        top, base, hw = C - 7.5, C + 6.5, 8.5
+    if kind == "triangle":              # 1.3: 18 px wide, 16 high (was 19 x 17); the base on whole pixels (20..23)
+        top, base, hw = C - 6.5, C + 6.5, 7.5
         return stroke(poly_segs([(C, top), (C + hw, base), (C - hw, base)])), GREEN
     if kind in ("dpad", "updown"):      # bars 4 px wide (13..17), 16 long
         bars = [in_rect(C - 2, C - 8, C + 2, C + 8)]
