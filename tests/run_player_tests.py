@@ -283,6 +283,8 @@ open(f"{T}/hls/subs_en.ass", "w").write("[Script Info]\nScriptType: v4.00+\n\n[V
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -i {T}/hls/subs_tr.srt -i {T}/hls/subs_en.ass "
    f"-map 0 -map 1 -map 2 -map 3 -t 5 -c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -c:s:0 srt -c:s:1 ass "
    f"-metadata:s:s:0 language=tur -metadata:s:s:1 language=eng -metadata:s:s:1 title=SDH {T}/hls/subs.mkv")
+# 1.3: the same film with Turkish sound (automatic subtitles stay off)
+sh(f"ffmpeg -loglevel error -y -i {T}/hls/subs.mkv -map 0 -c copy -metadata:s:a:0 language=tur {T}/hls/subs_trau.mkv")
 # 1.0: a stream whose 33-bit TS clock wraps after about 6 s (2^33 / 90000 = 95443.7 s)
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 12 "
    f"-c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -output_ts_offset 95436 -f mpegts {T}/wrap.ts")

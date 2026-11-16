@@ -825,7 +825,23 @@ subs:
         tsp_set_sub_delay(-700);                             /* 0.7 s earlier */
         s = sub_play(ps, -1, 0);
         assert(sub_at(&s, "İki") >= 207000 && sub_at(&s, "İki") <= 207000 + 3 * 3600);
-        tsp_set_sub_delay(0); tsp_set_sub(-1, NULL, 1);
+        tsp_set_sub_delay(0);
+        /* 1.3: automatic (no choice for this film): subtitles in the app's language only when the sound is not in it */
+        tsp_set_sub(-1, "tur", 2);
+        s = sub_play(ps, -1, 0);                             /* (the sound has no language) */
+        assert(s.st.s_cur == tur && sub_at(&s, "Bir") >= 90000 && s.n == 2);
+        tsp_set_sub(-1, "fra", 2);                           /* none in that language: off */
+        s = sub_play(ps, -1, 0);
+        assert(s.st.s_cur == -1 && s.n == 0);
+        {
+            static char ps2[512];
+            snprintf(ps2, sizeof ps2, "%s/subs_trau.mkv", argv[16]);   /* the same with Turkish sound: no subtitles */
+            tsp_set_sub(-1, "tur", 2);
+            s = sub_play(ps2, -1, 0);
+            assert(s.st.s_n == 2 && s.st.s_cur == -1 && s.n == 0);
+            puts("               automatic subtitles: on without Turkish sound, off with it");
+        }
+        tsp_set_sub(-1, NULL, 1);
         if (getenv("ONLY") && !strcmp(getenv("ONLY"), "subs")) { puts("subtitle tests passed"); return 0; }
     }
     if (argc > 23) {                                         /* a few AAC frames claiming 7 channels: skipped, sound stays on */
@@ -1617,6 +1633,25 @@ films:
         mock_http_fail_after = 0;
         vshow("mp4 drops", &v);
         assert(v.r.st.state == TSP_ENDED && v.r.st.reconnects >= 2 && v.r.changes >= 280 && v.r.nonmono == 0);
+        {   /* 1.3: films on the memory card through the same reader (a range = a seek in the file): MP4 (system player
+             * before), MKV and TS (these played as a live channel: no jumps, MKV and MP4 not at all) */
+            mock_http_reset();
+            int rq0 = mock_http_range_requests;              /* (no request may go out) */
+            v = play_vod_url(mp4, NULL, 0, 20, 0, 0);
+            vshow("local mp4 film", &v);
+            assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.r.changes >= 280 && v.r.nonmono == 0 && v.r.synced);
+            assert(v.r.st.seekable && v.r.st.audio_frames > 500 && mock_http_range_requests == rq0);
+            v = play_vod_url(mkv, NULL, 7200, 15, 0, 0);
+            vshow("local mkv from 7.2s", &v);
+            assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.first_pos >= 6900 && v.first_pos <= 7300);
+            assert(v.r.changes >= 100 && v.r.changes <= 140 && v.r.nonmono == 0 && v.r.synced);
+            v = play_vod_url(tsf, NULL, 5000, 15, 0, 0);
+            vshow("local ts from 5s", &v);
+            assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 400 && v.first_pos <= 5100 && v.first_pos >= 1000 && v.r.changes >= 150);
+            v = play_vod_url("/nonexistent/VitaIPTV/x.mkv", NULL, 0, 5, 0, 0);
+            vshow("local file missing", &v);
+            assert(v.r.st.state == TSP_ERROR && v.r.changes == 0 && mock_http_range_requests == rq0);
+        }
         {   /* a film through the transcoding server: a plain stream cut at 40 s; position counts from there */
             mock_http_reset();
             mock_http_file = tsf;
