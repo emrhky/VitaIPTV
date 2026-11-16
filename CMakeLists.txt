@@ -63,6 +63,7 @@ add_executable(${PROJECT_NAME}.elf
   src/catchup.c
   src/poster.c
   src/avpref.c
+  src/dl.c
 )
 target_compile_definitions(${PROJECT_NAME}.elf PRIVATE "APP_VERSION=\"v${APP_VER_MAJOR}.${APP_VER_MINOR}.${APP_VER_PATCH}\"")
 # 0.4.1: when this build was made (the log's second line says it, to tell builds apart while testing). Set when
