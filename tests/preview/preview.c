@@ -25,6 +25,31 @@ static int fav_demo;                                         /* 0.5.0: favourite
 static int src_moving = -1;                                  /* 1.1: reorder playlists */
 static void src_row(int i, ScrRow *r, void *c) { (void)c; r->name = src_names[i]; r->badge = src_badge[i]; r->badge_col = src_col[i]; r->sub = src_sub[i]; r->fav = fav_demo && i < 2; r->moving = i == src_moving; }
 
+/* 1.3: the Downloads screen */
+static int dl_pv_ep;
+static void dl_grp_pv(int i, ScrRow *r, void *c)
+{
+    static const char *g[] = { "Filmler", "Gönül Dağı", "Kızılcık Şerbeti" }, *n[] = { "4", "3", "1" };
+    (void)c; r->name = i == 0 ? T("Films") : g[i]; r->right = n[i];
+}
+static void dl_item_pv(int i, ScrRow *r, void *c)
+{
+    static const char *fn[] = { "Kurak Günler (2022)", "Ayla (2017)", "Babam ve Oğlum (2005)", "Kış Uykusu (2014)" };
+    static const char *fr[] = { "2,1 GB", "%42", "Durdu %18", "Sırada" };
+    static const char *en[] = { "S01E01  Bölüm 1", "S01E02  Bölüm 2", "S01E03  Bölüm 3" };
+    static const char *er[] = { "1,2 GB", "1,1 GB", "Hata" };
+    (void)c;
+    if (dl_pv_ep) { r->name = en[i]; r->right = er[i]; r->check = i < 2; }
+    else { r->name = fn[i]; r->right = fr[i]; r->check = i == 0; }
+}
+
+/* 1.3: the home: Downloads first, then seven playlists */
+static const char *home_names[] = { "İndirilenler", "Ev internet - Xtream", "Spor paketi", "Belgesel listesi", "TRT 1 (tek link)", "Yerel liste", "Çocuk kanalları", "Yedek hesap" };
+static const char *home_badge[] = { "OFFLINE", "XTREAM", "XTREAM", "M3U", "STREAM", "FILE", "M3U", "XTREAM" };
+static const char *home_sub[] = { "3 film, 1 dizi  ·  4,2 GB  ·  boş: 9,8 GB", "tv.example.net:8080", "spor.example.com", "raw.example.org", "trt.example.tr", "Turkiye_IP_TV.m3u", "kids.example.org", "backup.example.net" };
+static const unsigned home_col[] = { RGBA8(214, 70, 120, 255), RGBA8(124, 77, 230, 255), RGBA8(124, 77, 230, 255), RGBA8(33, 120, 235, 255), RGBA8(22, 160, 105, 255), RGBA8(222, 128, 30, 255), RGBA8(33, 120, 235, 255), RGBA8(124, 77, 230, 255) };
+static void home_row(int i, ScrRow *r, void *c) { (void)c; r->name = home_names[i]; r->badge = home_badge[i]; r->badge_col = home_col[i]; r->sub = home_sub[i]; }
+
 /* channels */
 static const char *ch_names[] = { "TRT 1 HD", "Kanal D HD", "Show TV HD", "Star TV HD", "ATV HD", "TV8 HD", "FOX HD", "TRT Haber HD",
     "CNN Türk HD", "Habertürk HD", "NTV HD", "TRT Spor HD", "TRT Çocuk", "Minika Çocuk", "Cartoon Network", "beIN Sports 1 HD (FHD)" };
@@ -110,6 +135,16 @@ int main(int argc, char **argv)
     UiHint hs[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_TRIANGLE, "Reload" }, { UI_BTN_START, T("Quit") } };
     ScrList sl = { "Vita IPTV", T("Sources"), T("5 sources"), 5, 0, &scroll, src_row, NULL, "No sources", hs, 3, NULL, 0 };
     preview_clear(UI_BG); scroll = 0; scr_list(&sl); shot("1_sources");
+    {   /* 1.3: the home as main.c draws it: 7 cards evenly spaced, the one-line note under them */
+        static const UiHint hh[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" },
+                                     { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Quit" } };
+        ScrList hl = { "Vita IPTV", T("Playlists"), "8 playlists", 8, 1, &scroll, home_row, NULL, "", hh, 6, NULL, 0 };
+        preview_clear(UI_BG); scroll = 0; scr_list(&hl); shot("1h_home");
+        hl.status = "Liste yenilendi: 1.248 kanal";
+        preview_clear(UI_BG); scroll = 0; scr_list(&hl); shot("1h_home_note");
+        hl.status = "Bu çok uzun bir not satırı: tek satıra sığmadığında sonu üç noktayla kısalır, kartların üstüne binmez ve ikinci satıra geçmez";
+        preview_clear(UI_BG); scroll = 0; scr_list(&hl); shot("1h_home_note_long");
+    }
 
     UiHint hc[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_LR, "Group" }, { UI_BTN_DPAD, "Page" }, { UI_BTN_CIRCLE, "Back" } };
     show_group = 1;
@@ -458,6 +493,26 @@ int main(int argc, char **argv)
         ScrVodCard cl2 = card; cl2.poster = NULL; cl2.loading = 1;
         d.preview = &cl2;
         preview_clear(UI_BG); gs = cs = 0; scr_dual(&d); shot("p_films_preview_loading");
+
+        {   /* 1.3: Downloads: the groups (films, each series) and the downloads with their state, the card beside */
+            UiHint hp[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_TRIANGLE, "Delete" }, { UI_BTN_CIRCLE, "Back" } };
+            ScrDual dd; memset(&dd, 0, sizeof dd);
+            dd.title = T("Downloads"); dd.subtitle = T("Films"); dd.right = "boş: 9,8 GB";
+            dd.lcount = 3; dd.lsel = 0; dd.lscroll = &gs; dd.lrow = dl_grp_pv;
+            dd.rcount = 4; dd.rsel = 1; dd.rscroll = &cs; dd.rrow = dl_item_pv; dd.focus = 1; dd.lmark = 1;
+            dd.hints = hp; dd.nhints = 3; dd.preview = &card;
+            dd.status = "İndiriliyor: 1,1 GB / 2,6 GB  (2,4 MB/sn)";
+            dl_pv_ep = 0;
+            preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); shot("u_downloads_films");
+            UiHint hl[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_TRIANGLE, "Delete series" }, { UI_BTN_CIRCLE, "Back" } };
+            dd.focus = 0; dd.lsel = 1; dd.preview = NULL; dd.hints = hl; dd.subtitle = "Gönül Dağı"; dd.status = NULL;
+            dl_pv_ep = 1; dd.rcount = 3;
+            preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); shot("u_downloads_series");
+            dd.focus = 1; dd.preview = &card;
+            preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); scr_confirm(T("Delete this download?"), "S01E02  Bölüm 2"); shot("u_downloads_delete");
+            dd.status = T("Not enough free space: 2810 MB needed, 1450 MB free"); dd.status_err = 1; dd.preview = &card;
+            preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); shot("u_downloads_nospace");
+        }
 
         /* film details */
         static const char *btn[] = { "Devam et (1:12:40)", "Baştan", "Favori" };
