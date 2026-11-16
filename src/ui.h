@@ -70,6 +70,8 @@ void ui_panel(int x, int y, int w, int h, unsigned fill);
 void ui_header(const char *title, const char *subtitle, const char *right);
 /* hints along the bottom bar; status (if any) is drawn just above it */
 void ui_footer(const UiHint *hints, int n, const char *status, int status_err);
+/* 1.3: the same, the status at most max_lines lines (1: the home's one-line note, 466-496) */
+void ui_footer_lines(const UiHint *hints, int n, const char *status, int status_err, int max_lines);
 int  ui_button(int x, int cy, int btn);           /* draws a glyph starting at x, returns its width */
 int  ui_badge(int x, int y, const char *txt, unsigned col);   /* y = top; returns width */
 void ui_round_rect(int x, int y, int w, int h, int r, unsigned col);

@@ -144,8 +144,25 @@ static void get_display_name(const char *line, char *out, size_t outsz)
     }
 }
 
+int iptv_is_local_path(const char *url)
+{
+    /* ux0:, ur0:, uma0:, imc0:, xmc0:, grw0:... (a device name of letters and a digit, then ':') */
+    size_t n = 0;
+    while (n < 5 && url[n] && ((url[n] >= 'a' && url[n] <= 'z') || (url[n] >= 'A' && url[n] <= 'Z'))) n++;
+    return n >= 2 && url[n] >= '0' && url[n] <= '9' && url[n + 1] == ':';
+}
+
 int iptv_is_film_url(const char *url)
 {
+    if (iptv_is_local_path(url)) {                           /* 1.3: a video file on the memory card: a film too */
+        static const char *const LEXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".flv", ".avi" };
+        size_t n = strlen(url);
+        for (size_t i = 0; i < sizeof LEXT / sizeof LEXT[0]; i++) {
+            size_t k = strlen(LEXT[i]);
+            if (n > k && !strncasecmp(url + n - k, LEXT[i], k)) return 1;
+        }
+        return 0;
+    }
     if (strncasecmp(url, "http://", 7) && strncasecmp(url, "https://", 8)) return 0;
     if (strstr(url, "/movie/") || strstr(url, "/series/")) return 1;   /* Xtream links in an M3U list */
     size_t n = strcspn(url, "?#|");                         /* (| starts headers: link|User-Agent=...) */
