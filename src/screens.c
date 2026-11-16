@@ -9,7 +9,13 @@
 #define LIST_FS  1.2f                     /* 0.5.0: the size of the settings screen (FS in scr_form) */
 
 /* Playlist cards: a big coloured type tag, the name and a dim second line. */
-#define CARD_H 56
+
+/* 1.3: seven cards 48 px high, evenly spaced: 9 px under the header's line (y 62), then 8 and 9 px apart in turn,
+ * the last ends at y 458; under them only a one-line note (466-496), which never covers a card. */
+#define CARD_DH  48
+#define CARD_Y0  71
+#define CARD_END 458
+static int card_y(int r) { return CARD_Y0 + r * 113 / 2; }
 
 void scr_list(const ScrList *l)
 {
@@ -22,42 +28,42 @@ void scr_list(const ScrList *l)
     if (l->count == 0 && l->empty) ui_message(l->empty, NULL, UI_DIM, 0, 0);
 
     for (int r = 0; r < SCR_SRC_ROWS && *scroll + r < l->count; r++) {
-        int i = *scroll + r, y = LIST_Y + r * CARD_H;
+        int i = *scroll + r, y = card_y(r);                 /* (1.3: y = the card's top) */
         int on = i == sel;
         ScrRow row;
         memset(&row, 0, sizeof row);
         l->row(i, &row, l->ctx);
         if (row.moving) {                                   /* 1.1: being moved: amber, with arrows on the right */
-            ui_round_rect(12, y + 3, 922, CARD_H - 6, 10, RGBA8(120, 84, 20, 255));
-            vita2d_draw_rectangle(12, y + 13, 4, CARD_H - 26, UI_WARN);
-            int ax = 900, cy = y + CARD_H / 2;
+            ui_round_rect(12, y, 922, CARD_DH, 10, RGBA8(120, 84, 20, 255));
+            vita2d_draw_rectangle(12, y + 10, 4, CARD_DH - 20, UI_WARN);
+            int ax = 900, cy = y + CARD_DH / 2;
             ui_fill_triangle(ax, cy - 3, ax + 14, cy - 3, ax + 7, cy - 13, UI_WARN);
             ui_fill_triangle(ax, cy + 3, ax + 14, cy + 3, ax + 7, cy + 13, UI_WARN);
         } else {
-            ui_round_rect(12, y + 3, 922, CARD_H - 6, 10, on ? UI_SEL : RGBA8(24, 28, 41, 255));
-            if (on) vita2d_draw_rectangle(12, y + 13, 4, CARD_H - 26, UI_ACCENT);
+            ui_round_rect(12, y, 922, CARD_DH, 10, on ? UI_SEL : RGBA8(24, 28, 41, 255));
+            if (on) vita2d_draw_rectangle(12, y + 10, 4, CARD_DH - 20, UI_ACCENT);
         }
         int x = 28;
-        if (row.badge) x += ui_tag(x, y + 11, 112, CARD_H - 22, row.badge, row.badge_col) + 18;
-        if (row.fav) { ui_star(x + 11, y + CARD_H / 2 - 1, 11, UI_FAV); x += 30; }   /* 0.5.0: a favourite list */
+        if (row.badge) x += ui_tag(x, y + 8, 112, CARD_DH - 16, row.badge, row.badge_col) + 18;
+        if (row.fav) { ui_star(x + 11, y + CARD_DH / 2 - 1, 11, UI_FAV); x += 30; }   /* 0.5.0: a favourite list */
         int rw = 0;
         if (row.right && row.right[0]) {
             rw = ui_text_w(1.0f, row.right);
             if (rw > 230) rw = 230;
-            ui_text_fit(918 - rw, y + 34, on ? ui_theme.sel_text : UI_DIM, 1.0f, row.right, 230);
+            ui_text_fit(918 - rw, y + 31, on ? ui_theme.sel_text : UI_DIM, 1.0f, row.right, 230);
         }
         int maxw = 918 - rw - 16 - x;
         if (row.sub && row.sub[0]) {
-            ui_text_fit(x, y + 27, UI_TEXT, 1.2f, row.name, maxw);
-            if (on) ui_text_fit(x + 1, y + 27, UI_TEXT, 1.2f, row.name, maxw);
-            ui_text_fit(x, y + 47, on ? ui_theme.sel_text : UI_DIM, 0.9f, row.sub, maxw);
+            ui_text_fit(x, y + 23, UI_TEXT, 1.2f, row.name, maxw);
+            if (on) ui_text_fit(x + 1, y + 23, UI_TEXT, 1.2f, row.name, maxw);
+            ui_text_fit(x, y + 42, on ? ui_theme.sel_text : UI_DIM, 0.9f, row.sub, maxw);
         } else {
-            ui_text_fit(x, y + 36, UI_TEXT, 1.2f, row.name, maxw);
-            if (on) ui_text_fit(x + 1, y + 36, UI_TEXT, 1.2f, row.name, maxw);
+            ui_text_fit(x, y + 32, UI_TEXT, 1.2f, row.name, maxw);
+            if (on) ui_text_fit(x + 1, y + 32, UI_TEXT, 1.2f, row.name, maxw);
         }
     }
-    ui_scrollbar(946, LIST_Y + 4, SCR_SRC_ROWS * CARD_H - 8, *scroll, SCR_SRC_ROWS, l->count);
-    ui_footer(l->hints, l->nhints, l->status, l->status_err);
+    ui_scrollbar(946, CARD_Y0, CARD_END - CARD_Y0, *scroll, SCR_SRC_ROWS, l->count);
+    ui_footer_lines(l->hints, l->nhints, l->status, l->status_err, 1);   /* (1.3: one line, above the cards' end) */
 }
 
 static void splash_background(void);
@@ -389,25 +395,25 @@ void scr_settings(const char *title, const ScrField *f, int n, int sel, int *scr
     char tb[192], lb[192];
     ui_header(ui_title(title, tb, sizeof tb), NULL, NULL);
     const char *line = status && status[0] ? status : info;
-    int rows = SCR_SET_ROWS;
+    int rows = SCR_SET_ROWS, two = 0;
     if (line && line[0]) {                                    /* a help line of two lines covers the last row */
         UiWrap w;
-        if (ui_wrap(&w, 1.0f, line, 924, 2) > 1 || w.n > 1) rows = SCR_SET_ROWS - 1;
+        if (ui_wrap(&w, 1.0f, line, 924, 2) > 1 || w.n > 1) { rows = SCR_SET_ROWS - 1; two = 1; }
     }
     if (sel < *scroll) *scroll = sel;
     if (sel >= *scroll + rows) *scroll = sel - rows + 1;
     if (*scroll > n - rows) *scroll = n - rows;
     if (*scroll < 0) *scroll = 0;
     for (int r = 0; r < rows && *scroll + r < n; r++) {
-        int i = *scroll + r, y = LIST_Y + r * CARD_H, on = i == sel, en = f[i].enabled;
-        int cy = y + CARD_H / 2, ty = y + 36;
-        ui_round_rect(12, y + 3, 922, CARD_H - 6, 10, on ? UI_SEL : RGBA8(24, 28, 41, 255));
-        if (on) vita2d_draw_rectangle(12, y + 13, 4, CARD_H - 26, UI_ACCENT);
+        int i = *scroll + r, y = card_y(r), on = i == sel, en = f[i].enabled;   /* (1.3: the home's cards) */
+        int cy = y + CARD_DH / 2, ty = y + 32;
+        ui_round_rect(12, y, 922, CARD_DH, 10, on ? UI_SEL : RGBA8(24, 28, 41, 255));
+        if (on) vita2d_draw_rectangle(12, y + 10, 4, CARD_DH - 20, UI_ACCENT);
         int lx = 28 + (f[i].indent ? 34 : 0);
         if (f[i].indent) {                                    /* a row that belongs to the one above: a small bend */
             unsigned lc = on ? ui_theme.sel_text : UI_LINE;
-            vita2d_draw_rectangle(36, y + 14, 2, 15, lc);
-            vita2d_draw_rectangle(36, y + 27, 14, 2, lc);
+            vita2d_draw_rectangle(36, y + 11, 2, 15, lc);
+            vita2d_draw_rectangle(36, y + 24, 14, 2, lc);
         }
         unsigned tc = en ? UI_TEXT : RGBA8(100, 104, 122, 255);
         unsigned vc = on ? ui_theme.sel_text : UI_DIM;
@@ -456,8 +462,8 @@ void scr_settings(const char *title, const ScrField *f, int n, int sel, int *scr
         ui_text_fit(lx, ty, lcol, 1.2f, label, right - lx - 8);
         if (on) ui_text_fit(lx + 1, ty, lcol, 1.2f, label, right - lx - 8);   /* (bold, as the lists) */
     }
-    ui_scrollbar(946, LIST_Y + 4, rows * CARD_H - 8, *scroll, rows, n);
-    ui_footer(hints, nhints, line, status && status[0] ? status_err : 0);
+    ui_scrollbar(946, CARD_Y0, card_y(rows - 1) + CARD_DH - CARD_Y0, *scroll, rows, n);
+    ui_footer_lines(hints, nhints, line, status && status[0] ? status_err : 0, two ? 2 : 1);
 }
 
 /* 1.2: a line in the middle of cx, shortened ("...") to maxw as ui_text_fit does */

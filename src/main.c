@@ -45,6 +45,8 @@
 #include "guide.h"
 #include "catchup.h"
 #include "poster.h"
+#include "avpref.h"
+#include "dl.h"
 #include <psp2/rtc.h>
 
 #define NET_POOL_SIZE (4 * 1024 * 1024)
@@ -64,11 +66,13 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define WATCH_FILE    DATA_DIR "/watched.txt"     /* 0.7.0: watched episodes */
 #define FAV_FILE      DATA_DIR "/favorites.txt"
 #define MYLIST_FILE   DATA_DIR "/mylist.txt"
+#define AVPREF_FILE   DATA_DIR "/avpref.txt"        /* 1.3: the sound and subtitles chosen for each stream */
 #define ORDER_FILE    DATA_DIR "/order.txt"         /* 1.1: the playlists' order (Select > Reorder playlists) */
+#define DL_ROOT       DATA_DIR "/downloads"              /* 1.3: the downloads (dl.h) */
 #define CACHE_DIR     DATA_DIR "/cache"                  /* 1.1: saved copies of the playlists (listcache.h) */
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v1.2.0"
+#define APP_VERSION   "v1.3.0"
 #endif
 #ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
 #define APP_BUILD     __DATE__ " " __TIME__
@@ -155,6 +159,14 @@ static void seasons_build(void);
 static void season_of(int ci);
 static void vod_card_of(const ChannelList *l, const Channel *c, ScrVodCard *k, int want_info);
 static void draw_series(void);
+static const char *dl_home_line(char *b, size_t cap);     /* 1.3: downloads (further down) */
+static void draw_downloads(void);
+static void dl_input(unsigned p);
+static void dl_open_screen(void);
+static void dl_refresh(void);
+static void dl_poll(void);
+static uint32_t dl_avkey_of(const char *path, int *series);
+static int dl_open;
 static void clock_of(int64_t t, char *b, size_t n);
 static void day_label(int64_t t, char *b, size_t n);
 static int prog_find(int ci, int64_t start);
@@ -717,7 +729,7 @@ static void save_order(void)
     int n = 0;
     for (int d = 0; d < nsources; d++) {
         const Source *src = &sources[sorder[d]];
-        if (src->type == SRC_MYLIST) continue;
+        if (src->type == SRC_MYLIST || src->type == SRC_DOWNLOADS) continue;
         char k[FAV_SRC_MAX];
         fav_source_key(src, k, sizeof k);
         o += (size_t)sprintf(buf + o, "%s\n", k);
@@ -758,16 +770,21 @@ static int src_is_fav(int i)
     return fav_find(&favs, FAV_LIST, k, NULL);
 }
 
+/* 1.3: a row of the home screen that is not a playlist (Downloads, My List) */
+static int src_virtual(int i) { return i >= 0 && i < nsources && (sources[i].type == SRC_MYLIST || sources[i].type == SRC_DOWNLOADS); }
+static int src_real_count(void) { int n = 0; for (int i = 0; i < nsources; i++) n += !src_virtual(i); return n; }
+
 static void sort_sources(void)
 {
     int n = 0, rank[MAX_SOURCES];
+    for (int i = 0; i < nsources; i++) if (sources[i].type == SRC_DOWNLOADS) sorder[n++] = i;   /* 1.3: Downloads first */
     for (int i = 0; i < nsources; i++) if (sources[i].type == SRC_MYLIST) sorder[n++] = i;   /* 1.1: My List on top */
     if (!ord_read) {                                         /* the first time: as before 1.1, then kept */
-        for (int i = 0; i < nsources; i++) rank[i] = sources[i].type == SRC_MYLIST ? -2 : src_is_fav(i);
+        for (int i = 0; i < nsources; i++) rank[i] = src_virtual(i) ? -2 : src_is_fav(i);
         for (int r = 0; r < favs.n; r++)                     /* (favs.n is small) */
             for (int i = 0; i < nsources; i++) if (rank[i] == r) sorder[n++] = i;
         for (int i = 0; i < nsources; i++) if (rank[i] == -1) sorder[n++] = i;
-        if (nsources > (n > 0 && sources[sorder[0]].type == SRC_MYLIST ? 1 : 0)) {
+        if (nsources > n) {                                  /* (playlists besides the fixed rows) */
             save_order();
             plog("order: the playlists' order written (%d)", nord);
         }
@@ -775,7 +792,7 @@ static void sort_sources(void)
     }
     for (int i = 0; i < nsources; i++) {
         rank[i] = -2;
-        if (sources[i].type == SRC_MYLIST) continue;
+        if (src_virtual(i)) continue;
         char k[FAV_SRC_MAX];
         fav_source_key(&sources[i], k, sizeof k);
         rank[i] = -1;
@@ -790,7 +807,7 @@ static int read_saved(const char *path, Mem *m);
 static int write_text_file(const char *path, const char *text);
 
 /* 1.1: Select > Reorder playlists: X picks a playlist up and puts it down, START saves, O asks (as the edit mode) */
-static int src_fixed(int d) { return d >= 0 && d < nsources && sources[sorder[d]].type == SRC_MYLIST; }   /* (My List stays on top) */
+static int src_fixed(int d) { return d >= 0 && d < nsources && src_virtual(sorder[d]); }   /* (Downloads, My List stay on top) */
 
 static void src_sort_status(void)
 {
@@ -880,7 +897,15 @@ static int save_mylist(void)
 /* the "My List" row: there while it has channels (always the last entry of sources[]) */
 static void mylist_source_sync(void)
 {
-    if (nsources > 0 && sources[nsources - 1].type == SRC_MYLIST) nsources--;
+    /* 1.3: the rows that are not playlists at the end: Downloads (always), then My List (while it has channels) */
+    while (nsources > 0 && (sources[nsources - 1].type == SRC_MYLIST || sources[nsources - 1].type == SRC_DOWNLOADS)) nsources--;
+    if (nsources < MAX_SOURCES) {
+        Source *s = &sources[nsources++];
+        memset(s, 0, sizeof *s);
+        s->type = SRC_DOWNLOADS;
+        s->auto_added = 1;
+        snprintf(s->name, sizeof s->name, "%s", T("Downloads"));
+    }
     if (mylist.n > 0 && nsources < MAX_SOURCES) {
         Source *s = &sources[nsources++];
         memset(s, 0, sizeof *s);
@@ -1018,7 +1043,7 @@ static void load_sources(void)
     load_order();                                            /* 1.1 */
     add_local_files();
     mylist_source_sync();                                    /* 1.1 */
-    if (nsources == 0) set_status(0, "Press Square to add your first playlist.", NULL);
+    if (src_real_count() == 0) set_status(0, "Press Square to add your first playlist.", NULL);
     else status[0] = 0;
     sort_sources();
     sel = scroll = 0;
@@ -1798,7 +1823,7 @@ static void leave_episodes(void);
 static int net_offline(const char *url)
 {
     static int last = -1;
-    if (url && !strncasecmp(url, "ux0:", 4)) return 0;
+    if (url && iptv_is_local_path(url)) return 0;            /* (1.3: any memory card) */
     int st = -1;
     int r = sceNetCtlInetGetState(&st);
     int off = r >= 0 && st != SCE_NETCTL_STATE_CONNECTED;     /* (cannot be read: try anyway) */
@@ -2186,8 +2211,10 @@ static void run_qjob(QJob *j)
     Mem m = {0};
     CioRequest rq = { j->url, NULL, NULL, 8, 15, mem_data, epg_stop_cb, &m };
     int st = 0;
-    char e[96];
-    int r = cio_get(&rq, &st, e, sizeof e);
+    char e[96] = "";
+    int r;
+    if (iptv_is_local_path(j->url)) r = read_file(j->url, &m) == 0 ? 0 : -1;   /* 1.3: a download's poster */
+    else r = cio_get(&rq, &st, e, sizeof e);
     j->http = st;
     j->ok = r >= 0 && st < 400 && m.buf != NULL;
     j->px = NULL;
@@ -2753,7 +2780,51 @@ static char sub_lang[4];             /* ... its language, kept for the next film
 static int sub_delay_ms;             /* ... shown this much later (- earlier), kept while the app runs */
 static int menu_tab, menu_fresh;     /* 0.7.0: the Select menu's tab; fresh: put the selection on what plays */
 static unsigned menu_lr_t0, menu_lr_last;   /* (the sync row: left / right held repeats) */
-static char aud_lang[4];             /* ... and its language, kept for the next channels and films */
+static char aud_lang[4];             /* ... and its language (1.3: for this stream only, see av_apply) */
+/* 1.3: the sound and subtitles of each stream, remembered (a series as a whole: its episodes share it). A stream
+ * without a choice: the sound in the app's language, else its own; subtitles in the app's language only when
+ * the sound is not in it. */
+static AvPrefs avprefs;
+static uint32_t av_key;              /* the stream playing (0: none) */
+static int av_by_lang;               /* (a series: the languages count, the track numbers may differ) */
+static const char *app_lang3(void) { return lang_get() == LANG_TR ? "tur" : "eng"; }
+static uint32_t av_key_of(int ci, int *series);
+static void av_apply(int ci)
+{
+    int series = 0;
+    av_key = av_key_of(ci, &series);
+    av_by_lang = series;
+    const AvPref *r = av_key ? avpref_get(&avprefs, av_key) : NULL;
+    if (r) {
+        aud_id = r->aud_id;
+        snprintf(aud_lang, sizeof aud_lang, "%s", r->aud_lang);
+        sub_off = r->sub_on == 2 ? 2 : !r->sub_on;          /* (2: automatic, as with no choice) */
+        sub_id = r->sub_on == 1 ? r->sub_id : -1;
+        snprintf(sub_lang, sizeof sub_lang, "%s", r->sub_on == 2 || !r->sub_lang[0] ? (r->sub_on == 2 ? app_lang3() : "") : r->sub_lang);
+        plog("player: sound / subtitles as chosen before: %s, subtitles %s", aud_lang[0] ? aud_lang : "-", sub_off == 2 ? "automatic" : sub_off ? "off" : sub_lang[0] ? sub_lang : "on");
+    } else {
+        aud_id = -1;
+        snprintf(aud_lang, sizeof aud_lang, "%s", app_lang3());
+        sub_id = -1;
+        sub_off = 2;                                         /* (tsplayer: on only when the sound is not in it) */
+        snprintf(sub_lang, sizeof sub_lang, "%s", app_lang3());
+    }
+}
+/* the menu's choice, for this stream (and its series) next time */
+static void av_remember(void)
+{
+    if (!av_key) return;
+    AvPref r;
+    memset(&r, 0, sizeof r);
+    r.key = av_key;
+    r.aud_id = av_by_lang && aud_lang[0] ? -1 : aud_id;
+    snprintf(r.aud_lang, sizeof r.aud_lang, "%s", aud_lang);
+    r.sub_on = sub_off == 0 ? 1 : sub_off == 2 ? 2 : 0;   /* (only the sound chosen: subtitles stay automatic) */
+    r.sub_id = av_by_lang && sub_lang[0] ? -1 : sub_id;
+    snprintf(r.sub_lang, sizeof r.sub_lang, "%s", sub_off == 0 ? sub_lang : "");
+    avpref_put(&avprefs, &r);
+    if (avpref_save(&avprefs, AVPREF_FILE, 0) != 0) plog("avpref: cannot save %s", AVPREF_FILE);
+}
 static long res_novideo[TSP_MAX_VARIANTS];   /* variants of this channel that sent no picture (by bit rate) */
 static int res_nnovideo;
 
@@ -2845,6 +2916,24 @@ static uint32_t url_key(const char *u)
     return h ? h : 1;
 }
 
+/* 1.3: the key of the stream's sound / subtitle choice: an episode: its series; else the address */
+static uint32_t av_key_of(int ci, int *series)
+{
+    *series = 0;
+    if (cur_src >= 0 && cur_src < nsources && sources[cur_src].type == SRC_DOWNLOADS && ci >= 0 && ci < chans.count) {
+        uint32_t k = dl_avkey_of(chans.items[ci].url, series);   /* 1.3: a download: the stream it came from */
+        if (k) return k;
+    }
+    if (in_episodes && series_ci_saved >= 0 && series_ci_saved < series_saved.count) {
+        char b[IPTV_URL_MAX + 8];
+        snprintf(b, sizeof b, "series:%s", series_saved.items[series_ci_saved].url);
+        *series = 1;
+        return avpref_key(b);
+    }
+    if (ci < 0 || ci >= chans.count) return 0;
+    return avpref_key(chans.items[ci].url);
+}
+
 static void nopic_remember(const char *url, int h, long bw)
 {
     uint32_t k = url_key(url);
@@ -2927,6 +3016,7 @@ static void play_channel_ex(int vi, int use_proxy)
         snprintf(play_err, sizeof play_err, "%s", NO_NET_MSG);
         return;
     }
+    if (iptv_is_local_path(url)) use_proxy = 0;             /* 1.3: a file here: the server cannot reach it */
     tsp_set_options(1, res_effective());                     /* 1080p is always on since v0.2 */
     tsp_set_audio(aud_id, aud_lang);                         /* 0.5.0: the audio track (or language) chosen */
     tsp_set_sub(sub_id, sub_lang, sub_off);                  /* 0.7.0: subtitles */
@@ -2992,8 +3082,12 @@ static void play_channel_ex(int vi, int use_proxy)
  * memory card: the server cannot reach them). Square still switches to the direct stream and back. */
 static int proxy_always(const char *url)
 {
-    return settings.auto_proxy == 2 && srv_on() && strncasecmp(url, "ux0:", 4) != 0;
+    return settings.auto_proxy == 2 && srv_on() && !iptv_is_local_path(url);
 }
+
+/* 1.3: what plays is a file on the memory card (local or downloaded): the server cannot reach it */
+static int cur_local(void) { return nvis && play_vis >= 0 && play_vis < nvis && iptv_is_local_path(chans.items[vis[play_vis]].url); }
+static int srv_here(void) { return srv_on() && !cur_local(); }
 
 static void play_channel(int vi)
 {
@@ -3017,8 +3111,7 @@ static void play_channel(int vi)
     }
     auto_proxy_tried = 0;
     film_dur_ms = 0;
-    aud_id = -1;                                             /* (0.5.0: the language chosen stays, the track number not) */
-    sub_id = -1;                                             /* (0.7.0: the same for subtitles; on or off stays too) */
+    av_apply(ci);                                            /* 1.3: this stream's own sound and subtitles */
     res_want = 0;                                            /* every channel opens at the size in the settings */
     res_bw = 0;
     res_manual = 0;
@@ -3375,9 +3468,9 @@ static void draw_tsp_screen(int osd)
     static char sq_label[24];
     int sq_next = st && !via_proxy ? res_square_next(st) : -1;
     /* Square: the next picture size; else the server (or back from it); a film: 720p through the server */
-    const char *square = sq_next >= 0 ? res_name(st, sq_next, sq_label, sizeof sq_label) : srv_on() ? "Server" : NULL;
+    const char *square = sq_next >= 0 ? res_name(st, sq_next, sq_label, sizeof sq_label) : srv_here() ? "Server" : NULL;
     /* (1.2: a film's 720p only with the server on: a film file has one size, so no Square without it) */
-    if (film_playing()) square = arch_on ? "Live" : via_proxy ? "Original" : srv_on() ? "720p" : NULL;
+    if (film_playing()) square = arch_on ? "Live" : via_proxy ? "Original" : srv_here() ? "720p" : NULL;
     int nh = play_hints(hints, 0, film_playing(), st && st->paused, square);
     if (film_playing()) {                                    /* films: pause, jumps, time line */
         int pos = 0, dur = 0;
@@ -3459,7 +3552,10 @@ static void draw_tsp_screen(int osd)
             sp.center_title = "Cannot play this channel";
             sp.center_line = T_msg(st->msg);
             sp.center_col = UI_ERR;
-            if (st->err_kind == TSP_ERRK_FORMAT && !srv_on()) {
+            if (st->err_kind == TSP_ERRK_NET && dl_active() && !cur_local() && strstr(st->msg, "HTTP")) {
+                sp.stats1 = T("A download is running: an account with one connection cannot play at the same time (stop it in Downloads)");   /* 1.3 */
+                sp.osd = 1;
+            } else if (st->err_kind == TSP_ERRK_FORMAT && !srv_here()) {
                 sp.stats1 = T("Tip: a transcoding server on your PC can play this channel (channel list: Select > Settings, see README)");
                 sp.osd = 1;
             } else if (via_proxy) {
@@ -3588,6 +3684,14 @@ static void src_row(int i, ScrRow *r, void *ctx)
     r->moving = src_sorting && src_held >= 0 && sorder[src_held] == i;   /* 1.1 */
     r->name = s->name;
     r->sub = src_where(s, where, sizeof where);
+    if (s->type == SRC_DOWNLOADS) {                          /* 1.3: always first */
+        static char dlw[160];
+        r->name = T("Downloads");
+        r->sub = dl_home_line(dlw, sizeof dlw);
+        r->badge = "OFFLINE";
+        r->badge_col = RGBA8(214, 70, 120, 255);
+        return;
+    }
     if (s->type == SRC_MYLIST) {                             /* 1.1 */
         snprintf(where, sizeof where, T("%d channels from your playlists"), mylist.n);
         r->sub = where;
@@ -3629,12 +3733,13 @@ static void ch_row(int i, ScrRow *r, void *ctx)
 
 static void draw_sources(void)
 {
+    if (dl_open) { draw_downloads(); return; }               /* 1.3 */
     static const UiHint H[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" },
                                 { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Quit" } };
     static const UiHint HMV[] = { { UI_BTN_UPDOWN, "Choose" }, { UI_BTN_CROSS, "Pick up" }, { UI_BTN_START, "Save" }, { UI_BTN_CIRCLE, "Back" } };
     static const UiHint HMH[] = { { UI_BTN_UPDOWN, "Reorder" }, { UI_BTN_CROSS, "Put down" }, { UI_BTN_START, "Save" }, { UI_BTN_CIRCLE, "Back" } };
     char right[32];
-    snprintf(right, sizeof right, T("%d playlists"), nsources);
+    snprintf(right, sizeof right, T("%d playlists"), src_real_count());   /* (1.3: the playlists, not the fixed rows) */
     const UiHint *h = src_sorting ? (src_held >= 0 ? HMH : HMV) : H;
     int nh = src_sorting ? (src_held >= 0 ? NH(HMH) : NH(HMV)) : NH(H);
     ScrList l = { "Vita IPTV", T(src_sorting ? "Reorder playlists" : "Playlists"), right, nsources, sel, &scroll, src_row, NULL,
@@ -4142,8 +4247,10 @@ static void save_settings_form(void)
     apply_look();
     save_settings();
     apply_language();
-    if (nsources > 0 && sources[nsources - 1].type == SRC_MYLIST)   /* 1.1: (its name in the new language) */
-        snprintf(sources[nsources - 1].name, sizeof sources[0].name, "%s", T("My List"));
+    for (int i = 0; i < nsources; i++) {                     /* 1.1: (the fixed rows' names in the new language) */
+        if (sources[i].type == SRC_MYLIST) snprintf(sources[i].name, sizeof sources[0].name, "%s", T("My List"));
+        if (sources[i].type == SRC_DOWNLOADS) snprintf(sources[i].name, sizeof sources[0].name, "%s", T("Downloads"));
+    }
     form_kind = FORM_NONE;
     if (!status_err) set_status(0, "Settings saved", NULL);
 }
@@ -4401,7 +4508,7 @@ static void keep_awake(void)
 /* Channels the Vita cannot play go through the transcoding server by themselves. */
 static void auto_proxy_check(void)
 {
-    if (play_mode != 2 || via_proxy || auto_proxy_tried || !srv_on() || !settings.auto_proxy) return;
+    if (play_mode != 2 || via_proxy || auto_proxy_tried || !srv_here() || !settings.auto_proxy) return;
     const TspStatus *st = tsp_status();
     if (!st) return;
     int format = st->state == TSP_ERROR && st->err_kind == TSP_ERRK_FORMAT;
@@ -4562,8 +4669,7 @@ static void arch_play(int vi, const GProg *p, int off_ms, int from)
     if (last_chan != ci) { prev_chan = last_chan; prev_key = last_key; }
     last_chan = ci;
     last_key = url_key(chans.items[ci].url);
-    aud_id = -1;
-    sub_id = -1;
+    av_apply(ci);                                            /* 1.3 (the channel's own choice) */
     res_want = 0; res_bw = 0; res_manual = 0; res_menu = 0; res_nnovideo = 0;
     auto_proxy_tried = 1;                                    /* (the server cannot convert an archive) */
     film_start_ms = off_ms;
@@ -5038,6 +5144,412 @@ static void vod_card_of(const ChannelList *l, const Channel *c, ScrVodCard *k, i
     k->loading = poster_loading();
 }
 
+/* ---- 1.3: downloads (dl.h): the "Downloads" row on top of the home screen, its screen, Select > Download ---- */
+static DlItem *dlv;                         /* the downloads (dl_scan), newest first */
+static int dln;
+/* (dl_open: its screen is open, over the playlists: state stays ST_SOURCES) */
+static int dl_focus, dl_gsel, dl_gscroll, dl_isel, dl_iscroll;
+static char dl_gname[48][IPTV_NAME_MAX];    /* the groups: "Films", then each series */
+static int dl_ngroups;
+static int dl_items[DL_MAX], dl_nitems;     /* the chosen group's downloads (indexes into dlv) */
+static int dl_ask;                          /* 1: delete the download?  2: delete the series? */
+static int dl_last_count = -1;              /* (dl_queued_count: a change means one ended) */
+static long long dl_free_now = -1;
+static uint64_t dl_total_bytes;
+static int dl_nfilms, dl_nseries;
+static unsigned dl_tick_ms;
+
+static int dl_src_index(void) { for (int i = 0; i < nsources; i++) if (sources[i].type == SRC_DOWNLOADS) return i; return -1; }
+static int dl_in_group(const DlItem *it, int g)
+{
+    if (g == 0) return it->kind != 'E';
+    return it->kind == 'E' && !strcmp(it->series[0] ? it->series : "?", dl_gname[g]);
+}
+static void dl_group_items(void)
+{
+    dl_nitems = 0;
+    for (int i = 0; i < dln; i++) if (dl_in_group(&dlv[i], dl_gsel)) dl_items[dl_nitems++] = i;
+    if (dl_gsel > 0)                                         /* episodes: by season and number */
+        for (int a = 1; a < dl_nitems; a++)
+            for (int b = a; b > 0; b--) {
+                const DlItem *x = &dlv[dl_items[b - 1]], *y = &dlv[dl_items[b]];
+                if (x->season < y->season || (x->season == y->season && x->episode <= y->episode)) break;
+                int t = dl_items[b]; dl_items[b] = dl_items[b - 1]; dl_items[b - 1] = t;
+            }
+    if (dl_isel >= dl_nitems) dl_isel = dl_nitems ? dl_nitems - 1 : 0;
+}
+static void dl_refresh(void)
+{
+    if (!dlv && !(dlv = malloc(sizeof(DlItem) * DL_MAX))) { dln = 0; return; }
+    dln = dl_scan(dlv, DL_MAX);
+    dl_ngroups = 0;
+    snprintf(dl_gname[dl_ngroups++], sizeof dl_gname[0], "%s", "Films");
+    dl_total_bytes = 0;
+    dl_nfilms = dl_nseries = 0;
+    for (int i = 0; i < dln; i++) {
+        dl_total_bytes += dlv[i].have;
+        if (dlv[i].kind != 'E') { dl_nfilms++; continue; }
+        const char *sn = dlv[i].series[0] ? dlv[i].series : "?";
+        int k = 1;
+        while (k < dl_ngroups && strcmp(dl_gname[k], sn)) k++;
+        if (k == dl_ngroups && dl_ngroups < (int)(sizeof dl_gname / sizeof dl_gname[0])) {
+            snprintf(dl_gname[dl_ngroups++], sizeof dl_gname[0], "%s", sn);
+            dl_nseries++;
+        }
+    }
+    for (int a = 2; a < dl_ngroups; a++)                     /* the series by name */
+        for (int b = a; b > 1 && strcasecmp(dl_gname[b - 1], dl_gname[b]) > 0; b--) {
+            char t[IPTV_NAME_MAX];
+            memcpy(t, dl_gname[b], sizeof t); memcpy(dl_gname[b], dl_gname[b - 1], sizeof t); memcpy(dl_gname[b - 1], t, sizeof t);
+        }
+    if (dl_gsel >= dl_ngroups) dl_gsel = 0;
+    dl_free_now = dl_free_bytes();
+    dl_group_items();
+}
+
+/* the line under "Downloads" on the home screen */
+static const char *dl_home_line(char *b, size_t cap)
+{
+    char sz[24], fr[24];
+    DlState st;
+    for (int i = 0; i < dln; i++)                            /* one downloading: its progress */
+        if (dl_state(dlv[i].dir, &st) == DL_ACTIVE) {
+            int pct = st.total ? (int)(st.have * 100 / st.total) : 0;
+            char sp[24];
+            dl_size_text(st.bps, lang_get() == LANG_TR, sp, sizeof sp);
+            snprintf(b, cap, T("Downloading: %s  %d%%  (%s/s)"), dlv[i].title, pct, st.bps >= 1024 * 1024 ? sp : "<1 MB");
+            return b;
+        }
+    if (!dln) { snprintf(b, cap, "%s", T("Nothing yet: Select > Download on a film or an episode")); return b; }
+    dl_size_text(dl_total_bytes, lang_get() == LANG_TR, sz, sizeof sz);
+    char cnt[64];
+    if (dl_nseries) snprintf(cnt, sizeof cnt, T("%d films, %d series"), dl_nfilms, dl_nseries);
+    else snprintf(cnt, sizeof cnt, T("%d films"), dl_nfilms);
+    if (dl_free_now >= 0) {
+        dl_size_text((uint64_t)dl_free_now, lang_get() == LANG_TR, fr, sizeof fr);
+        snprintf(b, cap, T("%s  \xC2\xB7  %s  \xC2\xB7  free: %s"), cnt, sz, fr);
+    } else snprintf(b, cap, "%s  \xC2\xB7  %s", cnt, sz);
+    return b;
+}
+
+static void dl_grp_row(int i, ScrRow *r, void *ctx)
+{
+    static char cnt[16];
+    (void)ctx;
+    int n = 0;
+    for (int k = 0; k < dln; k++) n += dl_in_group(&dlv[k], i);
+    snprintf(cnt, sizeof cnt, "%d", n);
+    r->name = i == 0 ? T("Films") : dl_gname[i];
+    r->right = cnt;
+}
+
+static const char *dl_right_text(const DlItem *it, char *b, size_t cap)
+{
+    DlState st;
+    int s = dl_state(it->dir, &st);
+    uint64_t have = s == DL_ACTIVE ? st.have : it->have, tot = s == DL_ACTIVE && st.total ? st.total : it->size;
+    int pct = tot ? (int)(have * 100 / tot) : 0;
+    if (it->done) {
+        dl_size_text(it->size ? it->size : it->have, lang_get() == LANG_TR, b, cap);
+    } else if (s == DL_ACTIVE) snprintf(b, cap, "%d%%", pct);
+    else if (s == DL_QUEUED) snprintf(b, cap, "%s", T("Waiting"));
+    else if (s == DL_FAILED) snprintf(b, cap, "%s", T("Failed"));
+    else snprintf(b, cap, T("Stopped %d%%"), pct);
+    return b;
+}
+
+static void dl_item_row(int i, ScrRow *r, void *ctx)
+{
+    static char nm[8][IPTV_NAME_MAX + 16], rt[8][32];
+    static int k;
+    (void)ctx;
+    if (i < 0 || i >= dl_nitems) return;
+    const DlItem *it = &dlv[dl_items[i]];
+    char *n = nm[k & 7], *t = rt[k & 7];
+    k++;
+    if (it->kind == 'E' && (it->season || it->episode)) snprintf(n, sizeof nm[0], "S%02dE%02d  %s", it->season, it->episode, it->title);
+    else if (it->kind != 'E' && it->year[0]) snprintf(n, sizeof nm[0], "%s (%s)", it->title, it->year);
+    else snprintf(n, sizeof nm[0], "%s", it->title);
+    r->name = n;
+    r->right = dl_right_text(it, t, sizeof rt[0]);
+    r->check = it->done;
+}
+
+static const DlItem *dl_cur(void) { return dl_nitems && dl_isel < dl_nitems ? &dlv[dl_items[dl_isel]] : NULL; }
+
+static void dl_path_of(const DlItem *it, char *out, size_t cap) { snprintf(out, cap, "%s/%s", it->dir, it->video); }
+
+static void draw_downloads(void)
+{
+    static const UiHint HL[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_TRIANGLE, "Delete series" }, { UI_BTN_CIRCLE, "Back" } };
+    static const UiHint HL0[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_CIRCLE, "Back" } };
+    static const UiHint HP[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_TRIANGLE, "Delete" }, { UI_BTN_CIRCLE, "Back" } };
+    static const UiHint HS[] = { { UI_BTN_CROSS, "Pause" }, { UI_BTN_TRIANGLE, "Delete" }, { UI_BTN_CIRCLE, "Back" } };
+    static const UiHint HC[] = { { UI_BTN_CROSS, "Continue" }, { UI_BTN_TRIANGLE, "Delete" }, { UI_BTN_CIRCLE, "Back" } };
+    char right[48], fr[24], sub[IPTV_NAME_MAX + 8];
+    if (dl_free_now >= 0) { dl_size_text((uint64_t)dl_free_now, lang_get() == LANG_TR, fr, sizeof fr); snprintf(right, sizeof right, T("free: %s"), fr); }
+    else right[0] = 0;
+    snprintf(sub, sizeof sub, "%s", dl_gsel == 0 ? T("Films") : dl_gname[dl_gsel]);
+    ScrDual d;
+    memset(&d, 0, sizeof d);
+    d.title = T("Downloads");
+    d.subtitle = sub;
+    d.right = right;
+    d.lcount = dl_ngroups; d.lsel = dl_gsel; d.lscroll = &dl_gscroll; d.lrow = dl_grp_row;
+    d.rcount = dl_nitems; d.rsel = dl_isel; d.rscroll = &dl_iscroll; d.rrow = dl_item_row;
+    d.focus = dl_focus;
+    d.lmark = 1;
+    d.rempty = T(dl_gsel == 0 ? "No downloaded films: Select > Download on a film" : "No episodes");
+    const DlItem *it = dl_cur();
+    DlState st;
+    int s = it ? dl_state(it->dir, &st) : DL_IDLE;
+    if (dl_focus == 0) { d.hints = dl_gsel ? HL : HL0; d.nhints = dl_gsel ? NH(HL) : NH(HL0); }
+    else if (!it || it->done) { d.hints = HP; d.nhints = NH(HP); }
+    else if (s == DL_ACTIVE || s == DL_QUEUED) { d.hints = HS; d.nhints = NH(HS); }
+    else { d.hints = HC; d.nhints = NH(HC); }
+    static char line[200];
+    d.status = status;
+    d.status_err = status_err;
+    if (!status[0] && dl_focus == 1 && it) {                 /* the chosen one: what it is doing */
+        char a[24], b[24];
+        if (s == DL_FAILED && st.err_arg_mb[0]) {
+            snprintf(line, sizeof line, T("Not enough free space: %d MB needed, %d MB free"), st.err_arg_mb[0], st.err_arg_mb[1]);
+            d.status = line; d.status_err = 1;
+        } else if (s == DL_FAILED) { snprintf(line, sizeof line, "%s", T_msg(st.err)); d.status = line; d.status_err = 1; }
+        else if (s == DL_ACTIVE) {
+            dl_size_text(st.have, lang_get() == LANG_TR, a, sizeof a);
+            dl_size_text(st.total, lang_get() == LANG_TR, b, sizeof b);
+            char sp[24];
+            dl_size_text(st.bps, lang_get() == LANG_TR, sp, sizeof sp);
+            snprintf(line, sizeof line, T("Downloading: %s of %s  (%s/s)"), a, st.total ? b : "?", st.bps >= 1024 * 1024 ? sp : "<1 MB");
+            d.status = line;
+        } else if (!it->done) {
+            snprintf(line, sizeof line, "%s", T("Stopped: X goes on where it stopped (the app must stay open)"));
+            d.status = line;
+        }
+    }
+    static ScrVodCard card;                                  /* the chosen one's card: its poster and plot from its folder */
+    if (dl_focus == 1 && it) {
+        static char pp[DL_DIR_MAX + 16], ln[48], rs[8];
+        memset(&card, 0, sizeof card);
+        card.rating = -1;
+        card.title = it->kind == 'E' && it->series[0] ? it->series : it->title;
+        char du[32] = "";
+        if (it->dur_min > 0) fmt_minutes(it->dur_min * 60, du, sizeof du);
+        if (it->kind == 'E') snprintf(ln, sizeof ln, T("Season %d, episode %d"), it->season, it->episode);
+        else snprintf(ln, sizeof ln, "%s%s%s", it->year, it->year[0] && du[0] ? "  \xC2\xB7  " : "", du);
+        card.line = ln;
+        card.genre = it->genre[0] ? it->genre : NULL;
+        card.plot = it->plot[0] ? it->plot : it->kind == 'E' ? it->title : NULL;
+        if (it->rating[0] && atof(it->rating) > 0) { snprintf(rs, sizeof rs, "%s", it->rating); card.rating = (float)atof(rs); if (card.rating > 10) card.rating = 10; }
+        snprintf(pp, sizeof pp, "%s/poster.jpg", it->dir);
+        SceIoStat ps;
+        poster_request(sceIoGetstat(pp, &ps) >= 0 ? pp : "");
+        card.poster = poster_now();
+        card.loading = poster_loading();
+        d.preview = &card;
+    }
+    scr_dual(&d);
+    if (dl_ask == 1 && it) scr_confirm(T("Delete this download?"), it->title);
+    if (dl_ask == 2) scr_confirm(T("Delete every downloaded episode of this series?"), dl_gname[dl_gsel]);
+}
+
+/* the done downloads of the chosen group become the channel list; it plays as a single film link does */
+static void dl_play(void)
+{
+    const DlItem *it = dl_cur();
+    if (!it || !it->done) return;
+    if (in_episodes) leave_episodes();
+    channel_list_free(&chans);
+    channel_list_init(&chans);
+    chans.items = malloc(sizeof(Channel) * (size_t)(dl_nitems ? dl_nitems : 1));
+    free(vis);
+    vis = malloc(sizeof(int) * (size_t)(dl_nitems ? dl_nitems : 1));
+    if (!chans.items || !vis) { set_status(1, "No memory", NULL); nvis = 0; return; }
+    int vi = 0, n = 0;
+    for (int k = 0; k < dl_nitems; k++) {
+        const DlItem *x = &dlv[dl_items[k]];
+        if (!x->done) continue;
+        Channel *c = &chans.items[n];
+        memset(c, 0, sizeof *c);
+        if (x->kind == 'E') snprintf(c->name, sizeof c->name, "%s  S%02dE%02d", x->series, x->season, x->episode);
+        else snprintf(c->name, sizeof c->name, "%s", x->title);
+        snprintf(c->group, sizeof c->group, "%s", x->kind == 'E' ? x->title : x->year);
+        dl_path_of(x, c->url, sizeof c->url);
+        c->kind = CH_FILM;
+        if (x == it) vi = n;
+        vis[n] = n;
+        n++;
+    }
+    chans.count = chans.cap = n;
+    nvis = n;
+    fav_rank_n = nfav_ch = 0;
+    search_q[0] = search_fold[0] = 0;
+    section = SEC_LIVE;                                      /* (as a single film link: no favourites, no guide) */
+    cur_src = dl_src_index();
+    int k = resume_find(resume, nresume, chans.items[vi].url);
+    film_start_ms = k >= 0 && resume_worth(resume[k].pos_ms, resume[k].dur_ms) ? resume[k].pos_ms : 0;
+    return_state = ST_SOURCES;
+    state = ST_PLAYING;
+    plog("dl: playing %s", chans.items[vi].url);
+    play_channel(vi);
+}
+
+/* the sound / subtitle key of a downloaded file: the one of the stream it came from (or its series) */
+static uint32_t dl_avkey_of(const char *path, int *series)
+{
+    char p[DL_DIR_MAX + 32];
+    for (int i = 0; i < dln; i++) {
+        dl_path_of(&dlv[i], p, sizeof p);
+        if (!strcmp(p, path)) { *series = dlv[i].av_series; return dlv[i].avkey; }
+    }
+    return 0;
+}
+
+static void dl_open_screen(void)
+{
+    dl_open = 1;
+    dl_focus = dln ? 1 : 0;
+    cur_src = dl_src_index();
+    status[0] = 0;
+    dl_refresh();
+    dl_focus = dl_nitems ? 1 : 0;
+}
+
+static void dl_input(unsigned p)
+{
+    if (dl_ask) {
+        const DlItem *it = dl_cur();
+        if (p & SCE_CTRL_CROSS) {
+            int bad = 0;
+            if (dl_ask == 1 && it) bad = dl_delete(it->dir) != 0;
+            else if (dl_ask == 2)
+                for (int k = 0; k < dln; k++) if (dl_in_group(&dlv[k], dl_gsel)) bad |= dl_delete(dlv[k].dir) != 0;
+            set_status(bad, bad ? "Could not delete all of it" : "Deleted", NULL);
+            dl_ask = 0;
+            dl_refresh();
+            if (!dl_nitems) dl_focus = 0;
+        } else if (p & SCE_CTRL_CIRCLE) dl_ask = 0;
+        return;
+    }
+    if (p & (SCE_CTRL_UP | SCE_CTRL_DOWN | SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE_CTRL_CROSS | SCE_CTRL_TRIANGLE)) status[0] = 0;
+    if (dl_focus == 0) {
+        int g = dl_gsel;
+        if ((p & SCE_CTRL_DOWN) && dl_ngroups) dl_gsel = (dl_gsel + 1) % dl_ngroups;
+        if ((p & SCE_CTRL_UP) && dl_ngroups) dl_gsel = (dl_gsel + dl_ngroups - 1) % dl_ngroups;
+        if (g != dl_gsel) { dl_isel = dl_iscroll = 0; dl_group_items(); }
+        if ((p & (SCE_CTRL_CROSS | SCE_CTRL_RIGHT)) && dl_nitems) dl_focus = 1;
+        if ((p & SCE_CTRL_TRIANGLE) && dl_gsel > 0) dl_ask = 2;
+        if (p & SCE_CTRL_CIRCLE) dl_open = 0;
+        return;
+    }
+    if ((p & SCE_CTRL_DOWN) && dl_nitems) dl_isel = (dl_isel + 1) % dl_nitems;
+    if ((p & SCE_CTRL_UP) && dl_nitems) dl_isel = (dl_isel + dl_nitems - 1) % dl_nitems;
+    if (p & SCE_CTRL_RTRIGGER) { dl_isel += SCR_ROWS; if (dl_isel >= dl_nitems) dl_isel = dl_nitems ? dl_nitems - 1 : 0; }
+    if (p & SCE_CTRL_LTRIGGER) { dl_isel -= SCR_ROWS; if (dl_isel < 0) dl_isel = 0; }
+    if (p & (SCE_CTRL_LEFT | SCE_CTRL_CIRCLE)) { dl_focus = 0; return; }
+    const DlItem *it = dl_cur();
+    if (!it) return;
+    if (p & SCE_CTRL_TRIANGLE) dl_ask = 1;
+    else if (p & SCE_CTRL_CROSS) {
+        DlState st;
+        int s = dl_state(it->dir, &st);
+        if (it->done) dl_play();
+        else if (s == DL_ACTIVE || s == DL_QUEUED) { dl_pause(it->dir); dl_refresh(); set_status(0, "Download stopped", NULL); }
+        else if (net_offline(it->url)) set_status(1, NO_NET_MSG, NULL);
+        else { dl_resume(it->dir); set_status(0, "Download goes on", NULL); }
+    }
+}
+
+/* every frame: a download that ended shows up; the Vita does not go to sleep by itself while one runs (the
+ * screen may still dim and turn off) */
+static void dl_poll(void)
+{
+    int c = dl_queued_count();
+    if (c != dl_last_count) {
+        if (dl_last_count >= 0 && c < dl_last_count) dl_refresh();
+        dl_last_count = c;
+    }
+    if (c && now_ms() - dl_tick_ms > 5000) { dl_tick_ms = now_ms(); sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND); }
+}
+
+/* Select > Download on film / episode ci of the open list */
+static int dl_from_channel(int ci, DlItem *it)
+{
+    const Channel *c = &chans.items[ci];
+    memset(it, 0, sizeof *it);
+    if (c->kind != CH_FILM || iptv_is_local_path(c->url)) return -1;
+    it->kind = in_episodes ? 'E' : 'F';
+    snprintf(it->title, sizeof it->title, "%s", c->name);
+    snprintf(it->url, sizeof it->url, "%s", c->url);
+    int si = chan_src(ci);
+    if (si >= 0) snprintf(it->source, sizeof it->source, "%s", sources[si].name);
+    const char *v;
+    if ((v = channel_extra(&chans, c, CX_POSTER))) snprintf(it->poster_url, sizeof it->poster_url, "%s", v);
+    if ((v = channel_extra(&chans, c, CX_YEAR))) snprintf(it->year, sizeof it->year, "%s", v);
+    if ((v = channel_extra(&chans, c, CX_GENRE))) snprintf(it->genre, sizeof it->genre, "%s", v);
+    if ((v = channel_extra(&chans, c, CX_RATING))) snprintf(it->rating, sizeof it->rating, "%s", v);
+    if ((v = channel_extra(&chans, c, CX_PLOT))) snprintf(it->plot, sizeof it->plot, "%s", v);
+    if ((v = channel_extra(&chans, c, CX_DURATION))) {       /* "01:45:00" or seconds */
+        int h = 0, m = 0, s2 = 0;
+        if (sscanf(v, "%d:%d:%d", &h, &m, &s2) == 3) it->dur_min = h * 60 + m;
+        else if (atoi(v) > 0) it->dur_min = atoi(v) / 60;
+    }
+    if (!in_episodes) {                                      /* a film: its details, when they were read */
+        char id[24];
+        film_id(c, id, sizeof id);
+        for (int i = 0; id[0] && i < VI_CACHE; i++)
+            if (!strcmp(vicache[i].id, id) && vicache[i].state == 2) {
+                const VodInfo *vi = &vicache[i].vi;
+                if (vi->plot[0]) snprintf(it->plot, sizeof it->plot, "%s", vi->plot);
+                if (vi->poster[0]) snprintf(it->poster_url, sizeof it->poster_url, "%s", vi->poster);
+                if (vi->year[0]) snprintf(it->year, sizeof it->year, "%s", vi->year);
+                if (vi->genre[0]) snprintf(it->genre, sizeof it->genre, "%s", vi->genre);
+                if (vi->rating[0]) snprintf(it->rating, sizeof it->rating, "%s", vi->rating);
+                if (vi->dur_s > 0) it->dur_min = vi->dur_s / 60;
+            }
+    } else {                                                 /* an episode: its series */
+        const Channel *sc = series_ci_saved >= 0 && series_ci_saved < series_saved.count ? &series_saved.items[series_ci_saved] : NULL;
+        if (sc) snprintf(it->series, sizeof it->series, "%s", sc->name);
+        int sn = 0;
+        if (sscanf(c->group, "Season %d", &sn) == 1) it->season = sn;
+        it->episode = c->episode;
+        if (!it->poster_url[0]) {
+            const char *sp = series_info_ok && series_info.poster[0] ? series_info.poster : sc ? channel_extra(&series_saved, sc, CX_POSTER) : NULL;
+            if (sp) snprintf(it->poster_url, sizeof it->poster_url, "%s", sp);
+        }
+        if (!it->genre[0] && series_info_ok && series_info.genre[0]) snprintf(it->genre, sizeof it->genre, "%s", series_info.genre);
+        if (!it->year[0] && series_info_ok && series_info.year[0]) snprintf(it->year, sizeof it->year, "%s", series_info.year);
+    }
+    it->avkey = av_key_of(ci, &it->av_series);               /* (the same sound / subtitle choice as online) */
+    return 0;
+}
+
+/* returns how many were queued (-1: cannot write) */
+static int dl_queue_items(const int *cis, int n)
+{
+    DlItem *it = malloc(sizeof *it);
+    if (!it) return -1;
+    int q = 0, there = 0, bad = 0;
+    for (int k = 0; k < n; k++) {
+        if (dl_from_channel(cis[k], it) != 0) continue;
+        int r = dl_add(it);
+        if (r == 0) q++; else if (r == 1) there++; else bad++;
+    }
+    free(it);
+    dl_refresh();
+    long long fr = dl_free_now;
+    static char msg[160];
+    if (bad && !q) { set_status(1, "Cannot write to %s", DL_ROOT); return -1; }
+    if (q == 1 && n == 1) snprintf(msg, sizeof msg, "%s", T("Downloading: see Downloads on the home screen"));
+    else if (q) snprintf(msg, sizeof msg, T("%d downloads queued: see Downloads on the home screen"), q);
+    else snprintf(msg, sizeof msg, "%s", T("Already in Downloads"));
+    snprintf(status, sizeof status, "%s", msg);
+    status_err = 0;
+    if (fr >= 0 && (uint64_t)fr < DL_RESERVE * 2) { set_status(1, "Little free space on the memory card", NULL); }
+    return q;
+}
+
 /* ---- film details (Triangle on a film) ---- */
 static int det_open, det_sel;
 
@@ -5414,8 +5926,12 @@ int main(void)
     plog("https: %s", cio_available() ? "built-in TLS (mbedTLS)" : "system only (built without TLS)");
     channel_list_init(&chans);
     load_favorites();                                        /* (before the playlists: they are sorted by it) */
+    plog("avpref: %d streams with a chosen sound / subtitles", avpref_load(&avprefs, AVPREF_FILE));   /* 1.3 */
     load_mylist();                                           /* 1.1 (its row among the playlists) */
     load_sources();
+    dl_init(DL_ROOT);                                        /* 1.3: the downloads (none starts by itself) */
+    dl_refresh();
+    plog("dl: %d downloads, %lld MB free", dln, dl_free_now >= 0 ? dl_free_now >> 20 : -1);
     while (now_ms() - t0 < 1500) splash_frame(T("Loading playlists..."));   /* let the logo be seen */
     if (splash_img) { vita2d_wait_rendering_done(); vita2d_free_texture(splash_img); splash_img = NULL; }
 
@@ -5446,6 +5962,7 @@ int main(void)
         }
         frame_begin();
         guide_tick(state == ST_PLAYING);                     /* 0.8.0: background answers (before anything is drawn) */
+        dl_poll();                                           /* 1.3: downloads */
         {                                                    /* 0.8.1: the console slept (the clock jumped): the lock closes */
             static int64_t last_wall;
             static unsigned last_check;
@@ -5545,16 +6062,19 @@ int main(void)
         else if (menu_open) {                                /* Select's menu over the playlists or the channels */
             /* 1.1: by the screen: the playlists: add, reorder, reload, settings, quit; the channels: reorder (favourites,
              * My List), Add to / Remove from My List, settings, quit (About is in the settings) */
-            enum { MI_EDIT, MI_MY, MI_ADD, MI_SORT, MI_RELOAD, MI_SETTINGS, MI_QUIT };
-            int acts[8], mn = 0;
-            const char *labels[8];
+            enum { MI_EDIT, MI_MY, MI_ADD, MI_SORT, MI_RELOAD, MI_SETTINGS, MI_QUIT, MI_DL, MI_DL_SEASON };
+            int acts[10], mn = 0;
+            const char *labels[10];
+            /* 1.3: a film or an episode chosen (not a file here): Download (an episode: also its season) */
+            int dl_ci = state == ST_CHANNELS && (focus == 1 || in_episodes || search_fold[0]) && nvis > 0 && sel < nvis &&
+                        chans.items[vis[sel]].kind == CH_FILM && !iptv_is_local_path(chans.items[vis[sel]].url) ? vis[sel] : -1;
             int ek = state == ST_CHANNELS ? edit_possible() : 0;
             int my_ci = state == ST_CHANNELS && section == SEC_LIVE && !in_episodes && focus == 1 && nvis > 0 && sel < nvis &&
                         chans.items[vis[sel]].kind == CH_LIVE && cur_src >= 0 && cur_src < nsources && sources[cur_src].type != SRC_STREAM ? vis[sel] : -1;
             if (state == ST_SOURCES) {
                 acts[mn] = MI_ADD; labels[mn++] = T("Add playlist");
                 int movable = 0;
-                for (int i = 0; i < nsources; i++) movable += sources[i].type != SRC_MYLIST;
+                for (int i = 0; i < nsources; i++) movable += !src_virtual(i);
                 if (movable > 1) { acts[mn] = MI_SORT; labels[mn++] = T("Reorder playlists"); }
                 acts[mn] = MI_RELOAD; labels[mn++] = T("Reload playlists");
             } else {
@@ -5562,6 +6082,10 @@ int main(void)
                 if (my_ci >= 0) {
                     acts[mn] = MI_MY;
                     labels[mn++] = T(sources[cur_src].type == SRC_MYLIST || in_mylist(my_ci) ? "Remove from My List" : "Add to My List");
+                }
+                if (dl_ci >= 0) {
+                    acts[mn] = MI_DL; labels[mn++] = T("Download");
+                    if (in_episodes && nvis > 1) { acts[mn] = MI_DL_SEASON; labels[mn++] = T(nseasons > 1 ? "Download this season" : "Download every episode"); }
                 }
             }
             acts[mn] = MI_SETTINGS; labels[mn++] = T("Settings");
@@ -5602,6 +6126,14 @@ int main(void)
                                : r == -2 ? "My List is full" : "Could not change My List", NULL);
                     break;
                 }
+                case MI_DL: dl_queue_items(&dl_ci, 1); break;   /* 1.3 */
+                case MI_DL_SEASON: {
+                    int *cis = malloc(sizeof(int) * (size_t)nvis), n = 0;
+                    for (int k = 0; cis && k < nvis; k++) if (chans.items[vis[k]].kind == CH_FILM) cis[n++] = vis[k];
+                    if (cis) dl_queue_items(cis, n);
+                    free(cis);
+                    break;
+                }
                 case MI_ADD: open_source_form(-1); break;
                 case MI_SORT: src_sort_begin(); break;
                 case MI_RELOAD: load_favorites(); load_mylist(); load_sources(); load_settings(); break;
@@ -5635,7 +6167,8 @@ int main(void)
             else draw_current();
         }
         else if (state == ST_SOURCES) {
-            if (src_sorting) src_sort_input(p);              /* 1.1: Select > Reorder playlists */
+            if (dl_open) dl_input(p);                        /* 1.3: the downloads */
+            else if (src_sorting) src_sort_input(p);         /* 1.1: Select > Reorder playlists */
             else if (quit_ask) {                             /* 1.1: "Quit Vita IPTV?" */
                 if (p & SCE_CTRL_CROSS) { quit_ask = 0; quit = 1; }
                 else if (p & SCE_CTRL_CIRCLE) quit_ask = 0;
@@ -5654,10 +6187,12 @@ int main(void)
                 if (p & SCE_CTRL_SQUARE) open_source_form(-1);
                 if ((p & SCE_CTRL_TRIANGLE) && nsources) {      /* edit (deleting is at the end of the form) */
                     if (sources[src_at(sel)].type == SRC_MYLIST) set_status(0, "My List: Select > Add to My List on a channel; Select > Remove from My List in it", NULL);
+                    else if (sources[src_at(sel)].type == SRC_DOWNLOADS) set_status(0, "Downloads: open it (X); Triangle in it deletes", NULL);   /* 1.3 */
                     else if (sources[src_at(sel)].auto_added) set_status(0, "This entry is a file in ux0:data/VitaIPTV (delete or rename it there)", NULL);
                     else open_source_form(src_at(sel));
                 }
-                if ((p & SCE_CTRL_CROSS) && nsources) {
+                if ((p & SCE_CTRL_CROSS) && nsources && sources[src_at(sel)].type == SRC_DOWNLOADS) dl_open_screen();   /* 1.3 */
+                else if ((p & SCE_CTRL_CROSS) && nsources) {
                     const Source *s = &sources[src_at(sel)];
                     cur_src = src_at(sel);
                     search_q[0] = search_fold[0] = 0;
@@ -5915,7 +6450,7 @@ int main(void)
                         MENU_ADD(MA_NONE, 0, 1);
                     }
                 } else {
-                    if (srv_on() && play_mode == 2 && !radio) {   /* this channel through the server, or back */
+                    if (srv_here() && play_mode == 2 && !radio) {   /* this channel through the server, or back (1.3: not a file) */
                         snprintf(names[n], sizeof names[n], "%s", T(via_proxy ? "Direct (without the server)" : "Through the Server"));
                         MENU_ADD(MA_SERVER, 0, 0);
                     }
@@ -5999,6 +6534,7 @@ int main(void)
                         sub_id = a == MA_SUB ? ms->s_id[g] : -1;
                         if (a == MA_SUB) snprintf(sub_lang, sizeof sub_lang, "%s", ms->s_lang[g]);
                         plog("player: subtitles %s (menu)", sub_off ? "off" : sub_lang[0] ? sub_lang : "on");
+                        av_remember();                       /* 1.3: for this stream next time */
                     } else if (a == MA_ANALYSIS) {
                         if (film) {
                             int pos = 0, dur = 0;
@@ -6022,6 +6558,7 @@ int main(void)
                             aud_id = ms->a_id[g];
                             snprintf(aud_lang, sizeof aud_lang, "%s", ms->a_lang[g]);
                             plog("player: audio track %d (%s) (menu)", aud_id, aud_lang[0] ? aud_lang : "-");
+                            av_remember();                   /* 1.3 */
                         } else {
                             auto_proxy_tried = 1;            /* (not back again by itself) */
                             plog("player: %s (menu)", to_proxy ? "through the transcoding server" : "direct, without the server");
@@ -6207,7 +6744,7 @@ int main(void)
                 if ((p & SCE_CTRL_SQUARE) && film && fs) {
                     /* a film file has one picture size; a smaller one needs the transcoding server, which
                      * converts it to 720p from where it is now */
-                    if (srv_on()) {
+                    if (srv_here()) {
                         save_film_position();
                         film_start_ms = pos;
                         seek_target = -1;
@@ -6230,7 +6767,7 @@ int main(void)
                         film_note_until = now_ms() + 3000;
                         play_channel_ex(play_vis, 0);
                         fs = tsp_status();
-                    } else if (srv_on()) { auto_proxy_tried = 1; play_channel_ex(play_vis, !via_proxy); }
+                    } else if (srv_here()) { auto_proxy_tried = 1; play_channel_ex(play_vis, !via_proxy); }
                     else {
                         snprintf(film_note, sizeof film_note, "%s", T("This channel has one picture size. Another needs the transcoding server (channel list: Select > Settings)"));
                         film_note_until = now_ms() + 4000;
@@ -6330,6 +6867,7 @@ int main(void)
     }
 
     stop_all();
+    dl_shutdown();                                           /* 1.3: (what came stays; it goes on next time from there) */
     refresh_stop();                                          /* 1.1 */
     epg_stop();
     plog("exit: the players are stopped");

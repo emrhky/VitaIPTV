@@ -47,7 +47,8 @@ typedef enum {
     SRC_XTREAM,    /* host + username + password (get.php style)      */
     SRC_STREAM,    /* single direct stream link, played immediately   */
     SRC_M3U_FILE,  /* local M3U file on the Vita memory card          */
-    SRC_MYLIST     /* 1.1: "My List", live channels gathered from the other playlists (mylist.h); never saved */
+    SRC_MYLIST,    /* 1.1: "My List", live channels gathered from the other playlists (mylist.h); never saved */
+    SRC_DOWNLOADS  /* 1.3: "Downloads" (dl.h), always first on the home screen; never saved */
 } SourceType;
 
 typedef struct {
@@ -88,8 +89,11 @@ const char *channel_extra(const ChannelList *l, const Channel *c, char tag);
 /* 0.8.0: the catch-up template of channel c (its own, else the list's), "" if none */
 const char *channel_catchup_src(const ChannelList *l, const Channel *c);
 
-/* An http(s) link to a film file (.mkv, .mp4, ... or Xtream /movie/ and /series/ links): played as a film. */
+/* An http(s) link to a film file (.mkv, .mp4, ... or Xtream /movie/ and /series/ links): played as a film.
+ * 1.3: also a video file on the memory card (ux0:...mkv / .mp4 / .ts ...): played as a film (pause, jumps). */
 int  iptv_is_film_url(const char *url);
+/* 1.3: a path on the Vita (ux0:, ur0:, uma0:...), not a link */
+int  iptv_is_local_path(const char *url);
 /* Parses M3U/M3U8 text (extended or plain list of links). Returns channel count. */
 int  m3u_parse(const char *text, size_t len, ChannelList *out);
 extern int iptv_headers_dropped;     /* links whose User-Agent/Referer did not fit (they play without them) */

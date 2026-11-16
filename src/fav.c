@@ -27,6 +27,7 @@ void fav_source_key(const Source *s, char *out, size_t outsz)
     case SRC_M3U_URL:  snprintf(tmp, sizeof tmp, "m|%s|%s", s->url, s->user); break;
     case SRC_M3U_FILE: snprintf(tmp, sizeof tmp, "f|%s", s->url); break;
     case SRC_MYLIST:   snprintf(tmp, sizeof tmp, "y|mylist"); break;          /* 1.1 */
+    case SRC_DOWNLOADS: snprintf(tmp, sizeof tmp, "d|downloads"); break;      /* 1.3 */
     default:           snprintf(tmp, sizeof tmp, "s|%s", s->url); break;
     }
     clean_copy(out, outsz, tmp);

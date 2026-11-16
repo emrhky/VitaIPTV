@@ -88,7 +88,7 @@ void              tsp_set_hls_bw(long bw);
 void              tsp_set_audio(int id, const char *lang);
 /* 0.7.0: subtitles for the next tsp_start: the track id (s_id[] of the status), else the first track in lang
  * ("tur"...); off = none shown (the choice of the menu stays for the next films) */
-void              tsp_set_sub(int id, const char *lang, int off);
+void              tsp_set_sub(int id, const char *lang, int off);   /* off: 1 none, 0 shown, 2 (1.3) lang only if no sound in lang */
 /* 0.7.0: show subtitle track k of the status now (-1 = off), without starting again */
 void              tsp_sub_choose(int k);
 /* 0.7.0: subtitles shown this many ms later (negative: earlier); stays for the next starts */

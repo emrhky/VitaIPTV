@@ -24,6 +24,12 @@
 #include <psp2/gxm.h>
 #include <psp2/audiodec.h>
 #include <psp2/audioout.h>
+#ifdef __vita__
+#include <psp2/io/fcntl.h>
+#else
+#include <fcntl.h>                      /* (the PC tests: the same with POSIX calls) */
+#include <unistd.h>
+#endif
 #include <malloc.h>
 #include <math.h>
 #include <stdarg.h>
@@ -160,6 +166,7 @@ typedef struct {
     Mp4Demux *mp4;                      /* film or episode in an MP4 file */
     /* films and episodes (files that can be paused and searched) */
     int vod, vod_start_ms, vod_norange, vod_last_status;
+    int vod_file;                       /* 1.3: a film on the memory card (vod_get reads the file, a range = a seek) */
     int vc_rec, vc_used, vc_verify;     /* film index cache: filling it / opened from it / size still to compare */
     int vod_stream;                     /* a film sent as a stream (the transcoding server): no ranges, no length */
     int vod_offset_ms;                  /* ... where in the film that stream starts */
@@ -2213,6 +2220,7 @@ static void video_packet(Tsp *t, Pkt *p)
 
 /* Demuxer callbacks (reader thread): copy the unit into a queue. */
 /* ---- 0.7.0: subtitles (Matroska text tracks) ---- */
+static int audio_playable(int c);
 #define SUB_CUES 512
 #define SUB_DEFAULT_MS 4000                 /* a cue without a duration: until the next one, at most this long */
 typedef struct SubCue { int track; int64_t start, dur; char text[240]; } SubCue;
@@ -2231,7 +2239,19 @@ static void update_sub_tracks(Tsp *t)
         snprintf(t->st.s_name[k], sizeof t->st.s_name[k], "%s", i->subs[k].name);
         t->st.s_forced[k] = i->subs[k].forced;
     }
-    if (!g_soff) {
+    int show = !g_soff;
+    if (g_soff == 2 && g_slang[0]) {                         /* 1.3: automatic: on in this language only when no sound is */
+        show = 1;
+        for (int k = 0; k < i->nstreams; k++) {
+            const TsStream *s = &i->streams[k];
+            int audio = s->stream_type == 2;                 /* (MKV and MP4: the track type) */
+            char l3[4];
+            ts_lang3(s->lang, l3);
+            if (audio && l3[0] && !strcmp(l3, g_slang) && audio_playable(s->codec)) { show = 0; break; }
+        }
+        if (!show) plog("tsp: subtitles: automatic: off (the sound is in %s)", g_slang);
+    }
+    if (show) {
         for (int k = 0; k < n && cur < 0; k++) if (t->st.s_id[k] == g_sid) cur = k;
         for (int k = 0; k < n && cur < 0 && g_slang[0]; k++) if (!strcmp(t->st.s_lang[k], g_slang) && !t->st.s_forced[k]) cur = k;
         for (int k = 0; k < n && cur < 0 && g_slang[0]; k++) if (!strcmp(t->st.s_lang[k], g_slang)) cur = k;
@@ -2263,6 +2283,7 @@ static void on_sub(void *ctx, int id, const char *text, int64_t pts, int64_t dur
     sceKernelUnlockMutex(t->qlock, 1);
 }
 
+/* off: 1 = none, 0 = id or else lang, 2 (1.3) = lang only when no sound track is in lang */
 void tsp_set_sub(int id, const char *lang, int off)
 {
     g_sid = id;
@@ -4085,11 +4106,76 @@ static void vc_check_total(Tsp *t, uint64_t tot)
     set_error_kind(t, TSP_ERRK_NET, "The film changed on the server: open it again");
 }
 
+/* ---- 1.3: films on the memory card through the same reader (local and downloaded files) ---- */
+static int lf_open(const char *path)
+{
+#ifdef __vita__
+    SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0);
+    return fd < 0 ? -1 : (int)fd;
+#else
+    return open(path, O_RDONLY);
+#endif
+}
+static int64_t lf_size(int fd)
+{
+#ifdef __vita__
+    return (int64_t)sceIoLseek(fd, 0, SCE_SEEK_END);
+#else
+    return (int64_t)lseek(fd, 0, SEEK_END);
+#endif
+}
+static int lf_pread(int fd, uint8_t *buf, size_t len, uint64_t off)
+{
+#ifdef __vita__
+    return sceIoPread(fd, buf, (SceSize)len, (SceOff)off);
+#else
+    return (int)pread(fd, buf, len, (off_t)off);
+#endif
+}
+static void lf_close(int fd)
+{
+#ifdef __vita__
+    sceIoClose(fd);
+#else
+    close(fd);
+#endif
+}
+
+/* [off, end) of the file as vod_get gives a range (status 206; 404 when it cannot be opened). A file is there
+ * at once: once a few seconds are queued it is read at a calm pace (as read_local), the queues also wait. */
+static int vod_get_file(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, int *status)
+{
+    int fd = lf_open(t->url);
+    if (fd < 0) { *status = 404; t->vod_last_status = 404; plog("tsp: cannot open the file %s", t->url); return 0; }
+    int64_t sz = lf_size(fd);
+    if (sz < 0) { lf_close(fd); *status = 404; t->vod_last_status = 404; return 0; }
+    if (!t->vod_total) t->vod_total = (uint64_t)sz;
+    *status = 206;
+    t->vod_last_status = 206;
+    uint64_t stop = end && end < (uint64_t)sz ? end : (uint64_t)sz, pos = off;
+    int ret = 0;
+    while (!stopping(t) && pos < stop) {
+        size_t ask = CHUNK < stop - pos ? CHUNK : (size_t)(stop - pos);
+        int n = lf_pread(fd, t->rbuf, ask, pos);
+        if (n < 0) { ret = -1; plog("tsp: file read error 0x%08X at byte %llu", (unsigned)n, (unsigned long long)pos); break; }
+        if (n == 0) break;
+        pos += (uint64_t)n;
+        if (fn(t, ctx, t->rbuf, (size_t)n)) break;
+        if (t->film_phase) {                                 /* (the film itself, not the header reads) */
+            int q_ms = (int)((int64_t)t->vq.count * (t->frame_us ? (int)t->frame_us : 40000) / 1000);
+            if (t->st.decoded > 0 && q_ms > 3000) sceKernelDelayThread(4000);
+        }
+    }
+    lf_close(fd);
+    return ret;
+}
+
 /* GET of the bytes [off, end) of the file (end 0 = to its end). Returns 0 when the body ended or fn stopped
  * it, VG_NO_RANGE when the server ignores ranges, < 0 on a network error. *status = HTTP status. */
 static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, int *status)
 {
     *status = 0;
+    if (t->vod_file) return vod_get_file(t, off, end, fn, ctx, status);   /* 1.3 */
     if (via_cio(t, t->url)) {
         VgCtx g = { t, fn, ctx, status, off, 0 };
         uint64_t tot = 0;
@@ -4205,7 +4291,7 @@ static int vod_fetch(Tsp *t, uint64_t off, uint8_t *out, size_t len)
         if (stopping(t)) return -1;
         if (r == VG_NO_RANGE) { t->vod_norange = 1; return -2; }
         if (st >= 400) { vod_status = st; return -1; }
-        if (f.n > 0 && t->vc_rec && st == 206) vc_put(t, off, out, f.n);
+        if (f.n > 0 && t->vc_rec && st == 206 && !t->vod_file) vc_put(t, off, out, f.n);   /* (1.3: a file needs no copy) */
         if (f.n > 0 || r >= 0) return (int)f.n;
         for (int k = 0; k < 15 && !stopping(t); k++) sceKernelDelayThread(20000);
     }
@@ -4253,7 +4339,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
     VodIo io = { t, NULL, 0, 0 };
     uint8_t head[1024];
     vod_status = 0;
-    uint64_t ctot = vc_total_for(t->url);
+    uint64_t ctot = t->vod_file ? 0 : vc_total_for(t->url);
     if (ctot) {                                             /* a jump in the same film: its index is in memory */
         t->vod_total = ctot;
         t->vc_used = 1;
@@ -4289,7 +4375,8 @@ static void read_vod(Tsp *t, uint8_t *buf)
     }
     if (n <= 0) {
         free(io.win);
-        if (busy_status(vod_status))
+        if (t->vod_file) set_error_kind(t, TSP_ERRK_FORMAT, n == 0 ? "The file is empty" : "Cannot open the file");   /* 1.3 */
+        else if (busy_status(vod_status))
             set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d (the provider refuses: account busy?)", vod_status);
         else if (vod_status) set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d", vod_status);
         else set_error_kind(t, TSP_ERRK_NET, "The server did not answer");
@@ -4385,6 +4472,10 @@ static void read_vod(Tsp *t, uint8_t *buf)
         t->vod_kick = 0;
         int r = vod_get(t, pos, 0, vod_feed_cb, &pos, &st);
         if (stopping(t)) break;
+        if (t->vod_file) {                                  /* 1.3: a file: its end, or it cannot be read */
+            if (r < 0 || st >= 400 || pos == before) set_error_kind(t, TSP_ERRK_FORMAT, "The file cannot be read (at %u MB)", (unsigned)(pos >> 20));
+            break;
+        }
         if (st >= 400) { if (!http_refused(t, st)) break; continue; }
         if (r == VG_NO_RANGE) { set_error_kind(t, TSP_ERRK_NET, "The server stopped sending parts of the file"); break; }
         if (t->mp4 && mp4_finished(t->mp4)) break;
@@ -4423,6 +4514,7 @@ static int worker(SceSize args, void *argp)
         else if (m3u8 || strstr(t->url, ".m3u8?") || strstr(t->url, "?m3u8")) { t->is_hls = 1; read_hls(t, buf); }
         else read_http(t, buf);
     }
+    else if (t->vod) { t->vod_file = 1; t->rbuf = buf; read_vod(t, buf); }   /* 1.3: a film on the memory card */
     else read_local(t, buf);
     free(buf);
     __sync_synchronize();
