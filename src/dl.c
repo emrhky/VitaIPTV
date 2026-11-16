@@ -4,6 +4,9 @@
 #include "urlhdr.h"
 #include "httpio.h"                     /* plog() */
 #include <psp2/kernel/threadmgr.h>
+#ifdef __vita__
+#include <psp2/kernel/processmgr.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -298,6 +301,9 @@ static void unlock(void) { if (g_lock >= 0) sceKernelUnlockMutex(g_lock, 1); }
 
 static unsigned long long now_ms_dl(void)
 {
+#ifdef __vita__
+    return (unsigned long long)sceKernelGetProcessTimeWide() / 1000ull;
+#endif
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return (unsigned long long)ts.tv_sec * 1000ull + (unsigned long long)(ts.tv_nsec / 1000000);
