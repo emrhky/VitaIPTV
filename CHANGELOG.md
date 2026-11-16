@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.3.0 (test)
+
+### Downloads
+- **Download films and episodes** to watch without the internet: **Select** > *Download* on a film or an episode
+  (Xtream or M3U), *Download this season* / *Download every episode* on a series. A fixed *Downloads* row is the
+  first on the home screen (its line: how many films and series, how much they take, the free space; while one
+  downloads, its progress). It opens without a connection: films, then each series by season and episode, with
+  the poster and the story beside the list. X plays (as a film: jumps, *Continue from*, the audio track and
+  subtitle choice of the stream it came from), pauses a running download or goes on with a stopped one;
+  **Triangle** deletes a download, or on the left a whole series (it asks first).
+- One folder each in `ux0:data/VitaIPTV/downloads/`: the video file as the server sends it (over 4 GB is fine on
+  exFAT), `poster.jpg` and `info.txt` (name, year, story, rating, length, series / season / episode, playlist,
+  address, size, finished or not).
+- One at a time, in a thread of its own below the player; a lost connection goes on where it stopped (HTTP
+  Range; a server without ranges starts over, so no broken file). The free space is read before it starts and
+  every 32 MB (the rest of the file + 200 MB must fit). The Vita does not go to sleep by itself while one runs.
+  Nothing starts by itself at start-up: a stopped one goes on with X.
+- A channel that fails with a busy answer while a download runs says so (one-connection accounts).
+- Separate subtitle files are not downloaded: the app shows the subtitles inside MKV / MP4 files only.
+
+### Films on the memory card
+- **Local files play as films:** video files in `ux0:data/VitaIPTV/` (and `ux0:...` lines of M3U lists) now open
+  with the film reader: MKV and MP4 play (before, the TS reader did not understand them), MP4 no longer goes to
+  the system player, and all of them can be paused and jumped through, remember where they were left, and list
+  their audio tracks and subtitles. The file is read where a link would ask for a range. The transcoding server
+  is not offered for them (it cannot reach the card).
+
+### Sound and subtitles
+- **Chosen per stream:** the audio track and subtitles chosen in **Select** are remembered for that channel or film
+  (a series: all of its episodes), up to 300 of them (`avpref.txt`). Before, a language chosen once went on to
+  every channel and film.
+- **Without a choice:** the sound in the app's language (Turkish / English) if the stream has one, else its own;
+  subtitles in the app's language only when the sound is not in it, else off.
+
+### Look
+- **Button symbols:** X, O, Square and Triangle all 16 px high (Triangle 18 px wide).
+- **Start / Select / L / R:** a small pill with a thin light frame (was a filled grey pill), bold text.
+- **Home screen:** seven cards 48 px high, evenly spaced under the top bar (8-9 px); under them one line for notes,
+  which no longer covers a card (a longer note ends in "..."). The Settings list uses the same spacing. O (Quit)
+  is on the right after Select, with a thin line before them.
+
 ## 1.2.0 (test)
 
 ### From the Venezia measurements (VNZBench)
