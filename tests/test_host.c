@@ -367,7 +367,11 @@ int main(void)
     assert(iptv_is_film_url("https://example.org/films/Sintel.2010.720p.mkv"));
     assert(iptv_is_film_url("http://h:8080/movie/u/p/123.mp4") && iptv_is_film_url("http://h/series/u/p/9.ts"));
     assert(iptv_is_film_url("http://h/a.MOV?token=1") && !iptv_is_film_url("http://h/live/u/p/1.ts"));
-    assert(!iptv_is_film_url("http://h/index.m3u8") && !iptv_is_film_url("ux0:data/VitaIPTV/a.mkv"));
+    assert(!iptv_is_film_url("http://h/index.m3u8"));
+    /* 1.3: video files on the memory card are films (the VOD reader reads files too) */
+    assert(iptv_is_film_url("ux0:data/VitaIPTV/a.mkv") && iptv_is_film_url("ux0:data/VitaIPTV/b.TS") && iptv_is_film_url("uma0:x/c.mp4"));
+    assert(!iptv_is_film_url("ux0:data/VitaIPTV/list.m3u") && iptv_is_local_path("ux0:a") && iptv_is_local_path("uma0:b"));
+    assert(!iptv_is_local_path("http://h/a.ts") && !iptv_is_local_path("a:b") && !iptv_is_local_path("ux:b"));
     {
         const char *m = "#EXTM3U\n#EXTINF:-1,Film\nhttp://h/f.mkv\n#EXTINF:-1,TV\nhttp://h/live/1.ts\n";
         ChannelList fl; channel_list_init(&fl);
