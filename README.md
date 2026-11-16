@@ -40,7 +40,8 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 - **50 / 60 fps:** 720p at 50 / 60 fps plays every picture; 1080p at 50 / 60 fps a steady 25 / 30 pictures a
   second (every second picture, evenly spaced).
 - **Sound (Select > Audio):** volume boost (+3 / +6 / +9 dB, with a limiter), "clear sound" for the Vita's small
-  speakers, and "clear speech" for 5.1 films (the centre channel louder in the stereo mix).
+  speakers, "clear speech" for 5.1 films (the centre channel louder in the stereo mix), the same volume on every
+  channel, and the sound field: wider stereo on the speakers, or crossfeed and virtual surround (5.1) on headphones.
 - **Picture size (HLS channels with several qualities):** they open at about 540p (the Vita's own screen size) if
   the channel offers it, else at 720p, or at the size chosen in the settings. **Select** lists the channel's
   sizes (tab *Picture*); **Square** goes to the next size up, from the biggest to the smallest.
@@ -48,9 +49,12 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   http and https) and whether the Vita can play it (**Select** > *More* while watching).
 - **Audio:** AAC (stereo on the hardware; 5.1 / 7.1 AAC in software), MP2 / MP3 and AC-3 / E-AC-3 (Dolby Digital /
   Dolby Digital Plus, software). 5.1 and 7.1 come out as stereo. Many TV channels use MP2, many films E-AC-3.
-- **Audio tracks:** a channel or film with more than one sound lists them in **Select** > *Audio* with their
-  language (*Audio: Turkish (AAC)*). Without a choice the stream's default track plays, AAC before AC-3. HLS
-  channels whose sound comes in playlists of its own (one per language) play too, and list those languages.
+- **Audio tracks and subtitles, remembered per stream:** a channel or film with more than one sound lists them in
+  **Select** > *Audio* with their language (*Audio: Turkish (AAC)*). What you choose there (and in *Subtitles*) is
+  kept for that channel or film only - for a series, for all of its episodes - and comes back the next time.
+  Without a choice the sound in the app's language plays (else the stream's own), and subtitles in the app's
+  language are shown only when the sound is not in it. HLS channels whose sound comes in playlists of its own
+  (one per language) play too, and list those languages.
 - **Radio:** audio-only streams get a radio screen.
 - **Favourites:** START marks a channel, a film or a series (star). A favourite channel stays in its
   place in its category and gets its own *Favorites* category, where **Select** > *Reorder favourites* reorders them (X
@@ -89,6 +93,16 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 - **Playlists' order:** **Select** > *Reorder playlists* on the playlists screen (as for the favourites); My List
   stays on top while it has channels. **O** there asks "Quit Vita IPTV?".
 - **Player top bar:** the channel or film, the time of day in the middle, the picture size on the right.
+- **Downloads (watch without the internet):** **Select** > *Download* on a film or an episode (or *Download this
+  season*). A *Downloads* row stays at the top of the playlists; it opens without a connection, with the films and
+  each series (by season and episode), the poster and the story, and plays them like any film (jumps, *Continue
+  from*, audio tracks, subtitles inside the file). **Triangle** deletes a film, an episode or a whole series. Files
+  go to `ux0:data/VitaIPTV/downloads/` (one folder each: the video as the server sends it, its poster and an
+  `info.txt`). Downloads run one at a time while the app is open; a stopped one goes on where it stopped (X), and
+  the free space is checked first (200 MB are always left free). The screen may dim, but sleep or the PS button
+  stops a download. An account that allows one connection cannot download and watch at the same time.
+  **Only for content you have the right to download**: whether you may keep a copy depends on your provider's
+  terms and on where the content legally comes from.
 - **Optional transcoding server** (`tools/vita_iptv_proxy.py`, needs Python 3 and ffmpeg on a PC or an Android
   phone): plays what the Vita cannot - HEVC, interlaced video, 1080p at 50/60 fps - by converting it to 720p
   H.264 + AAC. **Select** while watching moves the channel or film to the server (*Through the Server*) and back.
@@ -126,7 +140,8 @@ One channel      | stream | http://example.com/live/1.ts
 With headers     | stream | https://cdn.example.com/live.flv | https://example.com/page | Mozilla/5.0 ...
 ```
 
-- Video files (`.ts`, `.mp4`, `.mkv`) in the same folder are listed as local sources.
+- Video files (`.ts`, `.mp4`, `.mkv`, `.flv`) in the same folder are listed as local sources. They play as films
+  (pause, jumps, *Continue from*, audio tracks, subtitles inside MKV / MP4), also in M3U lists (`ux0:...` lines).
 
 **Streams that need a Referer or User-Agent:** M3U lists can give them with `#EXTVLCOPT:http-referrer=...` and
 `#EXTVLCOPT:http-user-agent=...` lines before the link (as VLC reads them), with `#EXTHTTP:{"Referer":"..."}`, or
