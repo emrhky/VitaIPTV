@@ -19,6 +19,10 @@ class H(BaseHTTPRequestHandler):
     def log_message(self, *a): pass
     def do_GET(self):
         p = self.path
+        if p == "/film.srt":                       # 1.3.1: a subtitle file beside film.mkv (not beside film2.mkv)
+            b = "1\n00:00:01,000 --> 00:00:02,000\nMerhaba\n".encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers()
+            self.wfile.write(b); return
         if p == "/poster.jpg":
             self.send_response(200); self.send_header("Content-Length", str(len(POSTER))); self.end_headers()
             self.wfile.write(POSTER); return
