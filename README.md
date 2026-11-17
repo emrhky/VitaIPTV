@@ -94,7 +94,8 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   stays on top while it has channels. **O** there asks "Quit Vita IPTV?".
 - **Player top bar:** the channel or film, the time of day in the middle, the picture size on the right.
 - **Downloads (watch without the internet):** **Select** > *Download* on a film or an episode (or *Download this
-  season*). A *Downloads* row stays at the top of the playlists; it opens without a connection, with the films and
+  season*), or on a single film link of the playlists. A *Downloads* row is among the playlists while there is a
+  download (it can be moved like them); it also continues a film where it was left online, and the other way round; it opens without a connection, with the films and
   each series (by season and episode), the poster and the story, and plays them like any film (jumps, *Continue
   from*, audio tracks, subtitles inside the file). **Triangle** deletes a film, an episode or a whole series. Files
   go to `ux0:data/VitaIPTV/downloads/` (one folder each: the video as the server sends it, its poster and an
@@ -140,8 +141,12 @@ One channel      | stream | http://example.com/live/1.ts
 With headers     | stream | https://cdn.example.com/live.flv | https://example.com/page | Mozilla/5.0 ...
 ```
 
-- Video files (`.ts`, `.mp4`, `.mkv`, `.flv`) in the same folder are listed as local sources. They play as films
-  (pause, jumps, *Continue from*, audio tracks, subtitles inside MKV / MP4), also in M3U lists (`ux0:...` lines).
+- **Videos on the Vita:** a row of the playlists that opens the memory cards folder by folder (the VitaIPTV
+  folder, the Video app's folder, `ux0:`, `uma0:`, `imc0:`...). MKV, MP4, TS and FLV files play as films (pause,
+  jumps, *Continue from*, audio tracks, subtitles inside MKV / MP4), also from M3U lists (`ux0:...` lines).
+- **Subtitle files (.srt):** a file beside the film with the same name (`Film.srt`, `Film.tr.srt`,
+  `Film.eng.srt`) is offered in **Select** > *Subtitles* as "SRT" (UTF-8 or Turkish Windows-1254; the language from
+  the name or the text). A download takes the `.srt` the server has beside the film, if there is one.
 
 **Streams that need a Referer or User-Agent:** M3U lists can give them with `#EXTVLCOPT:http-referrer=...` and
 `#EXTVLCOPT:http-user-agent=...` lines before the link (as VLC reads them), with `#EXTHTTP:{"Referer":"..."}`, or

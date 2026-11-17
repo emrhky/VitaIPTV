@@ -16,7 +16,7 @@ set(VITA_TITLEID  "VIPTV0001")
 # the version, in one place: the VPK's "00.70" and the app's "v0.7.0" (shown in About and in the log) both come from here
 set(APP_VER_MAJOR 1)
 set(APP_VER_MINOR 3)
-set(APP_VER_PATCH 0)
+set(APP_VER_PATCH 1)
 # The VPK takes "XX.YY" (two digits each side): minor and patch share the two digits, so a patch above 9
 # is written as 9 (0.2.10 -> "00.29"; 0.3.0 -> "00.30" is still higher).
 if(APP_VER_PATCH GREATER 9)
@@ -64,6 +64,7 @@ add_executable(${PROJECT_NAME}.elf
   src/poster.c
   src/avpref.c
   src/dl.c
+  src/srt.c
 )
 target_compile_definitions(${PROJECT_NAME}.elf PRIVATE "APP_VERSION=\"v${APP_VER_MAJOR}.${APP_VER_MINOR}.${APP_VER_PATCH}\"")
 # 0.4.1: when this build was made (the log's second line says it, to tell builds apart while testing). Set when
