@@ -1695,6 +1695,66 @@ films:
                 tsp_set_ext_subs(NULL, 0);
                 srt_free(&sl);
             }
+            {   /* 1.3.2: a film still being downloaded: 40 % there, the rest comes 2 s later: it waits and plays to the end */
+                static const char *part = "/tmp/tsp_growing.mkv";
+                FILE *src = fopen(mkv, "rb");
+                assert(src);
+                fseek(src, 0, SEEK_END);
+                long whole = ftell(src);
+                fseek(src, 0, SEEK_SET);
+                char *all = malloc((size_t)whole);
+                assert(all && fread(all, 1, (size_t)whole, src) == (size_t)whole);
+                fclose(src);
+                FILE *dst = fopen(part, "wb");
+                fwrite(all, 1, (size_t)(whole * 4 / 10), dst);
+                fclose(dst);
+                tsp_set_file_total((uint64_t)whole);
+                assert(tsp_start_vod(part, 0) == 0);
+                double t0 = now_s();
+                int appended = 0, waited = 0;
+                while (now_s() - t0 < 25) {
+                    int w, h;
+                    tsp_frame(&w, &h);
+                    const TspStatus *st = tsp_status();
+                    if (st->file_wait) waited = 1;
+                    if (!appended && now_s() - t0 > 2.0) {    /* (the download comes on) */
+                        dst = fopen(part, "ab");
+                        fwrite(all + whole * 4 / 10, 1, (size_t)(whole - whole * 4 / 10), dst);
+                        fclose(dst);
+                        appended = 1;
+                    }
+                    if (st->state == TSP_ENDED || st->state == TSP_ERROR) break;
+                    usleep(10000);
+                }
+                TspStatus gs = *tsp_status();
+                tsp_stop();
+                printf("               growing file: state %d, decoded %u, waited %d, dur %d ms, msg '%s'\n", gs.state, gs.decoded, waited, gs.dur_ms, gs.msg);
+                assert(gs.state == TSP_ENDED && gs.decoded >= 280 && abs(gs.dur_ms - 12000) < 400);
+                /* an MP4 whose index is at its end cannot start before it is there */
+                FILE *m = fopen(mp4, "rb");
+                fseek(m, 0, SEEK_END);
+                long mw = ftell(m);
+                fseek(m, 0, SEEK_SET);
+                char *mb = malloc((size_t)mw);
+                assert(fread(mb, 1, (size_t)mw, m) == (size_t)mw);
+                fclose(m);
+                int moov_end = 0;
+                for (long i = mw / 2; i + 4 < mw; i++) if (!memcmp(mb + i, "moov", 4)) moov_end = 1;
+                dst = fopen(part, "wb");
+                fwrite(mb, 1, (size_t)(mw / 2), dst);
+                fclose(dst);
+                tsp_set_file_total((uint64_t)mw);
+                assert(tsp_start_vod(part, 0) == 0);
+                t0 = now_s();
+                while (now_s() - t0 < 6 && tsp_status()->state != TSP_ERROR && tsp_status()->state != TSP_PLAYING) usleep(10000);
+                gs = *tsp_status();
+                tsp_stop();
+                printf("               growing MP4 (index at its end: %d): state %d, msg '%s'\n", moov_end, gs.state, gs.msg);
+                if (moov_end) assert(gs.state == TSP_ERROR && strstr(gs.msg, "download has ended"));
+                tsp_set_file_total(0);
+                free(all); free(mb);
+                remove(part);
+            }
             v = play_vod_url("/nonexistent/VitaIPTV/x.mkv", NULL, 0, 5, 0, 0);
             vshow("local file missing", &v);
             assert(v.r.st.state == TSP_ERROR && v.r.changes == 0 && mock_http_range_requests == rq0);
