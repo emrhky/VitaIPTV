@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.5.0 (test)
+
+### New kinds of playlist
+- **Internet Archive (archive.org):** an archive.org address (a collection, a film, a search) or words. The list:
+  the 500 most watched films there (poster, year, story beside the list). Opening one: its metadata tells which
+  file the Vita plays (MP4 / H.264 up to 1080p, the archive's own H.264 copy first) - asked once, then kept in
+  `archive_files.txt`, so "continue from", favourites and downloads use the same address. Downloads work too.
+- **Web page:** the videos written in a page: `<video>` / `<source>`, og:video, the video data for search engines
+  (JSON-LD), any .mp4 / .m3u8 / .webm / .mkv address in it (also in the data some sites put in the page, with
+  `\/` and `\u002F`), one step into its iframes. HLS playlists are checked (AES, DRM, H.265, fMP4 parts); DASH is
+  left out. Nothing to play: the reason is said ("The site makes its video with JavaScript", "encrypted (DRM)",
+  "HTTP 403"...), and `webcheck.txt` lists what was found.
+
+### Player
+- **HTTP 405 when the account is free** (no stream or download of the app in the last minute, the last account
+  check not full): "The server does not give this one (HTTP 405)" at once, not "account busy?" after 4.5 s of
+  asking again. A film's 403 / 404 / 410 say the same.
+
+### Downloads
+- **Black screen while it downloads** (Select on the Downloads screen): any button brings the screen back; a dim
+  line shows the progress and moves every 20 s.
+
+### Lists
+- **The last searches:** Square shows *New search...* and the last five (kept in `searches.txt`).
+
 ## 1.4.2 (test) - with 1.4.1
 
 ### Downloads

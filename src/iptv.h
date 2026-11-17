@@ -49,7 +49,9 @@ typedef enum {
     SRC_M3U_FILE,  /* local M3U file on the Vita memory card          */
     SRC_MYLIST,    /* 1.1: "My List", live channels gathered from the other playlists (mylist.h); never saved */
     SRC_DOWNLOADS, /* 1.3: "Downloads" (dl.h); 1.3.1: shown while there is one, can be moved; never saved */
-    SRC_DEVICE     /* 1.3.1: "Videos on the Vita": the video files on the memory cards, folder by folder */
+    SRC_DEVICE,    /* 1.3.1: "Videos on the Vita": the video files on the memory cards, folder by folder */
+    SRC_ARCHIVE,   /* 1.5: Internet Archive (archive.org): a collection, a search or an item (websrc.h) */
+    SRC_WEB        /* 1.5: a web page: the videos found in it (websrc.h) */
 } SourceType;
 
 typedef struct {
@@ -86,6 +88,8 @@ typedef struct {
 void channel_list_init(ChannelList *l);
 void channel_list_free(ChannelList *l);
 int  channel_list_push(ChannelList *l, const Channel *c);   /* 0.6.0 (films / series favourites); -1 full (extra is cleared) */
+/* 1.5: c added with its extra fields: tags[k] (CX_...) = vals[k] (NULL / "" left out), at most maxlen each */
+int  channel_list_add(ChannelList *l, const Channel *c, const char *tags, const char *const *vals, size_t maxlen);
 /* 0.8.0: an extra field of channel c of list l (CX_...), NULL if it has none */
 const char *channel_extra(const ChannelList *l, const Channel *c, char tag);
 /* 0.8.0: the catch-up template of channel c (its own, else the list's), "" if none */

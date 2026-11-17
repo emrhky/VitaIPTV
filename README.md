@@ -107,6 +107,19 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   stays in the list with the reason (Square tries again). A note at the top says when a download has ended.
   **Only for content you have the right to download**: whether you may keep a copy depends on your provider's
   terms and on where the content legally comes from.
+  *Select > Black screen while it downloads* on the Downloads screen keeps the screen black (any button brings it
+  back): less power on the first Vita's OLED screen during a long download.
+- **Internet Archive (archive.org):** add a playlist of the type *Internet Archive* with an archive.org address (a
+  collection like `https://archive.org/details/feature_films`, a film, or `https://archive.org/search?query=...`)
+  or just words (`charlie chaplin`). Its films come as a list (the 500 most watched, with poster, year and story);
+  when one is opened the app picks the file the Vita plays (MP4 / H.264 up to 1080p) and remembers it. Old, free
+  films: silent films, classics, documentaries.
+- **Web page:** a playlist of the type *Web page* lists the videos written in a page (`<video>`, the page's video
+  data, `.mp4` / `.m3u8` addresses in it, one step into the pages shown inside it). JavaScript does not run on
+  the Vita: a site that makes its video only then gives nothing, and the app says why (also: DRM, DASH, H.265,
+  encrypted HLS). `ux0:data/VitaIPTV/webcheck.txt` lists what the last page gave. **Only for pages whose videos
+  you may watch this way.**
+- **Search:** Square shows the last five searches first (and *New search...*).
 - **Optional transcoding server** (`tools/vita_iptv_proxy.py`, needs Python 3 and ffmpeg on a PC or an Android
   phone): plays what the Vita cannot - HEVC, interlaced video, 1080p at 50/60 fps - by converting it to 720p
   H.264 + AAC. **Select** while watching moves the channel or film to the server (*Through the Server*) and back.
