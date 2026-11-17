@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.4.0 (test)
+
+### Look
+- **Colour and background apart:** 6 colours (blue, green, purple, orange, teal, pink) × 4 backgrounds (navy,
+  **black for OLED**, graphite, warm dark). On black every ground is pure black: no grey row stripes or cards; only
+  the selection and the buttons keep a faint grey so they can be seen. Settings: "Colour" and "Background".
+- Button names nearer their symbols; the text in the SELECT / START / L/R pill pure white.
+
+### Downloads
+- **Watch while it downloads:** X plays a film still coming once about 2 % (16 MB) is there. When the film reaches
+  the part not yet downloaded it waits ("Waiting for the download... 40 % downloaded"); a jump stops at what is
+  there. An MP4 whose index is at its end can be played only when its download has ended.
+- **Keys of the Downloads screen:** X Watch, Square Stop / Continue, Triangle Delete, O Back, L/R Page, SELECT Menu
+  (stop all / continue all). Videos on the Vita the same way.
+- **A list loading stops the download of the same server** for that time and lets it go on after; the
+  background check of a list waits while that server downloads.
+- **Faster:** the download threads have a higher priority and the CPU runs at full speed while downloading.
+- "Download this season" skips an episode the list has twice.
+- **Triangle "Details" while a downloaded film plays** shows its poster and plot.
+- Going on where you stopped starts 5 s earlier (an MKV jump may land a few seconds later).
+
+### Videos on the Vita
+- **Triangle deletes a video** (with its .srt files and its resume point); a download is deleted as a download.
+- A folder the Vita does not let the app open (ux0:picture for a safe app) says so instead of showing an empty
+  list; the place list (the root) works on every memory card.
+
 ## 1.3.1 (test)
 
 ### Look
