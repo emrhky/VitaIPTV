@@ -37,6 +37,7 @@ typedef struct {
     volatile int hls_hd;                /* HLS offers a 1080p variant (the player can switch to it) */
     /* films and episodes */
     volatile int dur_ms;                /* length (0 = unknown) */
+    volatile int file_wait;             /* 1.3.2: a film still being downloaded waits for its next part */
     volatile int seekable;              /* tsp_start_vod at another time works */
     volatile int paused;
     int fields;                         /* pictures are two fields one above the other: draw the top half */
@@ -91,6 +92,9 @@ void              tsp_set_audio(int id, const char *lang);
 void              tsp_set_sub(int id, const char *lang, int off);   /* off: 1 none, 0 shown, 2 (1.3) lang only if no sound in lang */
 /* 1.3.1: subtitle files for the next films (after the file's own tracks; "SRT" in the menu); NULL = none. The
  * lists stay the caller's: kept until the next call (made only while nothing plays). */
+/* 1.3.2: the next film on the memory card is still being downloaded to this size (0 = a whole file): it waits
+ * for the part it needs (TspStatus.file_wait), and stops after 30 s without any more of it */
+void              tsp_set_file_total(uint64_t total);
 struct SrtList;
 void              tsp_set_ext_subs(const struct SrtList *subs, int n);
 /* 0.7.0: show subtitle track k of the status now (-1 = off), without starting again */

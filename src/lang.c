@@ -16,6 +16,28 @@ static const Pair FIXED[] = {
     { "Clear speech (5.1)", "Konuşma netleştirme (5.1)" },
     { "Same volume on every channel", "Kanallar arası ses eşitleme" },
     { "Sound field", "Ses alanı" }, { "Speakers", "Hoparlör" }, { "Headphones", "Kulaklık" }, { "Auto", "Otomatik" },   /* 1.3 */
+    /* 1.4: colours and backgrounds */
+    { "Colour", "Renk" }, { "Background", "Arka plan" }, { "Teal", "Turkuaz" }, { "Pink", "Pembe" },
+    { "Navy", "Lacivert" }, { "Black (OLED)", "Siyah (OLED)" }, { "Graphite", "Grafit" }, { "Warm dark", "Sıcak koyu" },
+    { "The colour of the selection and the lines (seen at once).", "Seçimin ve çizgilerin rengi (hemen görünür)." },
+    { "The background: navy, black (OLED: everything black, best on the first Vita's screen), graphite or warm dark.",
+      "Arka plan: lacivert, siyah (OLED: her yer simsiyah, ilk Vita'nın ekranında en iyisi), grafit ya da sıcak koyu." },
+    /* 1.3.2: watching while it downloads; the Downloads keys; Videos on the Vita */
+    { "%d%% downloaded", "%%%d indi" }, { "Waiting for the download...", "İndirme bekleniyor..." },
+    { "The rest has not been downloaded yet", "Gerisi henüz inmedi" },
+    { "The download has not reached this part yet", "İndirme henüz bu kısma gelmedi" },
+    { "This MP4 file can be played only when its download has ended", "Bu MP4 dosyası ancak indirmesi bitince oynatılabilir" },
+    { "Stop all downloads", "Tüm indirmeleri durdur" }, { "Continue all downloads", "Tüm indirmeleri sürdür" },
+    { "Downloads stopped", "İndirmeler durduruldu" }, { "Downloads go on", "İndirmeler sürüyor" }, { "Nothing to continue", "Sürdürülecek indirme yok" },
+    { "This one can be watched when its download has ended", "Bu, indirmesi bitince izlenebilir" },
+    { "A little more of it must be downloaded first", "Önce biraz daha inmesi gerekiyor" },
+    { "Stopped: Square goes on where it stopped (the app must stay open)", "Durduruldu: Kare ile kaldığı yerden devam eder (uygulama açık kalmalı)" },
+    { "Watch", "İzle" }, { "Stop", "Durdur" },
+    { "Loading a list: the download waits", "Liste yükleniyor: indirme bekliyor" },
+    { "The Vita does not let the app open this folder", "Vita bu klasörü uygulamaya açmıyor" },
+    { "This folder cannot be opened (0x%08X)", "Bu klasör açılamıyor (0x%08X)" },
+    { "Delete this video file?", "Bu video dosyası silinsin mi?" },
+    { "Could not delete it (the Vita does not allow it here?)", "Silinemedi (Vita burada izin vermiyor olabilir)" },
     /* 1.3.1: Videos on the Vita; downloads */
     { "Videos on the Vita", "Vita'daki Videolar" },
     { "Video files on the memory card, folder by folder", "Hafıza kartındaki video dosyaları, klasör klasör" },

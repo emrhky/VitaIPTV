@@ -1285,7 +1285,8 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "sub_color")) st->sub_color = small_num(v, 3, 0);
             else if (!strcmp(k, "sub_pos")) st->sub_pos = small_num(v, 2, 0);
             else if (!strcmp(k, "sub_bg")) st->sub_bg = small_num(v, 2, 0);
-            else if (!strcmp(k, "theme")) st->theme = small_num(v, 3, 0);
+            else if (!strcmp(k, "theme")) st->theme = small_num(v, 5, 0);   /* (1.4: 6 colours) */
+            else if (!strcmp(k, "background")) st->bg = small_num(v, 3, 0);   /* 1.4 */
             else if (!strcmp(k, "snd_boost")) st->snd_boost = small_num(v, 3, 0);   /* 1.1 */
             else if (!strcmp(k, "snd_speaker")) st->snd_speaker = small_num(v, 1, 0);
             else if (!strcmp(k, "snd_dialog")) st->snd_dialog = small_num(v, 1, 0);
@@ -1319,6 +1320,7 @@ int settings_format(const Settings *st, char *out, size_t outsz)
     if (st->sub_pos) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_pos=%d\n", st->sub_pos);
     if (st->sub_bg) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_bg=%d\n", st->sub_bg);
     if (st->theme) e += snprintf(ex + e, sizeof ex - (size_t)e, "theme=%d\n", st->theme);
+    if (st->bg) e += snprintf(ex + e, sizeof ex - (size_t)e, "background=%d\n", st->bg);   /* 1.4 */
     if (st->proxy_off) e += snprintf(ex + e, sizeof ex - (size_t)e, "proxy_off=1\n");   /* 1.1 */
     if (st->snd_boost) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_boost=%d\n", st->snd_boost);   /* 1.1 */
     if (st->snd_speaker) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_speaker=1\n");
