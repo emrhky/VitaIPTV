@@ -112,6 +112,9 @@ int               tsp_start(const char *url);       /* 0 = started */
 /* A film or episode (a file on a server that sends parts of it): starts at start_ms (the keyframe at or
  * before it). MKV, MP4 and TS files. */
 int               tsp_start_vod(const char *url, int start_ms);
+/* 1.5: no connection of the account is known to be in use: an HTTP 405 then means the file is not given (said at
+ * once) instead of "busy: asked again" */
+void              tsp_set_account_free(int on);
 /* A film as a plain stream that starts offset_ms into it (the transcoding server cut it there): pause works,
  * the position counts from offset_ms, jumping means starting the server again. */
 int               tsp_start_vod_stream(const char *url, int offset_ms);

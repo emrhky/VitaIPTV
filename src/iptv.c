@@ -91,6 +91,18 @@ int channel_list_push(ChannelList *l, const Channel *c)
     return 0;
 }
 
+int channel_list_add(ChannelList *l, const Channel *c, const char *tags, const char *const *vals, size_t maxlen)
+{
+    ExtraBuf *xb = malloc(sizeof *xb);
+    if (!xb) return -1;
+    xb->n = 0;
+    for (size_t k = 0; tags && tags[k]; k++) xb_add(xb, tags[k], vals[k], maxlen);
+    Channel ch = *c;
+    ch.extra = xb_commit(l, xb);
+    free(xb);
+    return list_push(l, &ch);
+}
+
 /* Copies up to dstsz-1 bytes without cutting a UTF-8 sequence in half. */
 static void copy_trunc(char *dst, size_t dstsz, const char *src, size_t n)
 {
@@ -1132,6 +1144,10 @@ int sources_parse(const char *text, Source *out, int max)
             if (nf >= 5) copy_trunc(src.pass, sizeof src.pass, f[4], strlen(f[4]));   /* User-Agent */
         } else if (!strcasecmp(f[1], "file")) {
             src.type = SRC_M3U_FILE;
+        } else if (!strcasecmp(f[1], "archive")) {               /* 1.5 */
+            src.type = SRC_ARCHIVE;
+        } else if (!strcasecmp(f[1], "web")) {
+            src.type = SRC_WEB;
         } else {
             continue;
         }
@@ -1278,6 +1294,8 @@ static const char *type_word(SourceType t)
     case SRC_XTREAM: return "xtream";
     case SRC_STREAM: return "stream";
     case SRC_M3U_FILE: return "file";
+    case SRC_ARCHIVE: return "archive";                      /* 1.5 */
+    case SRC_WEB: return "web";
     default: return "m3u";
     }
 }
@@ -1286,7 +1304,7 @@ int sources_format(const Source *src, int n, char *out, size_t outsz)
 {
     size_t o = 0;
     int w = snprintf(out, outsz, "# Vita IPTV sources (written by the app; you can also edit it by hand)\n"
-                                 "# Name | type | address [| username | password]   types: m3u, xtream, stream, file\n"
+                                 "# Name | type | address [| username | password]   types: m3u, xtream, stream, file, archive, web\n"
                                  "# (stream: address [| referer | user agent], for streams that need them)\n");
     if (w < 0 || (size_t)w >= outsz) return -1;
     o = (size_t)w;

@@ -3354,7 +3354,11 @@ static void check_stall(Tsp *t)
  * left may not be closed on their side yet). 1.2: also 405 and 512, which a server gave for one film and
  * episode after another while its account showed "connections 1 of 1" (switching quickly). Wait a moment
  * and ask again before giving up. Returns 1 to try again. */
-static int busy_status(int s) { return s == 405 || s == 407 || s == 429 || s == 503 || s == 509 || s == 512; }
+/* 1.5: the app knows no connection of this account is in use (no stream or download of it a minute ago): a 405 is
+ * then the server not giving this file (a film that never opens: the 1.4.2 log), not a busy account */
+static volatile int g_acct_free;
+void tsp_set_account_free(int on) { g_acct_free = on ? 1 : 0; }
+static int busy_status(int s) { if (s == 405 && g_acct_free) return 0; return s == 405 || s == 407 || s == 429 || s == 503 || s == 509 || s == 512; }
 
 static int http_refused(Tsp *t, int status)
 {
@@ -3383,6 +3387,8 @@ static int http_refused(Tsp *t, int status)
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP 407 (the provider refuses: account busy or channel not in the package)");
     else if (busy)
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d (the provider refuses: account busy?)", status);
+    else if (status == 405)
+        set_error_kind(t, TSP_ERRK_NET, "The server does not give this one (HTTP %d)", status);   /* 1.5 */
     else
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d", status);
     return 0;
@@ -4549,6 +4555,8 @@ static void read_vod(Tsp *t, uint8_t *buf)
         if (t->vod_file) set_error_kind(t, TSP_ERRK_FORMAT, n == 0 ? "The file is empty" : "Cannot open the file");   /* 1.3 */
         else if (busy_status(vod_status))
             set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d (the provider refuses: account busy?)", vod_status);
+        else if (vod_status == 405 || vod_status == 404 || vod_status == 403 || vod_status == 410)   /* 1.5 */
+            set_error_kind(t, TSP_ERRK_NET, "The server does not give this one (HTTP %d)", vod_status);
         else if (vod_status) set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d", vod_status);
         else set_error_kind(t, TSP_ERRK_NET, "The server did not answer");
         return;

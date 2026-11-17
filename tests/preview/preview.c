@@ -254,6 +254,39 @@ int main(int argc, char **argv)
         int sc2 = 0;
         preview_clear(UI_BG); scr_settings(T("Edit playlist"), pf, 6, 2, &sc2, hf3, 4, NULL, 0, T("Tip: a pasted get.php link fills everything")); shot("n_playlist_form");
         scr_confirm(T("Save the playlist?"), NULL); shot("n_playlist_form_ask");
+        {   /* 1.5: Internet Archive / web page, the last searches, the black screen */
+            ScrField pa[] = { { T("Type"), T("Internet Archive"), SCR_F_CHOICE, 1, 0 }, { T("Name"), "Klasik filmler", SCR_F_TEXT, 1, 0 },
+                              { T("Address or words"), "https://archive.org/details/feature_films", SCR_F_TEXT, 1, 0 },
+                              { T("Username (not needed)"), "", SCR_F_TEXT, 0, 0 }, { T("Password (not needed)"), "", SCR_F_TEXT, 0, 0 } };
+            int sc3 = 0;
+            preview_clear(UI_BG); scr_settings(T("Add playlist"), pa, 5, 0, &sc3, hf3, 4, NULL, 0,
+                                               T("Internet Archive: free films of archive.org (an address or words)")); shot("v_archive_form");
+            static int ag, ac;
+            ScrDual d; memset(&d, 0, sizeof d);
+            d.title = "Klasik filmler"; d.subtitle = "Klasik filmler"; d.right = "500";
+            d.lcount = 1; d.lsel = 0; d.lscroll = &ag; d.lrow = grp_row_pv;
+            d.rcount = 16; d.rsel = 2; d.rscroll = &ac; d.rrow = ch_row; d.focus = 1;
+            ScrVodCard k; memset(&k, 0, sizeof k);
+            k.title = "Nosferatu (1922)"; k.line = "1922  \xC2\xB7  1 sa 34 dk"; k.rating = -1;
+            k.plot = "F. W. Murnau'nun sessiz korku filmi. Kont Orlok, emlakçı Hutter'ı Transilvanya'daki şatosuna davet eder.";
+            d.preview = &k;
+            UiHint hr[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
+                            { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+            d.hints = hr; d.nhints = 7;
+            d.status = T_msg("The first 500 of 8123 films (the most watched)");
+            preview_clear(UI_BG); ag = ac = 0; scr_dual(&d); shot("v_archive_list");
+            const char *rq[] = { T("New search..."), "chaplin", "Kurtlar Vadisi", "belgesel", "Harry" };
+            d.preview = NULL; d.status = NULL;
+            preview_clear(UI_BG); ag = ac = 0; scr_dual(&d); scr_menu(T("Search"), rq, 5, 1); shot("v_recent_search");
+            preview_clear(0);
+            char bl[160];
+            snprintf(bl, sizeof bl, T("Downloading %d%%  (%s/s)  -  any button: back"), 42, "3,4 MB");
+            ui_text_center(480, 217, RGBA8(70, 70, 70, 255), 0.85f, bl);
+            shot("v_black_screen");
+            d.status = T_msg("Failed: The site makes its video with JavaScript: it is not in the page"); d.status_err = 1; d.rcount = 0;
+            d.rempty = T("No channels");
+            preview_clear(UI_BG); ag = ac = 0; scr_dual(&d); shot("v_web_fail");
+        }
         const char *mi[] = { T("Add playlist"), T("Reorder playlists"), T("Reload playlists"), T("Settings"), T("Quit") };
         ScrList sl3 = { "Vita IPTV", T("Playlists"), "5 playlists", 5, 1, &scroll, src_row, NULL, "", hf3, 4, NULL, 0 };
         scroll = 0;

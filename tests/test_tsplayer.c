@@ -978,6 +978,26 @@ slow:
         mock_http_reset();
     }
     mock_http_fail_after = 0;
+    {   /* 1.5: a 405 at the start: asked again twice (busy account?); when the app knows the account is free: at once,
+         * "the server does not give this one" */
+        extern int mock_http_status;
+        mock_http_file = argv[1];
+        for (int k = 0; k < 2; k++) {
+            mock_http_status = 405;
+            tsp_set_account_free(k);
+            double t0 = now_s();
+            r = play("http://example.invalid/live/9.ts", 8);
+            double took = r.st.state == TSP_ERROR ? now_s() - t0 : -1;
+            printf("               405, account free %d: state %d, '%s'\n", k, r.st.state, r.st.msg);
+            assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "405"));
+            if (k) assert(strstr(r.st.msg, "does not give"));
+            else assert(strstr(r.st.msg, "busy"));
+            (void)took;
+        }
+        tsp_set_account_free(0);
+        mock_http_status = 200;
+        mock_http_reset();
+    }
 
     r = play(argv[13], 10);                                 /* Matroska instead of MPEG-TS */
     show("mkv", &r);
