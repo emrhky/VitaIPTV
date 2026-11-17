@@ -38,6 +38,7 @@ typedef struct {
     uint32_t avkey;                         /* the sound / subtitle choice's key (avpref.h) */
     int av_series;                          /* (an episode's: its series') */
     long long added;                        /* when (seconds) */
+    char err[96];                           /* 1.4.1: why it stopped for good (English, for T_msg; "" = it did not) */
 } DlItem;
 
 enum { DL_IDLE = 0, DL_QUEUED, DL_ACTIVE, DL_FAILED, DL_DONE };
@@ -76,6 +77,10 @@ int  dl_active(void);                       /* something is being downloaded or 
 int  dl_queued_count(void);
 /* the free space of the device the root is on (bytes), -1 = cannot be read */
 long long dl_free_bytes(void);
+/* 1.4.1: a stream from the app has just ended (or the downloads go on after it): for a minute an HTTP 405 is
+ * taken for "the account is still counted on that stream" and asked again; otherwise 405 means the server does
+ * not give the file (the 1.4.0 log: asked three times for nothing) */
+void dl_note_stream_end(void);
 void dl_shutdown(void);                     /* at exit: stops (what is there stays) */
 
 #endif

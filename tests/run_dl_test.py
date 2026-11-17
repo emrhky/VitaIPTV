@@ -26,6 +26,8 @@ class H(BaseHTTPRequestHandler):
         if p == "/poster.jpg":
             self.send_response(200); self.send_header("Content-Length", str(len(POSTER))); self.end_headers()
             self.wfile.write(POSTER); return
+        if p.startswith("/e405/"):                 # 1.4.1: a server that does not give this file (or: the account is busy)
+            self.send_response(405); self.send_header("Content-Length", "0"); self.end_headers(); return
         drop = p.startswith("/drop/"); norange = "/norange/" in p; slow = "/slow/" in p
         name = p.rsplit("/", 1)[-1]
         if name not in ("film.mkv", "film2.mkv", "film3.mkv"):

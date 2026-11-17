@@ -867,6 +867,70 @@ int xtream_parse_vod_match(const char *json, size_t len, const Source *s, const 
     return n;
 }
 
+/* 1.4.1: the small copy for searching again */
+typedef struct { char *b; size_t n, cap; int series, bad, count; } CompactCtx;
+static void cc_put(CompactCtx *c, const char *s, size_t n)
+{
+    if (c->bad) return;
+    if (c->n + n + 1 > c->cap) {
+        size_t nc = c->cap ? c->cap + c->cap / 2 : 1u << 20;
+        while (nc < c->n + n + 1) nc += nc / 2;
+        char *nb = realloc(c->b, nc);
+        if (!nb) { c->bad = 1; return; }
+        c->b = nb; c->cap = nc;
+    }
+    memcpy(c->b + c->n, s, n);
+    c->n += n;
+}
+static void cc_field(CompactCtx *c, const char *key, const char *v, size_t maxlen)
+{
+    if (!v[0]) return;
+    char tmp[IPTV_URL_MAX * 2 + 64];
+    size_t o = (size_t)snprintf(tmp, sizeof tmp, "%s\"%s\":\"", c->n && c->b[c->n - 1] != '{' ? "," : "", key);
+    for (size_t i = 0; v[i] && i < maxlen && o + 8 < sizeof tmp; i++) {
+        unsigned char ch = (unsigned char)v[i];
+        if (ch == '"' || ch == '\\') { tmp[o++] = '\\'; tmp[o++] = (char)ch; }
+        else if (ch < 0x20) tmp[o++] = ' ';
+        else tmp[o++] = (char)ch;
+    }
+    tmp[o++] = '"';
+    cc_put(c, tmp, o);
+}
+static int compact_cb(const XtObj *o, void *vctx)
+{
+    CompactCtx *c = vctx;
+    const char *id = c->series ? o->sid : o->id;
+    if (!id_ok(id)) return 0;
+    cc_put(c, c->count ? ",{" : "{", c->count ? 2 : 1);
+    cc_field(c, "name", o->name, sizeof o->name);
+    cc_field(c, c->series ? "series_id" : "stream_id", id, 24);
+    cc_field(c, "category_id", o->cat, 24);
+    cc_field(c, "is_adult", o->adult, 8);
+    cc_field(c, "container_extension", o->ext, 12);
+    cc_field(c, "stream_icon", o->icon, IPTV_URL_MAX - 1);
+    cc_field(c, "rating", o->rating, 8);
+    cc_field(c, "year", o->release, 24);
+    cc_field(c, "genre", o->genre, 80);
+    cc_put(c, "}", 1);
+    c->count++;
+    return c->bad ? -1 : 0;
+}
+size_t xtream_compact(const char *json, size_t len, int series, char **out)
+{
+    CompactCtx c;
+    memset(&c, 0, sizeof c);
+    c.series = series;
+    *out = NULL;
+    cc_put(&c, "[", 1);
+    xt_each(json, len, compact_cb, &c);
+    cc_put(&c, "]", 1);
+    if (c.bad || !c.count) { free(c.b); return 0; }
+    c.b[c.n] = 0;
+    char *shrunk = realloc(c.b, c.n + 1);                    /* (the room left over given back) */
+    *out = shrunk ? shrunk : c.b;
+    return c.n;
+}
+
 /* get_series_info: "episodes" is an object of seasons ({"1": [...], "2": [...]}) or an array of them. */
 typedef struct { ChannelList *out; LiveCtx *c; int added; } EpCtx;
 

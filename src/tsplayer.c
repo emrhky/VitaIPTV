@@ -307,6 +307,12 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     MpaDec *mpa;                        /* MPEG audio (MP2/MP3) in software */
     A52Dec *a52;                        /* 0.5.0: AC-3 / E-AC-3 in software (FFmpeg) */
     A52Dec *aacsw;                      /* 0.6.0: AAC with more than two channels in software (FFmpeg) */
+    A52Dec *xsw;                        /* 1.4.2: Opus / Vorbis (FFmpeg), made from the config packet (flags 4 / 5) */
+    int xsw_kind, xsw_dlg;              /* ... 1 Opus, 2 Vorbis; "clear dialogue" when it was made */
+    uint8_t *xcfg;                      /* ... that config, kept for making it again */
+    size_t xcfg_len;
+    int xcfg_rate, xcfg_ch;
+    unsigned xcfg_gen;                  /* the demuxer's audio_cfg_gen last sent (reader thread) */
     int asw_rate, asw_ch;               /* ... the format it was opened for (the stream's channels) */
     /* 1.2: 5.1 AAC on the Vita's own decoder (type 0x1008; aac51.h) */
     int alib_type;                      /* the sceAudiodec library opened (0x1005 AAC, 0x1008 multichannel AAC) */
@@ -2404,7 +2410,8 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
 /* 0.5.0: the audio the player can play: AAC (the Vita's decoder), MPEG audio and AC-3 / E-AC-3 (software) */
 static int audio_playable(int c)
 {
-    return c == TS_CODEC_AAC || c == TS_CODEC_MPEG_AUDIO || ((c == TS_CODEC_AC3 || c == TS_CODEC_EAC3) && a52_available());
+    return c == TS_CODEC_AAC || c == TS_CODEC_MPEG_AUDIO || ((c == TS_CODEC_AC3 || c == TS_CODEC_EAC3) && a52_available()) ||
+           (c == TS_CODEC_OPUS && a52_xiph_available(1)) || (c == TS_CODEC_VORBIS && a52_xiph_available(0));   /* 1.4.2 */
 }
 
 /* the status' list of audio tracks (for the menu), made again when the stream list changes */
@@ -2451,7 +2458,8 @@ static void audio_push(Tsp *t, int codec, const uint8_t *data, size_t len, int64
     memset(p, 0, sizeof *p);
     p->pts = pts;
     p->len = len;
-    p->flags = codec == TS_CODEC_MPEG_AUDIO ? 1 : codec == TS_CODEC_AC3 || codec == TS_CODEC_EAC3 ? 2 : 0;   /* 1 MPEG, 2 AC-3 (software) */
+    p->flags = codec == TS_CODEC_MPEG_AUDIO ? 1 : codec == TS_CODEC_AC3 || codec == TS_CODEC_EAC3 ? 2 :
+               codec == TS_CODEC_OPUS || codec == TS_CODEC_VORBIS ? 3 : 0;   /* 1 MPEG, 2 AC-3, 3 Opus / Vorbis (software) */
     memcpy(p->data, data, len);
     q_push(t, &t->aq, p);
 }
@@ -2465,6 +2473,25 @@ static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
     const TsInfo *i = dmx_info(t);
     if (!t->alt_list) update_audio_tracks(t, i);
     update_sub_tracks(t);                                    /* 0.7.0 */
+    if ((i->audio_codec == TS_CODEC_OPUS || i->audio_codec == TS_CODEC_VORBIS) && i->audio_cfg_gen != t->xcfg_gen &&
+        audio_playable(i->audio_codec)) {
+        /* 1.4.2: the track's set-up goes first, in a packet of its own: [kind][rate 4][ch][CodecPrivate] */
+        size_t n = (size_t)(i->audio_cfg_len > 0 ? i->audio_cfg_len : 0);
+        Pkt *c = malloc(sizeof(Pkt) + 6 + n);
+        if (c) {
+            memset(c, 0, sizeof *c);
+            c->pts = -1;
+            c->len = 6 + n;
+            c->flags = i->audio_codec == TS_CODEC_OPUS ? 4 : 5;
+            c->data[0] = (uint8_t)c->flags;
+            int r = i->audio_cfg_rate;
+            c->data[1] = (uint8_t)(r >> 24); c->data[2] = (uint8_t)(r >> 16); c->data[3] = (uint8_t)(r >> 8); c->data[4] = (uint8_t)r;
+            c->data[5] = (uint8_t)(i->audio_cfg_ch > 0 && i->audio_cfg_ch < 256 ? i->audio_cfg_ch : 0);
+            if (n) memcpy(c->data + 6, i->audio_cfg, n);
+            q_push(t, &t->aq, c);
+            t->xcfg_gen = i->audio_cfg_gen;
+        }
+    }
     audio_push(t, i->audio_codec, data, len, pts);
 }
 
@@ -2900,6 +2927,60 @@ static void audio_a52(Tsp *t, Pkt *p)
     a52_feed(t->a52, p->data, p->len, p->pts, a52_frame, t);
 }
 
+/* 1.4.2: a piece of Opus / Vorbis sound from the software decoder (stereo already; XIPH_CHUNK samples) */
+static void xiph_frame(void *ctx, const int16_t *pcm, int samples, int rate, int ch, int src_ch, int eac3, int64_t pts)
+{
+    Tsp *t = ctx;
+    (void)eac3;
+    if (t->audio_off) return;
+    t->st.audio_src_ch = src_ch;
+    if (!t->st.audio_frames && !t->a52pcm) plog("tsp: %s audio, %d Hz, %d ch, played as %s (software decoder)", t->xsw_kind == 1 ? "Opus" : "Vorbis",
+                                                rate, src_ch, ch == 1 ? "mono" : "stereo");
+    if (samples % 64 || samples > A52_MAX_SAMPLES) { t->st.audio_errors++; return; }
+    if (!t->a52pcm) t->a52pcm = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
+    if (!t->a52pcm) return;
+    memcpy(t->a52pcm, pcm, (size_t)samples * 2u * (size_t)ch);
+    t->arate = rate;
+    t->ach = ch;
+    t->st.audio_rate = rate;
+    t->st.audio_ch = ch;
+    t->st.audio_xiph = t->xsw_kind;
+    audio_out(t, t->a52pcm, samples, rate, ch, pts);
+}
+
+static void xiph_open(Tsp *t)
+{
+    a52_destroy(t->xsw);
+    t->xsw_dlg = a52_get_dialog();
+    t->xsw = a52_create_xiph(t->xsw_kind == 1, t->xcfg, t->xcfg_len, t->xcfg_rate, t->xcfg_ch);
+    plog("tsp: %s decoder (FFmpeg): %s, set-up %u bytes, %d Hz, %d ch", t->xsw_kind == 1 ? "Opus" : "Vorbis", t->xsw ? "opened" : "FAILED",
+         (unsigned)t->xcfg_len, t->xcfg_rate, t->xcfg_ch);
+}
+
+static void audio_xiph(Tsp *t, Pkt *p)
+{
+    if (p->flags == 4 || p->flags == 5) {                    /* the set-up of a (new) track */
+        if (p->len < 6) return;
+        free(t->xcfg);
+        t->xcfg_len = p->len - 6;
+        t->xcfg = t->xcfg_len ? malloc(t->xcfg_len) : NULL;
+        if (t->xcfg) memcpy(t->xcfg, p->data + 6, t->xcfg_len);
+        else t->xcfg_len = 0;
+        t->xsw_kind = p->flags == 4 ? 1 : 2;
+        t->xcfg_rate = (int)(((uint32_t)p->data[1] << 24) | ((uint32_t)p->data[2] << 16) | ((uint32_t)p->data[3] << 8) | p->data[4]);
+        t->xcfg_ch = p->data[5];
+        xiph_open(t);
+        if (!t->xsw) audio_disable(t, "Audio %s: not supported", t->xsw_kind == 1 ? "opus" : "vorbis");
+        return;
+    }
+    if (t->xsw && t->xsw_dlg != a52_get_dialog()) {          /* 1.1: clear dialogue changed */
+        xiph_open(t);
+        if (!t->xsw) { audio_disable(t, "Audio %s: not supported", t->xsw_kind == 1 ? "opus" : "vorbis"); return; }
+    }
+    if (!t->xsw) { t->st.audio_errors++; return; }           /* (no set-up came: nothing can be decoded) */
+    a52_feed_frame(t->xsw, p->data, p->len, p->pts, xiph_frame, t);
+}
+
 static void audio_mpeg(Tsp *t, Pkt *p)
 {
     if (!t->mpa && !(t->mpa = mpa_create())) { audio_disable(t, "Out of memory"); return; }
@@ -2927,6 +3008,11 @@ static int audio_start_check(Tsp *t)
     int64_t fp = t->first_pic_pts;
     if (t->st.decoded > 0 && fp >= 0) {
         sceKernelLockMutex(t->qlock, 1, NULL);
+        Pkt *cfg = NULL;                                     /* 1.4.2: an Opus / Vorbis set-up first: kept, the old sound after it dropped */
+        if (t->aq.head && t->aq.head->flags >= 4 && t->aq.head->next) {
+            cfg = t->aq.head;
+            t->aq.head = cfg->next;
+        }
         while (t->aq.head && t->aq.head->pts >= 0 && t->aq.head->pts < fp - 4500 && fp - t->aq.head->pts < 90000LL * 10) {
             Pkt *p = t->aq.head;
             t->aq.head = p->next;
@@ -2935,6 +3021,11 @@ static int audio_start_check(Tsp *t)
             t->aq.bytes -= p->len;
             free(p);
             left++;
+        }
+        if (cfg) {
+            cfg->next = t->aq.head;
+            t->aq.head = cfg;
+            if (!cfg->next) t->aq.tail = cfg;
         }
         sceKernelUnlockMutex(t->qlock, 1);
     }
@@ -2969,7 +3060,10 @@ static int audio_main(SceSize args, void *argp)
             sceKernelDelayThread(2000);
             continue;
         }
-        if (!t->audio_off) { if (p->flags == 2) audio_a52(t, p); else if (p->flags) audio_mpeg(t, p); else audio_packet(t, p); }
+        if (!t->audio_off) {
+            if (p->flags >= 3) audio_xiph(t, p);             /* 1.4.2 */
+            else if (p->flags == 2) audio_a52(t, p); else if (p->flags) audio_mpeg(t, p); else audio_packet(t, p);
+        }
         free(p);
     }
     audio_close(t);
@@ -2977,6 +3071,11 @@ static int audio_main(SceSize args, void *argp)
     t->mpa = NULL;
     a52_destroy(t->a52);
     t->a52 = NULL;
+    a52_destroy(t->xsw);                                    /* 1.4.2 */
+    t->xsw = NULL;
+    free(t->xcfg);
+    t->xcfg = NULL;
+    t->xcfg_len = 0;
     free(t->a52pcm);
     t->a52pcm = NULL;
     if (t->alib) { sceAudiodecTermLibrary(t->alib_type ? t->alib_type : SCE_AUDIODEC_TYPE_AAC); t->alib = 0; }

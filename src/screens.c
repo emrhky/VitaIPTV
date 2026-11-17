@@ -625,6 +625,15 @@ void scr_about(const char *version)
     ui_text(bx, by + 8, UI_TEXT, LIST_FS, T("Close"));
     ui_text(x + w - 16 - ui_text_w(1.0f, "emrhky"), y + h - 16, UI_DIM, 1.0f, "emrhky");
 }
+/* 1.4.1: the download sign (an arrow down onto a line): blue = downloaded, dim = part of it */
+static void dl_sign(int x, int cy, int kind)
+{
+    unsigned c = kind == 1 ? RGBA8(96, 176, 255, 255) : RGBA8(150, 156, 176, 255);
+    vita2d_draw_rectangle((float)x + 6, (float)cy - 8, 4, 8, c);
+    ui_fill_triangle((float)x + 1, (float)cy - 1, (float)x + 15, (float)cy - 1, (float)x + 8, (float)cy + 6, c);
+    vita2d_draw_rectangle((float)x, (float)cy + 8, 16, 2, c);
+}
+
 
 /* one list inside a rectangle; returns nothing, draws rows + scrollbar */
 static void list_area(int x0, int w, int count, int sel, int *scroll, ScrRowFn fn, void *ctx, int focused, int mark, int numbers)
@@ -666,6 +675,7 @@ static void list_area(int x0, int w, int count, int sel, int *scroll, ScrRowFn f
         }
         if (row.fav) { ui_star(x + 8, y + ROW_H / 2, 8, UI_FAV); x += 22; }   /* 0.5.0: a favourite */
         if (row.check) { ui_check(x + 8, y + ROW_H / 2, 8, RGBA8(64, 226, 160, 255)); x += 24; }   /* 0.7.0: watched */
+        if (row.dl) { dl_sign(x, y + ROW_H / 2 - 1, row.dl); x += 24; }   /* 1.4.1: downloaded */
         if (row.folder) {                                    /* 1.3.1: a folder: a tab and a body */
             unsigned fc = RGBA8(232, 184, 82, 255);
             int fy = y + ROW_H / 2 - 7;
@@ -1030,6 +1040,7 @@ void scr_series(const ScrSeries *s)
         int rw = r.right ? ui_text_w(0.95f, r.right) : 0;
         ui_text_fit(x + 34, y2 + 26, UI_TEXT, 1.05f, r.name, r.progress > 0 ? 400 : 690 - rw);
         if (r.right) ui_text(940 - rw, y2 + 26, UI_DIM, 0.95f, r.right);
+        if (r.dl) dl_sign(940 - rw - (rw ? 28 : 18), y2 + 18, r.dl);   /* 1.4.1 */
         if (r.progress > 0) bar(x + 420, y2 + 16, 180, 5, r.progress, ui_theme.accent_dim, UI_TEXT);
     }
     ui_scrollbar(952, 288, SCR_EP_ROWS * 40 - 4, *scroll, SCR_EP_ROWS, s->count);

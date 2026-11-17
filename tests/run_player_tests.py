@@ -223,6 +223,13 @@ for ext, fmt in (("ts", "mpegts"), ("mkv", "matroska")):
     sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 "
        f"-f lavfi -i sine=frequency=880:sample_rate=48000 -t 6 -map 0:v -map 1:a -map 2:a -c:v libx264 -g 25 -pix_fmt yuv420p "
        f"-c:a:0 aac -c:a:1 ac3 -metadata:s:a:0 language=tur -metadata:s:a:1 language=eng -f {fmt} {T}/hls/twoaudio.{ext}")
+# 1.4.2: Opus and Vorbis sound (Matroska / WebM): H.264 + Opus stereo, H.264 + Vorbis 44.1 kHz, H.264 + Opus 5.1,
+# and an Opus-only WebM (the radio case); with FFMPEG_PREFIX (opus, vorbis built in) they play
+for name, ac in (("opus.mkv", "-c:a libopus -b:a 96k -ac 2 -ar 48000"), ("vorbis.mkv", "-c:a libvorbis -q:a 3 -ac 2 -ar 44100"),
+                 ("opus51.mkv", "-c:a libopus -b:a 192k -ac 6 -ar 48000 -mapping_family 1")):
+    sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 6 "
+       f"-c:v libx264 -g 25 -pix_fmt yuv420p {ac} {T}/hls/{name}")
+sh(f"ffmpeg -loglevel error -y -f lavfi -i sine=frequency=440:sample_rate=48000 -t 6 -c:a libopus -b:a 64k {T}/hls/opus_only.webm")
 # 0.6.0: HLS with the sound in playlists of its own (#EXT-X-MEDIA): picture-only TS segments, Turkish sound as
 # audio-only TS segments, English as packed AAC (.aac with an ID3 time stamp, as Apple's packager makes them;
 # the times are those of the TS segments, which the HLS muxer moved)
@@ -292,7 +299,8 @@ M = f"{ROOT}/tests/mock_rt"
 # with FFMPEG_PREFIX (an FFmpeg with the ac3/eac3 decoders, see run_a52_test.py) the AC-3 audio is decoded too
 FP = os.environ.get("FFMPEG_PREFIX", "")
 A52 = f"-DHAVE_A52 -I{FP}/include" if FP and os.path.exists(f"{FP}/lib/libavcodec.a") else ""
-A52L = f"{FP}/lib/libavcodec.a {FP}/lib/libavutil.a" if A52 else ""
+A52L = (f"{FP}/lib/libavcodec.a " + (f"{FP}/lib/libswresample.a " if os.path.exists(f"{FP}/lib/libswresample.a") else "") +
+        f"{FP}/lib/libavutil.a") if A52 else ""
 print("AC-3 decoding:", "with FFmpeg from " + FP if A52 else "not built in")
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL {A52} -I{ROOT}/src -I{M} "
    f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {ROOT}/src/srt.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")

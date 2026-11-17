@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 int main(void)
 {
@@ -106,6 +107,42 @@ int main(void)
     assert(!strcmp(xl.items[2].url, "http://host.example:8080/movie/ali/p%40ss/5003.mp4"));
     channel_list_free(&xl);
     channel_list_init(&xl);
+    {   /* 1.4.1: the small copy for searching again finds the same, with the same details (no plot / cast) */
+        const char *big = "[{\"num\":1,\"name\":\"Film \\\"A\\\" \\\\ (2020)\",\"stream_id\":5001,\"rating\":\"7.1\",\"category_id\":\"1\","
+                          "\"container_extension\":\"mkv\",\"stream_icon\":\"http://img.example/a.jpg\",\"plot\":\"Uzun bir konu...\","
+                          "\"cast\":\"A, B\",\"genre\":\"Dram\",\"releasedate\":\"2020-05-01\",\"is_adult\":\"0\",\"backdrop_path\":[\"x\",\"y\"]},"
+                          "{\"name\":\"Film B\",\"stream_id\":\"5002\",\"category_id\":\"2\"},{\"name\":\"no id\"},"
+                          "{\"name\":\"Film C\",\"stream_id\":\"5003\",\"is_adult\":\"1\",\"container_extension\":\"avi\"}]";
+        char *small = NULL;
+        size_t sn = xtream_compact(big, strlen(big), 0, &small);
+        assert(sn > 0 && small && sn < strlen(big));
+        ChannelList a1, a2;
+        channel_list_init(&a1); channel_list_init(&a2);
+        int n1 = xtream_parse_vod_match(big, strlen(big), &xs, cats, nc, &a1, 0, "film", 500);
+        int n2 = xtream_parse_vod_match(small, sn, &xs, cats, nc, &a2, 0, "film", 500);
+        assert(n1 == 3 && n2 == 3);
+        for (int i = 0; i < 3; i++) {
+            assert(!strcmp(a1.items[i].name, a2.items[i].name) && !strcmp(a1.items[i].url, a2.items[i].url) &&
+                   !strcmp(a1.items[i].group, a2.items[i].group) && a1.items[i].adult == a2.items[i].adult);
+            const char tags[] = { CX_POSTER, CX_RATING, CX_YEAR, CX_GENRE };
+            for (int t = 0; t < 4; t++) {
+                const char *x = channel_extra(&a1, &a1.items[i], tags[t]), *y = channel_extra(&a2, &a2.items[i], tags[t]);
+                assert((!x && !y) || (x && y && !strcmp(x, y)));
+            }
+        }
+        assert(!strcmp(a2.items[0].name, "Film \"A\" \\ (2020)") && a2.items[2].adult);
+        assert(!channel_extra(&a2, &a2.items[0], CX_PLOT));      /* (left out: the details screen reads it) */
+        channel_list_free(&a1); channel_list_free(&a2);
+        free(small);
+        const char *sj = "[{\"name\":\"Dizi X\",\"series_id\":77,\"cover\":\"http://c/x.jpg\",\"category_id\":\"1\",\"plot\":\"p\"}]";
+        sn = xtream_compact(sj, strlen(sj), 1, &small);
+        channel_list_init(&a2);
+        assert(sn && xtream_parse_vod_match(small, sn, &xs, cats, nc, &a2, 1, "dizi", 500) == 1 && !strcmp(a2.items[0].url, "77") &&
+               a2.items[0].kind == CH_SERIES && !strcmp(channel_extra(&a2, &a2.items[0], CX_POSTER), "http://c/x.jpg"));
+        channel_list_free(&a2);
+        free(small);
+        assert(xtream_compact("[]", 2, 0, &small) == 0 && !small);
+    }
     const char *srj = "[{\"num\":1,\"name\":\"Dizi\",\"series_id\":77,\"cover\":\"x\",\"category_id\":\"1\"},{\"name\":\"no id\"}]";
     assert(xtream_parse_series(srj, strlen(srj), &xs, cats, nc, &xl) == 1);
     assert(xl.items[0].kind == CH_SERIES && !strcmp(xl.items[0].url, "77") && !strcmp(xl.items[0].name, "Dizi"));

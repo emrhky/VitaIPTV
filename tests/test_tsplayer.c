@@ -639,6 +639,7 @@ int main(int argc, char **argv)
 
     Run r;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "films")) goto films;   /* quicker runs while working on one part */
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "xiph")) goto xiph;     /* 1.4.2 */
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slots")) goto slots;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slow")) goto slow;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "live")) goto live;
@@ -815,6 +816,28 @@ int main(int argc, char **argv)
                 assert(ra.st.audio_frames > 100 && ra.st.audio_ch == 2 && ra.st.audio_src_ch == 6 && !ra.st.audio_msg[0] && !ra.st.audio_ac3 && ra.synced);
             else
                 assert(ra.st.audio_frames == 0 && strstr(ra.st.audio_msg, "6 channels") && ra.changes >= 100);   /* the picture plays */
+        }
+        /* 1.4.2: Opus / Vorbis (FFmpeg): played as stereo in pieces of 1024 samples, in time with the picture */
+xiph:
+        {
+            static const char *xn[4] = { "opus.mkv", "vorbis.mkv", "opus51.mkv", "opus_only.webm" };
+            static const int xk[4] = { 1, 2, 1, 1 }, xr[4] = { 48000, 44100, 48000, 48000 }, xs[4] = { 2, 2, 6, 1 };
+            for (int k = 0; k < 4; k++) {
+                snprintf(pa, sizeof pa, "%s/%s", argv[16], xn[k]);
+                Run ra = play(pa, 7);
+                printf("               %s: state %d, audio %d Hz %d ch (stream %d), frames %u, errors %u, kind %d, synced %d, msg '%s'\n", xn[k],
+                       ra.st.state, ra.st.audio_rate, ra.st.audio_ch, ra.st.audio_src_ch, (unsigned)ra.st.audio_frames,
+                       (unsigned)ra.st.audio_errors, ra.st.audio_xiph, ra.synced, ra.st.audio_msg);
+                if (a52_xiph_available(xk[k] == 1)) {
+                    /* 6 s: 48 kHz in 1024-sample pieces is 281 pieces, 44.1 kHz 258 (a few left in the decoder) */
+                    unsigned want = (unsigned)(6.0 * xr[k] / 1024) - 12;
+                    assert(ra.st.state == TSP_ENDED && ra.st.audio_xiph == xk[k] && ra.st.audio_rate == xr[k] &&
+                           ra.st.audio_src_ch == xs[k] && ra.st.audio_frames >= want && !ra.st.audio_msg[0] && ra.st.audio_errors == 0);
+                    if (k < 3) assert(ra.synced && ra.st.audio_ch == 2 && ra.changes >= 120);
+                } else
+                    assert(ra.st.audio_frames == 0 && (k == 3 || ra.changes >= 120));   /* (the picture plays; no sound) */
+            }
+            if (getenv("ONLY") && !strcmp(getenv("ONLY"), "xiph")) { printf("all tsplayer tests passed\n"); return 0; }
         }
         /* 1.2: six different tones on the Vita's 5.1 decoder (0x1008, the mock gives AAC's order C L R Ls Rs LFE):
          * it opens at once, and the mix down puts each tone where FFmpeg's would */

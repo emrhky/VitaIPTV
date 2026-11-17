@@ -70,7 +70,7 @@ static const char *ch_groups[] = { "Ulusal", "Ulusal", "Ulusal", "Ulusal", "Ulus
     "Spor", "Çocuk", "Çocuk", "Çocuk", "Spor" };
 static int show_group = 0;
 static int check_demo;                                       /* 0.7.0: watched episodes */
-static void ch_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[i]; r->number = i + 1; r->right = show_group ? ch_groups[i] : NULL; r->fav = fav_demo && i < 3; r->moving = fav_demo == 2 && i == 1; r->check = check_demo && i < 3; }
+static void ch_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[i]; r->number = i + 1; r->right = show_group ? ch_groups[i] : NULL; r->fav = fav_demo && i < 3; r->moving = fav_demo == 2 && i == 1; r->check = check_demo && i < 3; r->dl = check_demo && i == 1 ? 1 : check_demo && i == 4 ? 2 : 0; }
 static int search_idx[] = { 12, 13 };
 static void search_row(int i, ScrRow *r, void *c) { (void)c; r->name = ch_names[search_idx[i]]; r->number = search_idx[i] + 1; r->right = ch_groups[search_idx[i]]; }
 
@@ -119,6 +119,7 @@ static void ep_row_pv(int i, ScrEpRow *r, void *c)
     static char nm[12][48];
     snprintf(nm[i], sizeof nm[i], "%d. Bölüm", i + 1);
     r->name = nm[i]; r->right = "1 sa 52 dk"; r->check = i < 2; r->progress = i == 2 ? 0.35f : 0;
+    r->dl = i == 0 || i == 2 ? 1 : i == 3 ? 2 : 0;          /* 1.4.1 */
 }
 static vita2d_texture wait_tex;
 static void load_backdrop(void)                              /* raw RGBA written by the test script from resources/waiting.png */
