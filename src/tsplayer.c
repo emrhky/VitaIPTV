@@ -115,6 +115,8 @@ static char g_slang[4];
 static const SrtList *g_ext;
 static int g_next;
 static char g_ext_lang[TSP_EXT_MAX][4];
+static uint64_t g_file_total;           /* 1.3.2: tsp_set_file_total */
+#define FILE_WAIT_MAX_MS 30000          /* a download that does not come on for this long: the film stops there */
 typedef struct Tsp Tsp;
 static int film_ms_at(Tsp *t, int64_t p);
 static volatile int g_sub_delay;        /* ms, + = later */
@@ -176,6 +178,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     /* films and episodes (files that can be paused and searched) */
     int vod, vod_start_ms, vod_norange, vod_last_status;
     int vod_file;                       /* 1.3: a film on the memory card (vod_get reads the file, a range = a seek) */
+    uint64_t file_total;                /* 1.3.2: > the file's size: it is still being downloaded to this size */
     int vc_rec, vc_used, vc_verify;     /* film index cache: filling it / opened from it / size still to compare */
     int vod_stream;                     /* a film sent as a stream (the transcoding server): no ranges, no length */
     int vod_offset_ms;                  /* ... where in the film that stream starts */
@@ -4185,16 +4188,46 @@ static int vod_get_file(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ct
     if (fd < 0) { *status = 404; t->vod_last_status = 404; plog("tsp: cannot open the file %s", t->url); return 0; }
     int64_t sz = lf_size(fd);
     if (sz < 0) { lf_close(fd); *status = 404; t->vod_last_status = 404; return 0; }
-    if (!t->vod_total) t->vod_total = (uint64_t)sz;
+    /* 1.3.2: a file still being downloaded: its whole size counts (lengths, jumps); the film waits for the part
+     * it needs, a header read past what is there finds nothing (as a short file) */
+    uint64_t total = t->file_total > (uint64_t)sz ? t->file_total : (uint64_t)sz;
+    if (!t->vod_total) t->vod_total = total;
     *status = 206;
     t->vod_last_status = 206;
-    uint64_t stop = end && end < (uint64_t)sz ? end : (uint64_t)sz, pos = off;
+    uint64_t stop = end && end < total ? end : total, pos = off;
     int ret = 0;
+    unsigned long long waited_since = 0;
     while (!stopping(t) && pos < stop) {
-        size_t ask = CHUNK < stop - pos ? CHUNK : (size_t)(stop - pos);
+        if (pos >= (uint64_t)sz) {                           /* (1.3.2: not downloaded yet) */
+            if (!t->film_phase || t->file_total <= (uint64_t)sz) break;
+            if (!waited_since) {
+                waited_since = now_us();
+                t->st.file_wait = 1;
+                plog("tsp: the download has reached byte %llu MB, the film waits for it", (unsigned long long)(sz >> 20));
+            }
+            sceKernelDelayThread(250000);
+            int64_t s2 = lf_size(fd);
+            if (s2 > sz) {
+                sz = s2; waited_since = 0; t->st.file_wait = 0;
+                plog("tsp: the download came on (%llu MB): playing on", (unsigned long long)(sz >> 20));
+            } else if (now_us() - waited_since > (unsigned long long)FILE_WAIT_MAX_MS * 1000ULL) {
+                t->st.file_wait = 0;
+                set_error_kind(t, TSP_ERRK_FORMAT, "The download has not reached this part yet");
+                ret = -1;
+                break;
+            }
+            continue;
+        }
+        uint64_t lim = stop < (uint64_t)sz ? stop : (uint64_t)sz;
+        size_t ask = CHUNK < lim - pos ? CHUNK : (size_t)(lim - pos);
         int n = lf_pread(fd, t->rbuf, ask, pos);
         if (n < 0) { ret = -1; plog("tsp: file read error 0x%08X at byte %llu", (unsigned)n, (unsigned long long)pos); break; }
-        if (n == 0) break;
+        if (n == 0) {                                        /* (the size said more: read it again) */
+            int64_t s2 = lf_size(fd);
+            if (s2 > 0) sz = s2;
+            if ((uint64_t)sz <= pos && t->file_total <= (uint64_t)sz) break;
+            continue;
+        }
         pos += (uint64_t)n;
         if (fn(t, ctx, t->rbuf, (size_t)n)) break;
         if (t->film_phase) {                                 /* (the film itself, not the header reads) */
@@ -4202,9 +4235,12 @@ static int vod_get_file(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ct
             if (t->st.decoded > 0 && q_ms > 3000) sceKernelDelayThread(4000);
         }
     }
+    t->st.file_wait = 0;
     lf_close(fd);
     return ret;
 }
+
+void tsp_set_file_total(uint64_t total) { g_file_total = total; }
 
 /* GET of the bytes [off, end) of the file (end 0 = to its end). Returns 0 when the body ended or fn stopped
  * it, VG_NO_RANGE when the server ignores ranges, < 0 on a network error. *status = HTTP status. */
@@ -4449,7 +4485,9 @@ static void read_vod(Tsp *t, uint8_t *buf)
         int r = mp4_read_moov(vio_read, &io, t->vod_total, &moov, &ml);
         if (r != 0) {
             free(io.win);
-            if (!stopping(t)) set_error_kind(t, TSP_ERRK_FORMAT, r == -2 ? "MP4 index too big" : t->vod_norange ?
+            if (!stopping(t) && t->vod_file && t->file_total > (uint64_t)0 && r != -2)   /* 1.3.2: its index is at the end */
+                set_error_kind(t, TSP_ERRK_FORMAT, "This MP4 file can be played only when its download has ended");
+            else if (!stopping(t)) set_error_kind(t, TSP_ERRK_FORMAT, r == -2 ? "MP4 index too big" : t->vod_norange ?
                                               "MP4 file: the server does not allow reading its index" : "Damaged MP4 file (no index)");
             return;
         }
@@ -4509,7 +4547,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         int r = vod_get(t, pos, 0, vod_feed_cb, &pos, &st);
         if (stopping(t)) break;
         if (t->vod_file) {                                  /* 1.3: a file: its end, or it cannot be read */
-            if (r < 0 || st >= 400 || pos == before) set_error_kind(t, TSP_ERRK_FORMAT, "The file cannot be read (at %u MB)", (unsigned)(pos >> 20));
+            if (t->st.state != TSP_ERROR && !t->err_set && (r < 0 || st >= 400 || pos == before)) set_error_kind(t, TSP_ERRK_FORMAT, "The file cannot be read (at %u MB)", (unsigned)(pos >> 20));
             break;
         }
         if (st >= 400) { if (!http_refused(t, st)) break; continue; }
@@ -4550,7 +4588,12 @@ static int worker(SceSize args, void *argp)
         else if (m3u8 || strstr(t->url, ".m3u8?") || strstr(t->url, "?m3u8")) { t->is_hls = 1; read_hls(t, buf); }
         else read_http(t, buf);
     }
-    else if (t->vod) { t->vod_file = 1; t->rbuf = buf; read_vod(t, buf); }   /* 1.3: a film on the memory card */
+    else if (t->vod) {                                       /* 1.3: a film on the memory card */
+        t->vod_file = 1;
+        t->file_total = g_file_total;                        /* (1.3.2: still being downloaded) */
+        t->rbuf = buf;
+        read_vod(t, buf);
+    }
     else read_local(t, buf);
     free(buf);
     __sync_synchronize();

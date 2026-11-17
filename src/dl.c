@@ -398,7 +398,7 @@ static int writer_start(void)
     if (g_w.lock < 0 && (g_w.lock = sceKernelCreateMutex("dl_w", 0, 0, NULL)) < 0) return -1;
     g_w.busy = g_w.err = g_w.quit = 0;
     g_w.fd = -1;
-    g_w.tid = sceKernelCreateThread("download_w", writer_thread, 0x10000120, 16 * 1024, 0, 0, NULL);
+    g_w.tid = sceKernelCreateThread("download_w", writer_thread, 0x10000100, 16 * 1024, 0, 0, NULL);   /* (1.3.2: as the player's reader) */
     if (g_w.tid < 0) return -1;
     sceKernelStartThread(g_w.tid, 0, NULL);
     return 0;
@@ -722,7 +722,7 @@ static void start_thread(void)
 {
     if (g_tid >= 0) return;
     g_quit = 0;
-    g_tid = sceKernelCreateThread("download", dl_thread, 0x10000120, 128 * 1024, 0, 0, NULL);   /* (below the player's) */
+    g_tid = sceKernelCreateThread("download", dl_thread, 0x10000100, 128 * 1024, 0, 0, NULL);   /* (1.3.2: as the player's reader: 1.3.1 was below the screen's and got ~half the line) */
     if (g_tid >= 0) sceKernelStartThread(g_tid, 0, NULL);
 }
 

@@ -75,6 +75,7 @@ typedef struct {
      * place 0-2 (bottom, a little higher, top), background 0-2 (light band, dark box, none); the theme 0-3
      * (blue, green, purple, orange). Written to settings.txt only when not the default. */
     int sub_size, sub_color, sub_pos, sub_bg, theme;
+    int bg;                             /* 1.4: the background scheme 0-3 (navy, black OLED, graphite, warm dark); theme: the colour 0-5 */
     /* 1.1: sound: boost 0-3 (off, +3, +6, +9 dB), speaker mode 0/1, clear dialogue for 5.1 0/1 (audiofx.h,
      * a52dec.h); written only when not off */
     int snd_boost, snd_speaker, snd_dialog, snd_level;   /* (1.2: snd_level, one level on every channel) */
