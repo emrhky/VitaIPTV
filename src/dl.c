@@ -190,6 +190,7 @@ int dl_info_write(const DlItem *it)
     put(f, "video", it->video);
     fprintf(f, "size=%llu\ndone=%d\navkey=%08x\nav_series=%d\nadded=%lld\n", (unsigned long long)it->size, it->done,
             (unsigned)it->avkey, it->av_series, it->added);
+    if (it->err[0] && !it->done) put(f, "error", it->err);  /* 1.4.1 */
     int bad = ferror(f);
     if (fclose(f) != 0 || bad) { remove(tmp); return -1; }
     remove(p);                                               /* (a rename does not replace a file on the Vita) */
@@ -234,6 +235,7 @@ int dl_info_read(DlItem *it, const char *dir)
         else if (!strcmp(k, "avkey")) it->avkey = (uint32_t)strtoul(v, NULL, 16);
         else if (!strcmp(k, "av_series")) it->av_series = atoi(v) != 0;
         else if (!strcmp(k, "added")) it->added = atoll(v);
+        else if (!strcmp(k, "error")) cpy(it->err, sizeof it->err, v);
     }
     fclose(f);
     if (!it->kind) it->kind = 'F';
@@ -302,7 +304,8 @@ static int g_nq;
 static char g_cur[DL_DIR_MAX];                 /* being downloaded ("" = none) */
 static volatile int g_stop_cur;         /* pause / delete: stop it */
 static DlState g_cur_st;
-static struct { char dir[DL_DIR_MAX]; char err[96]; int mb[2]; } g_fail[8];   /* the last failures (shown in the list) */
+#define NFAIL 32
+static struct { char dir[DL_DIR_MAX]; char err[96]; int mb[2]; } g_fail[NFAIL];   /* the failures (shown in the list; 1.4.1: also from info.txt) */
 static int g_nfail;
 
 static void lock(void) { if (g_lock >= 0) sceKernelLockMutex(g_lock, 1, NULL); }
@@ -323,8 +326,8 @@ static void fail_set(const char *dir, const char *err, int need_mb, int free_mb)
     int k = 0;
     while (k < g_nfail && strcmp(g_fail[k].dir, dir)) k++;
     if (k == g_nfail) {
-        if (g_nfail < 8) g_nfail++;
-        else { memmove(&g_fail[0], &g_fail[1], sizeof g_fail[0] * 7); k = 7; }
+        if (g_nfail < NFAIL) g_nfail++;
+        else { memmove(&g_fail[0], &g_fail[1], sizeof g_fail[0] * (NFAIL - 1)); k = NFAIL - 1; }
     }
     snprintf(g_fail[k].dir, sizeof g_fail[k].dir, "%s", dir);
     snprintf(g_fail[k].err, sizeof g_fail[k].err, "%s", err);
@@ -513,7 +516,17 @@ static int job_data(void *ctx, const uint8_t *d, size_t len)
 
 static int job_stop(void *ctx) { (void)ctx; return g_stop_cur || g_quit; }
 
-static int busy_http(int st) { return st == 405 || st == 407 || st == 429 || st == 503 || st == 509 || st == 512; }
+static volatile unsigned long long g_stream_end_ms;    /* 1.4.1: when a stream of the app ended (0 = not yet) */
+void dl_note_stream_end(void) { g_stream_end_ms = now_ms_dl(); }
+/* the account is still counted on another connection: asked again in 5 s (three times). 1.4.1: 405 only for a
+ * minute after a stream ended; other times the server does not give the file (no use asking again) */
+static int busy_http(int st)
+{
+    if (st == 405) return g_stream_end_ms && now_ms_dl() - g_stream_end_ms < 60000;
+    return st == 407 || st == 429 || st == 503 || st == 509 || st == 512;
+}
+/* 1.4.1: answers that will not change by asking again */
+static int gone_http(int st) { return st == 401 || st == 403 || st == 404 || st == 405 || st == 410 || st == 451; }
 
 typedef struct { uint8_t *b; size_t n, cap; } MemBuf;
 static int mem_cb(void *ctx, const uint8_t *d, size_t n)
@@ -584,6 +597,7 @@ static void run_one(const char *dir)
         return;
     }
     if (it->done) { free(it); free(buf); return; }
+    if (it->err[0]) { it->err[0] = 0; dl_info_write(it); }  /* 1.4.1: tried again */
     get_poster(it);
     char vpath[DL_DIR_MAX + 32];
     snprintf(vpath, sizeof vpath, "%s/%s", dir, it->video);
@@ -645,13 +659,15 @@ static void run_one(const char *dir)
         if (g_stop_cur || g_quit) break;
         if (status == 416 && it->size && j.have >= it->size) { it->done = 1; break; }   /* (all of it was there) */
         if (status >= 400) {
-            if (busy_http(status) && busy++ < 3) {           /* (the account still counted on the last stream) */
+            int after_stream = g_stream_end_ms && now_ms_dl() - g_stream_end_ms < 120000;   /* 1.4.1: up to a minute then */
+            if (busy_http(status) && busy++ < (after_stream ? 12 : 3)) {   /* (the account still counted on the last stream) */
                 plog("dl: server answered %d, asking again in 5 s", status);
                 for (int k = 0; k < 50 && !g_stop_cur && !g_quit; k++) sceKernelDelayThread(100000);
                 continue;
             }
-            static char eb[64];
-            snprintf(eb, sizeof eb, "Server answered HTTP %d", status);
+            static char eb[96];
+            if (gone_http(status)) snprintf(eb, sizeof eb, "The server does not give this one (HTTP %d)", status);   /* 1.4.1 */
+            else snprintf(eb, sizeof eb, "Server answered HTTP %d", status);
             err = eb;
             break;
         }
@@ -678,6 +694,8 @@ static void run_one(const char *dir)
     } else if (err) {
         plog("dl: %s: %s", it->title, err);
         lock(); fail_set(dir, err, need_mb, free_mb); unlock();
+        snprintf(it->err, sizeof it->err, "%s", err);         /* 1.4.1: kept (the list says it after a restart too) */
+        dl_info_write(it);
     }
     free(it);
     free(buf);
@@ -794,6 +812,13 @@ static void scan_one(void *ctx, const char *name, int dir)
     long long sz = f_size(v);
     it->have = sz > 0 ? (uint64_t)sz : 0;
     if (it->done && it->size && it->have < it->size) it->done = 0;   /* (the file was cut short) */
+    if (it->err[0] && !it->done) {                           /* 1.4.1: it failed before (also in an earlier run) */
+        lock();
+        int busy = !strcmp(g_cur, p) || queued(p), known = 0;
+        for (int k = 0; k < g_nfail; k++) if (!strcmp(g_fail[k].dir, p)) known = 1;
+        if (!busy && !known) fail_set(p, it->err, 0, 0);
+        unlock();
+    }
     c->n++;
 }
 

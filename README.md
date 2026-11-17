@@ -47,8 +47,8 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   sizes (tab *Picture*); **Square** goes to the next size up, from the biggest to the smallest.
 - **Stream analysis:** shows the resolution, codecs, frame rate and download speed of the stream (TS, HLS, MP4, MKV,
   http and https) and whether the Vita can play it (**Select** > *More* while watching).
-- **Audio:** AAC (stereo on the hardware; 5.1 / 7.1 AAC in software), MP2 / MP3 and AC-3 / E-AC-3 (Dolby Digital /
-  Dolby Digital Plus, software). 5.1 and 7.1 come out as stereo. Many TV channels use MP2, many films E-AC-3.
+- **Audio:** AAC (stereo on the hardware; 5.1 / 7.1 AAC in software), MP2 / MP3, AC-3 / E-AC-3 (Dolby Digital /
+  Dolby Digital Plus, software) and Opus / Vorbis (in MKV / WebM, software). 5.1 and 7.1 come out as stereo. Many TV channels use MP2, many films E-AC-3.
 - **Audio tracks and subtitles, remembered per stream:** a channel or film with more than one sound lists them in
   **Select** > *Audio* with their language (*Audio: Turkish (AAC)*). What you choose there (and in *Subtitles*) is
   kept for that channel or film only - for a series, for all of its episodes - and comes back the next time.
@@ -99,9 +99,12 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   each series (by season and episode), the poster and the story, and plays them like any film (jumps, *Continue
   from*, audio tracks, subtitles inside the file). **Triangle** deletes a film, an episode or a whole series. Files
   go to `ux0:data/VitaIPTV/downloads/` (one folder each: the video as the server sends it, its poster and an
-  `info.txt`). Downloads run one at a time while the app is open; a stopped one goes on where it stopped (X), and
+  `info.txt`). Downloads run one at a time while the app is open; a stopped one goes on where it stopped (Square), and
   the free space is checked first (200 MB are always left free). The screen may dim, but sleep or the PS button
-  stops a download. An account that allows one connection cannot download and watch at the same time.
+  stops a download. A film or an episode that is downloaded plays from the memory card when it is opened in its
+  list too (a sign beside it in the lists). While a channel or a film from the same server plays, the download
+  waits and goes on afterwards (an account with one connection cannot do both). A download the server refuses
+  stays in the list with the reason (Square tries again). A note at the top says when a download has ended.
   **Only for content you have the right to download**: whether you may keep a copy depends on your provider's
   terms and on where the content legally comes from.
 - **Optional transcoding server** (`tools/vita_iptv_proxy.py`, needs Python 3 and ffmpeg on a PC or an Android
@@ -159,7 +162,7 @@ Kodi style as `link|User-Agent=...&Referer=...`. The app sends them with every r
 | H.264 up to 1920x1080 (see below), AAC, MP2, MP3 | Above 1080p (4K) |
 | MPEG-TS, HLS (MPEG-TS segments), FLV, MKV, MP4 | HEVC / H.265 |
 | Films: MKV, MP4, TS, FLV files (FLV: from the start, no jumping) | AVI files |
-| AC-3 / E-AC-3 and 5.1 / 7.1 AAC audio (as stereo) | Interlaced broadcasts (576i, 1080i may stutter) |
+| AC-3 / E-AC-3, 5.1 / 7.1 AAC, Opus, Vorbis audio (as stereo) | Interlaced broadcasts (576i, 1080i may stutter) |
 | http and https | DTS and TrueHD audio |
 | | Encrypted (AES) HLS, HLS with fMP4 segments |
 
@@ -241,7 +244,7 @@ self-signed certificate (needs `openssl`), for comparing the same file over HTTP
 ## License
 
 Vita IPTV is released under the [MIT License](LICENSE), provided as is, without any warranty. Bundled third-party
-code keeps its own license (mbedTLS: Apache-2.0, minimp3: CC0, FFmpeg's AC-3 decoder: LGPL 2.1+, vita2d and its
+code keeps its own license (mbedTLS: Apache-2.0, minimp3: CC0, FFmpeg's audio decoders: LGPL 2.1+, vita2d and its
 libraries); the notices are in
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which is also inside the VPK.
 
@@ -253,7 +256,7 @@ project, not affiliated with or endorsed by Sony.
 - [vita2d](https://github.com/xerpi/libvita2d) - drawing
 - [mbedTLS](https://github.com/Mbed-TLS/mbedtls) (Apache-2.0) - TLS, in `third_party/mbedtls`
 - [minimp3](https://github.com/lieff/minimp3) (CC0) - MP2 / MP3 decoding
-- [FFmpeg](https://ffmpeg.org) (LGPL 2.1+) - AC-3 / E-AC-3 decoding
+- [FFmpeg](https://ffmpeg.org) (LGPL 2.1+) - AC-3 / E-AC-3, AAC 5.1, Opus and Vorbis decoding
 - The VitaSDK and HENkaku / Ensō teams
 
 Inspired by ViTube (the PS Vita YouTube app) - its source showed that the Vita's internal decoder

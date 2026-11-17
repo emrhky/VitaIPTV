@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <psp2/kernel/threadmgr.h>
 #include <stdio.h>
+#include <time.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -27,6 +28,8 @@ static int same_file(const char *a, const char *b)
     if (y) fclose(y);
     return ok;
 }
+
+static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 
 /* waits until dir is not queued / active (max_s), returns its last state */
 static int wait_end(const char *dir, double max_s)
@@ -137,6 +140,26 @@ int main(int argc, char **argv)
     dl_state(d.dir, &ds);
     printf("4 404: state %d (%s)\n", st, ds.err);
     assert(st == DL_FAILED && strstr(ds.err, "404"));
+    {   /* 1.4.1: the reason is kept in info.txt (the list says it after a restart); 404 is not asked again */
+        DlItem r;
+        assert(dl_info_read(&r, d.dir) == 0 && strstr(r.err, "does not give") && strstr(r.err, "404"));
+        /* 405 with no stream before: the server does not give it (failed at once, not asked three times) */
+        DlItem g = mk(base, "/e405/film.mkv", "Vermez", 'F');
+        double t0 = now_s();
+        assert(dl_add(&g) == 0);
+        st = wait_end(g.dir, 20);
+        dl_state(g.dir, &ds);
+        printf("4 405: state %d (%s) in %.1f s\n", st, ds.err, now_s() - t0);
+        assert(st == DL_FAILED && strstr(ds.err, "405") && now_s() - t0 < 4.0);
+        /* just after a stream: 405 is "the account is still counted": asked again (still running after 6 s) */
+        dl_note_stream_end();
+        assert(dl_resume(g.dir) == 0);
+        usleep(6000000);
+        int s2 = dl_state(g.dir, &ds);
+        printf("4 405 after a stream: state %d after 6 s\n", s2);
+        assert(s2 == DL_ACTIVE);
+        assert(dl_delete(g.dir) == 0);
+    }
     setenv("DL_TEST_FREE", "104857600", 1);                  /* 100 MB free: below the 200 MB kept free */
     DlItem e = mk(base, "/film2.mkv", "Sığmaz", 'F');
     assert(dl_add(&e) == 0);

@@ -73,7 +73,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define CACHE_DIR     DATA_DIR "/cache"                  /* 1.1: saved copies of the playlists (listcache.h) */
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v1.4.0"
+#define APP_VERSION   "v1.4.2"
 #endif
 #ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
 #define APP_BUILD     __DATE__ " " __TIME__
@@ -171,8 +171,17 @@ static const char *dl_url_of(const char *path);
 static const DlItem *dl_item_of_path(const char *path);
 static int dl_growing_pct(const char *path);
 static int dl_unfinished_idle(void);
-static void dl_hold_for(const char *url);
-static void dl_hold_end(void);
+enum { DL_HOLD_LIST = 1, DL_HOLD_STREAM = 2 };
+static void dl_hold_for(const char *url, int kind);
+static void dl_hold_end(int kind);
+static const char *dl_local_for(const char *url, int *growing);
+static void dl_stream_ended(void);
+static int dl_space_ok(void);
+static int dl_mark(const char *url);
+static char notice[200];                    /* 1.4.1: a short note at the top of any screen (a download ended...) */
+static int notice_err;
+static unsigned notice_until;
+static char play_path[IPTV_URL_MAX];        /* 1.4.1: what plays when it is not the channel's own address (a downloaded copy) */
 static int dl_busy_host(const char *url);
 static int dl_ask, dev_ask;
 static int dl_growing_limit_ms(const char *path, int dur_ms);
@@ -1801,6 +1810,24 @@ static int load_list(const Source *s, ChannelList *out, char *err, size_t errsz,
     return 0;
 }
 
+/* 1.4.1: every film / every series of an account, made small (xtream_compact), kept for this run of the app: a
+ * second search does not download the whole list again (13 MB, 6 s in the 1.4.0 log). An hour old, or after
+ * Select > Reload playlists, it is downloaded again. */
+#define SEARCH_COPY_MS (60u * 60u * 1000u)
+static struct { uint32_t key; char *json; size_t len; unsigned at; int n; } search_copy[2];   /* [0] films, [1] series */
+static uint32_t search_key(const Source *s)
+{
+    char k[IPTV_URL_MAX + 160];
+    snprintf(k, sizeof k, "%s|%s|%s", s->url, s->user, s->pass);
+    uint32_t h = 2166136261u;
+    for (const char *p = k; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+    return h;
+}
+static void search_copy_clear(void)
+{
+    for (int i = 0; i < 2; i++) { free(search_copy[i].json); memset(&search_copy[i], 0, sizeof search_copy[i]); }
+}
+
 /* Xtream films and series: categories, the items of one category, the episodes of one series. */
 static int load_vod(LoadJob *j)
 {
@@ -1834,9 +1861,34 @@ static int load_vod(LoadJob *j)
         break;
     }
     if (net_cancel) { snprintf(j->err, sizeof j->err, "Cancelled"); return -1; }
+    if (j->what == LOAD_SEARCH) {                            /* 1.4.1: the copy kept from the last search */
+        typeof(search_copy[0]) *sc = &search_copy[j->series ? 1 : 0];
+        if (sc->json && sc->key == search_key(s) && now_ms() - sc->at < SEARCH_COPY_MS) {
+            int n = xtream_parse_vod_match(sc->json, sc->len, s, vcats, nvcats, &j->list, j->series, j->folded, 500);
+            if (settings.hide_adult) n -= iptv_remove_adult(&j->list);
+            plog("list: search in the copy of %u min ago (%d %s, %u KB): %d found", (now_ms() - sc->at) / 60000u, sc->n,
+                 j->series ? "series" : "films", (unsigned)(sc->len >> 10), n);
+            if (n <= 0) { snprintf(j->err, sizeof j->err, "Nothing found"); return -1; }
+            return 0;
+        }
+    }
     if (xtream_api_url(s, action, url, sizeof url) != 0) { snprintf(j->err, sizeof j->err, "URL too long"); return -1; }
     if (http_get(url, NULL, NULL, &m, j->err, sizeof j->err) != 0) { free(m.buf); return -1; }
     log_heap("vod list downloaded", m.len);
+    if (j->what == LOAD_SEARCH) {                            /* 1.4.1: kept small for the next search */
+        typeof(search_copy[0]) *sc = &search_copy[j->series ? 1 : 0];
+        free(sc->json);
+        memset(sc, 0, sizeof *sc);
+        char *small = NULL;
+        size_t sn = xtream_compact(m.buf, m.len, j->series, &small);
+        if (sn) {
+            free(m.buf);                                     /* (the small one is searched: the same results) */
+            m.buf = small; m.len = sn; m.cap = sn + 1;
+            sc->json = small; sc->len = sn; sc->key = search_key(s); sc->at = now_ms();
+            for (const char *q = small; (q = strstr(q, j->series ? "\"series_id\"" : "\"stream_id\"")); q++) sc->n++;
+            log_heap("vod list made small", sn);
+        }
+    }
     int n = 0;
     if (j->what == LOAD_FILM_CATS || j->what == LOAD_SERIES_CATS) {
         j->cats = malloc(sizeof(XtCategory) * XT_MAX_CATS);
@@ -1856,7 +1908,7 @@ static int load_vod(LoadJob *j)
         if (!n) snprintf(j->err, sizeof j->err, "This category is empty");
     }
     log_heap("vod list parsed", (size_t)j->list.count * sizeof(Channel));   /* (0.7.0) */
-    free(m.buf);
+    if (!(j->what == LOAD_SEARCH && m.buf == search_copy[j->series ? 1 : 0].json)) free(m.buf);
     plog("list: %s: %d items", action, n);
     return n ? 0 : -1;
 }
@@ -1897,7 +1949,7 @@ static void load_begin(const Source *s, int what, const char *arg, int group)
     list_gen++;                                              /* 1.1: a background check of the old list is dropped */
     refresh_cancel();
     if (s->type != SRC_M3U_FILE && s->type != SRC_MYLIST && !(what == LOAD_LIVE && cache_exists(s)))
-        dl_hold_for(s->url);                                 /* 1.3.2: a download from this server waits for the list */
+        dl_hold_for(s->url, DL_HOLD_LIST);                   /* 1.3.2: a download from this server waits for the list */
     if (what != LOAD_EPISODES) {
         guide_reset();                                       /* 0.8.0 (the guide belongs to the old list) */
         poster_drop();
@@ -1938,7 +1990,7 @@ static int load_poll(unsigned p)
     ui_footer(H, 1, NULL, 0);
     if (!job_done) return 0;
     job_active = 0;
-    dl_hold_end();                                           /* 1.3.2: the downloads it stopped go on */
+    dl_hold_end(DL_HOLD_LIST);                               /* 1.3.2: the downloads it stopped go on */
     if (job.rc != 0) {
         channel_list_free(&job.list);
         free(job.cats);
@@ -3126,6 +3178,26 @@ static void play_channel_ex(int vi, int use_proxy)
     player_stop();
     probe_cancel();
     tsp_stop();
+    play_path[0] = 0;
+    if (!arch_on && chans.items[vis[vi]].kind == CH_FILM) {  /* 1.4.1: downloaded: it plays from the memory card */
+        int growing = 0;
+        const char *lp = dl_local_for(url, &growing);
+        if (lp) {
+            snprintf(play_path, sizeof play_path, "%s", lp);
+            url = play_path;
+            use_proxy = 0;
+            plog("dl: the downloaded copy plays%s: %s", growing ? " (still downloading)" : "", lp);
+            snprintf(film_note, sizeof film_note, "%s", T(growing ? "Playing the downloaded copy (still downloading)" : "Playing the downloaded copy"));
+            film_note_until = now_ms() + 5000;
+            if (growing && film_start_ms > 0) {              /* (not past what has come) */
+                int k = resume_find(resume, nresume, chans.items[vis[vi]].url);
+                const DlItem *di = dl_item_of_path(lp);
+                int lim = dl_growing_limit_ms(lp, k >= 0 && resume[k].dur_ms > 0 ? resume[k].dur_ms : di ? di->dur_min * 60000 : 0);
+                if (lim >= 0 && film_start_ms > lim) film_start_ms = lim;
+            }
+        }
+    }
+    if (!iptv_is_local_path(url)) dl_hold_for(url, DL_HOLD_STREAM);   /* 1.4.1: one connection: the download waits */
     if (net_offline(url)) {                                  /* nothing started: the message stays on the screen */
         play_mode = 2;
         snprintf(play_err, sizeof play_err, "%s", NO_NET_MSG);
@@ -3206,7 +3278,8 @@ static int proxy_always(const char *url)
 }
 
 /* 1.3: what plays is a file on the memory card (local or downloaded): the server cannot reach it */
-static int cur_local(void) { return nvis && play_vis >= 0 && play_vis < nvis && iptv_is_local_path(chans.items[vis[play_vis]].url); }
+static const char *cur_play_url(void);
+static int cur_local(void) { return nvis && play_vis >= 0 && play_vis < nvis && iptv_is_local_path(cur_play_url()); }
 static int srv_here(void) { return srv_on() && !cur_local(); }
 
 static void play_channel(int vi)
@@ -3269,6 +3342,8 @@ static void start_probe(void)
 static const UiHint HINTS_PROBE[] = { { UI_BTN_CROSS, "Again" }, { UI_BTN_CIRCLE, "Back" } };
 
 static const Channel *cur_channel(void) { return &chans.items[vis[play_vis]]; }
+/* 1.4.1: the address that plays now: the downloaded copy's file, else the channel's own */
+static const char *cur_play_url(void) { return play_path[0] ? play_path : cur_channel()->url; }
 
 /* 0.5.0: "Türkçe (AC-3)" for audio track k of the status */
 /* a language code ("tur") as its name in the app's language, NULL if not in the table */
@@ -3293,7 +3368,8 @@ static void audio_track_name(const TspStatus *st, int k, char *out, size_t cap)
 {
     const char *l = st->a_lang[k], *name = lang_name(l);
     int c = st->a_codec[k];
-    const char *cn = c == TS_CODEC_AAC ? "AAC" : c == TS_CODEC_MPEG_AUDIO ? "MP2" : c == TS_CODEC_AC3 ? "AC-3" : c == TS_CODEC_EAC3 ? "E-AC-3" : "?";
+    const char *cn = c == TS_CODEC_AAC ? "AAC" : c == TS_CODEC_MPEG_AUDIO ? "MP2" : c == TS_CODEC_AC3 ? "AC-3" : c == TS_CODEC_EAC3 ? "E-AC-3" :
+                     c == TS_CODEC_OPUS ? "Opus" : c == TS_CODEC_VORBIS ? "Vorbis" : "?";
     char up[4];
     for (int i = 0; i < 4; i++) up[i] = (char)(l[i] >= 'a' && l[i] <= 'z' ? l[i] - 32 : l[i]);
     if (name) snprintf(out, cap, "%s (%s)", name, cn);
@@ -3397,7 +3473,7 @@ static void save_film_position(void)
     if (iptv_is_local_path(cur_channel()->url)) {            /* 1.3.1: a download: its address too (online goes on there) */
         const char *ou = dl_url_of(cur_channel()->url);
         if (ou) remember_position(ou, pos, dur);
-    }
+    } else if (play_path[0]) remember_position(play_path, pos, dur);   /* 1.4.1: its downloaded copy played: that one too */
     mark_watched(cur_channel(), pos, dur, st->state == TSP_ENDED);   /* 0.7.0: an episode */
 }
 
@@ -3557,6 +3633,7 @@ static void draw_tsp_screen(int osd)
         fmt_rate(kr, sizeof kr, st->audio_rate);
         if (st->audio_msg[0]) snprintf(ai, sizeof ai, "%s", T_msg(st->audio_msg));
         else if (st->audio_frames) snprintf(ai, sizeof ai, "%s   %s   %s", st->audio_ac3 == 2 ? "E-AC-3" : st->audio_ac3 ? "AC-3" :
+                                            st->audio_xiph == 1 ? "Opus" : st->audio_xiph ? "Vorbis" :
                                             st->audio_mpeg ? "MP2" : "AAC", kr, ch_label(st));
         else snprintf(ai, sizeof ai, "%s", T("Buffering..."));
         UiHint rh[10];
@@ -3646,7 +3723,7 @@ static void draw_tsp_screen(int osd)
     }
     if (st && st->file_wait && !st->paused) {                /* 1.3.2: a film being downloaded: its next part is not here yet */
         static char fw_line[96];
-        int pct = dl_growing_pct(cur_channel()->url);
+        int pct = dl_growing_pct(cur_play_url());
         if (pct >= 0) snprintf(fw_line, sizeof fw_line, T("%d%% downloaded"), pct); else fw_line[0] = 0;
         sp.center_title = T("Waiting for the download...");
         sp.center_line = fw_line;
@@ -3731,6 +3808,7 @@ static void draw_tsp_screen(int osd)
                 if (st->audio_msg[0]) snprintf(au, sizeof au, "%s", T("off"));
                 else if (!st->audio_frames) snprintf(au, sizeof au, "%s", T("waiting"));
                 else if (st->audio_ac3) snprintf(au, sizeof au, "%s %s %s", st->audio_ac3 == 2 ? "E-AC-3" : "AC-3", kr, ch_label(st));
+                else if (st->audio_xiph) snprintf(au, sizeof au, "%s %s %s", st->audio_xiph == 1 ? "Opus" : "Vorbis", kr, ch_label(st));
                 else if (st->audio_mpeg) snprintf(au, sizeof au, "MP%d %s %s", st->audio_mpeg, kr, ch_label(st));
                 else snprintf(au, sizeof au, "AAC %s %s", kr, ch_label(st));
                 if (!st->audio_msg[0] && st->audio_frames && tsp_av_offset(&av)) {
@@ -3867,6 +3945,7 @@ static void ch_row(int i, ScrRow *r, void *ctx)
         int k = resume_find(resume, nresume, c->url);
         if (k >= 0) { fmt_time(left_at, sizeof left_at, resume[k].pos_ms); r->right = left_at; }
     }
+    if (c->kind == CH_FILM) r->dl = dl_mark(c->url);           /* 1.4.1 */
     if (in_episodes) {                                         /* 0.7.0: a tick on watched episodes */
         const WatchEntry *w = cur_watch();
         if (w && w->done) { char ek[WATCH_ID]; watch_ep_key(c->url, ek, sizeof ek); r->check = watch_is_done(w, ek); }
@@ -4733,6 +4812,8 @@ static void stop_all(void)
     next_ep_at = 0;                                          /* 0.7.0 */
     probe_cancel();
     tsp_stop();
+    play_path[0] = 0;
+    dl_stream_ended();                                       /* 1.4.1: the downloads it stopped go on (in 3 s) */
 }
 
 /* ===== 0.8.0: the guide, a channel's schedule, catch-up, film details, the series screen ======================== */
@@ -5418,7 +5499,7 @@ static const char *dl_right_text(const DlItem *it, char *b, size_t cap)
         dl_size_text(it->size ? it->size : it->have, lang_get() == LANG_TR, b, cap);
     } else if (s == DL_ACTIVE) snprintf(b, cap, "%d%%", pct);
     else if (s == DL_QUEUED) snprintf(b, cap, "%s", T("Waiting"));
-    else if (s == DL_FAILED) snprintf(b, cap, "%s", T("Failed"));
+    else if (s == DL_FAILED) snprintf(b, cap, "%s", T("Could not download"));
     else snprintf(b, cap, T("Stopped %d%%"), pct);
     return b;
 }
@@ -5516,6 +5597,8 @@ static void draw_downloads(void)
                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
     static const UiHint HC[] = { { UI_BTN_CROSS, "Watch" }, { UI_BTN_SQUARE, "Continue" }, { UI_BTN_TRIANGLE, "Delete" }, { UI_BTN_CIRCLE, "Back" },
                                  { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };
+    static const UiHint HF[] = { { UI_BTN_CROSS, "Watch" }, { UI_BTN_SQUARE, "Try again" }, { UI_BTN_TRIANGLE, "Delete" }, { UI_BTN_CIRCLE, "Back" },
+                                 { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" } };   /* 1.4.1 */
     char right[48], fr[24], sub[IPTV_NAME_MAX + 8];
     if (dl_free_now >= 0) { dl_size_text((uint64_t)dl_free_now, lang_get() == LANG_TR, fr, sizeof fr); snprintf(right, sizeof right, T("free: %s"), fr); }
     else right[0] = 0;
@@ -5536,6 +5619,7 @@ static void draw_downloads(void)
     if (dl_focus == 0) { d.hints = dl_gsel ? HL : HL0; d.nhints = dl_gsel ? NH(HL) : NH(HL0); }
     else if (!it || it->done) { d.hints = HP; d.nhints = NH(HP); }
     else if (s == DL_ACTIVE || s == DL_QUEUED) { d.hints = HS; d.nhints = NH(HS); }
+    else if (s == DL_FAILED) { d.hints = HF; d.nhints = NH(HF); }
     else { d.hints = HC; d.nhints = NH(HC); }
     static char line[200];
     d.status = status;
@@ -5642,9 +5726,22 @@ static int dl_busy_host(const char *url)
     }
     return 0;
 }
-static void dl_hold_for(const char *url)
+static int dl_hold_kind;                     /* 1.4.1: why they wait (DL_HOLD_*: a list loading, a stream playing) */
+static char dl_hold_url[IPTV_URL_MAX];
+static unsigned dl_release_at;              /* 1.4.1: the stream ended: they go on at this time (0 = not set) */
+static int same_host(const char *a, const char *b)
 {
-    if (dl_nheld || !dl_busy_host(url)) return;
+    char x[128], y[128];
+    url_host(a, x, sizeof x);
+    url_host(b, y, sizeof y);
+    return x[0] && !strcasecmp(x, y);
+}
+static void dl_hold_for(const char *url, int kind)
+{
+    int held_here = dl_nheld && same_host(url, dl_hold_url);   /* (they wait already: a stream from there again) */
+    if (!held_here && !dl_busy_host(url)) return;
+    if (held_here) { dl_release_at = 0; if (kind > dl_hold_kind) dl_hold_kind = kind; }
+    int had = dl_nheld;
     for (int k = 0; k < dln && dl_nheld < 16; k++) {        /* (the running one first, then the waiting ones in order) */
         DlState st;
         if (dl_state(dlv[k].dir, &st) == DL_ACTIVE) snprintf(dl_held[dl_nheld++], DL_DIR_MAX, "%s", dlv[k].dir);
@@ -5654,15 +5751,71 @@ static void dl_hold_for(const char *url)
         if (dl_state(dlv[k].dir, &st) == DL_QUEUED) snprintf(dl_held[dl_nheld++], DL_DIR_MAX, "%s", dlv[k].dir);
     }
     dl_pause_all();
-    plog("dl: stopped while a list loads from the same server (%d)", dl_nheld);
-    set_status(0, "Loading a list: the download waits", NULL);
+    if (kind > dl_hold_kind) { dl_hold_kind = kind; snprintf(dl_hold_url, sizeof dl_hold_url, "%s", url); }
+    dl_release_at = 0;
+    if (dl_nheld == had) return;
+    if (kind == DL_HOLD_STREAM) {
+        plog("dl: stopped while a stream from the same server plays (%d)", dl_nheld);
+        snprintf(film_note, sizeof film_note, "%s", T("Watching from the same server: the download waits"));
+        film_note_until = now_ms() + 5000;
+    } else {
+        plog("dl: stopped while a list loads from the same server (%d)", dl_nheld);
+        set_status(0, "Loading a list: the download waits", NULL);
+    }
 }
-static void dl_hold_end(void)
+static void dl_hold_end(int kind)
 {
-    if (!dl_nheld) return;
+    if (!dl_nheld || dl_hold_kind > kind) return;           /* (a stream still plays: the list's end does not count) */
     for (int k = 0; k < dl_nheld; k++) dl_resume(dl_held[k]);
-    plog("dl: the list has come: %d downloads go on", dl_nheld);
+    if (kind == DL_HOLD_STREAM) dl_note_stream_end();        /* (the account may count the stream a while longer) */
+    plog(kind == DL_HOLD_STREAM ? "dl: the stream ended: %d downloads go on" : "dl: the list has come: %d downloads go on", dl_nheld);
     dl_nheld = 0;
+    dl_hold_kind = 0;
+    dl_release_at = 0;
+}
+/* 1.4.1: out of the player: what a stream stopped goes on 3 s later (another stream from there keeps it waiting) */
+static void dl_stream_ended(void)
+{
+    if (dl_nheld && dl_hold_kind == DL_HOLD_STREAM) dl_release_at = now_ms() + 3000;
+}
+/* 1.4.1: new downloads queued while they wait (Select > Download in a list during a stream): they wait too */
+static void dl_hold_again(void)
+{
+    if (dl_nheld && dl_hold_kind) dl_hold_for(dl_hold_url, dl_hold_kind);
+}
+
+/* 1.4.1: the sign in the lists: 1 downloaded, 2 part of it here, 0 none */
+static int dl_mark(const char *url)
+{
+    if (!dln || iptv_is_local_path(url)) return 0;
+    for (int i = 0; i < dln; i++) if (!strcmp(dlv[i].url, url)) return dlv[i].done ? 1 : 2;
+    return 0;
+}
+
+/* 1.4.1: the downloaded copy of an online film / episode, when it can be played from there: ended, or enough of
+ * it here (2 %, at least 16 MB, the size known). NULL: none (it plays online) */
+static const char *dl_local_for(const char *url, int *growing)
+{
+    static char lp[DL_DIR_MAX + 32];
+    *growing = 0;
+    if (!url[0] || iptv_is_local_path(url)) return NULL;
+    for (int i = 0; i < dln; i++) {
+        const DlItem *it = &dlv[i];
+        if (strcmp(it->url, url)) continue;
+        dl_path_of(it, lp, sizeof lp);
+        SceIoStat fs;
+        if (sceIoGetstat(lp, &fs) < 0) return NULL;          /* (the file is gone: online) */
+        if (it->done) return lp;
+        if (!it->size) return NULL;
+        DlState st;
+        uint64_t have = dl_state(it->dir, &st) == DL_ACTIVE && st.have ? st.have : (uint64_t)fs.st_size;
+        uint64_t need = it->size / 50;
+        if (need < 16ull << 20) need = 16ull << 20;
+        if (have < need) return NULL;
+        *growing = 1;
+        return lp;
+    }
+    return NULL;
 }
 
 /* 1.3.2: an unfinished download that is neither running nor waiting (Select > Continue all downloads) */
@@ -5763,7 +5916,8 @@ static void dl_input(unsigned p)
             set_status(0, s == DL_ACTIVE ? "Download stopped. The provider may count it as watching for a few minutes" : "Download stopped", NULL);
         }
         else if (net_offline(it->url)) set_status(1, NO_NET_MSG, NULL);
-        else { dl_resume(it->dir); set_status(0, "Download goes on", NULL); }
+        else if (s == DL_FAILED && !dl_space_ok()) {}        /* 1.4.1: (it says how much is free) */
+        else { dl_resume(it->dir); set_status(0, s == DL_FAILED ? "Trying again" : "Download goes on", NULL); }
     }
 }
 
@@ -5777,6 +5931,48 @@ static void dl_poll(void)
         dl_last_count = c;
     }
     if (c && now_ms() - dl_tick_ms > 5000) { dl_tick_ms = now_ms(); sceKernelPowerTick(SCE_KERNEL_POWER_TICK_DISABLE_AUTO_SUSPEND); }
+    if (dl_release_at && (int)(now_ms() - dl_release_at) >= 0) dl_hold_end(DL_HOLD_STREAM);   /* 1.4.1 */
+    /* 1.4.1: the one that ran has ended or failed: a note at the top, wherever the user is */
+    static char was[DL_DIR_MAX];
+    static unsigned last_look;
+    if (now_ms() - last_look < 500) return;
+    last_look = now_ms();
+    char act[DL_DIR_MAX] = "";
+    DlState st;
+    for (int i = 0; i < dln; i++) if (dl_state(dlv[i].dir, &st) == DL_ACTIVE) { snprintf(act, sizeof act, "%s", dlv[i].dir); break; }
+    if (was[0] && strcmp(was, act)) {
+        dl_refresh();
+        for (int i = 0; i < dln; i++) {
+            if (strcmp(dlv[i].dir, was)) continue;
+            const DlItem *it = &dlv[i];
+            char nm[IPTV_NAME_MAX + 16];
+            if (it->kind == 'E' && it->series[0]) snprintf(nm, sizeof nm, "%s S%02dE%02d", it->series, it->season, it->episode);
+            else snprintf(nm, sizeof nm, "%s", it->title);
+            if (it->done) {
+                snprintf(notice, sizeof notice, T("Downloaded: %s"), nm);
+                notice_err = 0;
+                notice_until = now_ms() + 5000;
+            } else if (dl_state(it->dir, &st) == DL_FAILED) {
+                snprintf(notice, sizeof notice, T("Could not download: %s"), nm);
+                notice_err = 1;
+                notice_until = now_ms() + 6000;
+            }
+            break;
+        }
+    }
+    snprintf(was, sizeof was, "%s", act);
+}
+
+/* 1.4.1: the note at the top (over any screen) */
+static void draw_notice(void)
+{
+    if (!notice[0] || (int)(now_ms() - notice_until) >= 0) return;
+    char t[200];
+    ui_fit_copy(t, sizeof t, 1.0f, notice, 860);
+    int w = ui_text_w(1.0f, t) + 48, x = (960 - w) / 2, y = 66;
+    ui_round_rect(x, y, w, 40, 10, RGBA8(0, 0, 0, 215));
+    ui_round_rect(x, y + 36, w, 4, 2, notice_err ? UI_ERR : UI_OK);
+    ui_text_center(480, y + 28, notice_err ? UI_ERR : UI_TEXT, 1.0f, t);
 }
 
 /* Select > Download on film / episode ci of the open list */
@@ -5831,9 +6027,26 @@ static int dl_from_channel(int ci, DlItem *it)
     return 0;
 }
 
+/* 1.4.1: before queueing: is there room for a film at all? (Its size is known only when it starts; then the
+ * download thread checks again: the size plus DL_RESERVE.) Says why not. */
+#define DL_MIN_FREE (DL_RESERVE + 300ull * 1024 * 1024)
+static int dl_space_ok(void)
+{
+    long long fr = dl_free_bytes();
+    dl_free_now = fr;
+    if (fr < 0 || (uint64_t)fr >= DL_MIN_FREE) return 1;
+    char f[24];
+    dl_size_text((uint64_t)fr, lang_get() == LANG_TR, f, sizeof f);
+    snprintf(status, sizeof status, T("Not enough free space on the memory card (%s free)"), f);
+    status_err = 1;
+    plog("dl: not queued: %lld MB free", fr >> 20);
+    return 0;
+}
+
 /* returns how many were queued (-1: cannot write) */
 static int dl_queue_items(const int *cis, int n)
 {
+    if (!dl_space_ok()) return -1;                           /* 1.4.1: not even started */
     DlItem *it = malloc(sizeof *it);
     if (!it) return -1;
     int q = 0, there = 0, bad = 0;
@@ -5853,6 +6066,7 @@ static int dl_queue_items(const int *cis, int n)
     snprintf(status, sizeof status, "%s", msg);
     status_err = 0;
     if (fr >= 0 && (uint64_t)fr < DL_RESERVE * 2) { set_status(1, "Little free space on the memory card", NULL); }
+    dl_hold_again();
     return q;
 }
 
@@ -5860,6 +6074,7 @@ static int dl_queue_items(const int *cis, int n)
 static int dl_queue_stream(int si)
 {
     const Source *src = &sources[si];
+    if (!dl_space_ok()) return -1;                           /* 1.4.1 */
     DlItem *it = calloc(1, sizeof *it);
     if (!it) return -1;
     it->kind = 'F';
@@ -5874,6 +6089,7 @@ static int dl_queue_stream(int si)
     else if (r == 1) set_status(0, "Already in Downloads", NULL);
     else set_status(0, "Downloading: see Downloads on the home screen", NULL);
     if (r >= 0 && dl_free_now >= 0 && (uint64_t)dl_free_now < DL_RESERVE * 2) set_status(1, "Little free space on the memory card", NULL);
+    dl_hold_again();
     return r;
 }
 
@@ -6316,6 +6532,7 @@ static void ep_row(int i, ScrEpRow *r, void *ctx)
     if (w && w->done) { char ek[WATCH_ID]; watch_ep_key(c->url, ek, sizeof ek); r->check = watch_is_done(w, ek); }
     int k = resume_find(resume, nresume, c->url);
     if (k >= 0 && resume_worth(resume[k].pos_ms, resume[k].dur_ms) && resume[k].dur_ms > 0) r->progress = (float)resume[k].pos_ms / (float)resume[k].dur_ms;
+    r->dl = dl_mark(c->url);                                 /* 1.4.1 */
 }
 
 static void draw_series(void)
@@ -6418,7 +6635,7 @@ static int play_heavy(void)
     if (!st || st->state != TSP_PLAYING) return 1;
     const Channel *c = cur_channel();
     if (st->core_hot) play_hot = 1;                          /* (then for the rest of the channel: no back and forth) */
-    return st->audio_sw || st->audio_ac3 || st->audio_mpeg || st->fields || st->fps10 > 310 || play_hot ||
+    return st->audio_sw || st->audio_ac3 || st->audio_xiph || st->audio_mpeg || st->fields || st->fps10 > 310 || play_hot ||
            (c && !strncasecmp(c->url, "https:", 6));
 }
 
@@ -6637,6 +6854,7 @@ int main(void)
 
         if (job_active) {                                    /* a channel list is loading: O cancels */
             if (load_poll(p)) state = ST_CHANNELS;
+            draw_notice();
             vita2d_end_drawing();
             vita2d_swap_buffers();
             continue;
@@ -6804,7 +7022,7 @@ int main(void)
                 }
                 case MI_ADD: open_source_form(-1); break;
                 case MI_SORT: src_sort_begin(); break;
-                case MI_RELOAD: load_favorites(); load_mylist(); load_sources(); load_settings(); break;
+                case MI_RELOAD: load_favorites(); load_mylist(); load_sources(); load_settings(); search_copy_clear(); break;
                 case MI_SETTINGS: open_settings_form(); break;
                 default: quit = 1; break;
                 }
@@ -7319,7 +7537,7 @@ int main(void)
                     if (dur > 0 && seek_target > dur - 3000) seek_target = dur - 3000;
                     if (arch_on) { int lim = (int)(now_unix() - arch_start - 20) * 1000; if (seek_target > lim) seek_target = lim; }   /* (not past now) */
                     {   /* 1.3.2: a film being downloaded: not past what has come */
-                        int lim = dl_growing_limit_ms(cur_channel()->url, dur);
+                        int lim = dl_growing_limit_ms(cur_play_url(), dur);
                         if (lim >= 0 && seek_target > lim) {
                             seek_target = lim;
                             snprintf(film_note, sizeof film_note, "%s", T("The rest has not been downloaded yet"));
@@ -7539,6 +7757,7 @@ int main(void)
         }
 
         if (frames_after_fail < 3) plog("ui: frame %d after the failed load (screen %d)", frames_after_fail++, state);
+        draw_notice();                                       /* 1.4.1 */
         vita2d_end_drawing();
         if (ime_active) vita2d_common_dialog_update();
         vita2d_swap_buffers();

@@ -37,9 +37,9 @@ make distclean >/dev/null 2>&1 || true
 ./configure \
     --prefix="$OUT" \
     --enable-cross-compile --cross-prefix=arm-vita-eabi- --arch=arm --cpu=cortex-a9 --target-os=none \
-    --disable-everything --enable-decoder=ac3,eac3,aac --enable-parser=ac3 \
+    --disable-everything --enable-decoder=ac3,eac3,aac,opus,vorbis --enable-parser=ac3 \
     --disable-programs --disable-doc --disable-network --disable-autodetect \
-    --disable-avdevice --disable-avformat --disable-swscale --disable-postproc --disable-avfilter --disable-swresample \
+    --disable-avdevice --disable-avformat --disable-swscale --disable-postproc --disable-avfilter --enable-swresample \
     --disable-pthreads --disable-w32threads --disable-os2threads --disable-runtime-cpudetect \
     --disable-debug --enable-small --enable-static --disable-shared \
     --extra-cflags="-O2 -ffunction-sections -fdata-sections $LENIENT" \

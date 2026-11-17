@@ -16,6 +16,13 @@ static const Pair FIXED[] = {
     { "Clear speech (5.1)", "Konuşma netleştirme (5.1)" },
     { "Same volume on every channel", "Kanallar arası ses eşitleme" },
     { "Sound field", "Ses alanı" }, { "Speakers", "Hoparlör" }, { "Headphones", "Kulaklık" }, { "Auto", "Otomatik" },   /* 1.3 */
+    /* 1.4.1: downloads and playing the downloaded copy */
+    { "Watching from the same server: the download waits", "Aynı sunucudan izleniyor: indirme bekliyor" },
+    { "Playing the downloaded copy", "İndirilenden oynatılıyor" },
+    { "Playing the downloaded copy (still downloading)", "İndirilenden oynatılıyor (indirme sürüyor)" },
+    { "Downloaded: %s", "İndirildi: %s" }, { "Could not download: %s", "İndirilemedi: %s" },
+    { "Not enough free space on the memory card (%s free)", "Hafıza kartında yer yetmiyor (boş: %s)" },
+    { "Try again", "Tekrar dene" }, { "Trying again", "Tekrar deneniyor" }, { "Could not download", "İndirilemedi" },
     /* 1.4: colours and backgrounds */
     { "Colour", "Renk" }, { "Background", "Arka plan" }, { "Teal", "Turkuaz" }, { "Pink", "Pembe" },
     { "Navy", "Lacivert" }, { "Black (OLED)", "Siyah (OLED)" }, { "Graphite", "Grafit" }, { "Warm dark", "Sıcak koyu" },
@@ -397,6 +404,7 @@ static const Pair PATTERNS[] = {
     { "Account in use: %d of %d connections (channels may not open)", "Hesap kullanımda: %s / %s bağlantı (kanallar açılmayabilir)" },
     { "Account %s", "Hesap durumu: %s" },
     { "Server answered HTTP %d", "Sunucu HTTP %s yanıtı verdi" },
+    { "The server does not give this one (HTTP %d)", "Sunucu bu içeriği vermiyor (HTTP %s)" },   /* 1.4.1 */
     { "Server answered HTTP %d (the provider refuses: account busy?)", "Sunucu HTTP %s yanıtı verdi (sağlayıcı reddediyor: hesap kullanımda olabilir)" },
     { "Connection lost (%d times)", "Bağlantı koptu (%s kez)" },
     { "Connection lost (%s)", "Bağlantı koptu (%s)" },                          /* 1.3 (downloads) */

@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.4.2 (test) - with 1.4.1
+
+### Downloads
+- **A downloaded film or episode opened in its list plays from the memory card** (no connection used); one still
+  downloading too, once 2 % (16 MB) of it is there ("Playing the downloaded copy"). The point where it was left is
+  the same online and on the card. A sign in the film / episode lists: blue = downloaded, grey = part of it.
+- **While a channel or film from the same server plays, the download waits** (an account with one connection
+  cannot do both) and goes on 3 s after the player is closed. Just after a stream the server may still count it:
+  for a minute the download asks again (405, 512...) instead of failing.
+- **A server that does not give the file (403, 404, 405, 410) is not asked again**: "The server does not give this
+  one (HTTP 404)". The download stays in the list as "Could not download" with its reason (also after the app is
+  started again); **Square tries again**, Triangle deletes.
+- **Not enough free space** is said before a download is queued (and when it is tried again).
+- **A note at the top of the screen** when a download has ended ("Downloaded: ...") or failed, wherever you are.
+- (The Vita already did not go to sleep by itself while a download runs.)
+
+### Search
+- **Every film / every series of an account is downloaded once per run of the app** for searching: the second
+  search uses a small copy of it (only what a result needs: name, picture, year, genre...) and needs no network.
+  An hour later, or after Select > Reload playlists, it is downloaded again.
+
+### Sound
+- **Opus and Vorbis** (MKV / WebM films and streams) with FFmpeg's decoders, 5.1 played as stereo. The FFmpeg of
+  the build (tools/build_ffmpeg_vita.sh) has the opus and vorbis decoders and libswresample now (built again once
+  on GitHub: its cache key changed).
+
 ## 1.4.0 (test)
 
 ### Look
