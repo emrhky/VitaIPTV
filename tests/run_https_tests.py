@@ -67,7 +67,7 @@ threading.Thread(target=psrv.serve_forever, daemon=True).start()
 M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread {MCF} -DSTALL_US=1500000ULL -I{ROOT}/src -I{M} "
    f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c "
-   f"{ROOT}/src/curlio.c {ROOT}/src/vod.c {M}/mock_rt.c {MLIB} -lm -o {T}/test_https")
+   f"{ROOT}/src/curlio.c {ROOT}/src/vod.c {ROOT}/src/srt.c {M}/mock_rt.c {MLIB} -lm -o {T}/test_https")
 env = dict(os.environ, HTTPS_BASE=f"https://127.0.0.1:{srv.server_address[1]}",
            HTTP_BASE=f"http://127.0.0.1:{psrv.server_address[1]}")
 r = subprocess.run([f"{T}/test_https"], capture_output=True, text=True, env=env, timeout=300)

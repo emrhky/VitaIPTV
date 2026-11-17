@@ -453,6 +453,35 @@ static int64_t sub_at(const SubRun *r, const char *text)
     return -1;
 }
 
+/* 1.3.1: a film with a subtitle file (.srt) beside it: the texts and the film's times (ms) they were seen at */
+#include "srt.h"
+static SubRun vod_sub_play(const char *path, int start_ms, double max_s)
+{
+    SubRun r; memset(&r, 0, sizeof r);
+    assert(tsp_start_vod(path, start_ms) == 0);
+    double t0 = now_s(), end_seen = 0;
+    while (now_s() - t0 < max_s) {
+        int w = 0, h = 0, pos = 0, dur = 0;
+        tsp_frame(&w, &h);
+        char b[640];
+        if (tsp_sub_text(b, sizeof b) && tsp_vod_pos(&pos, &dur)) {
+            int k = 0;
+            while (k < r.n && strcmp(r.text[k], b)) k++;
+            if (k == r.n && r.n < 8) { snprintf(r.text[r.n], sizeof r.text[0], "%s", b); r.at[r.n++] = pos; }
+        }
+        const TspStatus *st = tsp_status();
+        if (st->state == TSP_ERROR) break;
+        if (st->state == TSP_ENDED) { if (!end_seen) end_seen = now_s(); else if (now_s() - end_seen > 0.6) break; }
+        usleep(8000);
+    }
+    r.st = *tsp_status();
+    tsp_stop();
+    printf("               srt: tracks %d, shown %d:", r.st.s_n, r.st.s_cur);
+    for (int k = 0; k < r.n; k++) printf(" '%s' at %.2f s", r.text[k], r.at[k] / 1000.0);
+    printf("\n");
+    return r;
+}
+
 /* ---- films: start at a time, pause, read position ---- */
 extern int mock_http_no_ranges, mock_http_range_requests;
 typedef struct { Run r; int first_pos, last_pos, dur, pos_during_pause_a, pos_during_pause_b, froze; } VRun;
@@ -1648,6 +1677,24 @@ films:
             v = play_vod_url(tsf, NULL, 5000, 15, 0, 0);
             vshow("local ts from 5s", &v);
             assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 400 && v.first_pos <= 5100 && v.first_pos >= 1000 && v.r.changes >= 150);
+            {   /* 1.3.1: a .srt beside the film: a track of its own ("SRT"), shown by the film's time, also from a jump */
+                static SrtList sl;
+                const char *srt = "1\n00:00:01,000 --> 00:00:02,500\nBir\n\n2\n00:00:06,000 --> 00:00:07,000\n\xC4\xB0ki\n";
+                assert(srt_parse(&sl, srt, strlen(srt)) == 0);
+                memcpy(sl.lang, "tur", 4);
+                tsp_set_ext_subs(&sl, 1);
+                tsp_set_sub(-1, "tur", 2);                   /* (automatic: the sound has no language: shown) */
+                SubRun sr = vod_sub_play(mkv, 0, 12);
+                assert(sr.st.s_n == 1 && sr.st.s_cur == 0 && !strcmp(sr.st.s_name[0], "SRT") && sr.n == 2);
+                assert(sub_at(&sr, "Bir") >= 900 && sub_at(&sr, "Bir") <= 1300 && sub_at(&sr, "\xC4\xB0ki") >= 5900 && sub_at(&sr, "\xC4\xB0ki") <= 6300);
+                sr = vod_sub_play(tsf, 5000, 6);                 /* a TS film from 5 s: only the second one */
+                assert(sr.st.s_n == 1 && sr.n == 1 && sub_at(&sr, "\xC4\xB0ki") >= 5900 && sub_at(&sr, "\xC4\xB0ki") <= 6300);
+                tsp_set_sub(-1, NULL, 1);                    /* off: none shown */
+                sr = vod_sub_play(mkv, 0, 4);
+                assert(sr.st.s_n == 1 && sr.st.s_cur == -1 && sr.n == 0);
+                tsp_set_ext_subs(NULL, 0);
+                srt_free(&sl);
+            }
             v = play_vod_url("/nonexistent/VitaIPTV/x.mkv", NULL, 0, 5, 0, 0);
             vshow("local file missing", &v);
             assert(v.r.st.state == TSP_ERROR && v.r.changes == 0 && mock_http_range_requests == rq0);

@@ -62,6 +62,9 @@ int main(int argc, char **argv)
     dl_folder_name('F', 0x1a2b3c4d, "Kızılcık Şerbeti: Çok Özel Bölüm / 2 ?", nm, sizeof nm);
     printf("folder name: %s\n", nm);
     assert(!strcmp(nm, "F_1a2b3c4d_Kizilcik_Serbeti_Cok_Ozel_Bolum_2"));
+    dl_folder_name('E', 2, "Organize İşler: Karun Hazinesi (2026) TR - S01E01 - 1. Bölüm", nm, sizeof nm);   /* (cut at 40: no dash at the end) */
+    printf("folder name: %s\n", nm);
+    assert(nm[strlen(nm) - 1] != '-' && nm[strlen(nm) - 1] != '_');
     dl_folder_name('E', 1, "", nm, sizeof nm);
     assert(!strcmp(nm, "E_00000001"));
     dl_video_name("http://h/movie/u/p/12.MP4?token=1", nm, sizeof nm); assert(!strcmp(nm, "video.mp4"));
@@ -88,6 +91,8 @@ int main(int argc, char **argv)
     {
         char p[700]; snprintf(p, sizeof p, "%s/poster.jpg", a.dir);
         assert(fsize(p) > 100);
+        snprintf(p, sizeof p, "%s/video.srt", a.dir);       /* 1.3.1: the subtitle file beside it on the server */
+        assert(fsize(p) > 10);
         DlItem r;
         assert(dl_info_read(&r, a.dir) == 0 && r.done && r.size == (uint64_t)whole && !strcmp(r.title, "Örnek Film"));
         assert(!strcmp(r.plot, "Bir satır ikinci satır") && r.avkey == 0xabcdef01 && !strcmp(r.year, "2021"));
@@ -144,6 +149,10 @@ int main(int argc, char **argv)
     st = wait_end(e.dir, 30);
     snprintf(vid, sizeof vid, "%s/%s", e.dir, e.video);
     assert(st == DL_IDLE && same_file(vid, src));
+    {
+        char p[700]; snprintf(p, sizeof p, "%s/video.srt", e.dir);   /* (film2.srt is not there: no file) */
+        assert(fsize(p) < 0);
+    }
 
     /* 5. delete: the folder goes (also while it downloads) */
     DlItem f = mk(base, "/slow/film3.mkv", "Silinecek", 'F');
