@@ -25,6 +25,19 @@ static int fav_demo;                                         /* 0.5.0: favourite
 static int src_moving = -1;                                  /* 1.1: reorder playlists */
 static void src_row(int i, ScrRow *r, void *c) { (void)c; r->name = src_names[i]; r->badge = src_badge[i]; r->badge_col = src_col[i]; r->sub = src_sub[i]; r->fav = fav_demo && i < 2; r->moving = i == src_moving; }
 
+/* 1.3.1: Videos on the Vita */
+static void dev_place_pv(int i, ScrRow *r, void *c)
+{
+    static const char *p[] = { "VitaIPTV folder", "Video app", "Memory card (ux0:)", "USB / SD card (uma0:)" };
+    (void)c; r->name = T(p[i]);
+}
+static void dev_item_pv(int i, ScrRow *r, void *c)
+{
+    static const char *n[] = { "Belgeseller", "Diziler", "Babam ve Oğlum", "Kış Uykusu", "Kurak Günler", "Tatil videosu" };
+    static const char *rt[] = { "", "", "MKV  2,1 GB", "MP4  1,6 GB", "MKV  2,4 GB", "MP4  820 MB" };
+    (void)c; r->name = n[i]; r->folder = i < 2; r->right = rt[i]; r->check = i == 3;
+}
+
 /* 1.3: the Downloads screen */
 static int dl_pv_ep;
 static void dl_grp_pv(int i, ScrRow *r, void *c)
@@ -44,10 +57,10 @@ static void dl_item_pv(int i, ScrRow *r, void *c)
 }
 
 /* 1.3: the home: Downloads first, then seven playlists */
-static const char *home_names[] = { "İndirilenler", "Ev internet - Xtream", "Spor paketi", "Belgesel listesi", "TRT 1 (tek link)", "Yerel liste", "Çocuk kanalları", "Yedek hesap" };
-static const char *home_badge[] = { "OFFLINE", "XTREAM", "XTREAM", "M3U", "STREAM", "FILE", "M3U", "XTREAM" };
-static const char *home_sub[] = { "3 film, 1 dizi  ·  4,2 GB  ·  boş: 9,8 GB", "tv.example.net:8080", "spor.example.com", "raw.example.org", "trt.example.tr", "Turkiye_IP_TV.m3u", "kids.example.org", "backup.example.net" };
-static const unsigned home_col[] = { RGBA8(214, 70, 120, 255), RGBA8(124, 77, 230, 255), RGBA8(124, 77, 230, 255), RGBA8(33, 120, 235, 255), RGBA8(22, 160, 105, 255), RGBA8(222, 128, 30, 255), RGBA8(33, 120, 235, 255), RGBA8(124, 77, 230, 255) };
+static const char *home_names[] = { "İndirilenler", "Vita'daki Videolar", "Ev internet - Xtream", "Spor paketi", "Belgesel listesi", "TRT 1 (tek link)", "Yerel liste", "Çocuk kanalları", "Yedek hesap" };
+static const char *home_badge[] = { "OFFLINE", "VITA", "XTREAM", "XTREAM", "M3U", "STREAM", "FILE", "M3U", "XTREAM" };
+static const char *home_sub[] = { "3 film, 1 dizi  ·  4,2 GB  ·  boş: 9,8 GB", "Hafıza kartındaki video dosyaları, klasör klasör", "tv.example.net:8080", "spor.example.com", "raw.example.org", "trt.example.tr", "Turkiye_IP_TV.m3u", "kids.example.org", "backup.example.net" };
+static const unsigned home_col[] = { RGBA8(214, 70, 120, 255), RGBA8(96, 104, 132, 255), RGBA8(124, 77, 230, 255), RGBA8(124, 77, 230, 255), RGBA8(33, 120, 235, 255), RGBA8(22, 160, 105, 255), RGBA8(222, 128, 30, 255), RGBA8(33, 120, 235, 255), RGBA8(124, 77, 230, 255) };
 static void home_row(int i, ScrRow *r, void *c) { (void)c; r->name = home_names[i]; r->badge = home_badge[i]; r->badge_col = home_col[i]; r->sub = home_sub[i]; }
 
 /* channels */
@@ -138,7 +151,7 @@ int main(int argc, char **argv)
     {   /* 1.3: the home as main.c draws it: 7 cards evenly spaced, the one-line note under them */
         static const UiHint hh[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" },
                                      { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Quit" } };
-        ScrList hl = { "Vita IPTV", T("Playlists"), "8 playlists", 8, 1, &scroll, home_row, NULL, "", hh, 6, NULL, 0 };
+        ScrList hl = { "Vita IPTV", T("Playlists"), "7 playlists", 9, 1, &scroll, home_row, NULL, "", hh, 6, NULL, 0 };
         preview_clear(UI_BG); scroll = 0; scr_list(&hl); shot("1h_home");
         hl.status = "Liste yenilendi: 1.248 kanal";
         preview_clear(UI_BG); scroll = 0; scr_list(&hl); shot("1h_home_note");
@@ -512,6 +525,19 @@ int main(int argc, char **argv)
             preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); scr_confirm(T("Delete this download?"), "S01E02  Bölüm 2"); shot("u_downloads_delete");
             dd.status = T("Not enough free space: 2810 MB needed, 1450 MB free"); dd.status_err = 1; dd.preview = &card;
             preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); shot("u_downloads_nospace");
+        }
+        {   /* 1.3.1: Videos on the Vita: the places, the folder's folders and videos */
+            UiHint hv[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_CIRCLE, "Up" } };
+            ScrDual dv; memset(&dv, 0, sizeof dv);
+            dv.title = T("Videos on the Vita"); dv.subtitle = "ux0:video/Filmler";
+            dv.lcount = 4; dv.lsel = 1; dv.lscroll = &gs; dv.lrow = dev_place_pv;
+            dv.rcount = 6; dv.rsel = 2; dv.rscroll = &cs; dv.rrow = dev_item_pv; dv.focus = 1; dv.lmark = 1;
+            dv.hints = hv; dv.nhints = 2;
+            preview_clear(UI_BG); gs = cs = 0; scr_dual(&dv); shot("v_device");
+            UiHint hl2[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_CIRCLE, "Back" } };
+            dv.focus = 0; dv.hints = hl2; dv.subtitle = "";
+            dv.status = T("Choose a place; MKV, MP4, TS and FLV files play (an .srt beside one: its subtitles)");
+            preview_clear(UI_BG); gs = cs = 0; scr_dual(&dv); shot("v_device_places");
         }
 
         /* film details */
