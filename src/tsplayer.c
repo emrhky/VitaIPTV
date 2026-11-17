@@ -10,6 +10,7 @@
 #include "spsfix.h"
 #include "curlio.h"
 #include "vod.h"
+#include "srt.h"
 #include "httpio.h"                     /* plog() */
 #include "memstat.h"
 #include "audiofx.h"
@@ -108,6 +109,14 @@ static int g_aid = -1;                  /* 0.5.0: the audio track wanted (tsp_se
 static char g_alang[4];
 static int g_sid = -1, g_soff = 1;      /* 0.7.0: the subtitle track wanted (tsp_set_sub), or its language, or none */
 static char g_slang[4];
+/* 1.3.1: subtitle files (.srt) of the next films, after the file's own tracks; ids TSP_EXT_SUB_ID + k */
+#define TSP_EXT_SUB_ID 100000
+#define TSP_EXT_MAX 4
+static const SrtList *g_ext;
+static int g_next;
+static char g_ext_lang[TSP_EXT_MAX][4];
+typedef struct Tsp Tsp;
+static int film_ms_at(Tsp *t, int64_t p);
 static volatile int g_sub_delay;        /* ms, + = later */
 #define NO_TS        0xFFFFFFFFu
 
@@ -142,7 +151,7 @@ typedef struct {
     uint64_t ready_us;                  /* when the decoder gave it (timing line) */
 } Slot;
 
-typedef struct {
+struct Tsp {                            /* (1.3.1: named, declared above) */
     char url[512];
     char hdr_ua[512], hdr_ref[512];     /* from link|User-Agent=...&Referer=... (M3U #EXTVLCOPT): "" = default */
     volatile int cancel;
@@ -354,7 +363,7 @@ typedef struct {
     int64_t base_pts;
     uint32_t base_seq;
     TspStatus st;
-} Tsp;
+};
 
 static Tsp *g_tsp;
 static int g_module_loaded;
@@ -2229,22 +2238,31 @@ typedef struct SubCue { int track; int64_t start, dur; char text[240]; } SubCue;
  * language, else none (subtitles are off until chosen) */
 static void update_sub_tracks(Tsp *t)
 {
-    if (!t->mkv && !t->mp4) return;                          /* (0.8.0: MP4 text tracks too) */
+    int inner = t->mkv || t->mp4;                            /* (0.8.0: MP4 text tracks too) */
     const TsInfo *i = dmx_info(t);
-    if (i->program < 0 || i->nsubs == t->sub_tracks_n) return;
-    int n = i->nsubs < TSP_MAX_SUBS ? i->nsubs : TSP_MAX_SUBS, cur = -1;
+    if (!inner && !(g_next && t->vod)) return;               /* 1.3.1: files beside a film: any kind of film */
+    if (inner && i->program < 0 && !g_next) return;
+    int nin = inner && i->program >= 0 ? i->nsubs : 0;
+    if (nin + 1 == t->sub_tracks_n) return;                  /* (1.3.1: counted + 1; 0 = not yet) */
+    int n = nin < TSP_MAX_SUBS ? nin : TSP_MAX_SUBS, cur = -1;
     for (int k = 0; k < n; k++) {
         t->st.s_id[k] = i->subs[k].id;
         memcpy(t->st.s_lang[k], i->subs[k].lang, 4);
         snprintf(t->st.s_name[k], sizeof t->st.s_name[k], "%s", i->subs[k].name);
         t->st.s_forced[k] = i->subs[k].forced;
     }
+    for (int k = 0; t->vod && k < g_next && n < TSP_MAX_SUBS; k++, n++) {   /* 1.3.1: the .srt files */
+        t->st.s_id[n] = TSP_EXT_SUB_ID + k;
+        memcpy(t->st.s_lang[n], g_ext_lang[k], 4);
+        snprintf(t->st.s_name[n], sizeof t->st.s_name[n], "SRT");
+        t->st.s_forced[n] = 0;
+    }
     int show = !g_soff;
     if (g_soff == 2 && g_slang[0]) {                         /* 1.3: automatic: on in this language only when no sound is */
         show = 1;
         for (int k = 0; k < i->nstreams; k++) {
             const TsStream *s = &i->streams[k];
-            int audio = s->stream_type == 2;                 /* (MKV and MP4: the track type) */
+            int audio = inner ? s->stream_type == 2 : s->pid == i->audio_pid;   /* (MKV, MP4: the track type; 1.3.1: else the sound playing) */
             char l3[4];
             ts_lang3(s->lang, l3);
             if (audio && l3[0] && !strcmp(l3, g_slang) && audio_playable(s->codec)) { show = 0; break; }
@@ -2258,7 +2276,7 @@ static void update_sub_tracks(Tsp *t)
     }
     t->st.s_cur = cur;
     t->st.s_n = n;
-    t->sub_tracks_n = i->nsubs;
+    t->sub_tracks_n = nin + 1;
     char list[200];
     size_t o = 0;
     for (int k = 0; k < n && o + 40 < sizeof list; k++)
@@ -2302,10 +2320,19 @@ void tsp_sub_choose(int k)
 
 void tsp_set_sub_delay(int ms) { g_sub_delay = ms; }
 
+void tsp_set_ext_subs(const SrtList *subs, int n)
+{
+    g_ext = subs;
+    g_next = subs ? (n < TSP_EXT_MAX ? n : TSP_EXT_MAX) : 0;
+    for (int k = 0; k < g_next; k++) memcpy(g_ext_lang[k], subs[k].lang, 4);
+}
+
 int tsp_sub_text(char *out, size_t cap)
 {
     Tsp *t = g_tsp;
-    if (!t || !t->cues || t->st.s_cur < 0 || t->st.s_cur >= t->st.s_n || cap < 2) return 0;
+    if (!t || t->st.s_cur < 0 || t->st.s_cur >= t->st.s_n || cap < 2) return 0;
+    int ext = t->st.s_id[t->st.s_cur] >= TSP_EXT_SUB_ID;    /* 1.3.1: a .srt file (no cues of the file needed) */
+    if (!ext && !t->cues) return 0;
     int64_t p = -1;
     sceKernelLockMutex(t->lock, 1, NULL);
     if (t->shown >= 0) p = t->shown_pts;
@@ -2313,6 +2340,14 @@ int tsp_sub_text(char *out, size_t cap)
     if (p < 0) return 0;
     p -= (int64_t)g_sub_delay * 90;                          /* (later subtitles: an earlier point of the film) */
     int track = t->st.s_id[t->st.s_cur], found = 0;
+    if (track >= TSP_EXT_SUB_ID) {                           /* 1.3.1: a .srt file: by the film's time */
+        int k = track - TSP_EXT_SUB_ID;
+        if (k >= g_next || !g_ext) return 0;
+        const SrtCue *c = srt_at(&g_ext[k], film_ms_at(t, p));
+        if (!c) return 0;
+        snprintf(out, cap, "%s", c->text);
+        return 1;
+    }
     int64_t best = -1;
     sceKernelLockMutex(t->qlock, 1, NULL);
     uint32_t n = t->ncues < SUB_CUES ? t->ncues : SUB_CUES;
@@ -3128,6 +3163,7 @@ static void stats_tick(Tsp *t)
     }
     cpu_line(t, now, loud);
     if (t->reader_done) return;                             /* (called by the video thread now: no reads to tune) */
+    if (t->vod_file) return;                                 /* 1.3.1: a file is read in CHUNK pieces (no network) */
 
     /* sceHttpReadData returns only when the request is full: small reads keep radio responsive, larger ones
      * (about 30 reads a second) cut the per-call cost on high bit rates. */
@@ -4739,7 +4775,8 @@ static void buffer_check(Tsp *t, uint64_t now)
     /* 0.6.0: "slower" only from an interval in which the reader did not wait for room (a full queue reads only
      * what is played, which looked like a slow line); and a network at least twice as fast as the film gets the
      * larger queues too (it fills them in seconds; a longer gap of the server is then ridden out) */
-    int measured = t->vod && t->first_show_us && now - t->first_show_us > 8000000ULL && t->st.need_kbs && t->st.net_kbs;
+    /* 1.3.1: not for a file on the memory card: it is there at once (and the 40 MB stay free) */
+    int measured = t->vod && !t->vod_file && t->first_show_us && now - t->first_show_us > 8000000ULL && t->st.need_kbs && t->st.net_kbs;
     int film_slow = measured && t->net_wait_pct < 10 && t->st.net_kbs < t->st.need_kbs * 9 / 10;
     int film_fast = measured && t->net_free_kbs >= t->st.need_kbs * 2;
     if ((film_slow || film_fast) && !t->big_queues) {
@@ -5106,6 +5143,21 @@ void tsp_pause(int on)
     if (!on) t->clock_on = 0;                               /* the video clock starts again from the next picture */
     sceKernelUnlockMutex(t->lock, 1);
     plog("tsp: %s", on ? "paused" : "playing again");
+}
+
+/* 1.3.1: the film's time (ms) of a picture's pts, as tsp_vod_pos counts it */
+static int film_ms_at(Tsp *t, int64_t p)
+{
+    if (t->vod_stream) {
+        int64_t d = t->vod_first_pts >= 0 ? p - t->vod_first_pts : 0;
+        if (d < -90000LL * 3600) d += 1LL << 33;
+        return t->vod_offset_ms + (d < 0 ? 0 : (int)(d / 90));
+    }
+    int64_t base = t->vod_base;
+    if (t->flv && flv_info(t->flv)->first_video_pts > 0) base = flv_info(t->flv)->first_video_pts;
+    int64_t d = p - base;
+    if (d < -90000LL * 3600) d += 1LL << 33;
+    return d < 0 ? 0 : (int)(d / 90);
 }
 
 int tsp_vod_pos(int *pos_ms, int *dur_ms)

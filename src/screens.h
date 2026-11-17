@@ -17,6 +17,7 @@ typedef struct {
     int fav;                            /* 0.5.0: a star before the name (favourite) */
     int moving;                         /* 0.4.5: the row being moved (reordering the favourites) */
     int check;                          /* 0.7.0: a tick before the name (a watched episode) */
+    int folder;                         /* 1.3.1: a folder sign before the name (Videos on the Vita) */
 } ScrRow;
 typedef void (*ScrRowFn)(int i, ScrRow *row, void *ctx);
 
