@@ -47,6 +47,7 @@
 #include "poster.h"
 #include "avpref.h"
 #include "dl.h"
+#include "srt.h"
 #include <psp2/rtc.h>
 
 #define NET_POOL_SIZE (4 * 1024 * 1024)
@@ -72,7 +73,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define CACHE_DIR     DATA_DIR "/cache"                  /* 1.1: saved copies of the playlists (listcache.h) */
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v1.3.0"
+#define APP_VERSION   "v1.3.1"
 #endif
 #ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
 #define APP_BUILD     __DATE__ " " __TIME__
@@ -166,7 +167,15 @@ static void dl_open_screen(void);
 static void dl_refresh(void);
 static void dl_poll(void);
 static uint32_t dl_avkey_of(const char *path, int *series);
+static const char *dl_url_of(const char *path);
 static int dl_open;
+static int dln;                             /* (1.3.1: the Downloads row is there while this is > 0) */
+static int dev_open;                        /* 1.3.1: "Videos on the Vita" open (over the playlists) */
+static void draw_device(void);
+static void dev_input(unsigned p);
+static void dev_open_screen(void);
+static const char *dev_home_line(char *b, size_t cap);
+static int dl_queue_stream(int si);
 static void clock_of(int64_t t, char *b, size_t n);
 static void day_label(int64_t t, char *b, size_t n);
 static int prog_find(int ci, int64_t start);
@@ -684,8 +693,8 @@ static void build_vod_groups(void)
     rebuild_visible();
 }
 
-/* Every video file in DATA_DIR becomes a "[Local]" entry, so local playback can be
- * tested without editing sources.txt. */
+/* Every playlist file (.m3u) in DATA_DIR becomes a playlist. (Until 1.3.0 each video file became a "[Local]"
+ * row too; 1.3.1: they are under "Videos on the Vita" with the rest of the memory card.) */
 static void add_local_files(void)
 {
     SceUID d = sceIoDopen(DATA_DIR);
@@ -698,7 +707,8 @@ static void add_local_files(void)
                             !strcasecmp(dot, ".ts") || !strcasecmp(dot, ".m2ts") || !strcasecmp(dot, ".mts") ||
                             !strcasecmp(dot, ".mkv") || !strcasecmp(dot, ".webm") || !strcasecmp(dot, ".flv"));
         int list = dot && (!strcasecmp(dot, ".m3u") || !strcasecmp(dot, ".m3u8"));   /* drop playlists here in bulk */
-        if (!SCE_S_ISDIR(e.d_stat.st_mode) && (video || list)) {
+        (void)video;                                         /* 1.3.1: videos: under "Videos on the Vita" (no [Local] rows) */
+        if (!SCE_S_ISDIR(e.d_stat.st_mode) && list) {
             Source *s = &sources[nsources++];
             memset(s, 0, sizeof *s);
             s->type = video ? SRC_STREAM : SRC_M3U_FILE;
@@ -729,11 +739,24 @@ static void save_order(void)
     int n = 0;
     for (int d = 0; d < nsources; d++) {
         const Source *src = &sources[sorder[d]];
-        if (src->type == SRC_MYLIST || src->type == SRC_DOWNLOADS) continue;
+        if (src->type == SRC_MYLIST) continue;               /* (1.3.1: Downloads and Videos on the Vita are kept) */
         char k[FAV_SRC_MAX];
         fav_source_key(src, k, sizeof k);
         o += (size_t)sprintf(buf + o, "%s\n", k);
         if (keys) snprintf(keys[n++], FAV_SRC_MAX, "%s", k);
+    }
+    {   /* 1.3.1: Downloads hidden (none now): its place stays */
+        int there = 0, was = -1;
+        for (int r = 0; r < n && keys; r++) if (!strcmp(keys[r], "d|downloads")) there = 1;
+        for (int r = 0; r < nord && was < 0; r++) if (!strcmp(ord_keys[r], "d|downloads")) was = r;
+        if (keys && !there && was >= 0 && n < MAX_SOURCES) {
+            if (was > n) was = n;
+            memmove(&keys[was + 1], &keys[was], sizeof(*keys) * (size_t)(n - was));
+            snprintf(keys[was], FAV_SRC_MAX, "d|downloads");
+            n++;
+            o = (size_t)sprintf(buf, "# Vita IPTV: the order of the playlists (written by the app)\n");
+            for (int r = 0; r < n; r++) o += (size_t)sprintf(buf + o, "%s\n", keys[r]);
+        }
     }
     if (write_text_file(ORDER_FILE, buf) < 0) set_status(1, "Could not write %s", ORDER_FILE);
     free(buf);
@@ -771,15 +794,19 @@ static int src_is_fav(int i)
 }
 
 /* 1.3: a row of the home screen that is not a playlist (Downloads, My List) */
-static int src_virtual(int i) { return i >= 0 && i < nsources && (sources[i].type == SRC_MYLIST || sources[i].type == SRC_DOWNLOADS); }
+
+/* 1.3: a row of the home screen that is not a playlist (Downloads, Videos on the Vita, My List) */
+static int src_virtual(int i) { return i >= 0 && i < nsources && (sources[i].type == SRC_MYLIST || sources[i].type == SRC_DOWNLOADS || sources[i].type == SRC_DEVICE); }
 static int src_real_count(void) { int n = 0; for (int i = 0; i < nsources; i++) n += !src_virtual(i); return n; }
+/* 1.3.1: Downloads and Videos on the Vita: rows of their own that move like playlists (their place in order.txt) */
+static int src_movable_virtual(int i) { return i >= 0 && i < nsources && (sources[i].type == SRC_DOWNLOADS || sources[i].type == SRC_DEVICE); }
 
 static void sort_sources(void)
 {
     int n = 0, rank[MAX_SOURCES];
-    for (int i = 0; i < nsources; i++) if (sources[i].type == SRC_DOWNLOADS) sorder[n++] = i;   /* 1.3: Downloads first */
     for (int i = 0; i < nsources; i++) if (sources[i].type == SRC_MYLIST) sorder[n++] = i;   /* 1.1: My List on top */
     if (!ord_read) {                                         /* the first time: as before 1.1, then kept */
+        for (int i = 0; i < nsources; i++) if (src_movable_virtual(i)) sorder[n++] = i;   /* (1.3.1: these first) */
         for (int i = 0; i < nsources; i++) rank[i] = src_virtual(i) ? -2 : src_is_fav(i);
         for (int r = 0; r < favs.n; r++)                     /* (favs.n is small) */
             for (int i = 0; i < nsources; i++) if (rank[i] == r) sorder[n++] = i;
@@ -790,12 +817,20 @@ static void sort_sources(void)
         }
         return;
     }
-    for (int i = 0; i < nsources; i++) {
-        rank[i] = -2;
-        if (src_virtual(i)) continue;
+    for (int i = 0; i < nsources; i++) {                     /* 1.3.1: a fixed row new to order.txt: on top */
+        if (!src_movable_virtual(i)) continue;
         char k[FAV_SRC_MAX];
         fav_source_key(&sources[i], k, sizeof k);
-        rank[i] = -1;
+        int known = 0;
+        for (int r = 0; r < nord; r++) if (!strcmp(ord_keys[r], k)) known = 1;
+        if (!known) sorder[n++] = i;
+    }
+    for (int i = 0; i < nsources; i++) {
+        rank[i] = -2;
+        if (sources[i].type == SRC_MYLIST) continue;
+        char k[FAV_SRC_MAX];
+        fav_source_key(&sources[i], k, sizeof k);
+        rank[i] = src_movable_virtual(i) ? -2 : -1;          /* (1.3.1: a fixed row not in order.txt: put on top above) */
         for (int r = 0; r < nord; r++) if (!strcmp(ord_keys[r], k)) { rank[i] = r; break; }
     }
     for (int r = 0; r < nord; r++)
@@ -807,7 +842,7 @@ static int read_saved(const char *path, Mem *m);
 static int write_text_file(const char *path, const char *text);
 
 /* 1.1: Select > Reorder playlists: X picks a playlist up and puts it down, START saves, O asks (as the edit mode) */
-static int src_fixed(int d) { return d >= 0 && d < nsources && src_virtual(sorder[d]); }   /* (Downloads, My List stay on top) */
+static int src_fixed(int d) { return d >= 0 && d < nsources && sources[sorder[d]].type == SRC_MYLIST; }   /* (My List stays on top) */
 
 static void src_sort_status(void)
 {
@@ -897,14 +932,22 @@ static int save_mylist(void)
 /* the "My List" row: there while it has channels (always the last entry of sources[]) */
 static void mylist_source_sync(void)
 {
-    /* 1.3: the rows that are not playlists at the end: Downloads (always), then My List (while it has channels) */
-    while (nsources > 0 && (sources[nsources - 1].type == SRC_MYLIST || sources[nsources - 1].type == SRC_DOWNLOADS)) nsources--;
-    if (nsources < MAX_SOURCES) {
+    /* 1.3: the rows that are not playlists at the end: Downloads, (1.3.1) Videos on the Vita, then My List
+     * (while it has channels). 1.3.1: Downloads only while there is one. */
+    while (nsources > 0 && src_virtual(nsources - 1)) nsources--;
+    if (dln > 0 && nsources < MAX_SOURCES) {
         Source *s = &sources[nsources++];
         memset(s, 0, sizeof *s);
         s->type = SRC_DOWNLOADS;
         s->auto_added = 1;
         snprintf(s->name, sizeof s->name, "%s", T("Downloads"));
+    }
+    if (nsources < MAX_SOURCES) {
+        Source *s = &sources[nsources++];
+        memset(s, 0, sizeof *s);
+        s->type = SRC_DEVICE;
+        s->auto_added = 1;
+        snprintf(s->name, sizeof s->name, "%s", T("Videos on the Vita"));
     }
     if (mylist.n > 0 && nsources < MAX_SOURCES) {
         Source *s = &sources[nsources++];
@@ -2998,6 +3041,58 @@ static int arch_url(int off_ms, char *out, size_t cap, int *real_off_ms)
     return catchup_url(c->cu_mode, c->url, channel_catchup_src(&chans, c), st, dur, now, srv_offset(ci), out, cap);
 }
 
+/* 1.3.1: subtitle files beside a film on the memory card: "Film.srt", "Film.tr.srt", "Film.eng.srt"... (a
+ * download: also any .srt in its folder). Read once per film (a jump starts the player again: kept). */
+#define EXT_SUBS_MAX 4
+static SrtList ext_subs[EXT_SUBS_MAX];
+static int next_subs;
+static char ext_subs_for[IPTV_URL_MAX];
+static void ext_subs_load(const char *url, int film)
+{
+    if (film && !strcmp(url, ext_subs_for)) { tsp_set_ext_subs(next_subs ? ext_subs : NULL, next_subs); return; }
+    tsp_set_ext_subs(NULL, 0);                               /* (nothing plays now: the old lists may go) */
+    for (int k = 0; k < next_subs; k++) srt_free(&ext_subs[k]);
+    next_subs = 0;
+    ext_subs_for[0] = 0;
+    if (!film || !iptv_is_local_path(url)) return;
+    snprintf(ext_subs_for, sizeof ext_subs_for, "%s", url);
+    char dir[IPTV_URL_MAX], base[256];
+    snprintf(dir, sizeof dir, "%s", url);
+    char *sl = strrchr(dir, '/');
+    if (!sl) sl = strchr(dir, ':');
+    if (!sl) return;
+    snprintf(base, sizeof base, "%s", sl + 1);
+    sl[1] = 0;
+    if (*sl == '/') *sl = 0;
+    char *dot = strrchr(base, '.');
+    if (dot) *dot = 0;
+    size_t bl = strlen(base);
+    int dl_folder = !strncmp(url, DL_ROOT "/", strlen(DL_ROOT) + 1);
+    SceUID d = sceIoDopen(dir);
+    if (d < 0) return;
+    SceIoDirent e;
+    memset(&e, 0, sizeof e);
+    while (next_subs < EXT_SUBS_MAX && sceIoDread(d, &e) > 0) {
+        const char *x = strrchr(e.d_name, '.');
+        int match = x && !strcasecmp(x, ".srt") && !SCE_S_ISDIR(e.d_stat.st_mode) &&
+                    (dl_folder || (!strncasecmp(e.d_name, base, bl) && (e.d_name[bl] == '.' || e.d_name[bl] == '_' || e.d_name[bl] == '-' || e.d_name[bl] == ' ')));
+        if (match && e.d_stat.st_size > 0 && e.d_stat.st_size < 4 * 1024 * 1024) {
+            char p[IPTV_URL_MAX + 256];
+            snprintf(p, sizeof p, "%s%s%s", dir, dir[strlen(dir) - 1] == ':' ? "" : "/", e.d_name);
+            Mem m = {0};
+            if (read_file(p, &m) == 0 && srt_parse(&ext_subs[next_subs], (const char *)m.buf, m.len) == 0) {
+                srt_guess_lang(&ext_subs[next_subs], e.d_name, ext_subs[next_subs].lang);
+                plog("subs: %s: %d lines (%s)", e.d_name, ext_subs[next_subs].n, ext_subs[next_subs].lang[0] ? ext_subs[next_subs].lang : "language not known");
+                next_subs++;
+            } else plog("subs: %s: not a subtitle file", e.d_name);
+            free(m.buf);
+        }
+        memset(&e, 0, sizeof e);
+    }
+    sceIoDclose(d);
+    tsp_set_ext_subs(next_subs ? ext_subs : NULL, next_subs);
+}
+
 static void play_channel_ex(int vi, int use_proxy)
 {
     play_vis = vi;
@@ -3021,6 +3116,7 @@ static void play_channel_ex(int vi, int use_proxy)
     tsp_set_audio(aud_id, aud_lang);                         /* 0.5.0: the audio track (or language) chosen */
     tsp_set_sub(sub_id, sub_lang, sub_off);                  /* 0.7.0: subtitles */
     tsp_set_sub_delay(sub_delay_ms);
+    ext_subs_load(url, !arch_on && chans.items[vis[vi]].kind == CH_FILM);   /* 1.3.1: .srt files beside it */
     tsp_set_via_server(use_proxy);
     tsp_set_hls_bw(res_bw);
     via_proxy = 0;
@@ -3274,6 +3370,10 @@ static void save_film_position(void)
     if (st->state == TSP_ERROR || (st->decoded == 0 && !st->audio_only)) return;   /* never started: keep the old point */
     if (st->state == TSP_ENDED) pos = dur > 0 ? dur : pos + 3600000;
     remember_position(cur_channel()->url, pos, dur);
+    if (iptv_is_local_path(cur_channel()->url)) {            /* 1.3.1: a download: its address too (online goes on there) */
+        const char *ou = dl_url_of(cur_channel()->url);
+        if (ou) remember_position(ou, pos, dur);
+    }
     mark_watched(cur_channel(), pos, dur, st->state == TSP_ENDED);   /* 0.7.0: an episode */
 }
 
@@ -3684,7 +3784,15 @@ static void src_row(int i, ScrRow *r, void *ctx)
     r->moving = src_sorting && src_held >= 0 && sorder[src_held] == i;   /* 1.1 */
     r->name = s->name;
     r->sub = src_where(s, where, sizeof where);
-    if (s->type == SRC_DOWNLOADS) {                          /* 1.3: always first */
+    if (s->type == SRC_DEVICE) {                             /* 1.3.1 */
+        static char dvw[160];
+        r->name = T("Videos on the Vita");
+        r->sub = dev_home_line(dvw, sizeof dvw);
+        r->badge = "VITA";
+        r->badge_col = RGBA8(96, 104, 132, 255);
+        return;
+    }
+    if (s->type == SRC_DOWNLOADS) {                          /* 1.3 (1.3.1: while there is one) */
         static char dlw[160];
         r->name = T("Downloads");
         r->sub = dl_home_line(dlw, sizeof dlw);
@@ -3734,6 +3842,7 @@ static void ch_row(int i, ScrRow *r, void *ctx)
 static void draw_sources(void)
 {
     if (dl_open) { draw_downloads(); return; }               /* 1.3 */
+    if (dev_open) { draw_device(); return; }                 /* 1.3.1 */
     static const UiHint H[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_SQUARE, "Add" }, { UI_BTN_TRIANGLE, "Edit" },
                                 { UI_BTN_SEP, "" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_CIRCLE, "Quit" } };
     static const UiHint HMV[] = { { UI_BTN_UPDOWN, "Choose" }, { UI_BTN_CROSS, "Pick up" }, { UI_BTN_START, "Save" }, { UI_BTN_CIRCLE, "Back" } };
@@ -5146,7 +5255,6 @@ static void vod_card_of(const ChannelList *l, const Channel *c, ScrVodCard *k, i
 
 /* ---- 1.3: downloads (dl.h): the "Downloads" row on top of the home screen, its screen, Select > Download ---- */
 static DlItem *dlv;                         /* the downloads (dl_scan), newest first */
-static int dln;
 /* (dl_open: its screen is open, over the playlists: state stays ST_SOURCES) */
 static int dl_focus, dl_gsel, dl_gscroll, dl_isel, dl_iscroll;
 static char dl_gname[48][IPTV_NAME_MAX];    /* the groups: "Films", then each series */
@@ -5178,10 +5286,27 @@ static void dl_group_items(void)
             }
     if (dl_isel >= dl_nitems) dl_isel = dl_nitems ? dl_nitems - 1 : 0;
 }
+/* 1.3.1: the Downloads row came or went: the home screen's rows again (the playlist chosen stays chosen) */
+static void home_rows_sync(void)
+{
+    int was = state == ST_SOURCES && nsources && sel >= 0 && sel < nsources ? src_at(sel) : -1;
+    int was_type = was >= 0 ? sources[was].type : -1;
+    mylist_source_sync();
+    sort_sources();
+    if (state != ST_SOURCES || !nsources) return;
+    int now = -1;
+    if (was >= 0 && was_type != SRC_DOWNLOADS && was_type != SRC_DEVICE && was_type != SRC_MYLIST) now = was;   /* (a playlist keeps its index) */
+    for (int i = 0; i < nsources && now < 0 && was_type >= 0; i++) if (sources[i].type == was_type) now = i;
+    sel = now >= 0 ? src_disp(now) : 0;
+    if (sel >= nsources) sel = nsources - 1;
+}
+
 static void dl_refresh(void)
 {
     if (!dlv && !(dlv = malloc(sizeof(DlItem) * DL_MAX))) { dln = 0; return; }
+    int had = dln > 0;
     dln = dl_scan(dlv, DL_MAX);
+    if ((dln > 0) != had && nsources) home_rows_sync();     /* 1.3.1: the row shows only while there is a download */
     dl_ngroups = 0;
     snprintf(dl_gname[dl_ngroups++], sizeof dl_gname[0], "%s", "Films");
     dl_total_bytes = 0;
@@ -5388,11 +5513,27 @@ static void dl_play(void)
     section = SEC_LIVE;                                      /* (as a single film link: no favourites, no guide) */
     cur_src = dl_src_index();
     int k = resume_find(resume, nresume, chans.items[vi].url);
+    if (k < 0) {                                             /* 1.3.1: never played here: where it was left online */
+        const char *ou = dl_url_of(chans.items[vi].url);
+        if (ou) k = resume_find(resume, nresume, ou);
+        if (k >= 0) plog("dl: continuing where it was left online (%d s)", resume[k].pos_ms / 1000);
+    }
     film_start_ms = k >= 0 && resume_worth(resume[k].pos_ms, resume[k].dur_ms) ? resume[k].pos_ms : 0;
     return_state = ST_SOURCES;
     state = ST_PLAYING;
     plog("dl: playing %s", chans.items[vi].url);
     play_channel(vi);
+}
+
+/* 1.3.1: the address a downloaded file came from (NULL: not a download) */
+static const char *dl_url_of(const char *path)
+{
+    char p[DL_DIR_MAX + 32];
+    for (int i = 0; i < dln; i++) {
+        dl_path_of(&dlv[i], p, sizeof p);
+        if (!strcmp(p, path)) return dlv[i].url;
+    }
+    return NULL;
 }
 
 /* the sound / subtitle key of a downloaded file: the one of the stream it came from (or its series) */
@@ -5421,14 +5562,17 @@ static void dl_input(unsigned p)
     if (dl_ask) {
         const DlItem *it = dl_cur();
         if (p & SCE_CTRL_CROSS) {
-            int bad = 0;
+            int bad = 0, was_active = 0;
+            DlState ds;
+            for (int k = 0; k < dln; k++) if (dl_state(dlv[k].dir, &ds) == DL_ACTIVE && (dl_ask == 2 ? dl_in_group(&dlv[k], dl_gsel) : it && !strcmp(dlv[k].dir, it->dir))) was_active = 1;
             if (dl_ask == 1 && it) bad = dl_delete(it->dir) != 0;
             else if (dl_ask == 2)
                 for (int k = 0; k < dln; k++) if (dl_in_group(&dlv[k], dl_gsel)) bad |= dl_delete(dlv[k].dir) != 0;
-            set_status(bad, bad ? "Could not delete all of it" : "Deleted", NULL);
+            set_status(bad, bad ? "Could not delete all of it" : was_active ? "Deleted. The provider may count the stopped download as watching for a few minutes" : "Deleted", NULL);
             dl_ask = 0;
             dl_refresh();
             if (!dl_nitems) dl_focus = 0;
+            if (!dln) dl_open = 0;                           /* 1.3.1: nothing left: the row is gone too */
         } else if (p & SCE_CTRL_CIRCLE) dl_ask = 0;
         return;
     }
@@ -5455,7 +5599,12 @@ static void dl_input(unsigned p)
         DlState st;
         int s = dl_state(it->dir, &st);
         if (it->done) dl_play();
-        else if (s == DL_ACTIVE || s == DL_QUEUED) { dl_pause(it->dir); dl_refresh(); set_status(0, "Download stopped", NULL); }
+        else if (s == DL_ACTIVE || s == DL_QUEUED) {
+            dl_pause(it->dir);
+            dl_refresh();
+            /* 1.3.1: the provider may count the closed connection a while longer (the log: 405 / 512 after a stop) */
+            set_status(0, s == DL_ACTIVE ? "Download stopped. The provider may count it as watching for a few minutes" : "Download stopped", NULL);
+        }
         else if (net_offline(it->url)) set_status(1, NO_NET_MSG, NULL);
         else { dl_resume(it->dir); set_status(0, "Download goes on", NULL); }
     }
@@ -5548,6 +5697,273 @@ static int dl_queue_items(const int *cis, int n)
     status_err = 0;
     if (fr >= 0 && (uint64_t)fr < DL_RESERVE * 2) { set_status(1, "Little free space on the memory card", NULL); }
     return q;
+}
+
+/* 1.3.1: Select > Download on a single film link of the home screen */
+static int dl_queue_stream(int si)
+{
+    const Source *src = &sources[si];
+    DlItem *it = calloc(1, sizeof *it);
+    if (!it) return -1;
+    it->kind = 'F';
+    snprintf(it->title, sizeof it->title, "%s", src->name);
+    snprintf(it->url, sizeof it->url, "%s", src->url);
+    snprintf(it->source, sizeof it->source, "%s", src->name);
+    it->avkey = avpref_key(src->url);                        /* (the link's own sound / subtitle choice) */
+    int r = dl_add(it);
+    free(it);
+    dl_refresh();
+    if (r < 0) set_status(1, "Cannot write to %s", DL_ROOT);
+    else if (r == 1) set_status(0, "Already in Downloads", NULL);
+    else set_status(0, "Downloading: see Downloads on the home screen", NULL);
+    if (r >= 0 && dl_free_now >= 0 && (uint64_t)dl_free_now < DL_RESERVE * 2) set_status(1, "Little free space on the memory card", NULL);
+    return r;
+}
+
+/* ---- 1.3.1: "Videos on the Vita": the video files on the memory cards, folder by folder ---- */
+#define DEV_MAX 1000
+typedef struct { char name[128]; int dir; uint64_t size; } DevEnt;
+static DevEnt *devv;                        /* the folder open now: its folders, then its videos */
+static int devn;
+static char dev_path[512];                  /* the folder open now ("" = none) */
+static int dev_focus, dev_psel, dev_pscroll, dev_isel, dev_iscroll;
+static int dev_depth, dev_back_sel[24];     /* (the row chosen in each folder above, for going back) */
+static struct { const char *label; char path[64]; } dev_places[8];
+static int dev_nplaces;
+
+static int dev_is_video(const char *name)
+{
+    static const char *const EXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".flv" };
+    const char *dot = strrchr(name, '.');
+    for (size_t i = 0; dot && i < sizeof EXT / sizeof EXT[0]; i++) if (!strcasecmp(dot, EXT[i])) return 1;
+    return 0;
+}
+static int dev_dir_ok(const char *p)
+{
+    SceUID d = sceIoDopen(p);
+    if (d < 0) return 0;
+    sceIoDclose(d);
+    return 1;
+}
+/* the places on the left: the app's folder, the Video app's, then each memory there is */
+static void dev_find_places(void)
+{
+    static const struct { const char *label, *path; } P[] = {
+        { "VitaIPTV folder", DATA_DIR }, { "Video app", "ux0:video" }, { "Memory card (ux0:)", "ux0:" },
+        { "USB / SD card (uma0:)", "uma0:" }, { "Internal storage (imc0:)", "imc0:" }, { "xmc0:", "xmc0:" }, { "grw0:", "grw0:" },
+    };
+    dev_nplaces = 0;
+    for (size_t i = 0; i < sizeof P / sizeof P[0] && dev_nplaces < 8; i++)
+        if (dev_dir_ok(P[i].path)) {
+            dev_places[dev_nplaces].label = P[i].label;
+            snprintf(dev_places[dev_nplaces].path, sizeof dev_places[0].path, "%s", P[i].path);
+            dev_nplaces++;
+        }
+}
+/* a device's own folders that hold no videos (apps, licences, the system) stay out of its first level */
+static int dev_skip_root(const char *name)
+{
+    static const char *const S[] = { "app", "appmeta", "addcont", "license", "patch", "cache", "theme", "tai", "sce_sys", "sce_pfs",
+                                     "bgdl", "calendar", "mms", "rif", "user", "temp", "vd", "id.dat" };
+    for (size_t i = 0; i < sizeof S / sizeof S[0]; i++) if (!strcasecmp(name, S[i])) return 1;
+    return !strncasecmp(name, "sce_", 4);
+}
+static int dev_cmp(const void *a, const void *b)
+{
+    const DevEnt *x = a, *y = b;
+    if (x->dir != y->dir) return y->dir - x->dir;            /* folders first */
+    return strcasecmp(x->name, y->name);
+}
+static void dev_read(void)
+{
+    devn = 0;
+    if (!devv && !(devv = malloc(sizeof(DevEnt) * DEV_MAX))) return;
+    SceUID d = sceIoDopen(dev_path);
+    if (d < 0) { plog("device: cannot open %s (0x%08X)", dev_path, (unsigned)d); return; }
+    int root = strchr(dev_path, ':') && !strchr(dev_path, '/');
+    SceIoDirent e;
+    memset(&e, 0, sizeof e);
+    while (devn < DEV_MAX && sceIoDread(d, &e) > 0) {
+        int dir = SCE_S_ISDIR(e.d_stat.st_mode);
+        if (e.d_name[0] != '.' && (dir ? !(root && dev_skip_root(e.d_name)) : dev_is_video(e.d_name))) {
+            DevEnt *v = &devv[devn++];
+            snprintf(v->name, sizeof v->name, "%s", e.d_name);
+            v->dir = dir;
+            v->size = (uint64_t)e.d_stat.st_size;
+        }
+        memset(&e, 0, sizeof e);
+    }
+    sceIoDclose(d);
+    qsort(devv, (size_t)devn, sizeof *devv, dev_cmp);
+    if (dev_isel >= devn) dev_isel = devn ? devn - 1 : 0;
+}
+static void dev_join(char *out, size_t cap, const char *dir, const char *name)
+{
+    size_t n = strlen(dir);
+    snprintf(out, cap, "%s%s%s", dir, n && dir[n - 1] != ':' && dir[n - 1] != '/' ? "/" : "", name);
+}
+static void dev_open_place(int k)
+{
+    if (k < 0 || k >= dev_nplaces) return;
+    snprintf(dev_path, sizeof dev_path, "%s", dev_places[k].path);
+    dev_depth = 0;
+    dev_isel = dev_iscroll = 0;
+    dev_read();
+}
+
+static const char *dev_home_line(char *b, size_t cap)
+{
+    snprintf(b, cap, "%s", T("Video files on the memory card, folder by folder"));
+    return b;
+}
+
+static void dev_place_row(int i, ScrRow *r, void *ctx) { (void)ctx; r->name = T(dev_places[i].label); }
+static void dev_item_row(int i, ScrRow *r, void *ctx)
+{
+    static char rt[8][24], nm[8][140];
+    static int k;
+    (void)ctx;
+    if (i < 0 || i >= devn) return;
+    const DevEnt *v = &devv[i];
+    char *t = rt[k & 7], *n = nm[k & 7];
+    k++;
+    r->folder = v->dir;
+    if (v->dir) { r->name = v->name; return; }
+    snprintf(n, sizeof nm[0], "%s", v->name);
+    char *dot = strrchr(n, '.');
+    if (dot && dot != n) *dot = 0;                           /* (the name without .mkv; the kind on the right) */
+    r->name = n;
+    char sz[16];
+    dl_size_text(v->size, lang_get() == LANG_TR, sz, sizeof sz);
+    const char *e = strrchr(v->name, '.');
+    snprintf(t, sizeof rt[0], "%s  %s", e ? e + 1 : "", sz);
+    for (char *c = t; *c && *c != ' '; c++) if (*c >= 'a' && *c <= 'z') *c -= 32;
+    r->right = t;
+    char p[700];
+    dev_join(p, sizeof p, dev_path, v->name);
+    int q = resume_find(resume, nresume, p);                 /* (watched to the end: a tick) */
+    r->check = q >= 0 && resume[q].dur_ms > 0 && resume[q].pos_ms >= resume[q].dur_ms - 60000;
+}
+
+static void draw_device(void)
+{
+    static const UiHint HL[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_CIRCLE, "Back" } };
+    static const UiHint HD[] = { { UI_BTN_CROSS, "Open" }, { UI_BTN_CIRCLE, "Up" } };
+    static const UiHint HF[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_CIRCLE, "Up" } };
+    static char sub[600];
+    ScrDual d;
+    memset(&d, 0, sizeof d);
+    d.title = T("Videos on the Vita");
+    snprintf(sub, sizeof sub, "%s", dev_focus ? dev_path : "");
+    d.subtitle = sub;
+    d.lcount = dev_nplaces; d.lsel = dev_psel; d.lscroll = &dev_pscroll; d.lrow = dev_place_row;
+    d.rcount = devn; d.rsel = dev_isel; d.rscroll = &dev_iscroll; d.rrow = dev_item_row;
+    d.focus = dev_focus;
+    d.lmark = 1;
+    d.rempty = T("No folders or video files here");
+    if (dev_focus == 0) { d.hints = HL; d.nhints = NH(HL); }
+    else if (devn && dev_isel < devn && !devv[dev_isel].dir) { d.hints = HF; d.nhints = NH(HF); }
+    else { d.hints = HD; d.nhints = NH(HD); }
+    d.status = status[0] ? status : dev_focus == 0 ? T("Choose a place; MKV, MP4, TS and FLV files play (an .srt beside one: its subtitles)") : NULL;
+    d.status_err = status[0] ? status_err : 0;
+    scr_dual(&d);
+}
+
+/* the videos of the open folder become the channel list; the chosen one plays as a film */
+static void dev_play(void)
+{
+    if (dev_isel >= devn || devv[dev_isel].dir) return;
+    if (in_episodes) leave_episodes();
+    int nv = 0;
+    for (int k = 0; k < devn; k++) nv += !devv[k].dir;
+    channel_list_free(&chans);
+    channel_list_init(&chans);
+    chans.items = malloc(sizeof(Channel) * (size_t)nv);
+    free(vis);
+    vis = malloc(sizeof(int) * (size_t)nv);
+    if (!chans.items || !vis) { set_status(1, "No memory", NULL); nvis = 0; return; }
+    int n = 0, vi = 0;
+    for (int k = 0; k < devn; k++) {
+        if (devv[k].dir) continue;
+        Channel *c = &chans.items[n];
+        memset(c, 0, sizeof *c);
+        snprintf(c->name, sizeof c->name, "%s", devv[k].name);
+        char *dot = strrchr(c->name, '.');
+        if (dot && dot != c->name) *dot = 0;
+        dev_join(c->url, sizeof c->url, dev_path, devv[k].name);
+        snprintf(c->group, sizeof c->group, "%s", dev_path);
+        c->kind = CH_FILM;
+        if (k == dev_isel) vi = n;
+        vis[n] = n;
+        n++;
+    }
+    chans.count = chans.cap = n;
+    nvis = n;
+    fav_rank_n = nfav_ch = 0;
+    search_q[0] = search_fold[0] = 0;
+    section = SEC_LIVE;                                      /* (as a single film link: no favourites, no guide) */
+    for (int i = 0; i < nsources; i++) if (sources[i].type == SRC_DEVICE) cur_src = i;
+    int k = resume_find(resume, nresume, chans.items[vi].url);
+    film_start_ms = k >= 0 && resume_worth(resume[k].pos_ms, resume[k].dur_ms) ? resume[k].pos_ms : 0;
+    return_state = ST_SOURCES;
+    state = ST_PLAYING;
+    plog("device: playing %s", chans.items[vi].url);
+    play_channel(vi);
+}
+
+static void dev_open_screen(void)
+{
+    dev_open = 1;
+    status[0] = 0;
+    dev_find_places();
+    if (dev_psel >= dev_nplaces) dev_psel = 0;
+    if (!dev_path[0]) { dev_focus = 0; devn = 0; if (dev_nplaces) dev_open_place(dev_psel); }
+    else dev_read();                                         /* (back from the player: where it was) */
+}
+
+static void dev_input(unsigned p)
+{
+    if (p & (SCE_CTRL_UP | SCE_CTRL_DOWN | SCE_CTRL_LEFT | SCE_CTRL_RIGHT | SCE_CTRL_CROSS)) status[0] = 0;
+    if (dev_focus == 0) {
+        int k = dev_psel;
+        if ((p & SCE_CTRL_DOWN) && dev_nplaces) dev_psel = (dev_psel + 1) % dev_nplaces;
+        if ((p & SCE_CTRL_UP) && dev_nplaces) dev_psel = (dev_psel + dev_nplaces - 1) % dev_nplaces;
+        if (k != dev_psel) dev_open_place(dev_psel);
+        if (p & (SCE_CTRL_CROSS | SCE_CTRL_RIGHT)) {
+            if (!dev_path[0]) dev_open_place(dev_psel);
+            if (devn) dev_focus = 1; else set_status(0, "No folders or video files here", NULL);
+        }
+        if (p & SCE_CTRL_CIRCLE) dev_open = 0;
+        return;
+    }
+    if ((p & SCE_CTRL_DOWN) && devn) dev_isel = (dev_isel + 1) % devn;
+    if ((p & SCE_CTRL_UP) && devn) dev_isel = (dev_isel + devn - 1) % devn;
+    if (p & SCE_CTRL_RTRIGGER) { dev_isel += SCR_ROWS; if (dev_isel >= devn) dev_isel = devn ? devn - 1 : 0; }
+    if (p & SCE_CTRL_LTRIGGER) { dev_isel -= SCR_ROWS; if (dev_isel < 0) dev_isel = 0; }
+    if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_LEFT)) {             /* up a folder; above the place: back to the places */
+        if (dev_depth > 0) {
+            char *s = strrchr(dev_path, '/');
+            if (s) *s = 0;
+            else { char *c = strchr(dev_path, ':'); if (c) c[1] = 0; }
+            dev_depth--;
+            dev_isel = dev_back_sel[dev_depth < 24 ? dev_depth : 23];
+            dev_iscroll = 0;
+            dev_read();
+        } else dev_focus = 0;
+        return;
+    }
+    if ((p & SCE_CTRL_CROSS) && devn && dev_isel < devn) {
+        if (devv[dev_isel].dir) {
+            char np[sizeof dev_path];
+            dev_join(np, sizeof np, dev_path, devv[dev_isel].name);
+            if (strlen(np) >= sizeof dev_path - 2) return;
+            if (dev_depth < 24) dev_back_sel[dev_depth] = dev_isel;
+            dev_depth++;
+            snprintf(dev_path, sizeof dev_path, "%s", np);
+            dev_isel = dev_iscroll = 0;
+            dev_read();
+        } else dev_play();
+    }
 }
 
 /* ---- film details (Triangle on a film) ---- */
@@ -5928,9 +6344,9 @@ int main(void)
     load_favorites();                                        /* (before the playlists: they are sorted by it) */
     plog("avpref: %d streams with a chosen sound / subtitles", avpref_load(&avprefs, AVPREF_FILE));   /* 1.3 */
     load_mylist();                                           /* 1.1 (its row among the playlists) */
-    load_sources();
     dl_init(DL_ROOT);                                        /* 1.3: the downloads (none starts by itself) */
-    dl_refresh();
+    dl_refresh();                                            /* (1.3.1: before the playlists: is there a Downloads row?) */
+    load_sources();
     plog("dl: %d downloads, %lld MB free", dln, dl_free_now >= 0 ? dl_free_now >> 20 : -1);
     while (now_ms() - t0 < 1500) splash_frame(T("Loading playlists..."));   /* let the logo be seen */
     if (splash_img) { vita2d_wait_rendering_done(); vita2d_free_texture(splash_img); splash_img = NULL; }
@@ -6071,10 +6487,14 @@ int main(void)
             int ek = state == ST_CHANNELS ? edit_possible() : 0;
             int my_ci = state == ST_CHANNELS && section == SEC_LIVE && !in_episodes && focus == 1 && nvis > 0 && sel < nvis &&
                         chans.items[vis[sel]].kind == CH_LIVE && cur_src >= 0 && cur_src < nsources && sources[cur_src].type != SRC_STREAM ? vis[sel] : -1;
+            /* 1.3.1: a single film link on the home screen: Download */
+            int dl_si = state == ST_SOURCES && nsources && sources[src_at(sel)].type == SRC_STREAM && !sources[src_at(sel)].auto_added &&
+                        iptv_is_film_url(sources[src_at(sel)].url) && !iptv_is_local_path(sources[src_at(sel)].url) ? src_at(sel) : -1;
             if (state == ST_SOURCES) {
+                if (dl_si >= 0) { acts[mn] = MI_DL; labels[mn++] = T("Download"); }
                 acts[mn] = MI_ADD; labels[mn++] = T("Add playlist");
                 int movable = 0;
-                for (int i = 0; i < nsources; i++) movable += !src_virtual(i);
+                for (int i = 0; i < nsources; i++) movable += sources[i].type != SRC_MYLIST;   /* (1.3.1: also the fixed rows) */
                 if (movable > 1) { acts[mn] = MI_SORT; labels[mn++] = T("Reorder playlists"); }
                 acts[mn] = MI_RELOAD; labels[mn++] = T("Reload playlists");
             } else {
@@ -6126,7 +6546,7 @@ int main(void)
                                : r == -2 ? "My List is full" : "Could not change My List", NULL);
                     break;
                 }
-                case MI_DL: dl_queue_items(&dl_ci, 1); break;   /* 1.3 */
+                case MI_DL: if (dl_si >= 0) dl_queue_stream(dl_si); else dl_queue_items(&dl_ci, 1); break;   /* 1.3 */
                 case MI_DL_SEASON: {
                     int *cis = malloc(sizeof(int) * (size_t)nvis), n = 0;
                     for (int k = 0; cis && k < nvis; k++) if (chans.items[vis[k]].kind == CH_FILM) cis[n++] = vis[k];
@@ -6168,6 +6588,7 @@ int main(void)
         }
         else if (state == ST_SOURCES) {
             if (dl_open) dl_input(p);                        /* 1.3: the downloads */
+            else if (dev_open) dev_input(p);                 /* 1.3.1: Videos on the Vita */
             else if (src_sorting) src_sort_input(p);         /* 1.1: Select > Reorder playlists */
             else if (quit_ask) {                             /* 1.1: "Quit Vita IPTV?" */
                 if (p & SCE_CTRL_CROSS) { quit_ask = 0; quit = 1; }
@@ -6188,10 +6609,12 @@ int main(void)
                 if ((p & SCE_CTRL_TRIANGLE) && nsources) {      /* edit (deleting is at the end of the form) */
                     if (sources[src_at(sel)].type == SRC_MYLIST) set_status(0, "My List: Select > Add to My List on a channel; Select > Remove from My List in it", NULL);
                     else if (sources[src_at(sel)].type == SRC_DOWNLOADS) set_status(0, "Downloads: open it (X); Triangle in it deletes", NULL);   /* 1.3 */
+                    else if (sources[src_at(sel)].type == SRC_DEVICE) set_status(0, "Videos on the Vita: open it (X) and choose a folder", NULL);   /* 1.3.1 */
                     else if (sources[src_at(sel)].auto_added) set_status(0, "This entry is a file in ux0:data/VitaIPTV (delete or rename it there)", NULL);
                     else open_source_form(src_at(sel));
                 }
                 if ((p & SCE_CTRL_CROSS) && nsources && sources[src_at(sel)].type == SRC_DOWNLOADS) dl_open_screen();   /* 1.3 */
+                else if ((p & SCE_CTRL_CROSS) && nsources && sources[src_at(sel)].type == SRC_DEVICE) dev_open_screen();   /* 1.3.1 */
                 else if ((p & SCE_CTRL_CROSS) && nsources) {
                     const Source *s = &sources[src_at(sel)];
                     cur_src = src_at(sel);

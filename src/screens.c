@@ -666,6 +666,13 @@ static void list_area(int x0, int w, int count, int sel, int *scroll, ScrRowFn f
         }
         if (row.fav) { ui_star(x + 8, y + ROW_H / 2, 8, UI_FAV); x += 22; }   /* 0.5.0: a favourite */
         if (row.check) { ui_check(x + 8, y + ROW_H / 2, 8, RGBA8(64, 226, 160, 255)); x += 24; }   /* 0.7.0: watched */
+        if (row.folder) {                                    /* 1.3.1: a folder: a tab and a body */
+            unsigned fc = RGBA8(232, 184, 82, 255);
+            int fy = y + ROW_H / 2 - 7;
+            ui_round_rect(x, fy, 8, 5, 2, fc);
+            ui_round_rect(x, fy + 3, 18, 12, 2, fc);
+            x += 28;
+        }
         ui_text_fit(x, y + 26, (focused || is_sel) ? UI_TEXT : RGBA8(190, 194, 210, 255), LIST_FS, row.name, x0 + w - 28 - rw - x);
     }
     ui_scrollbar(x0 + w - 8, LIST_Y + 2, SCR_ROWS * ROW_H - 4, *scroll, SCR_ROWS, count);

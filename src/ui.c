@@ -307,11 +307,11 @@ static void thick_line(float x0, float y0, float x1, float y1, unsigned col)
     vita2d_draw_line(x0, y0 - 1, x1, y1 - 1, col);
 }
 
-#define PILL_H 20                              /* 1.3: the Start / Select / L / R pill */
-#define PILL_SC 0.72f                          /* its text, about 11 px */
+#define PILL_H 24                              /* 1.3.1: the Start / Select / L / R pill (1.3: 20, the text touched it) */
+#define PILL_SC 0.74f                          /* its text, about 11 px */
 static int pill_w(const char *t)
 {
-    int w = ui_text_w(PILL_SC, t) + 15;                     /* (1 px more for the bold pass) */
+    int w = ui_text_w(PILL_SC, t) + 22;                     /* 1.3.1: 11 px each side (and 1 for the bold pass) */
     return w < PILL_H + 6 ? PILL_H + 6 : w;
 }
 
@@ -383,7 +383,7 @@ int ui_button(int x, int cy, int btn)
         ui_round_rect(x, cy - h / 2, w, h, h / 2, frame);
         ui_round_rect(x + 2, cy - h / 2 + 2, w - 4, h - 4, h / 2 - 2, UI_PANEL);
         int tw = ui_text_w(PILL_SC, t);
-        int tx = x + (w - tw) / 2, ty = cy + 4;
+        int tx = x + (w - tw) / 2, ty = cy + 5;
         ui_text(tx, ty, frame, PILL_SC, t);
         ui_text(tx + 1, ty, frame, PILL_SC, t);             /* second pass: bold */
         return w;
@@ -430,14 +430,10 @@ void ui_footer(const UiHint *hints_in, int n_in, const char *status, int status_
 void ui_footer_lines(const UiHint *hints_in, int n_in, const char *status, int status_err, int max_lines)
 {
     UiHint hints[20];
-    int n = 0, left = 0, rank[20], quit_right = 0;
-    /* 1.3: O after the caller's own separator stays on the right, last (the home's "Quit", a thin line before
-     * the right part); everywhere else O ("Back") is the last on the left as before */
-    int after_sep = 0;
+    int n = 0, left = 0, rank[20];
+    /* 1.3.1: X, Square, Triangle, O on the left; L / R, START, SELECT on the right (1.3 put the home's O right) */
     for (int i = 0; i < n_in && i < 20; i++) {
-        if (hints_in[i].btn == UI_BTN_SEP) after_sep = 1;
         rank[i] = hint_rank(hints_in[i].btn);
-        if (after_sep && hints_in[i].btn == UI_BTN_CIRCLE) { rank[i] = 105; quit_right = 1; }
     }
     for (int pass = 0; pass < 2; pass++)                     /* the left ones, a separator, the right ones */
         for (int r = pass ? 100 : 0; r < (pass ? 200 : 100); r++)
@@ -492,7 +488,6 @@ void ui_footer_lines(const UiHint *hints_in, int n_in, const char *status, int s
     if (sep >= n) return;
     int rx = 944 - (wr - gap);
     if (rx < x + 4) rx = x + 4;                              /* (the right part moves over when the left is long) */
-    if (quit_right && rx - 16 > x) vita2d_draw_rectangle((float)(rx - 16), (float)(cy - 12), 1, 24, UI_LINE);
     for (int i = sep + 1; i < n; i++) {
         const char *label = ui_title(T(hints[i].label), tb, sizeof tb);
         int need = button_w(hints[i].btn) + pad + ui_text_w(sc, label);

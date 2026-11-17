@@ -48,7 +48,8 @@ typedef enum {
     SRC_STREAM,    /* single direct stream link, played immediately   */
     SRC_M3U_FILE,  /* local M3U file on the Vita memory card          */
     SRC_MYLIST,    /* 1.1: "My List", live channels gathered from the other playlists (mylist.h); never saved */
-    SRC_DOWNLOADS  /* 1.3: "Downloads" (dl.h), always first on the home screen; never saved */
+    SRC_DOWNLOADS, /* 1.3: "Downloads" (dl.h); 1.3.1: shown while there is one, can be moved; never saved */
+    SRC_DEVICE     /* 1.3.1: "Videos on the Vita": the video files on the memory cards, folder by folder */
 } SourceType;
 
 typedef struct {

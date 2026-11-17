@@ -16,6 +16,20 @@ static const Pair FIXED[] = {
     { "Clear speech (5.1)", "Konuşma netleştirme (5.1)" },
     { "Same volume on every channel", "Kanallar arası ses eşitleme" },
     { "Sound field", "Ses alanı" }, { "Speakers", "Hoparlör" }, { "Headphones", "Kulaklık" }, { "Auto", "Otomatik" },   /* 1.3 */
+    /* 1.3.1: Videos on the Vita; downloads */
+    { "Videos on the Vita", "Vita'daki Videolar" },
+    { "Video files on the memory card, folder by folder", "Hafıza kartındaki video dosyaları, klasör klasör" },
+    { "VitaIPTV folder", "VitaIPTV klasörü" }, { "Video app", "Video uygulaması" },
+    { "Memory card (ux0:)", "Hafıza kartı (ux0:)" }, { "USB / SD card (uma0:)", "USB / SD kart (uma0:)" },
+    { "Internal storage (imc0:)", "Dahili bellek (imc0:)" }, { "Up", "Üst klasör" },
+    { "No folders or video files here", "Burada klasör ya da video dosyası yok" },
+    { "Choose a place; MKV, MP4, TS and FLV files play (an .srt beside one: its subtitles)",
+      "Bir yer seçin; MKV, MP4, TS ve FLV dosyaları oynar (yanındaki .srt altyazı olur)" },
+    { "Videos on the Vita: open it (X) and choose a folder", "Vita'daki Videolar: X ile açıp bir klasör seçin" },
+    { "Download stopped. The provider may count it as watching for a few minutes",
+      "İndirme durduruldu. Sağlayıcı bunu birkaç dakika daha izleme sayabilir" },
+    { "Deleted. The provider may count the stopped download as watching for a few minutes",
+      "Silindi. Sağlayıcı durdurulan indirmeyi birkaç dakika daha izleme sayabilir" },
     /* 1.3: sound and subtitles per stream; films on the memory card; downloads */
     { "Downloads", "İndirilenler" }, { "Download", "İndir" }, { "Download this season", "Bu sezonu indir" },
     { "Download every episode", "Tüm bölümleri indir" },

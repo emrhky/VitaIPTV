@@ -17,6 +17,7 @@
 #include <psp2/io/stat.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/devctl.h>
+#include <psp2/appmgr.h>
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -25,7 +26,7 @@
 #include <unistd.h>
 #endif
 
-#define WBUF        (512 * 1024)        /* written to the card in pieces this big */
+#define WBUF        (1024 * 1024)       /* written to the card in pieces this big (1.3.1: 1 MB, two of them) */
 #define SPACE_EVERY (32ull * 1024 * 1024)
 #define QMAX        64
 
@@ -130,10 +131,18 @@ long long dl_free_bytes(void)
     if (!g_root[n] || n + 2 > sizeof dev) return -1;
     memcpy(dev, g_root, n + 1);
     dev[n + 1] = 0;
+    /* 1.3.1: the app manager's call (a safe homebrew may use it; sceIoDevctl 0x3001, as VitaShell reads it,
+     * answered an error on the device: "-1 MB free"), the devctl only when it fails */
+    uint64_t mx = 0, fr = 0;
+    int r = sceAppMgrGetDevInfo(dev, &mx, &fr);
+    if (r >= 0 && mx) return (long long)fr;
     SceIoDevInfo info;
     memset(&info, 0, sizeof info);
-    if (sceIoDevctl(dev, 0x3001, NULL, 0, &info, sizeof info) < 0) return -1;   /* (as VitaShell reads it) */
-    return (long long)info.free_size;
+    int r2 = sceIoDevctl(dev, 0x3001, NULL, 0, &info, sizeof info);
+    if (r2 >= 0 && info.max_size) return (long long)info.free_size;
+    static int told;
+    if (!told) { told = 1; plog("dl: free space of %s cannot be read (app manager 0x%08X, devctl 0x%08X)", dev, (unsigned)r, (unsigned)r2); }
+    return -1;
 #else
     const char *env = getenv("DL_TEST_FREE");               /* (tests: a small card) */
     if (env) return atoll(env);
@@ -256,7 +265,7 @@ void dl_folder_name(char kind, uint32_t key, const char *title, char *out, size_
         if (!o || (o == '_' && (n == 0 || nm[n - 1] == '_'))) continue;
         nm[n++] = o;
     }
-    while (n && nm[n - 1] == '_') n--;
+    while (n && (nm[n - 1] == '_' || nm[n - 1] == '-')) n--;   /* (1.3.1: "..._TR_-" cut at 40: without the dash) */
     nm[n] = 0;
     snprintf(out, cap, "%c_%08x%s%s", kind == 'E' ? 'E' : 'F', (unsigned)key, n ? "_" : "", nm);
 }
@@ -330,10 +339,10 @@ static void fail_clear(const char *dir)
 typedef struct {
     int fd;
     const char *path;
-    uint8_t *buf;
+    uint8_t *buf, *buf2;                /* (1.3.1: filling, and the other one) */
     size_t n;
     uint64_t have, total, from;         /* from: where this request started */
-    uint64_t next_space;
+    uint64_t next_space, next_log;
     int *status;
     int restarted, werr, nospace;
     uint64_t *tot;                      /* (curlio: the whole file's size, known before the first data) */
@@ -345,17 +354,107 @@ typedef struct {
     char dir[DL_DIR_MAX];
 } Job;
 
+/* 1.3.1: the card is written by a thread of its own: while one buffer is written the other one fills from the
+ * network (the receiving does not wait for the card) */
+static struct {
+    SceUID lock, tid;
+    int fd;
+    uint8_t *buf;                       /* being written (busy) */
+    size_t n;
+    int busy, err, quit;
+} g_w = { -1, -1, -1, NULL, 0, 0, 0, 0 };
+
+static int writer_thread(SceSize args, void *argp)
+{
+    (void)args; (void)argp;
+    for (;;) {
+        sceKernelLockMutex(g_w.lock, 1, NULL);
+        int busy = g_w.busy, quit = g_w.quit, fd = g_w.fd;
+        uint8_t *b = g_w.buf;
+        size_t n = g_w.n;
+        sceKernelUnlockMutex(g_w.lock, 1);
+        if (!busy) {
+            if (quit) break;
+            sceKernelDelayThread(1000);
+            continue;
+        }
+        int bad = 0;
+        size_t o = 0;
+        while (o < n) {
+            int w = f_write(fd, b + o, n - o);
+            if (w <= 0) { bad = 1; break; }
+            o += (size_t)w;
+        }
+        sceKernelLockMutex(g_w.lock, 1, NULL);
+        if (bad) g_w.err = 1;
+        g_w.busy = 0;
+        sceKernelUnlockMutex(g_w.lock, 1);
+    }
+    return 0;
+}
+
+static int writer_start(void)
+{
+    if (g_w.lock < 0 && (g_w.lock = sceKernelCreateMutex("dl_w", 0, 0, NULL)) < 0) return -1;
+    g_w.busy = g_w.err = g_w.quit = 0;
+    g_w.fd = -1;
+    g_w.tid = sceKernelCreateThread("download_w", writer_thread, 0x10000120, 16 * 1024, 0, 0, NULL);
+    if (g_w.tid < 0) return -1;
+    sceKernelStartThread(g_w.tid, 0, NULL);
+    return 0;
+}
+static void writer_wait(void)                       /* until the buffer being written is on the card */
+{
+    for (;;) {
+        sceKernelLockMutex(g_w.lock, 1, NULL);
+        int busy = g_w.busy;
+        sceKernelUnlockMutex(g_w.lock, 1);
+        if (!busy) return;
+        sceKernelDelayThread(1000);
+    }
+}
+static void writer_stop(void)
+{
+    if (g_w.tid < 0) return;
+    writer_wait();
+    sceKernelLockMutex(g_w.lock, 1, NULL);
+    g_w.quit = 1;
+    sceKernelUnlockMutex(g_w.lock, 1);
+    sceKernelWaitThreadEnd(g_w.tid, NULL, NULL);
+    sceKernelDeleteThread(g_w.tid);
+    g_w.tid = -1;
+}
+
+/* hands the full buffer to the writer and goes on with the other one (written before, see writer_wait) */
 static int flush_job(Job *j)
 {
-    size_t o = 0;
-    while (o < j->n) {
-        int w = f_write(j->fd, j->buf + o, j->n - o);
-        if (w <= 0) { j->werr = 1; return -1; }
-        o += (size_t)w;
+    if (!j->n) return 0;
+    writer_wait();
+    sceKernelLockMutex(g_w.lock, 1, NULL);
+    int err = g_w.err;
+    if (!err) {
+        g_w.fd = j->fd;
+        g_w.buf = j->buf;
+        g_w.n = j->n;
+        g_w.busy = 1;
     }
+    sceKernelUnlockMutex(g_w.lock, 1);
+    if (err) { j->werr = 1; return -1; }
+    uint8_t *t = j->buf;
+    j->buf = j->buf2;
+    j->buf2 = t;
     j->have += j->n;
     j->n = 0;
     return 0;
+}
+static int finish_job(Job *j)                       /* the rest, and all of it on the card */
+{
+    int r = flush_job(j);
+    writer_wait();
+    sceKernelLockMutex(g_w.lock, 1, NULL);
+    if (g_w.err) { j->werr = 1; r = -1; }
+    sceKernelUnlockMutex(g_w.lock, 1);
+    return r;
 }
 
 static int job_data(void *ctx, const uint8_t *d, size_t len)
@@ -365,6 +464,7 @@ static int job_data(void *ctx, const uint8_t *d, size_t len)
     if (*j->status >= 400) return 1;
     if (*j->status == 200 && j->from > 0 && !j->restarted) {   /* the whole file came instead of the rest: from the start */
         j->restarted = 1;
+        writer_wait();                                       /* (1.3.1: nothing of the old file still being written) */
         f_close(j->fd);
         j->fd = f_open_append(j->path, 1);
         if (j->fd < 0) { j->werr = 1; return 1; }
@@ -395,6 +495,11 @@ static int job_data(void *ctx, const uint8_t *d, size_t len)
     }
     unsigned long long t = now_ms_dl();
     uint64_t h = j->have + j->n;
+    if (h >= j->next_log) {                                  /* 1.3.1: how it goes, every 256 MB (log) */
+        if (j->next_log) plog("dl: %llu of %llu MB, %.2f MB/s now", (unsigned long long)(h >> 20), (unsigned long long)(j->it->size >> 20),
+                              (double)g_cur_st.bps / 1048576.0);
+        j->next_log = (h / (256ull << 20) + 1) * (256ull << 20);
+    }
     lock();
     g_cur_st.have = h;
     if (t - j->t_last >= 1500) {
@@ -438,11 +543,41 @@ static void get_poster(const DlItem *it)
     free(m.b);
 }
 
+/* 1.3.1: a subtitle file beside the video on the server ("…/123.mkv" -> "…/123.srt"), if there is one */
+static void get_srt(const DlItem *it, const char *url, const char *ua, const char *ref)
+{
+    char p[DL_DIR_MAX + 16], su[DL_URL_MAX];
+    snprintf(p, sizeof p, "%s/video.srt", it->dir);
+    if (f_size(p) > 0) return;
+    size_t n = strcspn(url, "?#");
+    const char *dot = NULL;
+    for (size_t i = n; i > 0 && url[i - 1] != '/'; i--) if (url[i - 1] == '.') { dot = url + i - 1; break; }
+    if (!dot || n - (size_t)(dot - url) > 6) return;
+    char vn[24];
+    dl_video_name(url, vn, sizeof vn);
+    if (!strcmp(vn, "video.mkv") && strncasecmp(dot, ".mkv", 4)) return;   /* (not a video file's address) */
+    snprintf(su, sizeof su, "%.*s.srt%s", (int)(dot - url), url, url + n);
+    MemBuf m = { malloc(4 * 1024 * 1024), 0, 4 * 1024 * 1024 };
+    if (!m.b) return;
+    CioRequest rq = { su, NULL, NULL, 10, 15, mem_cb, job_stop, &m };
+    rq.ua = ua; rq.referer = ref;
+    int st = 0;
+    char e[96];
+    int r = cio_get(&rq, &st, e, sizeof e);
+    int ok = r >= 0 && st == 200 && m.n > 10;
+    for (size_t i = 0; ok && i + 3 <= m.n; i++) if (!memcmp(m.b + i, "-->", 3)) { ok = 2; break; }
+    if (ok == 2) {
+        int fd = f_open_append(p, 1);
+        if (fd >= 0) { int w = f_write(fd, m.b, m.n); f_close(fd); if (w != (int)m.n) f_remove(p); else plog("dl: subtitles found beside it (%u KB)", (unsigned)(m.n >> 10)); }
+    } else plog("dl: no subtitle file beside it (HTTP %d)", st);
+    free(m.b);
+}
+
 /* one download until it ends, stops or fails */
 static void run_one(const char *dir)
 {
     DlItem *it = malloc(sizeof *it);
-    uint8_t *buf = malloc(WBUF);
+    uint8_t *buf = malloc(WBUF * 2);
     if (!it || !buf || dl_info_read(it, dir) != 0) {
         free(it); free(buf);
         lock(); fail_set(dir, "The download's information cannot be read", 0, 0); unlock();
@@ -454,10 +589,17 @@ static void run_one(const char *dir)
     snprintf(vpath, sizeof vpath, "%s/%s", dir, it->video);
     char url[DL_URL_MAX], ua[256], ref[512];
     url_split_headers(it->url, url, sizeof url, ua, sizeof ua, ref, sizeof ref);
+    if (f_size(vpath) <= 0) get_srt(it, url, ua, ref);      /* 1.3.1 (once, before the film) */
     int status = 0, fails = 0, busy = 0;
     const char *err = NULL;
     int need_mb = 0, free_mb = 0;
+    long long have0 = f_size(vpath);                         /* 1.3.1: the speed of this session (log) */
+    if (have0 < 0) have0 = 0;
+    unsigned long long t0 = now_ms_dl(), tnet = 0;
+    uint64_t got = 0;
+    if (writer_start() != 0) err = "Cannot write to the memory card";
     for (;;) {
+        if (err) break;
         if (g_stop_cur || g_quit) break;
         long long have = f_size(vpath);
         if (have < 0) have = 0;
@@ -473,7 +615,7 @@ static void run_one(const char *dir)
         memset(&j, 0, sizeof j);
         j.fd = f_open_append(vpath, 0);
         if (j.fd < 0) { err = "Cannot write to the memory card"; break; }
-        j.path = vpath; j.buf = buf; j.have = j.from = (uint64_t)have; j.status = &status;
+        j.path = vpath; j.buf = buf; j.buf2 = buf + WBUF; j.have = j.from = (uint64_t)have; j.status = &status;
         j.next_space = j.have + SPACE_EVERY;
         j.t_last = now_ms_dl(); j.b_last = j.have;
         lock(); g_cur_st.have = j.have; g_cur_st.total = it->size; unlock();
@@ -484,8 +626,12 @@ static void run_one(const char *dir)
         char e[96] = "";
         status = 0;
         uint64_t before = j.have;
+        unsigned long long tq = now_ms_dl();
         int r = cio_get(&rq, &status, e, sizeof e);
-        if (!j.werr && j.n) flush_job(&j);
+        tnet += now_ms_dl() - tq;
+        got += j.have + j.n - (j.restarted ? 0 : j.from);
+        if (!j.werr) finish_job(&j);
+        else writer_wait();
         if (j.fd >= 0) f_close(j.fd);
         if (j.restarted) before = 0;
         if (j.size_new) dl_info_write(it);                  /* (the size, for the list while it is stopped) */
@@ -518,6 +664,13 @@ static void run_one(const char *dir)
         if (fails > 8) { static char eb2[128]; snprintf(eb2, sizeof eb2, "Connection lost (%s)", e[0] ? e : "no answer"); err = eb2; break; }
         plog("dl: connection lost at %llu MB (%s), again", (unsigned long long)(j.have >> 20), e[0] ? e : "-");
         for (int k = 0; k < 20 + fails * 10 && !g_stop_cur && !g_quit; k++) sceKernelDelayThread(100000);
+    }
+    writer_stop();
+    {
+        unsigned long long ms = now_ms_dl() - t0;
+        if (got > 1024 * 1024 && ms > 0)
+            plog("dl: %llu MB in %llu s: %.2f MB/s (%.2f MB/s while connected; it had %lld MB before)", (unsigned long long)(got >> 20), ms / 1000,
+                 (double)got / 1048576.0 * 1000.0 / (double)ms, tnet ? (double)got / 1048576.0 * 1000.0 / (double)tnet : 0.0, have0 >> 20);
     }
     if (it->done) {
         dl_info_write(it);
