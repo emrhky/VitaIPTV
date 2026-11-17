@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.3.1 (test)
+
+### Look
+- **Button symbols a notch bigger:** X, O, Square and Triangle 18 px high; the Start / Select / L / R pill 24 px
+  high with 11 px on each side of its text (on the Vita the text touched the frame).
+- **X, Square, Triangle, O on the left; L / R, START, SELECT on the right** everywhere (1.3.0 put the home
+  screen's O "Quit" on the right).
+
+### Videos on the Vita
+- A new row of the playlists, **Videos on the Vita**: the places on the left (the VitaIPTV folder, the Video app's
+  folder, each memory card there is), the folders and video files on the right (size, kind, a tick when watched
+  to the end). X opens a folder or plays the file as a film; O goes up. The video files of the VitaIPTV folder are
+  here now instead of "[Local]" rows (its .m3u files are still playlists).
+
+### Subtitle files (.srt)
+- Beside a film on the memory card: `Film.srt`, `Film.tr.srt`, `Film_eng.srt`... (a download: any .srt in its
+  folder), up to four, listed as "SRT" after the file's own tracks; shown by the film's time (also after a jump),
+  with the subtitle delay. UTF-8 or Windows-1254 (Turkish), tags left out; the language from the name, else from
+  Turkish letters in the text. The automatic choice (sound not in the app's language) works with them too.
+- A download asks the server for the `.srt` beside the film (`.../123.mkv` -> `.../123.srt`) and keeps it.
+
+### Downloads
+- **The free space is read on the device** (1.3.0 showed "-1 MB": the call it used is refused to a safe
+  homebrew; now `sceAppMgrGetDevInfo`): the space check before and during a download works.
+- **The Downloads row shows only while there is a download**, and it can be moved (Select > Reorder playlists);
+  its place is kept while it is hidden.
+- **Where it was left:** a download played the first time starts where the film was left online; watching it
+  saves the point for the online one too.
+- **Single film links** of the playlists can be downloaded: Select > Download on the row.
+- **Speed:** the card is written by a thread of its own (two 1 MB buffers) while the next part comes in; the log
+  tells each download's speed (and every 256 MB).
+- After stopping or deleting a running download the note says the provider may count it as watching for a few
+  minutes (the 405 / 512 answers in the log).
+- A folder name cut at 40 letters no longer ends in "-".
+
+### Player
+- A film on the memory card no longer asks for the 40 MB "network" queues, and the log no longer tells network
+  read sizes for it.
+
 ## 1.3.0 (test)
 
 ### Downloads
