@@ -256,8 +256,14 @@ int main(void)
         assert(settings_format(&sd, sdf, sizeof sdf) > 0);
         Settings se; settings_parse(sdf, &se);
         assert(se.sub_size == 3 && se.sub_color == 2 && se.sub_pos == 1 && se.sub_bg == 2 && se.theme == 3 && !strcmp(se.pin, "1234"));
-        settings_parse("sub_size=9\nsub_color=-1\nsub_pos=x\nsub_bg=3\ntheme=4\n", &se);
+        settings_parse("sub_size=9\nsub_color=-1\nsub_pos=x\nsub_bg=3\ntheme=6\n", &se);   /* 1.4: 6 colours (0..5) */
         assert(se.sub_size == 1 && se.sub_color == 0 && se.sub_pos == 0 && se.sub_bg == 0 && se.theme == 0);
+        /* 1.4: the background: kept, checked, written only when changed */
+        Settings sg; settings_defaults(&sg); assert(sg.bg == 0);
+        settings_format(&sg, sdf, sizeof sdf); assert(!strstr(sdf, "background"));
+        settings_parse("theme=5\nbackground=1\n", &sg); assert(sg.theme == 5 && sg.bg == 1);
+        settings_format(&sg, sdf, sizeof sdf); settings_parse(sdf, &se); assert(se.theme == 5 && se.bg == 1);
+        settings_parse("background=4\n", &se); assert(se.bg == 0);
         char tiny[40]; assert(settings_format(&sd, tiny, sizeof tiny) == -1);
     }
     {   /* 1.1: sound settings: off by default and not written then; kept; out of range -> off */

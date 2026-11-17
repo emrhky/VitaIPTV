@@ -600,7 +600,7 @@ int main(int argc, char **argv)
         scr_tabmenu(tabs, 4, 2, it, dz, 7, 4, T("Left / Right / X: change   O: close")); shot("s_sub_menu");
         scr_sub_style(1, 0, 0, 0);
         /* each theme: the channels, the settings, a film's details */
-        static const char *tn[4] = { "blue", "green", "purple", "orange" };
+        static const char *tn[UI_THEMES] = { "blue", "green", "purple", "orange", "teal", "pink" };
         for (int t = 0; t < UI_THEMES; t++) {
             ui_set_theme(t);
             char nmb[48];
@@ -625,6 +625,30 @@ int main(int argc, char **argv)
             preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pf); shot(nmb);
         }
         ui_set_theme(0);
+        fs[7].value = T("Blue");
+        /* 1.4: the backgrounds (with a colour each) */
+        static const char *bn[UI_BGS] = { "navy", "black", "graphite", "warm" };
+        static const int bt[UI_BGS] = { 0, 4, 2, 3 };
+        for (int b = 0; b < UI_BGS; b++) {
+            char nmb[48];
+            static int gs2, cs2;
+            ui_set_bg(b); ui_set_theme(bt[b]);
+            UiHint hr3[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_TRIANGLE, "Guide" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_CIRCLE, "Back" },
+                             { UI_BTN_SEP, "" }, { UI_BTN_LR, "Page" }, { UI_BTN_SELECT, "Menu" }, { UI_BTN_START, "Fav." } };
+            ScrDual d; memset(&d, 0, sizeof d);
+            d.title = "Ev internet - Xtream"; d.subtitle = "Ulusal"; d.right = "16 channels";
+            d.lcount = 9; d.lsel = 1; d.lscroll = &gs2; d.lrow = grp_row_pv;
+            d.rcount = 16; d.rsel = 3; d.rscroll = &cs2; d.rrow = ch_row; d.focus = 1; d.lmark = 1; d.hints = hr3; d.nhints = 8;
+            d.status = "Şimdi: Ana Haber Bülteni (19:00-20:30)";
+            snprintf(nmb, sizeof nmb, "b_%s_channels", bn[b]);
+            preview_clear(UI_BG); gs2 = cs2 = 0; scr_dual(&d); shot(nmb);
+            fs[7].value = T(ui_theme_name(bt[b]));
+            snprintf(nmb, sizeof nmb, "b_%s_settings", bn[b]);
+            preview_clear(UI_BG); scr_form(T("Settings"), NULL, fs, 13, 7, hf2, 4, NULL, 0); shot(nmb);
+            snprintf(nmb, sizeof nmb, "b_%s_menu", bn[b]);
+            preview_clear(UI_BG); scroll = 0; scr_list(&sl2); scr_menu(T("Menu"), menu, 5, 1); shot(nmb);
+        }
+        ui_set_bg(0); ui_set_theme(0);
         fs[7].value = T("Blue");
     }
     /* 0.4.1: the button bars, left and right */
