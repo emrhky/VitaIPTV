@@ -298,23 +298,58 @@ int ia_query(const char *addr, char *q, size_t cap, char *id, size_t idcap)
     return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
-int ia_query_words(const char *addr, const char *words, int all, char *q, size_t cap, char *id, size_t idcap)
+/* 1.5.2: the words as a query: in the title as word beginnings ("odys" finds "Odyssey"), in the title as whole words,
+ * or in every field (the description, the subjects...) */
+static int ia_words_query(const char *words, int field, char *out, size_t cap)
 {
     char w[160];
-    snprintf(w, sizeof w, "%s", words ? words : "");
+    snprintf(w, sizeof w, "%s", words);
+    for (char *p = w; *p; p++) {                             /* (words, not query syntax) */
+        unsigned char c = (unsigned char)*p;
+        if (strchr("()\"':*?\\/[]{}^~!+-&|<>=,;", c)) *p = ' ';
+        else if (c >= 'A' && c <= 'Z') *p = (char)(c - 'A' + 'a');   /* (the index keeps small letters) */
+    }
     trim(w);
-    for (char *p = w; *p; p++) if (*p == '(' || *p == ')' || *p == '"' || *p == ':') *p = ' ';   /* (words, not query syntax) */
-    if (!w[0]) return ia_query(addr, q, cap, id, idcap);
+    if (!w[0]) return -1;
+    if (field == IA_IN_ALL) {
+        int n = snprintf(out, cap, "(%s)", w);
+        return n > 0 && (size_t)n < cap ? 0 : -1;
+    }
+    size_t o = 0;
+    int nw = 0;
+    out[0] = 0;
+    for (char *t = strtok(w, " \t"); t && nw < 8; t = strtok(NULL, " \t")) {
+        int pre = field == IA_IN_TITLE_START && strlen(t) >= 2;   /* (one letter: a word of its own) */
+        int n = snprintf(out + o, cap - o, "%stitle:(%s%s)", nw ? " AND " : "", t, pre ? "*" : "");
+        if (n < 0 || (size_t)n >= cap - o) return -1;
+        o += (size_t)n;
+        nw++;
+    }
+    if (!nw) return -1;
+    if (nw > 1) {                                            /* "(title:(a*) AND title:(b*))" */
+        if (o + 3 > cap) return -1;
+        memmove(out + 1, out, o + 1);
+        out[0] = '(';
+        out[o + 1] = ')';
+        out[o + 2] = 0;
+    }
+    return 0;
+}
+
+int ia_query_words(const char *addr, const char *words, int all, int field, char *q, size_t cap, char *id, size_t idcap)
+{
+    char w[400];
+    if (!words || ia_words_query(words, field, w, sizeof w) != 0) return ia_query(addr, q, cap, id, idcap);
     if (all || ia_query(addr, q, cap, id, idcap) != 0) {
         id[0] = 0;
-        int n = snprintf(q, cap, "(%s) AND mediatype:(movies)", w);
+        int n = snprintf(q, cap, "%s AND mediatype:(movies)", w);
         return n > 0 && (size_t)n < cap ? 0 : -1;
     }
     char base[IPTV_URL_MAX + 64];
     snprintf(base, sizeof base, "%s", q);                    /* "(collection:(x)) AND mediatype:(movies)" */
     char *m = strstr(base, " AND mediatype:(movies)");
     if (m) *m = 0;
-    int n = snprintf(q, cap, "%s AND (%s) AND mediatype:(movies)", base, w);
+    int n = snprintf(q, cap, "%s AND %s AND mediatype:(movies)", base, w);
     id[0] = 0;                                               /* (not an item of that name: a search) */
     return n > 0 && (size_t)n < cap ? 0 : -1;
 }

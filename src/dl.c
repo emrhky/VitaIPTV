@@ -518,6 +518,15 @@ static int job_stop(void *ctx) { (void)ctx; return g_stop_cur || g_quit; }
 
 static volatile unsigned long long g_stream_end_ms;    /* 1.4.1: when a stream of the app ended (0 = not yet) */
 void dl_note_stream_end(void) { g_stream_end_ms = now_ms_dl(); }
+static int (*volatile g_net_up)(void);
+static volatile int g_asleep;
+void dl_set_net_check(int (*up)(void)) { g_net_up = up; }
+void dl_set_asleep(int on) { g_asleep = on; }
+static int net_down(void)
+{
+    int (*up)(void) = g_net_up;
+    return g_asleep || (up && !up());
+}
 /* the account is still counted on another connection: asked again in 5 s (three times). 1.4.1: 405 only for a
  * minute after a stream ended; other times the server does not give the file (no use asking again) */
 static int busy_http(int st)
@@ -689,6 +698,18 @@ static void run_one(const char *dir)
             if (!it->size) it->size = j.have;
             it->done = 1;
             break;
+        }
+        if (net_down()) {                                    /* 1.5.2: no network (Wi-Fi off, asleep): not a failure */
+            unsigned long long tw = now_ms_dl();
+            plog("dl: no network at %llu MB: waiting for it", (unsigned long long)(j.have >> 20));
+            lock(); g_cur_st.netwait = 1; g_cur_st.bps = 0; unlock();
+            while (net_down() && !g_stop_cur && !g_quit) sceKernelDelayThread(250000);
+            lock(); g_cur_st.netwait = 0; unlock();
+            if (g_stop_cur || g_quit) break;
+            plog("dl: the network is back after %llu s: on from %llu MB", (now_ms_dl() - tw) / 1000, (unsigned long long)(j.have >> 20));
+            for (int k = 0; k < 20 && !g_stop_cur && !g_quit; k++) sceKernelDelayThread(100000);   /* (2 s: settled) */
+            fails = 0;
+            continue;
         }
         fails = j.have - before > 256 * 1024 ? 0 : fails + 1;  /* a lost connection: on from where it stopped */
         if (fails > 8) { static char eb2[128]; snprintf(eb2, sizeof eb2, "Connection lost (%s)", e[0] ? e : "no answer"); err = eb2; break; }

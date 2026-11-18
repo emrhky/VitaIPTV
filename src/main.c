@@ -101,6 +101,7 @@ static int sel, scroll;
 static int play_vis;                /* index into vis of the channel being played */
 static char status[200];
 static int status_err;
+static int status_keep, status_gen;          /* 1.5.2: the next note stays (until a button / another note); notes given */
 static char search_q[96], search_fold[192];   /* channel search (empty = off) */
 static int cur_src;                          /* source whose channels are listed */
 static Settings settings;
@@ -174,6 +175,7 @@ static int dl_growing_pct(const char *path);
 static int dl_unfinished_idle(void);
 enum { DL_HOLD_LIST = 1, DL_HOLD_STREAM = 2 };
 static void dl_hold_for(const char *url, int kind);
+static const char *foot_line(int *err);      /* 1.5.2: the line under the lists: a note, else the download */
 static void dl_hold_end(int kind);
 static const char *dl_local_for(const char *url, int *growing);
 static void dl_stream_ended(void);
@@ -239,6 +241,35 @@ static void set_status(int err, const char *fmt, const char *a)
 {
     snprintf(status, sizeof status, T(fmt), a ? T_msg(a) : "");
     status_err = err;
+    status_gen++;
+}
+/* 1.5.2: a note that tells how to go on (a mode: reordering; the first playlist): it stays */
+static void set_status_keep(const char *fmt)
+{
+    set_status(0, fmt, NULL);
+    status_keep = 1;
+}
+/* 1.5.2: every frame: a note goes by itself after its time (1.5.1: it stayed until a button was pressed). 4 s, an
+ * error 6 s, a long one 2 s more (about 15 letters a second). A new note (or the same one again) starts its time. */
+#define NOTE_MS     4000
+#define NOTE_ERR_MS 6000
+static void status_tick(void)
+{
+    static char seen[sizeof status];
+    static int seen_gen;
+    static unsigned until;
+    if (!status[0]) { seen[0] = 0; status_keep = 0; return; }
+    unsigned now = now_ms();
+    if (strcmp(status, seen) || status_gen != seen_gen) {
+        snprintf(seen, sizeof seen, "%s", status);
+        seen_gen = status_gen;
+        until = status_keep ? 0 : (now + (status_err ? NOTE_ERR_MS : NOTE_MS) + (strlen(status) > 60 ? 2000 : 0)) | 1;
+        status_keep = 0;
+    } else if (until && (int)(now - until) >= 0) {
+        status[0] = 0;
+        seen[0] = 0;
+        until = 0;
+    }
 }
 
 /* ---- networking -------------------------------------------------------- */
@@ -882,7 +913,7 @@ static int src_fixed(int d) { return d >= 0 && d < nsources && sources[sorder[d]
 
 static void src_sort_status(void)
 {
-    set_status(0, src_held >= 0 ? "Up / down moves the playlist, X puts it down" : "X picks a playlist up, START saves the order", NULL);
+    set_status_keep(src_held >= 0 ? "Up / down moves the playlist, X puts it down" : "X picks a playlist up, START saves the order");
 }
 
 static void src_sort_begin(void)
@@ -1109,7 +1140,7 @@ static void load_sources(void)
                   "# .m3u files copied into ux0:data/VitaIPTV/ also appear automatically.\n", f);
             fclose(f);
         }
-        set_status(0, "Press Square to add your first playlist.", NULL);
+        set_status_keep("Press Square to add your first playlist.");
         nsources = 0;
         add_local_files();
         mylist_source_sync();                                /* 1.1 */
@@ -1122,7 +1153,7 @@ static void load_sources(void)
     load_order();                                            /* 1.1 */
     add_local_files();
     mylist_source_sync();                                    /* 1.1 */
-    if (src_real_count() == 0) set_status(0, "Press Square to add your first playlist.", NULL);
+    if (src_real_count() == 0) set_status_keep("Press Square to add your first playlist.");
     else status[0] = 0;
     sort_sources();
     sel = scroll = 0;
@@ -1297,7 +1328,7 @@ static void edit_free_saved(void)
 
 static void edit_status(void)
 {
-    set_status(0, move_ci >= 0 ? "Up / down moves the channel, X puts it down" : "X picks a channel up, START saves the order", NULL);
+    set_status_keep(move_ci >= 0 ? "Up / down moves the channel, X puts it down" : "X picks a channel up, START saves the order");
 }
 
 /* kind 1: the favourites ("Favorites" category); 2: My List (its order is mylist.txt's) */
@@ -1820,17 +1851,17 @@ static ChannelList ia_keep;                 /* the list before a search / the ne
 static int ia_keep_on;
 static const char *const IA_SORT_NAMES[IA_SORTS] = { "Most watched", "Newest added", "Year (newest first)", "Title (A-Z)" };
 
+static int ia_field;                        /* 1.5.2: where the words were found (IA_IN_*): the next pages search there */
+
 static int load_archive(const Source *s, ChannelList *out, char *err, size_t errsz, char *note, size_t notesz)
 {
-    char q[IPTV_URL_MAX + 256], id[96], url[IPTV_URL_MAX * 4], grp[IPTV_NAME_MAX];
+    char q[IPTV_URL_MAX + 512], id[96], url[IPTV_URL_MAX * 4], grp[IPTV_NAME_MAX];
     if (!ia_from_list) { ia_words[0] = 0; ia_all = 0; ia_page = 1; ia_append = 0; }   /* (opened from the playlists: from the start) */
     ia_from_list = 0;
-    if (ia_query_words(s->url, ia_words, ia_all, q, sizeof q, id, sizeof id) != 0) {
+    if (ia_query_words(s->url, ia_words, ia_all, IA_IN_ALL, q, sizeof q, id, sizeof id) != 0) {
         snprintf(err, errsz, "Not an archive.org address (or words to search for)");
         return -1;
     }
-    if (ia_words[0]) snprintf(grp, sizeof grp, "%s: %.60s", T("Search"), ia_words);
-    else snprintf(grp, sizeof grp, "%s", s->name);
     ia_cache_load(IA_FILE);
     if (ia_append && ia_keep_on) {                           /* the next page: the films shown so far first */
         for (int i = 0; i < ia_keep.count; i++) {
@@ -1842,23 +1873,42 @@ static int load_archive(const Source *s, ChannelList *out, char *err, size_t err
         }
         ia_sel_after = out->count;
     } else ia_page = 1;
-    for (int pass = 0; pass < 2; pass++) {
-        if (pass == 1) {                                     /* archive.org/details/ID: not a collection: that one item */
-            if (!id[0] || ia_page > 1) break;
-            snprintf(q, sizeof q, "(identifier:(%s)) AND mediatype:(movies)", id);
+    /* 1.5.2: words: in the titles as word beginnings first, then as whole words (if the archive did not take the
+     * "*"), then in every field (the description, the subjects: shown as such); the next pages: where they were found.
+     * No words: the list itself, then (archive.org/details/ID that is not a collection) that one item */
+    int words = ia_words[0] != 0;
+    int f0 = words ? (ia_page > 1 ? ia_field : IA_IN_TITLE_START) : IA_IN_ALL;
+    int tries = words ? IA_IN_ALL - f0 + 1 : 2;
+    for (int pass = 0; pass < tries; pass++) {
+        int field = words ? f0 + pass : IA_IN_ALL;
+        if (words) {
+            if (ia_query_words(s->url, ia_words, ia_all, field, q, sizeof q, id, sizeof id) != 0) continue;
+            if (field == IA_IN_ALL) snprintf(grp, sizeof grp, "%s: %.60s", T("Search (in descriptions)"), ia_words);
+            else snprintf(grp, sizeof grp, "%s: %.60s", T("Search"), ia_words);
+        } else {
+            snprintf(grp, sizeof grp, "%s", s->name);
+            if (pass == 1) {                                 /* archive.org/details/ID: not a collection: that one item */
+                if (!id[0] || ia_page > 1) break;
+                snprintf(q, sizeof q, "(identifier:(%s)) AND mediatype:(movies)", id);
+            }
         }
-        set_stage(ia_words[0] ? "Searching the archive..." : "Loading the archive...");
+        set_stage(words ? "Searching the archive..." : "Loading the archive...");
         if (net_cancel) { snprintf(err, errsz, "Cancelled"); return -1; }
         if (ia_search_url(q, ia_sort, ia_page, url, sizeof url) != 0) { snprintf(err, errsz, "URL too long"); return -1; }
         Mem m = {0};
-        if (http_get(url, NULL, NULL, &m, err, errsz) != 0) { free(m.buf); return -1; }
-        int before = out->count, found = 0, n = ia_parse_search(m.buf, m.len, grp, out, &found);
+        if (http_get(url, NULL, NULL, &m, err, errsz) != 0) {
+            free(m.buf);
+            if (!words || field == IA_IN_ALL || ia_page > 1 || net_cancel || net_offline(url)) return -1;
+            plog("archive: %s: %s (the next way)", q, err);    /* (a query the archive did not take: the next one) */
+            continue;
+        }
+        int found = 0, n = ia_parse_search(m.buf, m.len, grp, out, &found);
         free(m.buf);
-        (void)before;
         MemStat ms = mem_stat();
         plog("archive: %s (order %d, page %d): %d films of %d, %u KB app memory", q, ia_sort, ia_page, n, found, ms.used_kb);
         if (n > 0) {
             ia_found = found;
+            ia_field = field;
             int films = 0;
             for (int i = 0; i < out->count; i++) films += !!strncmp(out->items[i].url, "ia-more:", 8);
             if (found > films) {                             /* "Next 500..." at the end */
@@ -1876,7 +1926,7 @@ static int load_archive(const Source *s, ChannelList *out, char *err, size_t err
         }
         if (ia_page > 1) break;
     }
-    snprintf(err, errsz, "%s", ia_words[0] ? "Nothing found" : "No films found there");
+    snprintf(err, errsz, "%s", words ? "Nothing found" : "No films found there");
     return -1;
 }
 
@@ -4295,6 +4345,7 @@ static void draw_sources(void)
     int nh = src_sorting ? (src_held >= 0 ? NH(HMH) : NH(HMV)) : NH(H);
     ScrList l = { "Vita IPTV", T(src_sorting ? "Reorder playlists" : "Playlists"), right, nsources, sel, &scroll, src_row, NULL,
                   T("No playlists yet: press Square to add one"), h, nh, status, status_err };
+    l.status = foot_line(&l.status_err);                     /* 1.5.2: the download when there is no note */
     scr_list(&l);
     if (src_ask) scr_confirm(T("Save the new order?"), NULL);
     if (quit_ask) scr_confirm(T("Quit Vita IPTV?"), NULL);
@@ -4360,8 +4411,7 @@ static void draw_channels(void)
     if (fav_moving) { hr = move_ci >= 0 ? HMH : HMV; nhr = move_ci >= 0 ? NH(HMH) : NH(HMV); }
     d.hints = searching ? HS : focus == 0 ? (vod ? HLV : HL) : hr;
     d.nhints = searching ? NH(HS) : focus == 0 ? (vod ? NH(HLV) : NH(HL)) : nhr;
-    d.status = status;
-    d.status_err = status_err;
+    d.status = foot_line(&d.status_err);                     /* 1.5.2: a note, else the download going on */
     static ScrVodCard card;                                  /* 0.8.0: films / series: the chosen one's card beside the list */
     int src_films = !vod && cur_src >= 0 && cur_src < nsources && (sources[cur_src].type == SRC_ARCHIVE || sources[cur_src].type == SRC_WEB);
     if (src_films && (focus == 1 || searching) && nvis && sel < nvis && !fav_moving && strncmp(chans.items[vis[sel]].url, "ia-more:", 8)) {   /* 1.5 */
@@ -4381,7 +4431,7 @@ static void draw_channels(void)
             int ci = vis[sel];
             if (ci != last_ci) { last_ci = ci; since = now_ms(); }
             const char *el = epg_for(&chans.items[ci], now_ms() - since > 500);
-            if (el) { d.status = el; d.status_err = 0; }
+            if (el && (d.status == status || now_ms() - since < NOTE_MS)) { d.status = el; d.status_err = 0; }   /* (1.5.2: then the download) */
         }
     }
     scr_dual(&d);
@@ -6182,6 +6232,56 @@ static void dl_hold_again(void)
     if (dl_nheld && dl_hold_kind) dl_hold_for(dl_hold_url, dl_hold_kind);
 }
 
+/* 1.5.2: the download going on, for the line under the home screen, the lists and the folders (NULL: none). Worked
+ * out twice a second (not every frame). */
+static const char *dl_foot_line(void)
+{
+    static char line[200];
+    static unsigned at;
+    static int have;
+    unsigned now = now_ms();
+    if (at && now - at < 500) return have ? line : NULL;
+    at = now | 1;
+    have = 0;
+    if (!dln) return NULL;
+    DlState st;
+    int act = -1;
+    for (int i = 0; i < dln && act < 0; i++) if (dl_state(dlv[i].dir, &st) == DL_ACTIVE) act = i;
+    int waiting = dl_queued_count();
+    char more[48] = "", t[64];
+    if (act >= 0) {
+        const char *nm = dlv[act].title;                     /* (cut at 40 bytes, not inside a letter) */
+        size_t k = strlen(nm);
+        if (k > 40) {
+            k = 40;
+            while (k && ((unsigned char)nm[k] & 0xC0) == 0x80) k--;
+            while (k && nm[k - 1] == ' ') k--;
+            snprintf(t, sizeof t, "%.*s...", (int)k, nm);
+        } else snprintf(t, sizeof t, "%s", nm);
+        if (waiting > 0) snprintf(more, sizeof more, T("  \xC2\xB7  %d waiting"), waiting);
+        if (st.netwait) snprintf(line, sizeof line, T("Download waits for the Wi-Fi: %s%s"), t, more);
+        else {
+            char sp[24];
+            dl_size_text(st.bps, lang_get() == LANG_TR, sp, sizeof sp);
+            int pct = st.total ? (int)(st.have * 100 / st.total) : 0;
+            snprintf(line, sizeof line, T("Downloading: %s  %d%%  (%s/s)%s"), t, pct, st.bps >= 1024 * 1024 ? sp : "<1 MB", more);
+        }
+        have = 1;
+    } else if (dl_nheld) {                                   /* (stopped for a stream / a list from the same server) */
+        snprintf(line, sizeof line, "%s", T(dl_hold_kind == DL_HOLD_STREAM ? "Watching from the same server: the download waits"
+                                                                           : "Loading a list: the download waits"));
+        have = 1;
+    }
+    return have ? line : NULL;
+}
+static const char *foot_line(int *err)
+{
+    if (status[0]) { *err = status_err; return status; }
+    const char *d = dl_foot_line();
+    *err = 0;
+    return d ? d : status;
+}
+
 /* 1.4.1: the sign in the lists: 1 downloaded, 2 part of it here, 0 none */
 static int dl_mark(const char *url)
 {
@@ -6647,8 +6747,8 @@ static void draw_device(void)
     if (dev_focus == 0) { d.hints = HL; d.nhints = NH(HL); }
     else if (devn && dev_isel < devn && !devv[dev_isel].dir) { d.hints = HF; d.nhints = NH(HF); }
     else { d.hints = HD; d.nhints = NH(HD); }
-    d.status = status[0] ? status : dev_focus == 0 ? T("Choose a place; MKV, MP4, TS and FLV files play (an .srt beside one: its subtitles)") : NULL;
-    d.status_err = status[0] ? status_err : 0;
+    d.status = foot_line(&d.status_err);                     /* 1.5.2: a note, else the download going on, else the help */
+    if (!d.status[0]) d.status = dev_focus == 0 ? T("Choose a place; MKV, MP4, TS and FLV files play (an .srt beside one: its subtitles)") : NULL;
     scr_dual(&d);
     if (dev_ask && dev_isel < devn) {                        /* 1.3.2 */
         char p[700];
@@ -6971,7 +7071,8 @@ static void draw_series(void)
     static const UiHint H1[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_UPDOWN, "Episode" }, { UI_BTN_CIRCLE, "Back" }, { UI_BTN_SEP, "" }, { UI_BTN_START, "Fav." } };
     s.hints = nseasons > 1 ? H : H1;
     s.nhints = nseasons > 1 ? NH(H) : NH(H1);
-    s.status = status;
+    int serr;
+    s.status = foot_line(&serr);                             /* 1.5.2 */
     scr_series(&s);
 }
 
@@ -7130,17 +7231,32 @@ static void refresh_take(int busy)
  * the rest when the app runs again: the stream / film is stopped (its connection is gone), the downloads go
  * on, and the log says when it slept and for how long. ---- */
 static volatile int pw_slept;               /* set by the callback when it comes back */
+static volatile int pw_suspend;             /* 1.5.2: set by the callback when it goes to sleep */
 static volatile int pw_flags;
 static int64_t pw_alive;                    /* (main loop) the clock time it last ran: how long it slept */
+static unsigned pw_sleep_ms;                /* (main loop) when "going to sleep" came (0 = it did not / it woke) */
+/* 1.5.2: the 1.5.1 log: 0x80 comes with every call (also at the start: "awake again after 0 s"), going to sleep
+ * comes too (0x00400080: APP_SUSPEND), and the waking up as 0x00A40080 */
 static int power_cb(int notify_id, int notify_count, int arg, void *common)
 {
     (void)notify_id; (void)notify_count; (void)common;
-    /* (an app is told only of the waking up: SCE_POWER_CB_VALID_MASK_NON_SYSTEM has no "suspend") */
-    if (arg & (SCE_POWER_CB_SYSTEM_RESUMING | SCE_POWER_CB_SYSTEM_RESUME | SCE_POWER_CB_APP_RESUME | SCE_POWER_CB_AFTER_SYSTEM_RESUME)) {
+    if (arg & (SCE_POWER_CB_APP_SUSPEND | SCE_POWER_CB_SYSTEM_SUSPEND)) {
+        pw_flags |= arg;
+        pw_suspend = 1;
+        dl_set_asleep(1);                                    /* (the Wi-Fi goes: the downloads wait, not fail) */
+    }
+    if (arg & (SCE_POWER_CB_SYSTEM_RESUMING | SCE_POWER_CB_SYSTEM_RESUME | SCE_POWER_CB_APP_RESUME | SCE_POWER_CB_APP_RESUMING)) {
         pw_flags |= arg;
         pw_slept = 1;
     }
     return 0;
+}
+/* 1.5.2: the downloads' look at the network (their thread; nothing logged) */
+static int dl_net_up(void)
+{
+    int st = -1;
+    int r = sceNetCtlInetGetState(&st);
+    return r < 0 || st == SCE_NETCTL_STATE_CONNECTED;        /* (cannot be read: try anyway) */
 }
 static int power_thread(SceSize args, void *argp)
 {
@@ -7160,12 +7276,28 @@ static void power_start(void)
 static void power_poll(void)
 {
     int64_t now = now_unix();
-    if (!pw_slept) { pw_alive = now; return; }
+    if (pw_suspend && !pw_slept) {                           /* 1.5.2 */
+        pw_suspend = 0;
+        pw_sleep_ms = now_ms() | 1;
+        plog("power: going to sleep (0x%08X; downloads %d, screen %d)", (unsigned)pw_flags, dl_active(), state);
+    }
+    if (!pw_slept) {
+        pw_alive = now;
+        if (pw_sleep_ms && now_ms() - pw_sleep_ms > 60000) {   /* (it did not sleep after all: the downloads go on) */
+            pw_sleep_ms = 0;
+            dl_set_asleep(0);
+            plog("power: no sleep came: the downloads go on");
+        }
+        return;
+    }
     pw_slept = 0;
+    pw_suspend = 0;
+    pw_sleep_ms = 0;
     plog("power: awake again after about %lld s (0x%08X; downloads %d, screen %d)", (long long)(pw_alive ? now - pw_alive : 0),
          (unsigned)pw_flags, dl_active(), state);
     pw_flags = 0;
     pw_alive = now;
+    dl_set_asleep(0);                                        /* (they go on when the Wi-Fi is back) */
     if (state == ST_PLAYING && !cur_local()) {               /* (its connection did not live through the sleep) */
         save_film_position();
         stop_all();
@@ -7239,6 +7371,7 @@ int main(void)
     plog("avpref: %d streams with a chosen sound / subtitles", avpref_load(&avprefs, AVPREF_FILE));   /* 1.3 */
     load_mylist();                                           /* 1.1 (its row among the playlists) */
     dl_init(DL_ROOT);                                        /* 1.3: the downloads (none starts by itself) */
+    dl_set_net_check(dl_net_up);                             /* 1.5.2: no network: they wait (not counted as failing) */
     dl_refresh();                                            /* (1.3.1: before the playlists: is there a Downloads row?) */
     load_sources();
     plog("dl: %d downloads, %lld MB free", dln, dl_free_now >= 0 ? dl_free_now >> 20 : -1);
@@ -7284,6 +7417,7 @@ int main(void)
         guide_tick(state == ST_PLAYING);                     /* 0.8.0: background answers (before anything is drawn) */
         dl_poll();                                           /* 1.3: downloads */
         power_poll();                                        /* 1.5.1: back from sleep */
+        status_tick();                                       /* 1.5.2: the notes go by themselves */
         {                                                    /* 0.8.1: the console slept (the clock jumped): the lock closes */
             static int64_t last_wall;
             static unsigned last_check;
