@@ -42,13 +42,23 @@ static void archive(void)
            strstr(u, "output=json") && strstr(u, "fl%5B%5D=identifier") && strstr(u, "sort%5B%5D=downloads+desc") && strstr(u, "page=1&"));
     assert(ia_search_url("x", IA_SORT_NEW, 3, u, sizeof u) == 0 && strstr(u, "sort%5B%5D=addeddate+desc") && strstr(u, "page=3&"));
     assert(ia_search_url("x", IA_SORT_TITLE, 1, u, sizeof u) == 0 && strstr(u, "titleSorter+asc"));
-    /* 1.5.1: words inside the list's collection, or in the whole archive */
-    assert(ia_query_words("https://archive.org/details/feature_films", "chaplin (1916)", 0, q, sizeof q, id, sizeof id) == 0);
-    assert(!strcmp(q, "(collection:(feature_films)) AND (chaplin  1916 ) AND mediatype:(movies)") && !id[0]);
-    assert(ia_query_words("https://archive.org/details/feature_films", "chaplin", 1, q, sizeof q, id, sizeof id) == 0);
+    /* 1.5.1: words inside the list's collection, or in the whole archive; 1.5.2: in the titles first */
+    assert(ia_query_words("https://archive.org/details/feature_films", "chaplin (1916)", 0, IA_IN_ALL, q, sizeof q, id, sizeof id) == 0);
+    assert(!strcmp(q, "(collection:(feature_films)) AND (chaplin  1916) AND mediatype:(movies)") && !id[0]);
+    assert(ia_query_words("https://archive.org/details/feature_films", "chaplin", 1, IA_IN_ALL, q, sizeof q, id, sizeof id) == 0);
     assert(!strcmp(q, "(chaplin) AND mediatype:(movies)"));
-    assert(ia_query_words("klasik", "", 0, q, sizeof q, id, sizeof id) == 0 && !strcmp(q, "(klasik) AND mediatype:(movies)"));
-    assert(ia_query_words("klasik", "film", 0, q, sizeof q, id, sizeof id) == 0 && !strcmp(q, "(klasik) AND (film) AND mediatype:(movies)"));
+    assert(ia_query_words("klasik", "", 0, IA_IN_TITLE_START, q, sizeof q, id, sizeof id) == 0 && !strcmp(q, "(klasik) AND mediatype:(movies)"));
+    assert(ia_query_words("klasik", NULL, 0, IA_IN_TITLE_START, q, sizeof q, id, sizeof id) == 0 && !strcmp(q, "(klasik) AND mediatype:(movies)"));
+    assert(ia_query_words("klasik", "film", 0, IA_IN_ALL, q, sizeof q, id, sizeof id) == 0 && !strcmp(q, "(klasik) AND (film) AND mediatype:(movies)"));
+    assert(ia_query_words("klasik", "Odys", 1, IA_IN_TITLE_START, q, sizeof q, id, sizeof id) == 0);
+    assert(!strcmp(q, "title:(odys*) AND mediatype:(movies)"));
+    assert(ia_query_words("https://archive.org/details/feature_films", " Charlie  CHAP a ", 0, IA_IN_TITLE_START, q, sizeof q, id, sizeof id) == 0);
+    assert(!strcmp(q, "(collection:(feature_films)) AND (title:(charlie*) AND title:(chap*) AND title:(a)) AND mediatype:(movies)"));
+    assert(ia_query_words("klasik", "the ugly*", 1, IA_IN_TITLE, q, sizeof q, id, sizeof id) == 0);
+    assert(!strcmp(q, "(title:(the) AND title:(ugly)) AND mediatype:(movies)"));
+    assert(ia_query_words("klasik", "spider-man: \"x\" AND", 1, IA_IN_TITLE_START, q, sizeof q, id, sizeof id) == 0);
+    assert(!strcmp(q, "(title:(spider*) AND title:(man*) AND title:(x) AND title:(and*)) AND mediatype:(movies)"));
+    assert(ia_query_words("klasik", " ** ", 0, IA_IN_TITLE_START, q, sizeof q, id, sizeof id) == 0 && !strcmp(q, "(klasik) AND mediatype:(movies)"));
 
     unlink("/tmp/ws_ia.txt");
     ia_cache_load("/tmp/ws_ia.txt");
