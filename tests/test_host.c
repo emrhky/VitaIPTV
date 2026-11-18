@@ -124,8 +124,9 @@ int main(void)
         for (int i = 0; i < 3; i++) {
             assert(!strcmp(a1.items[i].name, a2.items[i].name) && !strcmp(a1.items[i].url, a2.items[i].url) &&
                    !strcmp(a1.items[i].group, a2.items[i].group) && a1.items[i].adult == a2.items[i].adult);
-            const char tags[] = { CX_POSTER, CX_RATING, CX_YEAR, CX_GENRE };
-            for (int t = 0; t < 4; t++) {
+            const char tags[] = { CX_RATING, CX_YEAR, CX_GENRE };   /* (1.5.1: films' pictures left out) */
+            assert(!channel_extra(&a2, &a2.items[i], CX_POSTER));
+            for (int t = 0; t < 3; t++) {
                 const char *x = channel_extra(&a1, &a1.items[i], tags[t]), *y = channel_extra(&a2, &a2.items[i], tags[t]);
                 assert((!x && !y) || (x && y && !strcmp(x, y)));
             }

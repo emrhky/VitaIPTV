@@ -56,6 +56,34 @@ threading.Thread(target=srv12.serve_forever, daemon=True).start()
 subprocess.run(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra {MCF} -I{ROOT}/src "
                f"{ROOT}/tests/test_curlio.c {ROOT}/src/curlio.c {ROOT}/src/hls.c {MLIB} -o {T}/test_curlio",
                shell=True, check=True)
-r = subprocess.run([f"{T}/test_curlio", str(port), f"{T}/file.ts", str(srv12.server_address[1])], capture_output=True, text=True, timeout=120)
+# 1.5.1: a server that drops the first SYNs (its queue full for 4.6 s): how long one socket alone waits, then the app
+import socket as so
+def busy_server(free_after):
+    s = so.socket(); s.setsockopt(so.SOL_SOCKET, so.SO_REUSEADDR, 1); s.bind(("127.0.0.1", 0)); s.listen(0)
+    fill = []
+    for _ in range(3):
+        c = so.socket(); c.setblocking(False)
+        try: c.connect(s.getsockname())
+        except BlockingIOError: pass
+        fill.append(c)
+    time.sleep(0.3)
+    def run():
+        time.sleep(free_after)
+        while True:
+            a, _ = s.accept()
+            def h(a):
+                try:
+                    a.settimeout(5)
+                    if a.recv(4096): a.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                except Exception: pass
+                a.close()
+            threading.Thread(target=h, args=(a,), daemon=True).start()
+    threading.Thread(target=run, daemon=True).start()
+    return s.getsockname()[1], fill
+p1, keep1 = busy_server(4.6)
+t0 = time.time(); c = so.socket(); c.settimeout(30); c.connect(("127.0.0.1", p1)); plain = time.time() - t0; c.close()
+p2, keep2 = busy_server(4.6)
+r = subprocess.run([f"{T}/test_curlio", str(port), f"{T}/file.ts", str(srv12.server_address[1]), str(p2), "%.2f" % plain],
+                   capture_output=True, text=True, timeout=120)
 print(r.stdout); print(r.stderr[-3000:])
 sys.exit(r.returncode)
