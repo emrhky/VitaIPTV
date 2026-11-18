@@ -74,7 +74,7 @@ __attribute__((used)) static const unsigned char elf_layout_pad[8192] = { 1 };
 #define CACHE_DIR     DATA_DIR "/cache"                  /* 1.1: saved copies of the playlists (listcache.h) */
 #define MAX_RESUME    200
 #ifndef APP_VERSION                     /* set by CMakeLists.txt (the one place for the version) */
-#define APP_VERSION   "v1.5.0"
+#define APP_VERSION   "v1.5.1"
 #endif
 #ifndef APP_BUILD                       /* the build time, also from CMakeLists.txt; else the compiler's */
 #define APP_BUILD     __DATE__ " " __TIME__
@@ -291,18 +291,23 @@ static volatile int net_req = -1;
 static void poll_cancel(void);
 static int net_stop_cb(void *ctx) { (void)ctx; poll_cancel(); return net_cancel; }
 
+static const char *http_ua;                 /* 1.5.1 (http_get: this User-Agent instead of the app's; NULL = the app's) */
 static int http_get_curl(const char *url, const char *user, const char *pass, Mem *m, char *err, size_t errsz)
 {
     CioRequest rq = { url, user, pass, 10, 20, mem_data, net_stop_cb, m };
+    rq.ua = http_ua;                                         /* 1.5.1 (web pages: a browser's) */
     int status = 0;
     char e[96];
     unsigned t0 = now_ms();
     int r = cio_get(&rq, &status, e, sizeof e);
     unsigned ms = now_ms() - t0;
-    plog("http: GET %.5s (own socket) -> status %d, %u KB in %u.%u s, receive buffer %d KB, connect %d ms%s%s", url, status,
-         (unsigned)(m->len / 1024), ms / 1000, ms % 1000 / 100, cio_last_rcvbuf() / 1024, cio_last_connect_ms(), r < 0 ? ", " : "", r < 0 ? e : "");
-    const char *rn = cio_rcvbuf_note();                     /* (once, and again when a size was refused) */
-    if (rn[0]) plog("http: receive buffer: %s", rn);
+    int tries = cio_last_connect_tries();
+    plog("http: GET %.5s -> status %d, %u KB in %u.%u s, connect %d ms%s%s%s", url, status,
+         (unsigned)(m->len / 1024), ms / 1000, ms % 1000 / 100, cio_last_connect_ms(),
+         tries > 1 ? (tries == 2 ? " (2nd socket: the first stayed silent)" : " (3rd socket: the first ones stayed silent)") : "",
+         r < 0 ? ", " : "", r < 0 ? e : "");
+    const char *rn = cio_rcvbuf_note();                     /* (1.5.1: only when the system gave less) */
+    if (rn[0] && strstr(rn, "refused")) plog("http: receive buffer: %s", rn);
     if (net_cancel) { snprintf(err, errsz, "Cancelled"); return -1; }
     if (r < 0 && !status && !m->buf && !strncasecmp(url, "http:", 5)) {      /* (0.6.0: plain http: the system HTTP tries) */
         snprintf(err, errsz, "Connection failed (%s)", e);
@@ -635,7 +640,12 @@ static void vod_open_list(int recent)
     if (loaded_group >= 0) gcount[loaded_group] = chans.count;
     fav_update_ranks();
     rebuild_visible();
-    plog("fav: %d %s %s", chans.count, recent ? "watched" : "favourite", films ? "films" : "series");
+    {   /* (1.5.1: said again only when it changed) */
+        static int last_n[2][2] = { { -1, -1 }, { -1, -1 } };
+        if (last_n[recent ? 1 : 0][films ? 1 : 0] != chans.count)
+            plog("fav: %d %s %s", chans.count, recent ? "watched" : "favourite", films ? "films" : "series");
+        last_n[recent ? 1 : 0][films ? 1 : 0] = chans.count;
+    }
 }
 static void vod_open_favorites(void) { vod_open_list(0); }
 
@@ -1705,10 +1715,30 @@ static int cache_load(const Source *s, ChannelList *out, uint32_t *h0, uint32_t 
 
 /* Xtream: the account first (a wrong password or an expired account is said at once), then the
  * categories and the live channels from the JSON API (much smaller than get.php). */
+/* 1.5.1: what this run of the app already asked the server (each question is one more connection, and on a
+ * server that drops connections now and then each may take 2-10 s): the account (10 min) and the categories of
+ * films / series (30 min). Select > Reload playlists forgets them. */
+static uint32_t src_key(const Source *s)
+{
+    char k[IPTV_URL_MAX + 160];
+    snprintf(k, sizeof k, "%s|%s|%s", s->url, s->user, s->pass);
+    uint32_t h = 2166136261u;
+    for (const char *p = k; *p; p++) h = (h ^ (uint8_t)*p) * 16777619u;
+    return h ? h : 1;
+}
+static struct { uint32_t key; unsigned at; } acct_ok;
+static struct { uint32_t key; unsigned at; char *buf; size_t len; } cats_copy[2];   /* [0] films, [1] series */
+static void api_copies_clear(void)
+{
+    acct_ok.key = 0;
+    for (int i = 0; i < 2; i++) { free(cats_copy[i].buf); memset(&cats_copy[i], 0, sizeof cats_copy[i]); }
+}
+
 static int check_account(const Source *s, char *err, size_t errsz, char *note, size_t notesz)
 {
     char url[IPTV_URL_MAX + 160];
     Mem ma = {0};
+    if (acct_ok.key == src_key(s) && now_ms() - acct_ok.at < 10u * 60u * 1000u) return 0;   /* 1.5.1: asked a moment ago */
     set_stage("Checking the account...");
     if (xtream_api_url(s, NULL, url, sizeof url) != 0) { snprintf(err, errsz, "URL too long"); return -1; }
     if (http_get(url, NULL, NULL, &ma, err, errsz) != 0) { free(ma.buf); return -1; }   /* not reachable: stop here */
@@ -1723,6 +1753,7 @@ static int check_account(const Source *s, char *err, size_t errsz, char *note, s
         if (a.status[0] && strcasecmp(a.status, "Active")) { free(ma.buf); snprintf(err, errsz, "Account %s", a.status); return -1; }
         if (a.max > 0 && a.active >= a.max)
             snprintf(note, notesz, "Account in use: %d of %d connections (channels may not open)", a.active, a.max);
+        else { acct_ok.key = src_key(s); acct_ok.at = now_ms(); }   /* 1.5.1 */
     } else {
         plog("xtream: no account information in the answer");
     }
@@ -1780,32 +1811,121 @@ static int net_offline(const char *url);
 #define IA_FILE  DATA_DIR "/archive_files.txt"     /* the files chosen for the archive's films (id|address|length) */
 #define WEB_REPORT DATA_DIR "/webcheck.txt"         /* what the last web page gave (for finding why a site does not work) */
 
+/* 1.5.1: the archive list: searched for words (Square) inside it or in the whole archive, in an order (Select),
+ * page after page ("Next 500..." at its end adds the next ones) */
+static char ia_words[96];
+static int ia_all, ia_page = 1, ia_sort, ia_found, ia_append, ia_sel_after = -1, ia_from_list;
+static int ia_search_all;                   /* the next search: the whole archive (Select > Search the whole archive) */
+static ChannelList ia_keep;                 /* the list before a search / the next page (back to it when that fails) */
+static int ia_keep_on;
+static const char *const IA_SORT_NAMES[IA_SORTS] = { "Most watched", "Newest added", "Year (newest first)", "Title (A-Z)" };
+
 static int load_archive(const Source *s, ChannelList *out, char *err, size_t errsz, char *note, size_t notesz)
 {
-    char q[IPTV_URL_MAX + 64], id[96], url[IPTV_URL_MAX * 4];
-    if (ia_query(s->url, q, sizeof q, id, sizeof id) != 0) { snprintf(err, errsz, "Not an archive.org address (or words to search for)"); return -1; }
+    char q[IPTV_URL_MAX + 256], id[96], url[IPTV_URL_MAX * 4], grp[IPTV_NAME_MAX];
+    if (!ia_from_list) { ia_words[0] = 0; ia_all = 0; ia_page = 1; ia_append = 0; }   /* (opened from the playlists: from the start) */
+    ia_from_list = 0;
+    if (ia_query_words(s->url, ia_words, ia_all, q, sizeof q, id, sizeof id) != 0) {
+        snprintf(err, errsz, "Not an archive.org address (or words to search for)");
+        return -1;
+    }
+    if (ia_words[0]) snprintf(grp, sizeof grp, "%s: %.60s", T("Search"), ia_words);
+    else snprintf(grp, sizeof grp, "%s", s->name);
     ia_cache_load(IA_FILE);
+    if (ia_append && ia_keep_on) {                           /* the next page: the films shown so far first */
+        for (int i = 0; i < ia_keep.count; i++) {
+            const Channel *c = &ia_keep.items[i];
+            if (!strncmp(c->url, "ia-more:", 8)) continue;
+            const char *vals[4] = { channel_extra(&ia_keep, c, CX_POSTER), channel_extra(&ia_keep, c, CX_YEAR),
+                                    channel_extra(&ia_keep, c, CX_PLOT), channel_extra(&ia_keep, c, CX_DURATION) };
+            if (channel_list_add(out, c, "pydt", vals, 420) != 0) break;
+        }
+        ia_sel_after = out->count;
+    } else ia_page = 1;
     for (int pass = 0; pass < 2; pass++) {
         if (pass == 1) {                                     /* archive.org/details/ID: not a collection: that one item */
-            if (!id[0]) break;
+            if (!id[0] || ia_page > 1) break;
             snprintf(q, sizeof q, "(identifier:(%s)) AND mediatype:(movies)", id);
         }
-        set_stage("Searching the archive...");
+        set_stage(ia_words[0] ? "Searching the archive..." : "Loading the archive...");
         if (net_cancel) { snprintf(err, errsz, "Cancelled"); return -1; }
-        if (ia_search_url(q, url, sizeof url) != 0) { snprintf(err, errsz, "URL too long"); return -1; }
+        if (ia_search_url(q, ia_sort, ia_page, url, sizeof url) != 0) { snprintf(err, errsz, "URL too long"); return -1; }
         Mem m = {0};
         if (http_get(url, NULL, NULL, &m, err, errsz) != 0) { free(m.buf); return -1; }
-        int found = 0, n = ia_parse_search(m.buf, m.len, s->name, out, &found);
-        log_heap("archive list downloaded", m.len);
+        int before = out->count, found = 0, n = ia_parse_search(m.buf, m.len, grp, out, &found);
         free(m.buf);
-        plog("archive: %s: %d films (of %d)", q, n, found);
+        (void)before;
+        MemStat ms = mem_stat();
+        plog("archive: %s (order %d, page %d): %d films of %d, %u KB app memory", q, ia_sort, ia_page, n, found, ms.used_kb);
         if (n > 0) {
-            if (found > n) snprintf(note, notesz, "The first %d of %d films (the most watched)", n, found);
+            ia_found = found;
+            int films = 0;
+            for (int i = 0; i < out->count; i++) films += !!strncmp(out->items[i].url, "ia-more:", 8);
+            if (found > films) {                             /* "Next 500..." at the end */
+                Channel c;
+                memset(&c, 0, sizeof c);
+                int next = found - films < IA_ROWS ? found - films : IA_ROWS;
+                snprintf(c.name, sizeof c.name, T("Next %d...  (%d of %d shown)"), next, films, found);
+                snprintf(c.group, sizeof c.group, "%s", grp);
+                snprintf(c.url, sizeof c.url, "ia-more:%d", ia_page + 1);
+                c.kind = CH_FILM;
+                channel_list_add(out, &c, NULL, NULL, 0);
+            }
+            snprintf(note, notesz, "%d of %d films (%s)", films, found, T(IA_SORT_NAMES[ia_sort]));
             return 0;
         }
+        if (ia_page > 1) break;
     }
-    snprintf(err, errsz, "No films found there");
+    snprintf(err, errsz, "%s", ia_words[0] ? "Nothing found" : "No films found there");
     return -1;
+}
+
+static void load_start(const Source *s);
+/* from the archive list: load it again (with ia_words / ia_all / ia_sort / ia_page set); append = the next page */
+static void ia_reload(int append)
+{
+    if (cur_src < 0 || cur_src >= nsources || sources[cur_src].type != SRC_ARCHIVE) return;
+    channel_list_free(&ia_keep);
+    ia_keep = chans;                                         /* (kept: back to it if this fails; the next page copies it) */
+    channel_list_init(&chans);
+    nvis = 0;
+    ia_keep_on = 1;
+    ia_append = append;
+    ia_from_list = 1;
+    load_start(&sources[cur_src]);
+    if (!job_active && !job_pending) {                       /* (not started: no network) */
+        channel_list_free(&chans);
+        chans = ia_keep;
+        channel_list_init(&ia_keep);
+        ia_keep_on = 0;
+        build_groups();
+    }
+}
+
+/* 1.5.1: web pages are asked for as a browser does (some sites refuse other programs: the 403s of the 1.5.0 log);
+ * the videos found carry the same User-Agent and the page as Referer ("link|User-Agent=...&Referer=...", as the
+ * M3U lists' #EXTVLCOPT lines), so playing and downloading them look the same to the site */
+#define WEB_UA "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+static void web_with_headers(const char *video, const char *page, char *out, size_t cap)
+{
+    static const char hx[] = "0123456789ABCDEF";
+    char enc_ua[256], enc_ref[IPTV_URL_MAX * 3];
+    const char *src[2] = { WEB_UA, page };
+    char *dst[2] = { enc_ua, enc_ref };
+    size_t cp[2] = { sizeof enc_ua, sizeof enc_ref };
+    for (int k = 0; k < 2; k++) {
+        size_t o = 0;
+        for (const unsigned char *p = (const unsigned char *)src[k]; *p && o + 4 < cp[k]; p++) {
+            if (isalnum(*p) || *p == '.' || *p == '-' || *p == '_' || *p == '/' || *p == ':') dst[k][o++] = (char)*p;
+            else { dst[k][o++] = '%'; dst[k][o++] = hx[*p >> 4]; dst[k][o++] = hx[*p & 15]; }
+        }
+        dst[k][o] = 0;
+    }
+    int n = snprintf(out, cap, "%s|User-Agent=%s&Referer=%s", video, enc_ua, enc_ref);
+    if (n < 0 || (size_t)n >= cap) {                         /* (too long: the Referer only, then nothing) */
+        n = snprintf(out, cap, "%s|Referer=%s", video, enc_ref);
+        if (n < 0 || (size_t)n >= cap) snprintf(out, cap, "%s", video);
+    }
 }
 
 /* a web page: its videos (and those of the pages inside it); what was found and why not goes to webcheck.txt */
@@ -1819,6 +1939,7 @@ static int load_web(const Source *s, ChannelList *out, char *err, size_t errsz, 
         fprintf(rf, "Vita IPTV %s: web page check (%lld)\npage: %s\n", APP_VERSION, (long long)t, s->url);
     }
     set_stage("Reading the page...");
+    http_ua = WEB_UA;                                        /* 1.5.1 */
     Mem m = {0};
     char herr[160] = "";
     int rc = http_get(s->url, s->user, s->pass, &m, herr, sizeof herr);
@@ -1861,10 +1982,10 @@ static int load_web(const Source *s, ChannelList *out, char *err, size_t errsz, 
         Channel c;
         memset(&c, 0, sizeof c);
         const char *t = v->title[0] ? v->title : sc->title[0] ? sc->title : s->name;
-        if (playable > 1) snprintf(c.name, sizeof c.name, "%.80s (%d)", t, added + 1);
+        if (playable > 1 && !v->title[0]) snprintf(c.name, sizeof c.name, "%.80s (%d)", t, added + 1);
         else snprintf(c.name, sizeof c.name, "%s", t);
         snprintf(c.group, sizeof c.group, "%s", s->name);
-        snprintf(c.url, sizeof c.url, "%s", v->url);
+        web_with_headers(v->url, s->url, c.url, sizeof c.url);   /* 1.5.1: as a browser, from the page */
         c.kind = v->kind == WV_FILE ? CH_FILM : CH_LIVE;     /* (HLS plays as a stream: no jumps) */
         const char *vals[2] = { sc->poster, sc->plot };
         if (channel_list_add(out, &c, "pd", vals, 420) == 0) added++;
@@ -1877,6 +1998,7 @@ static int load_web(const Source *s, ChannelList *out, char *err, size_t errsz, 
         if (rf) fprintf(rf, "result: %d to play, %d left out\n", added, left);
     }
     if (rf) fclose(rf);
+    http_ua = NULL;
     plog("web: %s: %d videos (%d left out)%s%s", s->url, added, left, added ? "" : ": ", added ? "" : err);
     free(sc);
     return added ? 0 : -1;
@@ -2020,9 +2142,28 @@ static int load_vod(LoadJob *j)
             return 0;
         }
     }
-    if (xtream_api_url(s, action, url, sizeof url) != 0) { snprintf(j->err, sizeof j->err, "URL too long"); return -1; }
-    if (http_get(url, NULL, NULL, &m, j->err, sizeof j->err) != 0) { free(m.buf); return -1; }
-    log_heap("vod list downloaded", m.len);
+    int cats = j->what == LOAD_FILM_CATS || j->what == LOAD_SERIES_CATS;
+    if (cats && cats_copy[films ? 0 : 1].buf && cats_copy[films ? 0 : 1].key == src_key(s) &&
+        now_ms() - cats_copy[films ? 0 : 1].at < 30u * 60u * 1000u) {   /* 1.5.1: the categories of a moment ago */
+        m.len = cats_copy[films ? 0 : 1].len;
+        m.buf = malloc(m.len + 1);
+        if (m.buf) { memcpy(m.buf, cats_copy[films ? 0 : 1].buf, m.len); m.buf[m.len] = 0; m.cap = m.len + 1; }
+        plog("list: %s from the copy of %u min ago", action, (now_ms() - cats_copy[films ? 0 : 1].at) / 60000u);
+    }
+    if (!m.buf) {
+        if (xtream_api_url(s, action, url, sizeof url) != 0) { snprintf(j->err, sizeof j->err, "URL too long"); return -1; }
+        if (http_get(url, NULL, NULL, &m, j->err, sizeof j->err) != 0) { free(m.buf); return -1; }
+        if (cats && m.len && m.len < 1024 * 1024) {          /* 1.5.1: kept for the next time */
+            free(cats_copy[films ? 0 : 1].buf);
+            cats_copy[films ? 0 : 1].buf = malloc(m.len);
+            if (cats_copy[films ? 0 : 1].buf) {
+                memcpy(cats_copy[films ? 0 : 1].buf, m.buf, m.len);
+                cats_copy[films ? 0 : 1].len = m.len;
+                cats_copy[films ? 0 : 1].key = src_key(s);
+                cats_copy[films ? 0 : 1].at = now_ms();
+            }
+        }
+    }
     if (j->what == LOAD_SEARCH) {                            /* 1.4.1: kept small for the next search */
         typeof(search_copy[0]) *sc = &search_copy[j->series ? 1 : 0];
         free(sc->json);
@@ -2055,9 +2196,9 @@ static int load_vod(LoadJob *j)
                   : xtream_parse_series(m.buf, m.len, s, vcats, nvcats, &j->list);
         if (!n) snprintf(j->err, sizeof j->err, "This category is empty");
     }
-    log_heap("vod list parsed", (size_t)j->list.count * sizeof(Channel));   /* (0.7.0) */
+    MemStat ms = mem_stat();                                 /* 1.5.1: one line (was: downloaded / parsed / items) */
+    plog("list: %s: %d items, %u KB (app memory %u KB, peak %u KB)", action, n, (unsigned)(m.len >> 10), ms.used_kb, ms.peak_kb);
     if (!(j->what == LOAD_SEARCH && m.buf == search_copy[j->series ? 1 : 0].json)) free(m.buf);
-    plog("list: %s: %d items", action, n);
     return n ? 0 : -1;
 }
 
@@ -2144,6 +2285,19 @@ static int load_poll(unsigned p)
         free(job.cats);
         if (job.what == LOAD_FILMS || job.what == LOAD_SERIES || job.what == LOAD_SEARCH) rebuild_visible();
         if (job.what == LOAD_SEARCH && !strcmp(job.err, "Nothing found")) { set_status(0, "Nothing found", NULL); focus = 0; frames_after_fail = 0; return 0; }
+        if (job.what == LOAD_LIVE && ia_keep_on) {           /* 1.5.1: an archive search / next page failed: the list as it was */
+            channel_list_free(&chans);
+            chans = ia_keep;
+            channel_list_init(&ia_keep);
+            ia_keep_on = 0;
+            if (ia_append) ia_page--;
+            ia_append = 0;
+            build_groups();
+            frames_after_fail = 0;
+            if (!strcmp(job.err, "Nothing found")) { set_status(0, "Nothing found", NULL); return 1; }
+            set_status(1, "Failed: %s", job.err);
+            return 1;
+        }
         set_status(1, "Failed: %s", job.err);
         frames_after_fail = 0;
         return 0;
@@ -2155,6 +2309,17 @@ static int load_poll(unsigned p)
         chans = job.list;
         section = SEC_LIVE;
         build_groups();
+        if (ia_keep_on) {                                    /* 1.5.1: an archive search / the next page: in the list, on */
+            channel_list_free(&ia_keep);                     /*  the first new film */
+            channel_list_init(&ia_keep);
+            ia_keep_on = 0;
+            cur_group = g_all;
+            rebuild_visible();
+            sel = ia_sel_after >= 0 && ia_sel_after < nvis ? ia_sel_after : 0;
+            focus = 1;
+        }
+        ia_sel_after = -1;
+        ia_append = 0;
         guide_setup();                                       /* 0.8.0 */
         if (job.from_cache) refresh_start(&job.src, job.ch0, job.ch1);   /* 1.1 */
         break;
@@ -2487,7 +2652,8 @@ static void run_qjob(QJob *j)
         memset(&j->m, 0, sizeof j->m);
     } else j->m = m;
     static int logged;
-    if (!j->ok && logged++ < 8) plog("job %d: HTTP %d%s%s", j->kind, st, r < 0 ? ", " : "", r < 0 ? e : "");
+    if (!j->ok && logged++ < 8) plog("%s: HTTP %d%s%s (%.60s)", j->kind == QJ_POSTER ? "picture" : j->kind == QJ_VODINFO ? "film info" : j->kind == QJ_XT_TABLE ? "guide" : "job",
+                                     st, r < 0 ? ", " : "", r < 0 ? e : "", j->url);   /* (1.5.1: what it was for) */
 }
 
 static int xmltv_data(void *ctx, const uint8_t *d, size_t n)
@@ -3699,6 +3865,9 @@ static void activate_item(int vi)
         series_ci_saved = vis[vi];                           /* 0.6.0: START in the episodes: this series */
         snprintf(cur_series_id, sizeof cur_series_id, "%s", id);   /* 0.7.0: its watched episodes */
         load_begin(&sources[cur_src], LOAD_EPISODES, id, cur_group);
+    } else if (!strncmp(c->url, "ia-more:", 8)) {           /* 1.5.1: the archive's next page */
+        ia_page = atoi(c->url + 8);
+        ia_reload(1);
     } else if (c->kind == CH_FILM && !strncmp(c->url, "ia:", 3)) {
         ia_pending_vi = vi;                                  /* 1.5: which file: asked between frames */
         ia_pending_act = 1;
@@ -4195,7 +4364,7 @@ static void draw_channels(void)
     d.status_err = status_err;
     static ScrVodCard card;                                  /* 0.8.0: films / series: the chosen one's card beside the list */
     int src_films = !vod && cur_src >= 0 && cur_src < nsources && (sources[cur_src].type == SRC_ARCHIVE || sources[cur_src].type == SRC_WEB);
-    if (src_films && (focus == 1 || searching) && nvis && sel < nvis && !fav_moving) {   /* 1.5: the archive's / a page's films */
+    if (src_films && (focus == 1 || searching) && nvis && sel < nvis && !fav_moving && strncmp(chans.items[vis[sel]].url, "ia-more:", 8)) {   /* 1.5 */
         vod_card_of(&chans, &chans.items[vis[sel]], &card, 0);
         d.preview = &card;
     } else if (vod && !in_episodes && focus == 1 && !searching && nvis && sel < nvis && !fav_moving) {
@@ -4441,6 +4610,15 @@ static void search_submit(const char *b)
     for (const char *q = b; *q; q++) if (*q < '0' || *q > '9') digits = 0;
     if (digits && section == SEC_LIVE && !in_episodes && strlen(b) <= 5) { clear_search(); zap_number(atoi(b)); return; }
     if (b[0] && !digits) recent_push(b);                     /* 1.5 */
+    if (section == SEC_LIVE && cur_src >= 0 && cur_src < nsources && sources[cur_src].type == SRC_ARCHIVE) {   /* 1.5.1 */
+        snprintf(ia_words, sizeof ia_words, "%s", b);        /* (empty: the whole list again) */
+        ia_all = ia_search_all;
+        ia_search_all = 0;
+        ia_page = 1;
+        search_q[0] = search_fold[0] = 0;
+        ia_reload(0);
+        return;
+    }
     if (section != SEC_LIVE && !in_episodes && b[0]) { vod_search(b); return; }   /* 0.8.0: films / series: every category */
     snprintf(search_q, sizeof search_q, "%s", b);
     if (!search_q[0]) { clear_search(); return; }
@@ -6008,7 +6186,7 @@ static void dl_hold_again(void)
 static int dl_mark(const char *url)
 {
     if (!dln || iptv_is_local_path(url)) return 0;
-    for (int i = 0; i < dln; i++) if (!strcmp(dlv[i].url, url)) return dlv[i].done ? 1 : 2;
+    for (int i = 0; i < dln; i++) if (!strcmp(dlv[i].url, url)) return dlv[i].done ? 1 : dlv[i].have ? 2 : 0;
     return 0;
 }
 
@@ -6024,7 +6202,7 @@ static const char *dl_local_for(const char *url, int *growing)
         if (strcmp(it->url, url)) continue;
         dl_path_of(it, lp, sizeof lp);
         SceIoStat fs;
-        if (sceIoGetstat(lp, &fs) < 0) return NULL;          /* (the file is gone: online) */
+        if (sceIoGetstat(lp, &fs) < 0 || fs.st_size < (SceOff)DL_EMPTY) return NULL;   /* (gone or empty: online; 1.5.1) */
         if (it->done) return lp;
         if (!it->size) return NULL;
         DlState st;
@@ -6947,8 +7125,60 @@ static void refresh_take(int busy)
     status_err = 0;
 }
 
+/* ---- 1.5.1: the Vita going to sleep and waking up (the 1.5.0 report: a reset when the screen came back; the
+ * log said nothing). The system's callback only notes it (it runs on a thread of its own); the main loop does
+ * the rest when the app runs again: the stream / film is stopped (its connection is gone), the downloads go
+ * on, and the log says when it slept and for how long. ---- */
+static volatile int pw_slept;               /* set by the callback when it comes back */
+static volatile int pw_flags;
+static int64_t pw_alive;                    /* (main loop) the clock time it last ran: how long it slept */
+static int power_cb(int notify_id, int notify_count, int arg, void *common)
+{
+    (void)notify_id; (void)notify_count; (void)common;
+    /* (an app is told only of the waking up: SCE_POWER_CB_VALID_MASK_NON_SYSTEM has no "suspend") */
+    if (arg & (SCE_POWER_CB_SYSTEM_RESUMING | SCE_POWER_CB_SYSTEM_RESUME | SCE_POWER_CB_APP_RESUME | SCE_POWER_CB_AFTER_SYSTEM_RESUME)) {
+        pw_flags |= arg;
+        pw_slept = 1;
+    }
+    return 0;
+}
+static int power_thread(SceSize args, void *argp)
+{
+    (void)args; (void)argp;
+    int cb = sceKernelCreateCallback("power", 0, power_cb, NULL);
+    int r = cb >= 0 ? scePowerRegisterCallback(cb) : cb;
+    plog("power: callback 0x%08X", (unsigned)r);
+    for (;;) sceKernelDelayThreadCB(1000000);
+    return 0;
+}
+static void power_start(void)
+{
+    SceUID t = sceKernelCreateThread("power", power_thread, 0x10000100, 16 * 1024, 0, 0, NULL);
+    if (t >= 0) sceKernelStartThread(t, 0, NULL);
+}
+/* main loop: back from sleep */
+static void power_poll(void)
+{
+    int64_t now = now_unix();
+    if (!pw_slept) { pw_alive = now; return; }
+    pw_slept = 0;
+    plog("power: awake again after about %lld s (0x%08X; downloads %d, screen %d)", (long long)(pw_alive ? now - pw_alive : 0),
+         (unsigned)pw_flags, dl_active(), state);
+    pw_flags = 0;
+    pw_alive = now;
+    if (state == ST_PLAYING && !cur_local()) {               /* (its connection did not live through the sleep) */
+        save_film_position();
+        stop_all();
+        state = return_state;
+        set_status(1, "The Vita slept: the stream was stopped", NULL);
+    }
+}
+
 int main(void)
 {
+    sceIoMkdir(DATA_DIR, 0777);                              /* 1.5.1: the log first (some lines of the start went to */
+    player_log_reset();                                      /*  the previous run's log) */
+    plog("version %s, built %s", APP_VERSION, APP_BUILD);
     SceAppUtilInitParam aup;
     SceAppUtilBootParam abp;
     memset(&aup, 0, sizeof aup);
@@ -6989,9 +7219,7 @@ int main(void)
     sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
 
     splash_frame(T("Loading playlists..."));
-    sceIoMkdir(DATA_DIR, 0777);
-    player_log_reset();
-    plog("version %s, built %s", APP_VERSION, APP_BUILD);
+    power_start();                                           /* 1.5.1 */
     {   /* a video plugin (reAvPlayer) patches the system decoder and breaks normal 720p playback */
         FILE *cf = fopen("ur0:tai/config.txt", "rb");
         if (cf) {
@@ -7055,6 +7283,7 @@ int main(void)
         frame_begin();
         guide_tick(state == ST_PLAYING);                     /* 0.8.0: background answers (before anything is drawn) */
         dl_poll();                                           /* 1.3: downloads */
+        power_poll();                                        /* 1.5.1: back from sleep */
         {                                                    /* 0.8.1: the console slept (the clock jumped): the lock closes */
             static int64_t last_wall;
             static unsigned last_check;
@@ -7177,12 +7406,14 @@ int main(void)
         else if (menu_open) {                                /* Select's menu over the playlists or the channels */
             /* 1.1: by the screen: the playlists: add, reorder, reload, settings, quit; the channels: reorder (favourites,
              * My List), Add to / Remove from My List, settings, quit (About is in the settings) */
-            enum { MI_EDIT, MI_MY, MI_ADD, MI_SORT, MI_RELOAD, MI_SETTINGS, MI_QUIT, MI_DL, MI_DL_SEASON, MI_DL_STOPALL, MI_DL_GOALL, MI_DL_BLACK };
+            enum { MI_EDIT, MI_MY, MI_ADD, MI_SORT, MI_RELOAD, MI_SETTINGS, MI_QUIT, MI_DL, MI_DL_SEASON, MI_DL_STOPALL, MI_DL_GOALL, MI_DL_BLACK,
+                   MI_IA_ORDER, MI_IA_ALL, MI_IA_CLEAR };
             int acts[10], mn = 0;
             const char *labels[10];
             /* 1.3: a film or an episode chosen (not a file here): Download (an episode: also its season) */
             int dl_ci = state == ST_CHANNELS && (focus == 1 || in_episodes || search_fold[0]) && nvis > 0 && sel < nvis &&
-                        chans.items[vis[sel]].kind == CH_FILM && !iptv_is_local_path(chans.items[vis[sel]].url) ? vis[sel] : -1;
+                        chans.items[vis[sel]].kind == CH_FILM && !iptv_is_local_path(chans.items[vis[sel]].url) &&
+                        strncmp(chans.items[vis[sel]].url, "ia-more:", 8) ? vis[sel] : -1;
             int ek = state == ST_CHANNELS ? edit_possible() : 0;
             int my_ci = state == ST_CHANNELS && section == SEC_LIVE && !in_episodes && focus == 1 && nvis > 0 && sel < nvis &&
                         chans.items[vis[sel]].kind == CH_LIVE && cur_src >= 0 && cur_src < nsources && sources[cur_src].type != SRC_STREAM ? vis[sel] : -1;
@@ -7207,6 +7438,13 @@ int main(void)
                 if (my_ci >= 0) {
                     acts[mn] = MI_MY;
                     labels[mn++] = T(sources[cur_src].type == SRC_MYLIST || in_mylist(my_ci) ? "Remove from My List" : "Add to My List");
+                }
+                if (state == ST_CHANNELS && cur_src >= 0 && cur_src < nsources && sources[cur_src].type == SRC_ARCHIVE && !job_active) {   /* 1.5.1 */
+                    static char ol[96];
+                    snprintf(ol, sizeof ol, "%s: %s", T("Order"), T(IA_SORT_NAMES[(ia_sort + 1) % IA_SORTS]));
+                    acts[mn] = MI_IA_ORDER; labels[mn++] = ol;
+                    acts[mn] = MI_IA_ALL; labels[mn++] = T("Search the whole archive");
+                    if (ia_words[0]) { acts[mn] = MI_IA_CLEAR; labels[mn++] = T("Show the whole list"); }
                 }
                 if (dl_ci >= 0) {
                     acts[mn] = MI_DL; labels[mn++] = T("Download");
@@ -7258,6 +7496,9 @@ int main(void)
                     } else dl_queue_items(&dl_ci, 1);
                     break;
                 case MI_DL_STOPALL: dl_pause_all(); dl_refresh(); set_status(0, "Downloads stopped", NULL); break;   /* 1.3.2 */
+                case MI_IA_ORDER: ia_sort = (ia_sort + 1) % IA_SORTS; ia_page = 1; ia_reload(0); break;   /* 1.5.1 */
+                case MI_IA_ALL: ia_search_all = 1; ime_open("Search the whole archive", "", 0, IME_SEARCH, NULL, 0); break;
+                case MI_IA_CLEAR: ia_words[0] = 0; ia_page = 1; ia_reload(0); break;
                 case MI_DL_BLACK: black_mode = 1; black_since = now_ms(); plog("dl: black screen"); break;   /* 1.5 */
                 case MI_DL_GOALL: {
                     int n = 0;
@@ -7282,7 +7523,7 @@ int main(void)
                 }
                 case MI_ADD: open_source_form(-1); break;
                 case MI_SORT: src_sort_begin(); break;
-                case MI_RELOAD: load_favorites(); load_mylist(); load_sources(); load_settings(); search_copy_clear(); break;
+                case MI_RELOAD: load_favorites(); load_mylist(); load_sources(); load_settings(); search_copy_clear(); api_copies_clear(); break;
                 case MI_SETTINGS: open_settings_form(); break;
                 default: quit = 1; break;
                 }
@@ -7397,7 +7638,7 @@ int main(void)
                 if (p & SCE_CTRL_CROSS) {
                     recent_open = 0;
                     if (recent_sel == 0)
-                        ime_open(!vod || in_episodes ? "Search channels" : section == SEC_FILMS ? "Search every film" : "Search every series",
+                        ime_open((!vod && cur_src >= 0 && cur_src < nsources && sources[cur_src].type == SRC_ARCHIVE) ? "Search the archive" : !vod || in_episodes ? "Search channels" : section == SEC_FILMS ? "Search every film" : "Search every series",
                                  search_q, 0, IME_SEARCH, NULL, 0);
                     else { char q[64]; snprintf(q, sizeof q, "%s", recent_q[recent_sel - 1]); search_submit(q); }
                 }
@@ -7493,7 +7734,7 @@ int main(void)
             if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SQUARE) && (!vod || !in_episodes || nvis || searching) &&
                 (recent_load(), nrecent > 0)) { recent_open = 1; recent_sel = 0; }   /* 1.5: the last searches first */
             else if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SQUARE) && (!vod || !in_episodes || nvis || searching))   /* 0.8.0: films everywhere */
-                ime_open(!vod || in_episodes ? "Search channels" : section == SEC_FILMS ? "Search every film" : "Search every series",
+                ime_open((!vod && cur_src >= 0 && cur_src < nsources && sources[cur_src].type == SRC_ARCHIVE) ? "Search the archive" : !vod || in_episodes ? "Search channels" : section == SEC_FILMS ? "Search every film" : "Search every series",
                          search_q, 0, IME_SEARCH, NULL, 0);
             if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_SELECT)) { menu_open = 1; menu_sel = 0; }   /* the menu */
             if (state == ST_CHANNELS && !job_active && (p & SCE_CTRL_START)) {   /* 0.5.0: favourite channel */
@@ -8037,7 +8278,7 @@ int main(void)
             }
         }
 
-        if (frames_after_fail < 3) plog("ui: frame %d after the failed load (screen %d)", frames_after_fail++, state);
+        (void)frames_after_fail;                             /* (1.5.1: no longer logged) */
         draw_notice();                                       /* 1.4.1 */
         vita2d_end_drawing();
         if (ime_active) vita2d_common_dialog_update();

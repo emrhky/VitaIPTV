@@ -70,10 +70,12 @@ static uint64_t now_ms64(void) { struct timespec ts; clock_gettime(CLOCK_MONOTON
 
 static volatile int g_rcvbuf;            /* the receive buffer the last connection got (bytes) */
 static volatile int g_connect_ms;        /* how long the last connect took (about one round trip) */
+static volatile int g_connect_tries;     /* 1.5.1: the sockets it took (more than one: the first stayed silent) */
 static char g_rcv_note[160];             /* 0.6.0: the receive buffer the system gave ("512 KB", or what was refused) */
 static volatile int g_rcv_new;           /* ... not logged yet */
 int cio_last_rcvbuf(void) { return g_rcvbuf; }
 int cio_last_connect_ms(void) { return g_connect_ms; }
+int cio_last_connect_tries(void) { return g_connect_tries; }
 const char *cio_rcvbuf_note(void)
 {
     if (!g_rcv_new) return "";
@@ -141,37 +143,70 @@ static int bio_recv_timeout(void *ctx, unsigned char *buf, size_t len, uint32_t 
 /* connect() with a time limit: a server that silently drops the connection would otherwise block for the
  * system's own timeout (tens of seconds) and O could not stop it. Non-blocking connect + poll in ticks so
  * stop() is honoured; the socket is made blocking again afterwards (the rest of the code expects that).
- * Returns 0 connected, -2 stopped, -1 failed. */
-static int connect_wait(int fd, const struct sockaddr *addr, socklen_t alen, const CioRequest *rq, int *why)
+ * (1.5.1: connect_race, with more than one socket.) */
+
+/* 1.5.1: a connect whose first packet is lost waits for the system to send it again (2 s, then 6 s more: the
+ * 1.5.0 logs: "connect 2087 ms", "6113 ms", "10002 ms" to a server that otherwise answers in 60-90 ms). After
+ * 1.5 s (and 4 s) one more socket tries too; the first that connects is used, the others are closed before
+ * anything is sent on them. Returns the connected socket, -2 stopped, -1 failed (*why as connect_wait). */
+#define RACE_N 3
+static int connect_race(const struct addrinfo *a, const CioRequest *rq, int *why, int *tries)
 {
-    int fl = fcntl(fd, F_GETFL, 0);
+    static const int START_MS[RACE_N] = { 0, 1500, 4000 };
+    int fds[RACE_N], fls[RACE_N], n = 0, alive = 0, win = -1;
+    int limit_ms = (rq && rq->connect_timeout_s > 0 ? rq->connect_timeout_s : 15) * 1000;
+    uint64_t t0 = now_ms64();
     *why = 0;
-    if (fl < 0 || fcntl(fd, F_SETFL, fl | O_NONBLOCK) < 0) {     /* no non-blocking mode: as before */
-        if (connect(fd, addr, alen) == 0) return 0;
-        *why = errno;
-        return -1;
-    }
-    int ret = -1;
-    if (connect(fd, addr, alen) == 0) ret = 0;
-    else if (errno != EINPROGRESS && errno != EALREADY && errno != EWOULDBLOCK) *why = errno;
-    else {
-        int limit_ms = (rq && rq->connect_timeout_s > 0 ? rq->connect_timeout_s : 15) * 1000;
-        for (int waited = 0; waited < limit_ms; waited += TICK_MS) {
-            if (rq && stopped(rq)) { ret = -2; break; }
-            struct pollfd p = { fd, POLLOUT, 0 };
-            int r = poll(&p, 1, TICK_MS);
-            if (r < 0) { *why = 1000 + errno; break; }
-            if (r == 0) { if (waited + TICK_MS >= limit_ms) *why = -1; continue; }   /* -1: no answer in time */
-            int e = 0;
-            socklen_t el = sizeof e;
-            if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &e, &el) < 0) e = (p.revents & (POLLERR | POLLHUP)) ? -2 : 0;
-            ret = e ? -1 : 0;
-            *why = e;
-            break;
+    *tries = 0;
+    for (;;) {
+        int el = (int)(now_ms64() - t0);
+        if (n < RACE_N && (el >= START_MS[n] || !alive)) {    /* (all of them failed at once: the next one now) */
+            int fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
+            fds[n] = fd;
+            fls[n] = -1;
+            n++;
+            *tries = n;
+            if (fd >= 0) {
+                set_rcvbuf(fd);
+                fls[n - 1] = fcntl(fd, F_GETFL, 0);
+                if (fls[n - 1] < 0 || fcntl(fd, F_SETFL, fls[n - 1] | O_NONBLOCK) < 0) {   /* no non-blocking mode: as before */
+                    fcntl(fd, F_SETFL, fls[n - 1] < 0 ? 0 : fls[n - 1]);
+                    if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) { win = n - 1; break; }
+                    *why = errno;
+                    close(fd); fds[n - 1] = -1;
+                } else if (connect(fd, a->ai_addr, a->ai_addrlen) == 0) { win = n - 1; break; }
+                else if (errno != EINPROGRESS && errno != EALREADY && errno != EWOULDBLOCK) { *why = errno; close(fd); fds[n - 1] = -1; }
+                else alive++;
+            }
+            continue;
         }
+        if (rq && stopped(rq)) break;
+        if (el >= limit_ms) { if (!*why || alive) *why = -1; break; }
+        if (!alive && n >= RACE_N) break;
+        struct pollfd p[RACE_N];
+        int idx[RACE_N], np = 0;
+        for (int k = 0; k < n; k++) if (fds[k] >= 0) { p[np].fd = fds[k]; p[np].events = POLLOUT; p[np].revents = 0; idx[np++] = k; }
+        int wait = TICK_MS;
+        if (n < RACE_N && START_MS[n] - el < wait) wait = START_MS[n] - el > 0 ? START_MS[n] - el : 0;
+        if (limit_ms - el < wait) wait = limit_ms - el > 0 ? limit_ms - el : 0;
+        int r = poll(p, (nfds_t)np, wait);
+        if (r < 0) { if (errno == EINTR) continue; *why = 1000 + errno; break; }
+        for (int q = 0; q < np && r > 0 && win < 0; q++) {
+            if (!p[q].revents) continue;
+            int k = idx[q], e = 0;
+            socklen_t elen = sizeof e;
+            if (getsockopt(fds[k], SOL_SOCKET, SO_ERROR, &e, &elen) < 0) e = (p[q].revents & (POLLERR | POLLHUP)) ? -2 : 0;
+            if (!e) { win = k; break; }
+            *why = e;
+            close(fds[k]); fds[k] = -1; alive--;
+        }
+        if (win >= 0) break;
     }
-    fcntl(fd, F_SETFL, fl);
-    return ret;
+    for (int k = 0; k < n; k++) if (k != win && fds[k] >= 0) close(fds[k]);
+    if (win < 0) return rq && stopped(rq) ? -2 : -1;
+    if (fls[win] >= 0) fcntl(fds[win], F_SETFL, fls[win]);   /* (blocking again: the rest of the code expects that) */
+    *why = 0;
+    return fds[win];
 }
 
 static int tcp_connect(const char *host, int port, const CioRequest *rq, char *err, size_t errsz)
@@ -185,17 +220,16 @@ static int tcp_connect(const char *host, int port, const CioRequest *rq, char *e
     if (getaddrinfo(host, ps, &hints, &res) != 0 || !res) { snprintf(err, errsz, "Could not resolve %s", host); return -1001; }
     int fd = -1, st = 0, why = 0;
     for (struct addrinfo *a = res; a; a = a->ai_next) {
-        fd = socket(a->ai_family, a->ai_socktype, a->ai_protocol);
-        if (fd < 0) continue;
         /* A big receive buffer, set before connecting so TCP can offer a big window: with the small default
          * the speed stops near buffer / round trip (films over https stayed at about 300 KB/s while the
-         * Vita's own HTTP reached 800 KB/s). */
-        set_rcvbuf(fd);
+         * Vita's own HTTP reached 800 KB/s). (set_rcvbuf in connect_race) */
         uint64_t t0 = now_ms64();
-        st = connect_wait(fd, a->ai_addr, a->ai_addrlen, rq, &why);
+        int tries = 0;
+        fd = connect_race(a, rq, &why, &tries);
         g_connect_ms = (int)(now_ms64() - t0);
-        if (st == 0) break;
-        close(fd);
+        g_connect_tries = tries;
+        if (fd >= 0) { st = 0; break; }
+        st = fd;
         fd = -1;
         if (st == -2) break;
     }
@@ -563,6 +597,7 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 int cio_available(void) { return 0; }
 int cio_last_rcvbuf(void) { return 0; }
 int cio_last_connect_ms(void) { return 0; }
+int cio_last_connect_tries(void) { return 0; }
 const char *cio_rcvbuf_note(void) { return ""; }
 void cio_init(void) {}
 int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)

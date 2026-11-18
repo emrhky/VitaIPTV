@@ -16,6 +16,14 @@ static const Pair FIXED[] = {
     { "Clear speech (5.1)", "Konuşma netleştirme (5.1)" },
     { "Same volume on every channel", "Kanallar arası ses eşitleme" },
     { "Sound field", "Ses alanı" }, { "Speakers", "Hoparlör" }, { "Headphones", "Kulaklık" }, { "Auto", "Otomatik" },   /* 1.3 */
+    /* 1.5.1 */
+    { "The server sent nothing (an empty answer)", "Sunucu bir şey göndermedi (boş cevap)" },
+    { "The Vita slept: the stream was stopped", "Vita uykuya geçti: yayın durduruldu" },
+    { "Next %d...  (%d of %d shown)", "Sonraki %d...  (%d / %d gösteriliyor)" },
+    { "Most watched", "En çok izlenen" }, { "Newest added", "En yeni eklenen" }, { "Year (newest first)", "Yıl (yeniden eskiye)" },
+    { "Title (A-Z)", "Ad (A-Z)" }, { "Order", "Sıralama" }, { "Search the whole archive", "Tüm arşivde ara" },
+    { "Show the whole list", "Tüm listeyi göster" }, { "Search the archive", "Arşivde ara" }, { "Loading the archive...", "Arşiv yükleniyor..." },
+    { "The video is WebM / Ogg (VP8, VP9, Theora pictures): the Vita cannot play it", "Video WebM / Ogg (VP8, VP9, Theora görüntü): Vita oynatamaz" },
     /* 1.5: Internet Archive, web pages, black screen, the last searches */
     { "Internet Archive", "Internet Archive" }, { "Web page", "Web sayfası" },
     { "Internet Archive: free films of archive.org (an address or words)", "Internet Archive: archive.org'daki ücretsiz filmler (adres ya da kelimeler)" },
@@ -436,6 +444,7 @@ static const Pair PATTERNS[] = {
     { "Server answered HTTP %d", "Sunucu HTTP %s yanıtı verdi" },
     { "The server does not give this one (HTTP %d)", "Sunucu bu içeriği vermiyor (HTTP %s)" },   /* 1.4.1 */
     { "The first %d of %d films (the most watched)", "%s / %s film (en çok izlenenler)" },   /* 1.5 */
+    { "%d of %d films (%s)", "%s / %s film (%s)" },   /* 1.5.1 */
     { "%d videos left out (the Vita cannot play them: see webcheck.txt)", "%s video dışarıda kaldı (Vita oynatamaz: webcheck.txt'ye bakın)" },
     { "The page could not be opened (%s)", "Sayfa açılamadı (%s)" },
     { "Server answered HTTP %d (the provider refuses: account busy?)", "Sunucu HTTP %s yanıtı verdi (sağlayıcı reddediyor: hesap kullanımda olabilir)" },
