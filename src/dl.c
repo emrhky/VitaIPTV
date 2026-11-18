@@ -523,7 +523,7 @@ void dl_note_stream_end(void) { g_stream_end_ms = now_ms_dl(); }
 static int busy_http(int st)
 {
     if (st == 405) return g_stream_end_ms && now_ms_dl() - g_stream_end_ms < 60000;
-    return st == 407 || st == 429 || st == 503 || st == 509 || st == 512;
+    return st == 407 || st == 429 || st == 503 || st == 506 || st == 509 || st == 512;   /* (1.5.1: 506 as well) */
 }
 /* 1.4.1: answers that will not change by asking again */
 static int gone_http(int st) { return st == 401 || st == 403 || st == 404 || st == 405 || st == 410 || st == 451; }
@@ -582,7 +582,7 @@ static void get_srt(const DlItem *it, const char *url, const char *ua, const cha
     if (ok == 2) {
         int fd = f_open_append(p, 1);
         if (fd >= 0) { int w = f_write(fd, m.b, m.n); f_close(fd); if (w != (int)m.n) f_remove(p); else plog("dl: subtitles found beside it (%u KB)", (unsigned)(m.n >> 10)); }
-    } else plog("dl: no subtitle file beside it (HTTP %d)", st);
+    }                                                        /* (1.5.1: none: not logged) */
     free(m.b);
 }
 
@@ -596,6 +596,11 @@ static void run_one(const char *dir)
         lock(); fail_set(dir, "The download's information cannot be read", 0, 0); unlock();
         return;
     }
+    {   /* 1.5.1: "finished" with nothing (an empty answer of 1.5.0): downloaded again */
+        char vp[DL_DIR_MAX + 32];
+        snprintf(vp, sizeof vp, "%s/%s", dir, it->video);
+        if (it->done && f_size(vp) < (long long)DL_EMPTY) { it->done = 0; it->size = 0; f_remove(vp); }
+    }
     if (it->done) { free(it); free(buf); return; }
     if (it->err[0]) { it->err[0] = 0; dl_info_write(it); }  /* 1.4.1: tried again */
     get_poster(it);
@@ -604,7 +609,7 @@ static void run_one(const char *dir)
     char url[DL_URL_MAX], ua[256], ref[512];
     url_split_headers(it->url, url, sizeof url, ua, sizeof ua, ref, sizeof ref);
     if (f_size(vpath) <= 0) get_srt(it, url, ua, ref);      /* 1.3.1 (once, before the film) */
-    int status = 0, fails = 0, busy = 0;
+    int status = 0, fails = 0, busy = 0, empty = 0;
     const char *err = NULL;
     int need_mb = 0, free_mb = 0;
     long long have0 = f_size(vpath);                         /* 1.3.1: the speed of this session (log) */
@@ -669,6 +674,15 @@ static void run_one(const char *dir)
             if (gone_http(status)) snprintf(eb, sizeof eb, "The server does not give this one (HTTP %d)", status);   /* 1.4.1 */
             else snprintf(eb, sizeof eb, "Server answered HTTP %d", status);
             err = eb;
+            break;
+        }
+        if (r >= 0 && status && !it->size && j.have < DL_EMPTY) {   /* 1.5.1: the answer ended with (almost) nothing */
+            if (empty++ < 2) {
+                plog("dl: the server sent %llu KB and ended (size not given): asking again in 5 s", (unsigned long long)(j.have >> 10));
+                for (int k = 0; k < 50 && !g_stop_cur && !g_quit; k++) sceKernelDelayThread(100000);
+                continue;
+            }
+            err = "The server sent nothing (an empty answer)";
             break;
         }
         if (r >= 0 && status && (it->size ? j.have >= it->size : 1)) {   /* the body ended: all of it */
@@ -812,6 +826,10 @@ static void scan_one(void *ctx, const char *name, int dir)
     long long sz = f_size(v);
     it->have = sz > 0 ? (uint64_t)sz : 0;
     if (it->done && it->size && it->have < it->size) it->done = 0;   /* (the file was cut short) */
+    if (it->done && it->have < DL_EMPTY) {                   /* 1.5.1: "finished" with nothing (1.5.0: an empty answer) */
+        it->done = 0;
+        it->size = 0;
+    }
     if (it->err[0] && !it->done) {                           /* 1.4.1: it failed before (also in an earlier run) */
         lock();
         int busy = !strcmp(g_cur, p) || queued(p), known = 0;

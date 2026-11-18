@@ -23,8 +23,11 @@
  * archive.org/details/ID page ("" otherwise): a collection or one item, tried as a collection first (if that finds
  * nothing: "identifier:(ID)"). 0 = ok, -1 = not an archive.org address */
 int  ia_query(const char *addr, char *q, size_t cap, char *id, size_t idcap);
-/* the API address for a query */
-int  ia_search_url(const char *q, char *out, size_t cap);
+/* 1.5.1: the same with words searched for (Square in the list): inside it (all = 0) or in the whole archive */
+int  ia_query_words(const char *addr, const char *words, int all, char *q, size_t cap, char *id, size_t idcap);
+/* the API address for a query: sorted (IA_SORT_*), page 1, 2... of IA_ROWS */
+enum { IA_SORT_POPULAR, IA_SORT_NEW, IA_SORT_YEAR, IA_SORT_TITLE, IA_SORTS };
+int  ia_search_url(const char *q, int sort, int page, char *out, size_t cap);
 /* the search's answer as films ("ia:<id>", the source's name as their group, poster / year / plot). Returns how
  * many; *found = the API's total (more than IA_ROWS: only the first ones) */
 int  ia_parse_search(const char *json, size_t len, const char *group, ChannelList *out, int *found);
@@ -58,6 +61,7 @@ typedef struct {
     int scripts;                            /* <script> tags */
     int js_player;                          /* a known JavaScript player is named (jwplayer, video.js, hls.js...) */
     int drm;                                /* DRM is named (widevine, playready, fairplay...) */
+    int skipped_formats;                    /* 1.5.1: WebM / Ogg videos seen (VP8 / VP9 / Theora: left out) */
 } WebScan;
 /* the videos of a page (base: its address, for relative ones); more pages (iframes) may be added to the same scan */
 void web_scan(const char *html, size_t len, const char *base, WebScan *out);

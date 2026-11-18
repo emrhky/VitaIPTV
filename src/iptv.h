@@ -151,7 +151,7 @@ int  xtream_parse_series(const char *json, size_t len, const Source *s,
 int  xtream_parse_vod_match(const char *json, size_t len, const Source *s, const XtCategory *cats, int ncats,
                             ChannelList *out, int series, const char *folded_query, int max);
 /* 1.4.1: get_vod_streams / get_series made small for searching again: the fields a search result uses (name, id,
- * category, adult, extension, picture, rating, year, genre) as JSON of the same shape (xtream_parse_vod_match
+ * category, adult, extension, rating, year, genre; the picture only for series: 1.5.1) as JSON of the same shape (xtream_parse_vod_match
  * reads it). *out is malloc'd (the caller frees it); returns its length, 0 = none. */
 size_t xtream_compact(const char *json, size_t len, int series, char **out);
 /* get_series_info: the episodes (kind CH_FILM, group "Season N", url .../series/U/P/ID.EXT) */

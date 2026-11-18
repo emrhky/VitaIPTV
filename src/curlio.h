@@ -39,6 +39,7 @@ int  cio_last_rcvbuf(void);
 /* 0.6.0 (diagnosis): how long the last connect took in ms (about one round trip), and the receive buffer the
  * system gave ("512 KB", or "512 KB refused (105), using 256 KB"): returned once, then "" until it changes */
 int  cio_last_connect_ms(void);
+int  cio_last_connect_tries(void);   /* 1.5.1: sockets the last connect took (2, 3: the first stayed silent) */
 const char *cio_rcvbuf_note(void);
 
 #endif

@@ -298,12 +298,36 @@ int ia_query(const char *addr, char *q, size_t cap, char *id, size_t idcap)
     return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
-int ia_search_url(const char *q, char *out, size_t cap)
+int ia_query_words(const char *addr, const char *words, int all, char *q, size_t cap, char *id, size_t idcap)
 {
+    char w[160];
+    snprintf(w, sizeof w, "%s", words ? words : "");
+    trim(w);
+    for (char *p = w; *p; p++) if (*p == '(' || *p == ')' || *p == '"' || *p == ':') *p = ' ';   /* (words, not query syntax) */
+    if (!w[0]) return ia_query(addr, q, cap, id, idcap);
+    if (all || ia_query(addr, q, cap, id, idcap) != 0) {
+        id[0] = 0;
+        int n = snprintf(q, cap, "(%s) AND mediatype:(movies)", w);
+        return n > 0 && (size_t)n < cap ? 0 : -1;
+    }
+    char base[IPTV_URL_MAX + 64];
+    snprintf(base, sizeof base, "%s", q);                    /* "(collection:(x)) AND mediatype:(movies)" */
+    char *m = strstr(base, " AND mediatype:(movies)");
+    if (m) *m = 0;
+    int n = snprintf(q, cap, "%s AND (%s) AND mediatype:(movies)", base, w);
+    id[0] = 0;                                               /* (not an item of that name: a search) */
+    return n > 0 && (size_t)n < cap ? 0 : -1;
+}
+
+int ia_search_url(const char *q, int sort, int page, char *out, size_t cap)
+{
+    static const char *const SORT[IA_SORTS] = { "downloads+desc", "addeddate+desc", "year+desc", "titleSorter+asc" };
     char e[IPTV_URL_MAX * 3];
     url_encode_q(q, e, sizeof e, 0);
+    if (sort < 0 || sort >= IA_SORTS) sort = 0;
+    if (page < 1) page = 1;
     int n = snprintf(out, cap, "https://archive.org/advancedsearch.php?q=%s&fl%%5B%%5D=identifier&fl%%5B%%5D=title&fl%%5B%%5D=year"
-                               "&fl%%5B%%5D=description&sort%%5B%%5D=downloads+desc&rows=%d&page=1&output=json", e, IA_ROWS);
+                               "&fl%%5B%%5D=description&sort%%5B%%5D=%s&rows=%d&page=%d&output=json", e, SORT[sort], IA_ROWS, page);
     return n > 0 && (size_t)n < cap ? 0 : -1;
 }
 
@@ -563,11 +587,13 @@ static void unescape_url(const char *s, size_t n, char *out, size_t cap)
     out[o] = 0;
 }
 
+/* (1.5.1: WebM / Ogg are left out: VP8 / VP9 / Theora pictures, which the Vita cannot decode) */
 static int video_kind(const char *url)
 {
     size_t n = strcspn(url, "?#");
     static const struct { const char *e; int k; } EXT[] = { { ".m3u8", WV_HLS }, { ".mpd", WV_DASH }, { ".mp4", WV_FILE }, { ".m4v", WV_FILE },
-                                                            { ".mkv", WV_FILE }, { ".webm", WV_FILE }, { ".mov", WV_FILE }, { ".ts", WV_FILE } };
+                                                            { ".mkv", WV_FILE }, { ".mov", WV_FILE }, { ".ts", WV_FILE },
+                                                            { ".webm", -1 }, { ".ogv", -1 }, { ".ogg", -1 } };
     for (size_t i = 0; i < sizeof EXT / sizeof EXT[0]; i++) {
         size_t l = strlen(EXT[i].e);
         if (n > l && !strncasecmp(url + n - l, EXT[i].e, l)) return EXT[i].k;
@@ -585,12 +611,13 @@ static void add_video(WebScan *s, const char *base, const char *raw, size_t rl, 
     if (strncasecmp(abs, "http://", 7) && strncasecmp(abs, "https://", 8)) return;
     if (strlen(abs) >= IPTV_URL_MAX) return;
     int k = video_kind(abs);
+    if (k < 0) { s->skipped_formats++; return; }             /* (1.5.1: WebM / Ogg) */
     if (!k) k = kind_hint;
     if (!k) return;
     for (int i = 0; i < s->n; i++) if (!strcmp(s->v[i].url, abs)) return;
     if (s->n >= WEB_MAX_VIDEOS) return;
     WebVideo *v = &s->v[s->n++];
-    snprintf(v->url, sizeof v->url, "%s", abs);
+    memcpy(v->url, abs, strlen(abs) + 1);                    /* (shorter than IPTV_URL_MAX: checked above) */
     v->kind = k;
     snprintf(v->title, sizeof v->title, "%s", title ? title : "");
 }
@@ -643,7 +670,21 @@ void web_scan(const char *html, size_t len, const char *base, WebScan *s)
         } else if (tl == 6 && !strncasecmp(t, "source", 6)) {
             tag_attr(t, te, "type", b, sizeof b);
             int hint = ci_str(b, "mpegurl") ? WV_HLS : ci_str(b, "dash") ? WV_DASH : ci_str(b, "video/") ? WV_FILE : 0;
-            if (tag_attr(t, te, "src", a, sizeof a)) add_video(s, base, a, strlen(a), hint, NULL);
+            if (ci_str(b, "webm") || ci_str(b, "ogg")) { s->skipped_formats++; hint = -1; }   /* 1.5.1 */
+            if (hint >= 0 && tag_attr(t, te, "src", a, sizeof a)) add_video(s, base, a, strlen(a), hint, NULL);
+        } else if (tl == 1 && (t[0] == 'a' || t[0] == 'A')) {   /* 1.5.1: a link to a video file (a folder's list of files) */
+            int vk = tag_attr(t, te, "href", a, sizeof a) ? video_kind(a) : 0;
+            if (vk < 0) s->skipped_formats++;
+            if (vk > 0) {
+                char nm[IPTV_NAME_MAX];                      /* its name: the file's, %XX undone, without the extension */
+                const char *f = a + strcspn(a, "?#");
+                const char *slash = a;
+                for (const char *q = a; q < f; q++) if (*q == '/') slash = q + 1;
+                url_decode(slash, (size_t)(f - slash), nm, sizeof nm);
+                char *dot = strrchr(nm, '.');
+                if (dot && dot != nm) *dot = 0;
+                add_video(s, base, a, strlen(a), 0, nm);
+            }
         } else if ((tl == 6 && !strncasecmp(t, "iframe", 6)) || (tl == 5 && !strncasecmp(t, "embed", 5))) {
             if (tag_attr(t, te, "src", a, sizeof a) && a[0] && s->nframes < WEB_MAX_FRAMES && strncasecmp(a, "about:", 6)) {
                 char full[IPTV_URL_MAX * 2];
@@ -781,6 +822,7 @@ const char *web_reason(const WebScan *s, const char *http_err, int hls_bits)
     for (int i = 0; i < s->n; i++) if (s->v[i].kind == WV_DASH) dash = 1;
     if (s->drm) return "The video is encrypted (DRM): the Vita cannot play it";
     if (dash) return "The video is DASH (.mpd): the Vita player does not play it";
+    if (s->skipped_formats) return "The video is WebM / Ogg (VP8, VP9, Theora pictures): the Vita cannot play it";   /* 1.5.1 */
     if (s->js_player || s->scripts > 3) return "The site makes its video with JavaScript: it is not in the page";
     return "No video found in this page";
 }

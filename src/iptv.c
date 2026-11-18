@@ -919,7 +919,8 @@ static int compact_cb(const XtObj *o, void *vctx)
     cc_field(c, "category_id", o->cat, 24);
     cc_field(c, "is_adult", o->adult, 8);
     cc_field(c, "container_extension", o->ext, 12);
-    cc_field(c, "stream_icon", o->icon, IPTV_URL_MAX - 1);
+    if (c->series) cc_field(c, "stream_icon", o->icon, IPTV_URL_MAX - 1);   /* (1.5.1: films: the picture comes with
+                                                                               the film's information: the copy is half as big) */
     cc_field(c, "rating", o->rating, 8);
     cc_field(c, "year", o->release, 24);
     cc_field(c, "genre", o->genre, 80);

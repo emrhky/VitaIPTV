@@ -707,7 +707,7 @@ static int set_plan(Tsp *t, int p)
     char ex[48] = "";
     if (n > t->base_slots) snprintf(ex, sizeof ex, " (%d of them extra%s%s)", n - t->base_slots,
                                     extra_kind >= 0 ? ", some in " : "", extra_kind >= 0 ? mem_name(extra_kind) : "");
-    plog("tsp: memory plan %d: ES in %s, %d pictures in %s%s", p, mem_name(PLANS[p].es), n, mem_name(pk), ex);
+    if (p > 0) plog("tsp: memory plan %d: ES in %s, %d pictures in %s%s", p, mem_name(PLANS[p].es), n, mem_name(pk), ex);   /* (1.5.1: the usual one not logged) */
     return 0;
 }
 
@@ -727,6 +727,8 @@ static int dpb_frames(int level, int w, int h, int refs)
     int pic = ((w + 15) / 16) * ((h + 15) / 16);
     int n = (pic > 0 ? mbs / pic : 4) + 2;                  /* some decoders hold output pictures too */
     if (n > 10) n = 10;                                     /* memory; grows later if really needed */
+    if (pic > 0 && pic <= 1620) n = 16;                     /* 1.5.1: SD (up to 720x576) is cheap: room from the start (640x480
+                                                               with 8 ran out and dropped 134 pictures until the next keyframe) */
     if (n < refs + 1) n = refs + 1;
     if (n < 2) n = 2;
     if (n > 16) n = 16;
@@ -786,7 +788,7 @@ static int decoder_core_open_internal(Tsp *t, int nref)
     q.vertical = (uint32_t)t->dh;
     q.numOfRefFrames = (uint32_t)nref;
     r = sceAvcdecQueryDecoderMemSizeInternal(AVC, &q, &di);
-    plog("tsp: HD decoder frame memory %u KB -> 0x%08X", (unsigned)(di.frameMemSize >> 10), (unsigned)r);
+    if (r < 0) plog("tsp: HD decoder frame memory %u KB -> 0x%08X", (unsigned)(di.frameMemSize >> 10), (unsigned)r);
     if (r < 0) return r;
 
     /* codec context: CDRAM, 1 MB aligned, opened as "unmapped" memory for the codec engine */
@@ -810,7 +812,7 @@ static int decoder_core_open_internal(Tsp *t, int nref)
     vc.vaContext = t->va;
     vc.contextSize = csize;
     r = sceVideodecInitLibraryWithUnmapMemInternal(AVC, &vc, &init);
-    plog("tsp: HD decoder library -> 0x%08X", (unsigned)r);
+    if (r < 0) plog("tsp: HD decoder library -> 0x%08X", (unsigned)r);
     if (r < 0) return r;
     t->lib_open = 1;
 
@@ -824,7 +826,7 @@ static int decoder_core_open_internal(Tsp *t, int nref)
         t->ctrl.frameBuf.pBuf = fb;
         t->ctrl.frameBuf.size = ALIGN(di.frameMemSize, k == MEM_CDRAM ? 256 * 1024 : 4096);
         r = sceAvcdecCreateDecoderInternal(AVC, &t->ctrl, &q);
-        plog("tsp: HD decoder (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
+        if (r < 0) plog("tsp: HD decoder (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
         if (r >= 0) { t->fb_kind = k; break; }
         mem_free(fb, t->fb_uid, 0);
         t->fb_uid = -1;
@@ -867,7 +869,8 @@ static int decoder_core_open(Tsp *t, int nref, int nmin)
         init.numOfStreams = 1;
         interlaced_mode(t);
         r = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, &init);
-        plog("tsp: sceVideodecInitLibrary %dx%d refs %d -> 0x%08X", t->dw, t->dh, n, (unsigned)r);
+        if (r < 0) plog("tsp: sceVideodecInitLibrary %dx%d refs %d -> 0x%08X", t->dw, t->dh, n, (unsigned)r);
+        else plog("tsp: decoder %dx%d, %d pictures", t->dw, t->dh, n);   /* (1.5.1: one line when it works) */
         if (r >= 0) {
             if (n < nref) t->nref_cap = n;                 /* n + 1 was refused: never ask for more */
             nref = n;
@@ -886,7 +889,7 @@ static int decoder_core_open(Tsp *t, int nref, int nmin)
     q.vertical = (uint32_t)t->dh;
     q.numOfRefFrames = (uint32_t)nref;
     r = sceAvcdecQueryDecoderMemSize(SCE_VIDEODEC_TYPE_HW_AVCDEC, &q, &di);
-    plog("tsp: decoder memory %u bytes -> 0x%08X", (unsigned)di.frameMemSize, (unsigned)r);
+    if (r < 0) plog("tsp: decoder memory %u bytes -> 0x%08X", (unsigned)di.frameMemSize, (unsigned)r);
     if (r < 0) return r;
 
     r = -1;
@@ -897,7 +900,7 @@ static int decoder_core_open(Tsp *t, int nref, int nmin)
         t->ctrl.frameBuf.pBuf = fb;
         t->ctrl.frameBuf.size = ALIGN(di.frameMemSize, k == MEM_PHYCONT ? 1024 * 1024 : k == MEM_CDRAM ? 256 * 1024 : 4096);
         r = sceAvcdecCreateDecoder(SCE_VIDEODEC_TYPE_HW_AVCDEC, &t->ctrl, &q);
-        plog("tsp: sceAvcdecCreateDecoder (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
+        if (r < 0) plog("tsp: sceAvcdecCreateDecoder (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
         if (r >= 0) { t->fb_kind = k; break; }
         mem_free(fb, t->fb_uid, 0);
         t->fb_uid = -1;
@@ -935,7 +938,7 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
         /* On a real Vita this ID is rejected (0x805A1000) because the decoder lives in
          * SceAvcodecUser, which is already loaded: a failure here is not fatal. */
         r = sceSysmoduleLoadModule(SCE_SYSMODULE_AVCDEC);
-        plog("tsp: load AVCDEC module -> 0x%08X%s", (unsigned)r, r < 0 ? " (ignored, continuing)" : "");
+        if ((unsigned)r != 0x805A1000u) plog("tsp: load AVCDEC module -> 0x%08X%s", (unsigned)r, r < 0 ? " (ignored, continuing)" : "");   /* (1.5.1: the usual answer not logged) */
         g_module_loaded = 1;
     }
     t->dw = ALIGN(w, 16);
@@ -1452,9 +1455,7 @@ static const uint8_t *sps_for_decoder(Tsp *t, const uint8_t *nal, size_t len, si
         if (sps_info(nal, len, &in) == 0) {
             t->hdr_timing = in.nal_hrd || in.vcl_hrd || in.pic_struct;
             t->hdr_no_restr = !in.restriction;
-            if (!t->hdr_logged++)                           /* (to compare channels that play with ones that do not) */
-                plog("tsp: H.264 header: timing %s, HRD %s, picture timing %s, bitstream_restriction %s", in.timing ? "yes" : "no",
-                     in.nal_hrd ? (in.vcl_hrd ? "NAL+VCL" : "NAL") : in.vcl_hrd ? "VCL" : "no", in.pic_struct ? "yes" : "no", in.restriction ? "yes" : "no");
+            t->hdr_logged++;                                /* (1.5.1: the header details are no longer logged) */
         }
         t->sps_fix_len = t->drop_timing ? sps_rewrite(nal, len, t->sps_fix, sizeof t->sps_fix, 1, &reorder) : 0;
         if (t->sps_fix_len && !t->sps_fix_logged++) {
@@ -1560,10 +1561,12 @@ static void log_rcvbuf(Tsp *t)
     if (t->rcvbuf_logged) return;
     t->rcvbuf_logged = 1;
     int rb = cio_last_rcvbuf(), cms = cio_last_connect_ms();
-    plog("tsp: own socket (%s), receive buffer %d KB, connect %d ms (about one round trip: at most %d KB/s with this buffer)",
-         strncasecmp(t->url, "https:", 6) ? "http" : "https", rb / 1024, cms, cms > 0 ? rb / cms : 0);
-    const char *rn = cio_rcvbuf_note();                     /* (once, and again when a size was refused) */
-    if (rn[0]) plog("tsp: receive buffer: %s", rn);
+    int tries = cio_last_connect_tries();
+    plog("tsp: own socket (%s), receive buffer %d KB, connect %d ms%s (about one round trip: at most %d KB/s with this buffer)",
+         strncasecmp(t->url, "https:", 6) ? "http" : "https", rb / 1024, cms, tries > 1 ? (tries == 2 ? ", 2nd socket" : ", 3rd socket") : "",
+         cms > 0 ? rb / cms : 0);
+    const char *rn = cio_rcvbuf_note();                     /* (1.5.1: only when the system gave less) */
+    if (rn[0] && strstr(rn, "refused")) plog("tsp: receive buffer: %s", rn);
 }
 
 /* A decoder slower than the stream (1080p at 50/60 fps may be): leave out the pictures nothing else needs
@@ -1815,8 +1818,7 @@ static void video_packet(Tsp *t, Pkt *p)
         if (m) {
             t->sei_logged = 1;
             t->sei_timing = (m & 3) != 0;
-            plog("tsp: the stream sends SEI messages%s%s%s", m & 1 ? ", buffering period" : "", m & 2 ? ", picture timing" : "",
-                 (m & ~3u) ? ", others" : "");
+            /* (1.5.1: not logged) */
         }
     }
     if (t->hd60_pending && start_ok && t->dec_open) {       /* 720p above 30 fps: the HD decoder from this keyframe */
@@ -2684,9 +2686,11 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
         int b, sp, lv;
         afx_get_global(&b, &sp, &lv);
         if (b != t->afx_boost || sp != t->afx_speaker || lv != t->afx_level) {
-            if (t->afx_boost >= 0 || b || sp || lv)
+            static int lb = -1, lsp = -1, llv = -1;           /* (1.5.1: said again only when changed) */
+            if ((t->afx_boost >= 0 || b || sp || lv) && (b != lb || sp != lsp || lv != llv))
                 plog("tsp: sound: boost %s, speaker mode %s, one level %s", b ? (b == 1 ? "+3 dB" : b == 2 ? "+6 dB" : "+9 dB") : "off",
                      sp ? "on" : "off", lv ? "on" : "off");
+            lb = b; lsp = sp; llv = lv;
             t->afx_boost = b;
             t->afx_speaker = sp;
             t->afx_level = lv;
@@ -2694,7 +2698,9 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
         }
         int fd = afx_get_field();                            /* 1.3: the sound field */
         if (fd != t->afx.field) {
-            plog("tsp: sound field %s", fd == 1 ? "speakers (wider)" : fd == 2 ? "headphones (crossfeed, 5.1: virtual surround)" : "off");
+            static int lfd = -1;                             /* (1.5.1: said again only when changed) */
+            if (fd != lfd) plog("tsp: sound field %s", fd == 1 ? "speakers (wider)" : fd == 2 ? "headphones (crossfeed, 5.1: virtual surround)" : "off");
+            lfd = fd;
             afx_field(&t->afx, fd);
         }
         afx_process(&t->afx, (int16_t *)pcm, samples, ch, rate);
@@ -3160,6 +3166,7 @@ static void stats_tick(Tsp *t)
      * information table uses them. */
     uint32_t bad = t->st.dropped + t->st.late + t->st.damaged + t->st.errors + (uint32_t)t->st.skipped;
     int loud = now - t->start_us < 31000000ULL || bad != t->log_bad;
+    int detail = now - t->start_us < 12000000ULL || bad != t->log_bad;   /* 1.5.1: timing / cpu / units: the start, or when lost */
     int brief = loud || ++t->stats_quiet >= 12;
     if (brief) t->stats_quiet = 0;
     t->log_bad = bad;
@@ -3257,13 +3264,13 @@ static void stats_tick(Tsp *t)
             unsigned used = pd + psl + pda + pb;
             uint32_t dr = t->drained;
             t->drained = 0;
-            if (loud) plog("tsp: timing: video thread %u%% in the decoder, %u%% waiting for a free slot, %u%% waiting for data, "
+            if (detail) plog("tsp: timing: video thread %u%% in the decoder, %u%% waiting for a free slot, %u%% waiting for data, "
                  "%u%% HD decoder busy, %u%% other; picture to screen avg %u ms; screen frames with no picture %u, behind %u",
                  pd, psl, pda, pb, used < 100 ? 100 - used : 0, wn ? (unsigned)(wsum / wn / 1000) : 0, (unsigned)none, (unsigned)more);
-            if (dr && loud) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
+            if (dr && detail) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
         }
     }
-    cpu_line(t, now, loud);
+    cpu_line(t, now, detail);
     if (t->reader_done) return;                             /* (called by the video thread now: no reads to tune) */
     if (t->vod_file) return;                                 /* 1.3.1: a file is read in CHUNK pieces (no network) */
 
@@ -3273,7 +3280,7 @@ static void stats_tick(Tsp *t)
     while (rs < CHUNK && (uint64_t)rs * 2 * 30 <= (uint64_t)kbs * 1024) rs *= 2;
     while (rs > READ_SIZE && (uint64_t)rs * 4 > (uint64_t)kbs * 1024) rs /= 2;   /* below 4 reads a second: smaller */
     if (rs != cur_read_size(t)) {
-        plog("tsp: http read size %u -> %u bytes", cur_read_size(t), rs);
+        /* (1.5.1: not logged) */
         t->read_size = rs;
     }
 }
@@ -3358,7 +3365,7 @@ static void check_stall(Tsp *t)
  * then the server not giving this file (a film that never opens: the 1.4.2 log), not a busy account */
 static volatile int g_acct_free;
 void tsp_set_account_free(int on) { g_acct_free = on ? 1 : 0; }
-static int busy_status(int s) { if (s == 405 && g_acct_free) return 0; return s == 405 || s == 407 || s == 429 || s == 503 || s == 509 || s == 512; }
+static int busy_status(int s) { if (s == 405 && g_acct_free) return 0; return s == 405 || s == 407 || s == 429 || s == 503 || s == 506 || s == 509 || s == 512; }
 
 static int http_refused(Tsp *t, int status)
 {

@@ -18,6 +18,7 @@
 #define DL_URL_MAX   1280
 #define DL_DIR_MAX   256
 #define DL_RESERVE   (200ull * 1024 * 1024)  /* left free on the memory card */
+#define DL_EMPTY     (256u * 1024)          /* 1.5.1: less than this with no size given: an empty answer, not a film */
 
 typedef struct {
     char dir[DL_DIR_MAX];                          /* its folder (the key for everything here) */
