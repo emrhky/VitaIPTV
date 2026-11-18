@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.5.1 (test)
+
+### Fixes
+- **"Downloaded (0 MB)":** a server that answered with nothing (no size, no data) made a download "finished" in a
+  few seconds, and the empty file played ("The file is empty"). Now such an answer is asked again twice, then the
+  download fails ("The server sent nothing"); an empty "finished" one (from 1.5.0) counts as not downloaded, also
+  for playing from the list. HTTP 506 is taken as "busy" (asked again), like 512.
+- **Slow list opening:** some connections to a provider waited 2, 6 or 10 s (the first packets lost, the system
+  sending them again later). After 1.5 s (and 4 s) another socket tries too; the first that answers is used
+  (PC test: 3.5 s instead of 5.1 s). The account check (10 min) and the film / series categories (30 min) are
+  not asked again on every opening (Select > Reload playlists forgets them).
+- **Sleep:** the app is told when the Vita wakes up: a stream that was playing is stopped (its connection is
+  gone), the downloads go on, and the log says how long it slept. The first lines of a start no longer go to
+  the previous run's log.
+- A small (SD) picture gets its decoder memory for 16 pictures from the start (a 640x480 film ran out with 8 and
+  lost 134 pictures).
+
+### Internet Archive
+- **Square searches the archive** (inside the list's collection; Select > *Search the whole archive*), the
+  results as a group of their own; *Show the whole list* goes back. The last searches are offered here too.
+- **"Next 500..."** at the end of the list adds the next films (the total is shown).
+- **Select > Order:** most watched, newest added, year, title.
+
+### Web pages
+- **Links to video files** (a folder's list of files) are found, with the file's name as the title.
+- **WebM and Ogg are left out** (VP8 / VP9 / Theora pictures the Vita cannot decode; the reason is said).
+- Pages are asked for as a browser does (some sites refused the app: HTTP 403), and the videos found carry the
+  same User-Agent and the page as Referer.
+
+### Search
+- The copy of every film kept for searching is about half as big: no film pictures in it (they come with the
+  film's information when it is chosen). (1.5.0: 21 MB of films -> 12 MB kept.)
+
+### Log
+- Shorter: the decoder's start in one line, no "load AVCDEC module", "SEI messages", "H.264 header", "http read
+  size", "receive buffer" (unless smaller), "ui: frame ... after the failed load", "no subtitle file beside it";
+  the sound settings and the favourite counts only when they change; one line per list request; the timing and
+  CPU lines only in the first seconds of a film or when pictures are lost. "job 3: HTTP 404" now says what it
+  was for (picture, film information, guide).
+
 ## 1.5.0 (test)
 
 ### New kinds of playlist
