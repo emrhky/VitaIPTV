@@ -111,13 +111,16 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   back): less power on the first Vita's OLED screen during a long download.
 - **Internet Archive (archive.org):** add a playlist of the type *Internet Archive* with an archive.org address (a
   collection like `https://archive.org/details/feature_films`, a film, or `https://archive.org/search?query=...`)
-  or just words (`charlie chaplin`). Its films come as a list (the 500 most watched, with poster, year and story);
-  when one is opened the app picks the file the Vita plays (MP4 / H.264 up to 1080p) and remembers it. Old, free
-  films: silent films, classics, documentaries.
+  or just words (`charlie chaplin`). Its films come as a list (500 at a time, with poster, year and story;
+  *Next 500...* at the end adds more); when one is opened the app picks the file the Vita plays (MP4 / H.264 up
+  to 1080p) and remembers it. **Square** searches the archive (inside the list, or Select > *Search the whole
+  archive*), **Select > Order** sorts it (most watched, newest, year, title). Old, free films: silent films,
+  classics, documentaries.
 - **Web page:** a playlist of the type *Web page* lists the videos written in a page (`<video>`, the page's video
-  data, `.mp4` / `.m3u8` addresses in it, one step into the pages shown inside it). JavaScript does not run on
-  the Vita: a site that makes its video only then gives nothing, and the app says why (also: DRM, DASH, H.265,
-  encrypted HLS). `ux0:data/VitaIPTV/webcheck.txt` lists what the last page gave. **Only for pages whose videos
+  data, `.mp4` / `.m3u8` addresses in it, links to video files, one step into the pages shown inside it).
+  JavaScript does not run on the Vita: a site that makes its video only then gives nothing, and the app says why
+  (also: DRM, DASH, H.265, encrypted HLS, WebM / Ogg). A page to try it with:
+  `https://www.w3schools.com/html/html5_video.asp`. `ux0:data/VitaIPTV/webcheck.txt` lists what the last page gave. **Only for pages whose videos
   you may watch this way.**
 - **Search:** Square shows the last five searches first (and *New search...*).
 - **Optional transcoding server** (`tools/vita_iptv_proxy.py`, needs Python 3 and ffmpeg on a PC or an Android
