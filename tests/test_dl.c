@@ -143,6 +143,27 @@ int main(int argc, char **argv)
     {   /* 1.4.1: the reason is kept in info.txt (the list says it after a restart); 404 is not asked again */
         DlItem r;
         assert(dl_info_read(&r, d.dir) == 0 && strstr(r.err, "does not give") && strstr(r.err, "404"));
+        /* 1.5.1: an empty answer with no size is not a finished film: asked again twice, then it fails */
+        {
+            DlItem e = mk(base, "/empty/film.mkv", "Bos", 'F');
+            double te = now_s();
+            assert(dl_add(&e) == 0);
+            int se = wait_end(e.dir, 30);
+            dl_state(e.dir, &ds);
+            printf("4 empty answer: state %d (%s) in %.1f s\n", se, ds.err, now_s() - te);
+            assert(se == DL_FAILED && strstr(ds.err, "empty") && now_s() - te > 9.0);
+            DlItem ei;
+            assert(dl_info_read(&ei, e.dir) == 0 && !ei.done);
+            /* a "finished" one with nothing (written so by 1.5.0) is not finished when the list is read */
+            ei.done = 1; ei.err[0] = 0;
+            assert(dl_info_write(&ei) == 0);
+            DlItem lst[64];
+            int nl = dl_scan(lst, 64);
+            int seen = 0;
+            for (int i = 0; i < nl; i++) if (!strcmp(lst[i].dir, e.dir)) { seen = 1; assert(!lst[i].done); }
+            assert(seen);
+            assert(dl_delete(e.dir) == 0);
+        }
         /* 405 with no stream before: the server does not give it (failed at once, not asked three times) */
         DlItem g = mk(base, "/e405/film.mkv", "Vermez", 'F');
         double t0 = now_s();

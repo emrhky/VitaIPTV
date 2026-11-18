@@ -26,6 +26,9 @@ class H(BaseHTTPRequestHandler):
         if p == "/poster.jpg":
             self.send_response(200); self.send_header("Content-Length", str(len(POSTER))); self.end_headers()
             self.wfile.write(POSTER); return
+        if p.startswith("/empty/"):                # 1.5.1: 200, no size, nothing (1.5.0: "finished (0 MB)")
+            self.send_response(200); self.send_header("Connection", "close"); self.end_headers()
+            self.close_connection = True; return
         if p.startswith("/e405/"):                 # 1.4.1: a server that does not give this file (or: the account is busy)
             self.send_response(405); self.send_header("Content-Length", "0"); self.end_headers(); return
         drop = p.startswith("/drop/"); norange = "/norange/" in p; slow = "/slow/" in p

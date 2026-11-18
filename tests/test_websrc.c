@@ -37,9 +37,18 @@ static void archive(void)
     assert(!id[0] && !strcmp(q, "(yesil\xC3\xA7" "am film) AND mediatype:(movies)"));
     assert(ia_query("  charlie chaplin ", q, sizeof q, id, sizeof id) == 0 && !strcmp(q, "(charlie chaplin) AND mediatype:(movies)"));
     assert(ia_query("https://example.com/x", q, sizeof q, id, sizeof id) == -1);
-    assert(ia_search_url("(a b) AND mediatype:(movies)", u, sizeof u) == 0);
+    assert(ia_search_url("(a b) AND mediatype:(movies)", IA_SORT_POPULAR, 1, u, sizeof u) == 0);
     assert(strstr(u, "https://archive.org/advancedsearch.php?q=%28a%20b%29%20AND%20mediatype%3A%28movies%29&") && strstr(u, "rows=500") &&
-           strstr(u, "output=json") && strstr(u, "fl%5B%5D=identifier"));
+           strstr(u, "output=json") && strstr(u, "fl%5B%5D=identifier") && strstr(u, "sort%5B%5D=downloads+desc") && strstr(u, "page=1&"));
+    assert(ia_search_url("x", IA_SORT_NEW, 3, u, sizeof u) == 0 && strstr(u, "sort%5B%5D=addeddate+desc") && strstr(u, "page=3&"));
+    assert(ia_search_url("x", IA_SORT_TITLE, 1, u, sizeof u) == 0 && strstr(u, "titleSorter+asc"));
+    /* 1.5.1: words inside the list's collection, or in the whole archive */
+    assert(ia_query_words("https://archive.org/details/feature_films", "chaplin (1916)", 0, q, sizeof q, id, sizeof id) == 0);
+    assert(!strcmp(q, "(collection:(feature_films)) AND (chaplin  1916 ) AND mediatype:(movies)") && !id[0]);
+    assert(ia_query_words("https://archive.org/details/feature_films", "chaplin", 1, q, sizeof q, id, sizeof id) == 0);
+    assert(!strcmp(q, "(chaplin) AND mediatype:(movies)"));
+    assert(ia_query_words("klasik", "", 0, q, sizeof q, id, sizeof id) == 0 && !strcmp(q, "(klasik) AND mediatype:(movies)"));
+    assert(ia_query_words("klasik", "film", 0, q, sizeof q, id, sizeof id) == 0 && !strcmp(q, "(klasik) AND (film) AND mediatype:(movies)"));
 
     unlink("/tmp/ws_ia.txt");
     ia_cache_load("/tmp/ws_ia.txt");
@@ -117,8 +126,8 @@ static void pages(void)
                       "<meta property='og:description' content='Konu &quot;burada&quot;'></head><body>"
                       "<video poster=\"x.jpg\" controls><source src=\"/media/film.mp4\" type=\"video/mp4\">"
                       "<source src='media/film.webm' type='video/webm'></video></body></html>", "https://site.example/a/page");
-    assert(s->n == 2 && !strcmp(s->v[0].url, "https://site.example/media/film.mp4") && s->v[0].kind == WV_FILE);
-    assert(!strcmp(s->v[1].url, "https://site.example/a/media/film.webm"));
+    assert(s->n == 1 && !strcmp(s->v[0].url, "https://site.example/media/film.mp4") && s->v[0].kind == WV_FILE);
+    assert(s->skipped_formats);                              /* 1.5.1: the WebM one left out (VP8 / VP9) */
     assert(!strcmp(s->title, "Bir & Film") && !strcmp(s->poster, "https://site.example/p.jpg") && !strcmp(s->plot, "Konu \"burada\""));
     /* og:video, JSON-LD, an address in a script, a source without an extension but with a type */
     s = scan("<meta property=\"og:video:secure_url\" content=\"https://cdn.example/v/1.mp4?token=a&amp;b=2\">"
@@ -146,6 +155,20 @@ static void pages(void)
              "<iframe src=\"about:blank\"></iframe>", "https://site.example/p");
     assert(s->nframes == 2 && !strcmp(s->frames[0], "https://player.example/embed/42") && !strcmp(s->frames[1], "https://site.example/e/2"));
     assert(s->n == 1 && !strcmp(s->v[0].url, "https://v.example/f.mp4"));
+    /* 1.5.1: a folder's list of files (links), the W3Schools page (MP4 + Ogg: the Ogg one left out) */
+    s = scan("<pre><a href=\"../\">../</a>\n<a href=\"Big%20Buck%20Bunny.mp4\">Big Buck Bunny.mp4</a>\n"
+             "<a href=\"trailer_480p.mov?x=1\">t</a>\n<a href=\"old.webm\">old</a>\n<a href=\"notes.txt\">notes</a></pre>",
+             "https://download.example/films/");
+    assert(s->n == 2 && has(s, "https://download.example/films/Big%20Buck%20Bunny.mp4", WV_FILE) &&
+           has(s, "https://download.example/films/trailer_480p.mov?x=1", WV_FILE));
+    for (int i = 0; i < s->n; i++) printf("  link %d: %s [%s]\n", i, s->v[i].url, s->v[i].title);
+    fflush(stdout);
+    assert(!strcmp(s->v[0].title, "Big Buck Bunny") && !strcmp(s->v[1].title, "trailer_480p") && s->skipped_formats);
+    s = scan("<video width=\"320\" height=\"240\" controls>\n  <source src=\"movie.mp4\" type=\"video/mp4\">\n"
+             "  <source src=\"movie.ogg\" type=\"video/ogg\">\n</video>", "https://www.w3schools.com/html/html5_video.asp");
+    assert(s->n == 1 && !strcmp(s->v[0].url, "https://www.w3schools.com/html/movie.mp4"));
+    s = scan("<video><source src=\"a.webm\" type=\"video/webm\"></video>", "https://site.example/");
+    assert(s->n == 0 && strstr(web_reason(s, "", 0), "WebM"));
     /* nothing: JavaScript, DRM, DASH, words that are not addresses */
     s = scan("<script src=\"/js/jwplayer.js\"></script><div>video.mp4 is a name, not an address</div>", "https://site.example/");
     assert(s->n == 0 && s->js_player && !strcmp(web_reason(s, "", 0), "The site makes its video with JavaScript: it is not in the page"));
