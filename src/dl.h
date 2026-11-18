@@ -49,6 +49,7 @@ typedef struct {
     unsigned bps;                           /* bytes a second (active) */
     char err[96];                           /* DL_FAILED: why (English, for T()) */
     int err_arg_mb[2];                      /* (space: needed, free; MB) */
+    int netwait;                            /* 1.5.2: active, but waiting for the network (Wi-Fi off, the Vita asleep) */
 } DlState;
 
 /* ---- the info file and names (no thread) ---- */
@@ -82,6 +83,12 @@ long long dl_free_bytes(void);
  * taken for "the account is still counted on that stream" and asked again; otherwise 405 means the server does
  * not give the file (the 1.4.0 log: asked three times for nothing) */
 void dl_note_stream_end(void);
+/* 1.5.2: the network: up() says whether it is connected now (called from the download thread; NULL = always). While
+ * it is not, or the Vita goes to sleep (dl_set_asleep(1) until it wakes), a lost connection is not counted as a
+ * failure: the download waits for the network and goes on from where it stopped (the 1.5.1 log: the Wi-Fi went
+ * off with the sleep, ten tries failed and the download stopped) */
+void dl_set_net_check(int (*up)(void));
+void dl_set_asleep(int on);
 void dl_shutdown(void);                     /* at exit: stops (what is there stays) */
 
 #endif

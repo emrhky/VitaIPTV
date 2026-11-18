@@ -23,8 +23,11 @@
  * archive.org/details/ID page ("" otherwise): a collection or one item, tried as a collection first (if that finds
  * nothing: "identifier:(ID)"). 0 = ok, -1 = not an archive.org address */
 int  ia_query(const char *addr, char *q, size_t cap, char *id, size_t idcap);
-/* 1.5.1: the same with words searched for (Square in the list): inside it (all = 0) or in the whole archive */
-int  ia_query_words(const char *addr, const char *words, int all, char *q, size_t cap, char *id, size_t idcap);
+/* 1.5.1: the same with words searched for (Square in the list): inside it (all = 0) or in the whole archive.
+ * 1.5.2: field = where: IA_IN_TITLE_START (word beginnings in the title), IA_IN_TITLE (whole words in the title),
+ * IA_IN_ALL (every field). No words: ia_query */
+enum { IA_IN_TITLE_START, IA_IN_TITLE, IA_IN_ALL };
+int  ia_query_words(const char *addr, const char *words, int all, int field, char *q, size_t cap, char *id, size_t idcap);
 /* the API address for a query: sorted (IA_SORT_*), page 1, 2... of IA_ROWS */
 enum { IA_SORT_POPULAR, IA_SORT_NEW, IA_SORT_YEAR, IA_SORT_TITLE, IA_SORTS };
 int  ia_search_url(const char *q, int sort, int page, char *out, size_t cap);
