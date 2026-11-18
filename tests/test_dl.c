@@ -29,6 +29,9 @@ static int same_file(const char *a, const char *b)
     return ok;
 }
 
+static volatile int net_on = 1;                     /* 1.5.2: the network the downloads see */
+static int net_up(void) { return net_on; }
+
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec + t.tv_nsec / 1e9; }
 
 /* waits until dir is not queued / active (max_s), returns its last state */
@@ -210,6 +213,29 @@ int main(int argc, char **argv)
         DlItem lst[8];
         assert(dl_scan(lst, 8) == 4);                        /* b, c, d (failed, its folder stays), e */
     }
+    /* 6. 1.5.2: the Vita asleep / no network: the drops are not counted, it waits and goes on afterwards */
+    dl_set_net_check(net_up);
+    dl_set_asleep(1);
+    DlItem h = mk(base, "/drop/film2.mkv", "Uyku", 'F');
+    assert(dl_add(&h) == 0);
+    snprintf(vid, sizeof vid, "%s/%s", h.dir, h.video);
+    {
+        for (int k = 0; k < 200 && !(dl_state(h.dir, &ds) == DL_ACTIVE && ds.netwait); k++) usleep(20000);
+        long long at = fsize(vid);
+        usleep(4000000);                                     /* (ten drops' time and more: still waiting) */
+        int s6 = dl_state(h.dir, &ds);
+        printf("6 asleep: state %d, waiting %d, %lld -> %lld bytes\n", s6, ds.netwait, at, fsize(vid));
+        assert(s6 == DL_ACTIVE && ds.netwait && fsize(vid) == at && at > 0 && at < whole);
+        dl_set_asleep(0);                                    /* awake, but the Wi-Fi not yet */
+        net_on = 0;
+        usleep(1500000);
+        assert(dl_state(h.dir, &ds) == DL_ACTIVE && ds.netwait && fsize(vid) == at);
+        net_on = 1;
+        st = wait_end(h.dir, 60);
+        printf("6 network back: state %d, %lld bytes\n", st, fsize(vid));
+        assert(st == DL_IDLE && same_file(vid, src));
+    }
+    dl_set_net_check(NULL);
     dl_shutdown();
     printf("all download tests passed\n");
     return 0;
