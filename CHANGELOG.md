@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.5.2 (test)
+
+### Internet Archive
+- **Search in the titles:** Square searched every field (description, subjects, uploader) and whole words only:
+  "Odys" found nothing, "Ugly" brought thousands of unrelated videos. Now the words are looked for in the films'
+  titles as word beginnings ("odys" finds "Odyssey", every word must be there); if the archive does not take
+  that, as whole words; if the titles have none, in all the information, shown as *Search (in descriptions)*.
+
+### Downloads and sleep
+- **A download goes on after sleep:** the Wi-Fi goes off with the sleep and the tries of a download ran out
+  ("Connection lost"). Now, while there is no network (or the Vita sleeps), a lost connection is not counted:
+  the download waits for the Wi-Fi and goes on from where it stopped.
+- The app is told when the Vita goes to sleep too (the log says so); the wrong "awake again after 0 s" line at
+  the start is gone.
+
+### Screens
+- **The download on the bottom line:** on the home screen, in the lists and in the folders the line at the
+  bottom shows the download going on (its progress, speed, how many wait; "waits for the Wi-Fi"; "waits: a stream
+  from the same server"). Another note is shown over it for its time, then the download comes back; a channel's
+  now / next stays 4 s after moving onto it.
+- **Notes go by themselves:** a note stayed until a button was pressed. Now 4 s (an error 6 s, a long one 2 s
+  more); the ones that say how to go on (reordering, adding the first playlist) stay.
+
 ## 1.5.1 (test)
 
 ### Fixes
