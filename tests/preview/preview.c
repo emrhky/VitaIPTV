@@ -158,6 +158,19 @@ int main(int argc, char **argv)
         preview_clear(UI_BG); scroll = 0; scr_list(&hl); shot("1h_home_note");
         hl.status = "Bu çok uzun bir not satırı: tek satıra sığmadığında sonu üç noktayla kısalır, kartların üstüne binmez ve ikinci satıra geçmez";
         preview_clear(UI_BG); scroll = 0; scr_list(&hl); shot("1h_home_note_long");
+        {   /* 1.5.2: the download on the bottom line (main.c: dl_foot_line, as T() makes it) */
+            static char dl1[200];
+            snprintf(dl1, sizeof dl1, T("Downloading: %s  %d%%  (%s/s)%s"), "İçimdeki Müzik - 2024 (Türkçe Dub...", 45, "3,1 MB", "");
+            char more[48];
+            snprintf(more, sizeof more, T("  \xC2\xB7  %d waiting"), 2);
+            strncat(dl1, more, sizeof dl1 - strlen(dl1) - 1);
+            hl.status = dl1;
+            preview_clear(UI_BG); scroll = 0; scr_list(&hl); shot("1h_home_download");
+            static char dl2[200];
+            snprintf(dl2, sizeof dl2, T("Download waits for the Wi-Fi: %s%s"), "İçimdeki Müzik - 2024", "");
+            hl.status = dl2;
+            preview_clear(UI_BG); scroll = 0; scr_list(&hl); shot("1h_home_download_wifi");
+        }
     }
 
     UiHint hc[] = { { UI_BTN_CROSS, "Play" }, { UI_BTN_SQUARE, "Search" }, { UI_BTN_LR, "Group" }, { UI_BTN_DPAD, "Page" }, { UI_BTN_CIRCLE, "Back" } };
