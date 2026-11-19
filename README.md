@@ -12,7 +12,8 @@ listen to radio from your own M3U playlists or Xtream accounts, decoded by the V
 This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
 > Vita IPTV is only a player. It does not include, sell or point to any channels or playlists.
-> Use it with playlists and services you are allowed to watch; you are responsible for what you play with it.
+> Use it with playlists and services you are allowed to watch, and download only what you have the right to keep;
+> you are responsible for what you play and download with it.
 
 ## Features
 

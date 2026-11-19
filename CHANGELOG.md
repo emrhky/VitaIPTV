@@ -19,9 +19,8 @@ All changes since 1.1.0.
   *Black screen while it downloads* saves power on the OLED Vita.
 
 ### New kinds of playlist
-- **Internet Archive (archive.org):** a collection, a film or a search. Square searches the film titles (word
-  beginnings: "odys" finds "Odyssey"; the descriptions only when no title matches), inside the list or in the
-  whole archive; *Next 500...*, Select > Order, the last five searches. The playable H.264 file is chosen and kept.
+- **Internet Archive (archive.org):** a collection, a film or a search. Square searches the film titles (by word
+  beginnings; the descriptions only when no title matches), inside the list or in the whole archive; *Next 500...*, Select > Order, the last five searches. The playable H.264 file is chosen and kept.
 - **Web page:** the videos written in a page (`<video>`, og:video, JSON-LD, links to video files, iframes; HLS
   checked). When nothing plays, the reason is said ("made with JavaScript", "DRM"...) and `webcheck.txt` lists
   what was found.
