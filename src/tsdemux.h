@@ -16,7 +16,8 @@
 typedef enum {
     TS_CODEC_NONE = 0, TS_CODEC_H264, TS_CODEC_HEVC, TS_CODEC_MPEG2V,
     TS_CODEC_AAC, TS_CODEC_AAC_LATM, TS_CODEC_MPEG_AUDIO, TS_CODEC_AC3, TS_CODEC_EAC3,
-    TS_CODEC_OTHER
+    TS_CODEC_OTHER,
+    TS_CODEC_OPUS, TS_CODEC_VORBIS          /* 1.4.2 (Matroska / WebM only) */
 } TsCodec;
 
 #define TS_FLAG_KEYFRAME 1      /* IDR picture or recovery-point SEI */
@@ -49,6 +50,11 @@ typedef struct {
     /* 0.7.0: text subtitle tracks (Matroska S_TEXT/UTF8, S_TEXT/ASS, S_TEXT/SSA), in the file's order */
     int nsubs;
     struct { int id; char lang[4]; char name[32]; int ass, forced, is_default; } subs[TS_MAX_SUBS];
+    /* 1.4.2 (Matroska): the chosen audio track's CodecPrivate for Opus / Vorbis (owned by the demuxer), its rate
+     * and channels; audio_cfg_gen changes (never 0) whenever another track's set is chosen */
+    const uint8_t *audio_cfg;
+    int audio_cfg_len, audio_cfg_rate, audio_cfg_ch;
+    unsigned audio_cfg_gen;
 } TsInfo;
 
 typedef struct {

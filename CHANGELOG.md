@@ -1,5 +1,306 @@
 # Changelog
 
+## 1.5.2 (test)
+
+### Internet Archive
+- **Search in the titles:** Square searched every field (description, subjects, uploader) and whole words only:
+  "Odys" found nothing, "Ugly" brought thousands of unrelated videos. Now the words are looked for in the films'
+  titles as word beginnings ("odys" finds "Odyssey", every word must be there); if the archive does not take
+  that, as whole words; if the titles have none, in all the information, shown as *Search (in descriptions)*.
+
+### Downloads and sleep
+- **A download goes on after sleep:** the Wi-Fi goes off with the sleep and the tries of a download ran out
+  ("Connection lost"). Now, while there is no network (or the Vita sleeps), a lost connection is not counted:
+  the download waits for the Wi-Fi and goes on from where it stopped.
+- The app is told when the Vita goes to sleep too (the log says so); the wrong "awake again after 0 s" line at
+  the start is gone.
+
+### Screens
+- **The download on the bottom line:** on the home screen, in the lists and in the folders the line at the
+  bottom shows the download going on (its progress, speed, how many wait; "waits for the Wi-Fi"; "waits: a stream
+  from the same server"). Another note is shown over it for its time, then the download comes back; a channel's
+  now / next stays 4 s after moving onto it.
+- **Notes go by themselves:** a note stayed until a button was pressed. Now 4 s (an error 6 s, a long one 2 s
+  more); the ones that say how to go on (reordering, adding the first playlist) stay.
+
+## 1.5.1 (test)
+
+### Fixes
+- **"Downloaded (0 MB)":** a server that answered with nothing (no size, no data) made a download "finished" in a
+  few seconds, and the empty file played ("The file is empty"). Now such an answer is asked again twice, then the
+  download fails ("The server sent nothing"); an empty "finished" one (from 1.5.0) counts as not downloaded, also
+  for playing from the list. HTTP 506 is taken as "busy" (asked again), like 512.
+- **Slow list opening:** some connections to a provider waited 2, 6 or 10 s (the first packets lost, the system
+  sending them again later). After 1.5 s (and 4 s) another socket tries too; the first that answers is used
+  (PC test: 3.5 s instead of 5.1 s). The account check (10 min) and the film / series categories (30 min) are
+  not asked again on every opening (Select > Reload playlists forgets them).
+- **Sleep:** the app is told when the Vita wakes up: a stream that was playing is stopped (its connection is
+  gone), the downloads go on, and the log says how long it slept. The first lines of a start no longer go to
+  the previous run's log.
+- A small (SD) picture gets its decoder memory for 16 pictures from the start (a 640x480 film ran out with 8 and
+  lost 134 pictures).
+
+### Internet Archive
+- **Square searches the archive** (inside the list's collection; Select > *Search the whole archive*), the
+  results as a group of their own; *Show the whole list* goes back. The last searches are offered here too.
+- **"Next 500..."** at the end of the list adds the next films (the total is shown).
+- **Select > Order:** most watched, newest added, year, title.
+
+### Web pages
+- **Links to video files** (a folder's list of files) are found, with the file's name as the title.
+- **WebM and Ogg are left out** (VP8 / VP9 / Theora pictures the Vita cannot decode; the reason is said).
+- Pages are asked for as a browser does (some sites refused the app: HTTP 403), and the videos found carry the
+  same User-Agent and the page as Referer.
+
+### Search
+- The copy of every film kept for searching is about half as big: no film pictures in it (they come with the
+  film's information when it is chosen). (1.5.0: 21 MB of films -> 12 MB kept.)
+
+### Log
+- Shorter: the decoder's start in one line, no "load AVCDEC module", "SEI messages", "H.264 header", "http read
+  size", "receive buffer" (unless smaller), "ui: frame ... after the failed load", "no subtitle file beside it";
+  the sound settings and the favourite counts only when they change; one line per list request; the timing and
+  CPU lines only in the first seconds of a film or when pictures are lost. "job 3: HTTP 404" now says what it
+  was for (picture, film information, guide).
+
+## 1.5.0 (test)
+
+### New kinds of playlist
+- **Internet Archive (archive.org):** an archive.org address (a collection, a film, a search) or words. The list:
+  the 500 most watched films there (poster, year, story beside the list). Opening one: its metadata tells which
+  file the Vita plays (MP4 / H.264 up to 1080p, the archive's own H.264 copy first) - asked once, then kept in
+  `archive_files.txt`, so "continue from", favourites and downloads use the same address. Downloads work too.
+- **Web page:** the videos written in a page: `<video>` / `<source>`, og:video, the video data for search engines
+  (JSON-LD), any .mp4 / .m3u8 / .webm / .mkv address in it (also in the data some sites put in the page, with
+  `\/` and `\u002F`), one step into its iframes. HLS playlists are checked (AES, DRM, H.265, fMP4 parts); DASH is
+  left out. Nothing to play: the reason is said ("The site makes its video with JavaScript", "encrypted (DRM)",
+  "HTTP 403"...), and `webcheck.txt` lists what was found.
+
+### Player
+- **HTTP 405 when the account is free** (no stream or download of the app in the last minute, the last account
+  check not full): "The server does not give this one (HTTP 405)" at once, not "account busy?" after 4.5 s of
+  asking again. A film's 403 / 404 / 410 say the same.
+
+### Downloads
+- **Black screen while it downloads** (Select on the Downloads screen): any button brings the screen back; a dim
+  line shows the progress and moves every 20 s.
+
+### Lists
+- **The last searches:** Square shows *New search...* and the last five (kept in `searches.txt`).
+
+## 1.4.2 (test) - with 1.4.1
+
+### Downloads
+- **A downloaded film or episode opened in its list plays from the memory card** (no connection used); one still
+  downloading too, once 2 % (16 MB) of it is there ("Playing the downloaded copy"). The point where it was left is
+  the same online and on the card. A sign in the film / episode lists: blue = downloaded, grey = part of it.
+- **While a channel or film from the same server plays, the download waits** (an account with one connection
+  cannot do both) and goes on 3 s after the player is closed. Just after a stream the server may still count it:
+  for a minute the download asks again (405, 512...) instead of failing.
+- **A server that does not give the file (403, 404, 405, 410) is not asked again**: "The server does not give this
+  one (HTTP 404)". The download stays in the list as "Could not download" with its reason (also after the app is
+  started again); **Square tries again**, Triangle deletes.
+- **Not enough free space** is said before a download is queued (and when it is tried again).
+- **A note at the top of the screen** when a download has ended ("Downloaded: ...") or failed, wherever you are.
+- (The Vita already did not go to sleep by itself while a download runs.)
+
+### Search
+- **Every film / every series of an account is downloaded once per run of the app** for searching: the second
+  search uses a small copy of it (only what a result needs: name, picture, year, genre...) and needs no network.
+  An hour later, or after Select > Reload playlists, it is downloaded again.
+
+### Sound
+- **Opus and Vorbis** (MKV / WebM films and streams) with FFmpeg's decoders, 5.1 played as stereo. The FFmpeg of
+  the build (tools/build_ffmpeg_vita.sh) has the opus and vorbis decoders and libswresample now (built again once
+  on GitHub: its cache key changed).
+
+## 1.4.0 (test)
+
+### Look
+- **Colour and background apart:** 6 colours (blue, green, purple, orange, teal, pink) × 4 backgrounds (navy,
+  **black for OLED**, graphite, warm dark). On black every ground is pure black: no grey row stripes or cards; only
+  the selection and the buttons keep a faint grey so they can be seen. Settings: "Colour" and "Background".
+- Button names nearer their symbols; the text in the SELECT / START / L/R pill pure white.
+
+### Downloads
+- **Watch while it downloads:** X plays a film still coming once about 2 % (16 MB) is there. When the film reaches
+  the part not yet downloaded it waits ("Waiting for the download... 40 % downloaded"); a jump stops at what is
+  there. An MP4 whose index is at its end can be played only when its download has ended.
+- **Keys of the Downloads screen:** X Watch, Square Stop / Continue, Triangle Delete, O Back, L/R Page, SELECT Menu
+  (stop all / continue all). Videos on the Vita the same way.
+- **A list loading stops the download of the same server** for that time and lets it go on after; the
+  background check of a list waits while that server downloads.
+- **Faster:** the download threads have a higher priority and the CPU runs at full speed while downloading.
+- "Download this season" skips an episode the list has twice.
+- **Triangle "Details" while a downloaded film plays** shows its poster and plot.
+- Going on where you stopped starts 5 s earlier (an MKV jump may land a few seconds later).
+
+### Videos on the Vita
+- **Triangle deletes a video** (with its .srt files and its resume point); a download is deleted as a download.
+- A folder the Vita does not let the app open (ux0:picture for a safe app) says so instead of showing an empty
+  list; the place list (the root) works on every memory card.
+
+## 1.3.1 (test)
+
+### Look
+- **Button symbols a notch bigger:** X, O, Square and Triangle 18 px high; the Start / Select / L / R pill 24 px
+  high with 11 px on each side of its text (on the Vita the text touched the frame).
+- **X, Square, Triangle, O on the left; L / R, START, SELECT on the right** everywhere (1.3.0 put the home
+  screen's O "Quit" on the right).
+
+### Videos on the Vita
+- A new row of the playlists, **Videos on the Vita**: the places on the left (the VitaIPTV folder, the Video app's
+  folder, each memory card there is), the folders and video files on the right (size, kind, a tick when watched
+  to the end). X opens a folder or plays the file as a film; O goes up. The video files of the VitaIPTV folder are
+  here now instead of "[Local]" rows (its .m3u files are still playlists).
+
+### Subtitle files (.srt)
+- Beside a film on the memory card: `Film.srt`, `Film.tr.srt`, `Film_eng.srt`... (a download: any .srt in its
+  folder), up to four, listed as "SRT" after the file's own tracks; shown by the film's time (also after a jump),
+  with the subtitle delay. UTF-8 or Windows-1254 (Turkish), tags left out; the language from the name, else from
+  Turkish letters in the text. The automatic choice (sound not in the app's language) works with them too.
+- A download asks the server for the `.srt` beside the film (`.../123.mkv` -> `.../123.srt`) and keeps it.
+
+### Downloads
+- **The free space is read on the device** (1.3.0 showed "-1 MB": the call it used is refused to a safe
+  homebrew; now `sceAppMgrGetDevInfo`): the space check before and during a download works.
+- **The Downloads row shows only while there is a download**, and it can be moved (Select > Reorder playlists);
+  its place is kept while it is hidden.
+- **Where it was left:** a download played the first time starts where the film was left online; watching it
+  saves the point for the online one too.
+- **Single film links** of the playlists can be downloaded: Select > Download on the row.
+- **Speed:** the card is written by a thread of its own (two 1 MB buffers) while the next part comes in; the log
+  tells each download's speed (and every 256 MB).
+- After stopping or deleting a running download the note says the provider may count it as watching for a few
+  minutes (the 405 / 512 answers in the log).
+- A folder name cut at 40 letters no longer ends in "-".
+
+### Player
+- A film on the memory card no longer asks for the 40 MB "network" queues, and the log no longer tells network
+  read sizes for it.
+
+## 1.3.0 (test)
+
+### Downloads
+- **Download films and episodes** to watch without the internet: **Select** > *Download* on a film or an episode
+  (Xtream or M3U), *Download this season* / *Download every episode* on a series. A fixed *Downloads* row is the
+  first on the home screen (its line: how many films and series, how much they take, the free space; while one
+  downloads, its progress). It opens without a connection: films, then each series by season and episode, with
+  the poster and the story beside the list. X plays (as a film: jumps, *Continue from*, the audio track and
+  subtitle choice of the stream it came from), pauses a running download or goes on with a stopped one;
+  **Triangle** deletes a download, or on the left a whole series (it asks first).
+- One folder each in `ux0:data/VitaIPTV/downloads/`: the video file as the server sends it (over 4 GB is fine on
+  exFAT), `poster.jpg` and `info.txt` (name, year, story, rating, length, series / season / episode, playlist,
+  address, size, finished or not).
+- One at a time, in a thread of its own below the player; a lost connection goes on where it stopped (HTTP
+  Range; a server without ranges starts over, so no broken file). The free space is read before it starts and
+  every 32 MB (the rest of the file + 200 MB must fit). The Vita does not go to sleep by itself while one runs.
+  Nothing starts by itself at start-up: a stopped one goes on with X.
+- A channel that fails with a busy answer while a download runs says so (one-connection accounts).
+- Separate subtitle files are not downloaded: the app shows the subtitles inside MKV / MP4 files only.
+
+### Films on the memory card
+- **Local files play as films:** video files in `ux0:data/VitaIPTV/` (and `ux0:...` lines of M3U lists) now open
+  with the film reader: MKV and MP4 play (before, the TS reader did not understand them), MP4 no longer goes to
+  the system player, and all of them can be paused and jumped through, remember where they were left, and list
+  their audio tracks and subtitles. The file is read where a link would ask for a range. The transcoding server
+  is not offered for them (it cannot reach the card).
+
+### Sound and subtitles
+- **Chosen per stream:** the audio track and subtitles chosen in **Select** are remembered for that channel or film
+  (a series: all of its episodes), up to 300 of them (`avpref.txt`). Before, a language chosen once went on to
+  every channel and film.
+- **Without a choice:** the sound in the app's language (Turkish / English) if the stream has one, else its own;
+  subtitles in the app's language only when the sound is not in it, else off.
+
+### Look
+- **Button symbols:** X, O, Square and Triangle all 16 px high (Triangle 18 px wide).
+- **Start / Select / L / R:** a small pill with a thin light frame (was a filled grey pill), bold text.
+- **Home screen:** seven cards 48 px high, evenly spaced under the top bar (8-9 px); under them one line for notes,
+  which no longer covers a card (a longer note ends in "..."). The Settings list uses the same spacing. O (Quit)
+  is on the right after Select, with a thin line before them.
+
+## 1.2.0 (test)
+
+### From the Venezia measurements (VNZBench)
+- **5.1 AAC on the Vita's own decoder:** the firmware has a second, multichannel AAC decoder (sceAudiodec type
+  0x1008) that runs on a Venezia core with about 5% of the ARM. 5.1 AAC channels and films now use it instead of
+  FFmpeg's decoder on the ARM. Its channel order was measured on a Vita (C L R Ls Rs LFE) and is now fixed, so it
+  starts at once. If the decoder cannot open or gives no sound, FFmpeg plays as before. 7.1 AAC stays on FFmpeg
+  (the decoder stops at 5.1). The mix down and *Clear speech* are the same as before.
+- **1080i:** the decoder is switched to its interlaced mode before an interlaced stream, as Sony's own player does
+  (`sceAvcdecSetInterlacedStreamMode`).
+
+### Picture and sound
+- **Films of 1920 x 1038 / 1040 and the like** (heights between 720 and 1088): the Vita's HD decoder is opened at
+  1088 lines, the size it is made for. It failed at such heights before and the film stuttered.
+- **AC-3 / E-AC-3 5.1:** mixed down to stereo by the app, like 5.1 AAC (left / right + centre and surrounds at
+  -3 dB). FFmpeg's own mix follows the stream's mix levels and often left the surrounds out: no left / right
+  effect.
+- **1080i at 50 movements a second:** the Vita's decoder gives each 1080i picture as its two fields one above the
+  other; until now only the top one was shown (25 a second). Now both are shown, the top one first and the bottom
+  one half a picture later, as a television does ("bob").
+- **HD decoder pictures as YUV:** above 720p (and 720p above 30 fps) the decoder hands its pictures out as YUV 4:2:0
+  and the GPU turns them into colour when it draws them. Measured on a Vita: the decoder's time a picture is halved
+  (1080p25: 9.1 -> 4.6 ms), 1080p50 gets about 7% more pictures decoded (35 -> 37 a second; the decoding itself is
+  the limit there, so every second picture is still shown) and each picture takes 3.1 MB of video memory instead of
+  8.4. Only for widths that are a multiple of 32 (a 1478x1080 film, coded 1488 wide, was refused); if a decoder
+  gives no picture this way, that width goes back to RGBA pictures.
+- **Streams with 4 references and no bitstream_restriction** (a 1920x1038 film, a 1080p50 channel): the HD decoder
+  gave pictures for a while, then ran out of memory and gave none, and restarting it only froze again. Now it is
+  opened again sooner, with the header adjusted (the restriction added, timing taken out). A film that needed it
+  gets it from the start when it is opened again (after a jump).
+
+- **1080p50 / 60 with 4 references** (a 1080p50 channel): the decoder gives fewer pictures with them (35 a second
+  instead of 39, measured); such channels leave out the pictures nothing refers to from the start, instead of
+  falling behind in their first seconds (few pictures, the sound paused) and only then.
+- **Same volume on every channel** (Settings and Select > Audio, off unless turned on): quiet and loud channels
+  come out about as loud as each other. The level is measured over a few seconds and brought towards -20 dBFS
+  (between -6 and +12 dB, a few dB a second at most, quicker in a channel's first seconds); pauses do not count.
+- **Sound field** (Settings and Select > Audio). *Auto* (the default): Headphones when headphones are plugged in,
+  else Speakers; it follows at once when they are plugged in or out (the system tells where the sound goes, no
+  plugin; the log shows the value it gives: "audio out: device ..."). Off, Speakers and Headphones can be chosen too.
+  - *Speakers:* wider stereo for the Vita's speakers, which sit close together (the difference between the sides,
+    above about 300 Hz, about 5 dB louder). What is in the middle (voices, mono sound) is not changed.
+  - *Headphones:* crossfeed: each ear also hears the other side's low and middle sounds at about -7 dB, as from
+    speakers in a room, so hard left / right sound is less tiring. Mono sound is not changed. On 5.1 / 7.1
+    sound (AC-3, E-AC-3, AAC) also virtual surround: a rear channel comes to the other ear too, 0.6 ms later and
+    duller, with a quiet echo (13 / 17 ms). A light version, not a measured head model (HRTF).
+
+### Network
+- **"Account busy" answers** (405, 407, 429, 503, 509, 512 before anything came, as a one-connection account gives
+  while the server still counts the last channel or film): asked again after 1.5 s and 3 s, also for films and
+  episodes (they were not asked again at all); then the message says the account may be busy.
+
+### Speed and battery
+- **Clock speeds while playing:** channels and films that the Vita's decoders play alone (H.264 with AAC or MP3 sound)
+  run the ARM at 333 MHz with the bus and the GPU at 222. Everything else (AC-3, software decoding, 1080i, high
+  frame rates, https, a busy core) gets 444 MHz at once, as before; it goes back down only after 15 s.
+
+### Look
+- **Menus centred:** the Select menus' titles and rows (also the player's) are in the middle of the box.
+- **Notes in amber:** the notes above the bottom bar (and the settings' help line) are amber instead of grey, so
+  they are seen. While watching too: the notes at the bottom ("the Vita plays at most 30 fps"...), the programme
+  line at the top (now / next) and the radio screen's note.
+- **4:4:4 channels:** "H.264 8-bit / chroma 3: not supported" is now "H.264 8-bit, colour 4:4:4 (the Vita
+  decodes 8-bit 4:2:0 only)": the hardware decodes only the usual 4:2:0 colour; the transcoding server plays
+  such a channel.
+- **Sharper button symbols:** drawn at the size they are shown (the cover of each pixel from its distance to the
+  line), not drawn big and scaled down; the straight lines on whole pixels; bare, in their colours, without the
+  dark disc. Drawn 1:1 (no smoothing of the texture).
+- **Square only when it does something:** a film without the transcoding server has one picture size, so the
+  bar no longer shows Square for it.
+- **"Detay"** instead of "Detaylar" next to Triangle (Turkish), a shorter bar.
+
+### Controls
+- **The left stick only:** up / down moves like the d-pad in every list and menu (on the channel screen the list
+  with the highlight); pushed to the right from the middle it opens the category, to the left it goes back. A
+  slanted push does not count, so scrolling never opens a category by mistake. Films: sideways still moves through
+  the film. The right stick does nothing now (it moved the channel list).
+- **Sharper text:** the system font's letters are made at the size they are drawn at, and drawn 1:1 on whole
+  pixels. Before, they were made at one size and stretched for the bigger sizes (1.1x-1.7x), which made them soft
+  and blocky. Same fonts (the Latin one with the Turkish letters, the default one for other scripts), same widths.
+
 ## 1.1.0
 
 ### Highlights

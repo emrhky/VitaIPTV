@@ -10,9 +10,11 @@
 #include "spsfix.h"
 #include "curlio.h"
 #include "vod.h"
+#include "srt.h"
 #include "httpio.h"                     /* plog() */
 #include "memstat.h"
 #include "audiofx.h"
+#include "aac51.h"
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
@@ -23,6 +25,12 @@
 #include <psp2/gxm.h>
 #include <psp2/audiodec.h>
 #include <psp2/audioout.h>
+#ifdef __vita__
+#include <psp2/io/fcntl.h>
+#else
+#include <fcntl.h>                      /* (the PC tests: the same with POSIX calls) */
+#include <unistd.h>
+#endif
 #include <malloc.h>
 #include <math.h>
 #include <stdarg.h>
@@ -86,6 +94,7 @@ int sceAvcdecDecodeAuInternal(SceAvcdecCtrl *decoder, SceAvcdecAu *au, SceInt32 
 int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *decoder, SceAvcdecArrayPicture *pictures,
                                                       SceAvcdecArrayPicture *work, SceInt32 *pic);
 SceUID sceCodecEngineOpenUnmapMemBlock(void *base, SceSize size);
+int sceAvcdecSetInterlacedStreamMode(SceVideodecType type, SceInt32 on);   /* 1.2: Sony's player, before the library */
 int sceCodecEngineCloseUnmapMemBlock(SceUID uid);
 SceUIntVAddr sceCodecEngineAllocMemoryFromUnmapMemBlock(SceUID uid, SceUInt32 size, SceUInt32 align);
 int sceCodecEngineFreeMemoryFromUnmapMemBlock(SceUID uid, SceUIntVAddr addr);
@@ -100,6 +109,16 @@ static int g_aid = -1;                  /* 0.5.0: the audio track wanted (tsp_se
 static char g_alang[4];
 static int g_sid = -1, g_soff = 1;      /* 0.7.0: the subtitle track wanted (tsp_set_sub), or its language, or none */
 static char g_slang[4];
+/* 1.3.1: subtitle files (.srt) of the next films, after the file's own tracks; ids TSP_EXT_SUB_ID + k */
+#define TSP_EXT_SUB_ID 100000
+#define TSP_EXT_MAX 4
+static const SrtList *g_ext;
+static int g_next;
+static char g_ext_lang[TSP_EXT_MAX][4];
+static uint64_t g_file_total;           /* 1.3.2: tsp_set_file_total */
+#define FILE_WAIT_MAX_MS 30000          /* a download that does not come on for this long: the film stops there */
+typedef struct Tsp Tsp;
+static int film_ms_at(Tsp *t, int64_t p);
 static volatile int g_sub_delay;        /* ms, + = later */
 #define NO_TS        0xFFFFFFFFu
 
@@ -125,6 +144,7 @@ typedef struct { Pkt *head, *tail; int count, max_count; size_t bytes, max_bytes
 
 typedef struct {
     vita2d_texture tex;
+    int tex_h;                          /* 1.2: the texture's height (YUV: the picture's coded height, see take_picture) */
     SceUID uid;
     void *data;
     volatile int state;
@@ -133,7 +153,7 @@ typedef struct {
     uint64_t ready_us;                  /* when the decoder gave it (timing line) */
 } Slot;
 
-typedef struct {
+struct Tsp {                            /* (1.3.1: named, declared above) */
     char url[512];
     char hdr_ua[512], hdr_ref[512];     /* from link|User-Agent=...&Referer=... (M3U #EXTVLCOPT): "" = default */
     volatile int cancel;
@@ -157,6 +177,8 @@ typedef struct {
     Mp4Demux *mp4;                      /* film or episode in an MP4 file */
     /* films and episodes (files that can be paused and searched) */
     int vod, vod_start_ms, vod_norange, vod_last_status;
+    int vod_file;                       /* 1.3: a film on the memory card (vod_get reads the file, a range = a seek) */
+    uint64_t file_total;                /* 1.3.2: > the file's size: it is still being downloaded to this size */
     int vc_rec, vc_used, vc_verify;     /* film index cache: filling it / opened from it / size still to compare */
     int vod_stream;                     /* a film sent as a stream (the transcoding server): no ranges, no length */
     int vod_offset_ms;                  /* ... where in the film that stream starts */
@@ -193,6 +215,7 @@ typedef struct {
     int aparam_new, aparam_bad, aparam_logs;   /* audio frames whose format differs from the open decoder */
     int aac_main;                       /* AAC Main profile frames given to the decoder as AAC-LC */
     int cur_interlaced;                 /* the unit being decoded belongs to an interlaced stream */
+    int open_interlaced;                /* 1.2: the decoder is being opened for an interlaced stream */
     volatile int fields;                /* 1: pictures come as two half-height fields one above the other */
     int field_votes, frame_votes, field_checks;
     int win_calls, win_oom, skip_left;  /* out-of-memory rate decides whether non-reference pictures are dropped */
@@ -249,7 +272,7 @@ typedef struct {
     uint32_t fr_drop0;                  /* ... pictures dropped / late when the last 3 s window began */
     int fr_set;
     AudioFx afx;                        /* 1.1: volume boost / speaker mode (Select > Audio) */
-    int afx_boost, afx_speaker;         /* ... as last applied (-1 = not yet; a change is written to the log) */
+    int afx_boost, afx_speaker, afx_level;         /* ... as last applied (-1 = not yet; a change is written to the log) */
     int a52_dlg, aacsw_dlg;             /* 1.1: "clear dialogue" when the software decoders were created */
     volatile int av_started;            /* audio thread: the first picture is there (or there is none to wait for) */
     volatile int64_t first_pic_pts;     /* time of the first decoded picture (-1 = none yet) */
@@ -265,6 +288,9 @@ typedef struct {
     uint64_t first_show_us;             /* when the first picture went on screen */
     uint32_t pub_fed, pub_nopic, pub_nopic_nonref;     /* public decoder: units given, of them without a picture */
     int hd60, hd60_pending;             /* 720p above 30 fps through the HD decoder (0.2.10 experiment) */
+    /* 1.2: the HD decoder's pictures as YUV 4:2:0 (see yuv_wanted) */
+    int yuv, yuv_off, yuv_units, yuv_h_logged;
+    uint32_t yuv_open_dec, yuv_open_err;
     uint8_t sps_src[256], sps_fix[300]; /* the last SPS seen and its fixed form (spsfix.c); fix_len 0 = as it is */
     size_t sps_src_len, sps_fix_len;
     int sps_fix_logged;
@@ -281,7 +307,19 @@ typedef struct {
     MpaDec *mpa;                        /* MPEG audio (MP2/MP3) in software */
     A52Dec *a52;                        /* 0.5.0: AC-3 / E-AC-3 in software (FFmpeg) */
     A52Dec *aacsw;                      /* 0.6.0: AAC with more than two channels in software (FFmpeg) */
+    A52Dec *xsw;                        /* 1.4.2: Opus / Vorbis (FFmpeg), made from the config packet (flags 4 / 5) */
+    int xsw_kind, xsw_dlg;              /* ... 1 Opus, 2 Vorbis; "clear dialogue" when it was made */
+    uint8_t *xcfg;                      /* ... that config, kept for making it again */
+    size_t xcfg_len;
+    int xcfg_rate, xcfg_ch;
+    unsigned xcfg_gen;                  /* the demuxer's audio_cfg_gen last sent (reader thread) */
     int asw_rate, asw_ch;               /* ... the format it was opened for (the stream's channels) */
+    /* 1.2: 5.1 AAC on the Vita's own decoder (type 0x1008; aac51.h) */
+    int alib_type;                      /* the sceAudiodec library opened (0x1005 AAC, 0x1008 multichannel AAC) */
+    int hw51;                           /* actrl decodes 5.1 (0x1008): mixed down here */
+    int16_t *dmx51;                     /* stereo mixed down from 0x1008's output */
+    VSurr vs51;                         /* 1.3: its virtual surround (headphones) */
+    uint32_t ainfo51[8] __attribute__((aligned(16)));   /* its 24-byte info: { 0x18, isAdts, ch, rate, isSbr, 0 } */
     /* 0.6.0: HLS sound from an audio playlist of its own (#EXT-X-MEDIA:TYPE=AUDIO) */
     TsDemux *adm;                       /* its MPEG-TS segments */
     int alt_on;                         /* the sound comes from there (the variant's own sound is left out) */
@@ -334,7 +372,7 @@ typedef struct {
     int64_t base_pts;
     uint32_t base_seq;
     TspStatus st;
-} Tsp;
+};
 
 static Tsp *g_tsp;
 static int g_module_loaded;
@@ -522,6 +560,27 @@ static int is_mem_error(int r)
     return u == 0x80620009u || u == 0x80620007u || u == 0x80620809u || u == 0x80620807u;
 }
 
+/* 1.2: the HD decoder (above 720p, and 720p above 30 fps) hands its pictures out as YUV 4:2:0, Y then U then V
+ * (YUV420_RASTER); the GPU turns them into colour itself when it draws them (YUV420P3, BT.709). Measured on the
+ * device (the memtest builds): RGBA pictures are 8.4 MB at 1080p, YUV 3.1 MB; the decoder's time a picture fell
+ * from 9.1 to 4.6 ms at 1080p25 and it gave about 7% more pictures at 1080p50 (37 instead of 35 a second: the
+ * decoding itself is the limit there). The colours were right with Y + U + V (Y + UV had red and blue swapped).
+ * Not for interlaced streams (the field check reads RGBA). If the decoder gives no picture in its first units
+ * this way, RGBA again for this channel. */
+/* (widths whose YUV pictures the decoder refused, for the rest of this run: a 1478x1080 film, coded 1488 wide,
+ * gave 0x80620005; each seek in it waited for the fallback again) */
+static int g_yuv_bad_w[8], g_yuv_bad_n;
+/* 1.2: the last stream that needed its header adjusted (no bitstream_restriction, out of memory): a film is opened
+ * again at each jump; adjusted from the start then, without the freeze before it */
+static char g_adj_url[512];
+static int yuv_bad_width(int w) { for (int i = 0; i < g_yuv_bad_n; i++) if (g_yuv_bad_w[i] == w) return 1; return 0; }
+/* (the width a multiple of 32: the colour planes are half as wide, and their rows start every 16 bytes then; 1488
+ * wide, 744 for the colour, was refused - known from the stream's header before the decoder opens) */
+static int yuv_wanted(const Tsp *t)
+{
+    return t->internal && !t->open_interlaced && !t->yuv_off && t->dw % 32 == 0 && !yuv_bad_width(t->dw);
+}
+
 /* Where the compressed data (ES) and the decoded pictures live. */
 static const struct { int es, pic; } PLANS[] = {
     { MEM_PHYCONT, MEM_CDRAM }, { MEM_CDRAM, MEM_CDRAM }, { MEM_MAIN_NC, MEM_CDRAM },
@@ -577,9 +636,11 @@ static void free_plan(Tsp *t)
 static int slot_init(Tsp *t, Slot *s)
 {
     memset(&s->tex, 0, sizeof s->tex);
-    int r = sceGxmTextureInitLinear(&s->tex.gxm_tex, s->data, TEX_FORMAT, (unsigned)t->dw, (unsigned)t->dh, 0);
+    int fmt = t->yuv ? SCE_GXM_TEXTURE_FORMAT_YUV420P3_CSC1 : TEX_FORMAT;
+    int r = sceGxmTextureInitLinear(&s->tex.gxm_tex, s->data, fmt, (unsigned)t->dw, (unsigned)t->dh, 0);
     if (r < 0) { plog("tsp: texture init 0x%08X", (unsigned)r); return r; }
     vita2d_texture_set_filters(&s->tex, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
+    s->tex_h = t->dh;
     s->state = SLOT_FREE;
     return 0;
 }
@@ -607,7 +668,7 @@ static int set_plan(Tsp *t, int p)
     /* 4 pictures in flight; 3 when memory is short. The HD decoder gets 4 too when CDRAM has room: with 3
      * a stream whose pictures come out of order loses about a third of them (seen at 1080p). */
     int n = ((t->dw * t->dh > 1280 * 736 && !t->internal) || pk == MEM_PHYCONT) ? 3 : 4;
-    uint32_t psize = (uint32_t)(t->dw * t->dh * 4);
+    uint32_t psize = t->yuv ? (uint32_t)(t->dw * t->dh * 3 / 2) : (uint32_t)(t->dw * t->dh * 4);   /* (1.2: YUV 1.5 bytes a pixel) */
     for (int i = 0; i < n; i++) {
         Slot *s = &t->slots[i];
         s->data = mem_alloc(pk, psize, &s->uid, 1);
@@ -646,7 +707,7 @@ static int set_plan(Tsp *t, int p)
     char ex[48] = "";
     if (n > t->base_slots) snprintf(ex, sizeof ex, " (%d of them extra%s%s)", n - t->base_slots,
                                     extra_kind >= 0 ? ", some in " : "", extra_kind >= 0 ? mem_name(extra_kind) : "");
-    plog("tsp: memory plan %d: ES in %s, %d pictures in %s%s", p, mem_name(PLANS[p].es), n, mem_name(pk), ex);
+    if (p > 0) plog("tsp: memory plan %d: ES in %s, %d pictures in %s%s", p, mem_name(PLANS[p].es), n, mem_name(pk), ex);   /* (1.5.1: the usual one not logged) */
     return 0;
 }
 
@@ -666,6 +727,8 @@ static int dpb_frames(int level, int w, int h, int refs)
     int pic = ((w + 15) / 16) * ((h + 15) / 16);
     int n = (pic > 0 ? mbs / pic : 4) + 2;                  /* some decoders hold output pictures too */
     if (n > 10) n = 10;                                     /* memory; grows later if really needed */
+    if (pic > 0 && pic <= 1620) n = 16;                     /* 1.5.1: SD (up to 720x576) is cheap: room from the start (640x480
+                                                               with 8 ran out and dropped 134 pictures until the next keyframe) */
     if (n < refs + 1) n = refs + 1;
     if (n < 2) n = 2;
     if (n > 16) n = 16;
@@ -684,11 +747,24 @@ static int hd_ref_cap(const Tsp *t)
 /* Above 720p: library + codec context + frame memory + decoder through the Internal entry points.
  * Same sequence as the probe that worked on the device (tools/decprobe). Everything it set up is
  * released by decoder_core_close, also when a step fails halfway. */
+/* 1.2: Sony's own player switches the decoder to its interlaced mode before opening the library for an interlaced
+ * stream (firmware analysis, VNZBench); off again for the next progressive one */
+static int g_ilace_on;
+static void interlaced_mode(Tsp *t)
+{
+    int on = t->open_interlaced ? 1 : 0;
+    if (on == g_ilace_on) return;
+    int r = sceAvcdecSetInterlacedStreamMode(AVC, on);
+    plog("tsp: decoder interlaced mode %s -> 0x%08X", on ? "on" : "off", (unsigned)r);
+    if (r >= 0) g_ilace_on = on;
+}
+
 static int decoder_core_open_internal(Tsp *t, int nref)
 {
     if (nref < 1) nref = 1;
     int cap = hd_ref_cap(t);
     if (nref > cap) nref = cap;
+    interlaced_mode(t);
     int r1 = sceVideodecSetConfigInternal(AVC, 2);
     int r2 = sceAvcdecSetDecodeMode(AVC, 0x80);              /* hand pictures out as they are ready */
     SceVideodecQueryInitInfo init;
@@ -712,7 +788,7 @@ static int decoder_core_open_internal(Tsp *t, int nref)
     q.vertical = (uint32_t)t->dh;
     q.numOfRefFrames = (uint32_t)nref;
     r = sceAvcdecQueryDecoderMemSizeInternal(AVC, &q, &di);
-    plog("tsp: HD decoder frame memory %u KB -> 0x%08X", (unsigned)(di.frameMemSize >> 10), (unsigned)r);
+    if (r < 0) plog("tsp: HD decoder frame memory %u KB -> 0x%08X", (unsigned)(di.frameMemSize >> 10), (unsigned)r);
     if (r < 0) return r;
 
     /* codec context: CDRAM, 1 MB aligned, opened as "unmapped" memory for the codec engine */
@@ -736,7 +812,7 @@ static int decoder_core_open_internal(Tsp *t, int nref)
     vc.vaContext = t->va;
     vc.contextSize = csize;
     r = sceVideodecInitLibraryWithUnmapMemInternal(AVC, &vc, &init);
-    plog("tsp: HD decoder library -> 0x%08X", (unsigned)r);
+    if (r < 0) plog("tsp: HD decoder library -> 0x%08X", (unsigned)r);
     if (r < 0) return r;
     t->lib_open = 1;
 
@@ -750,7 +826,7 @@ static int decoder_core_open_internal(Tsp *t, int nref)
         t->ctrl.frameBuf.pBuf = fb;
         t->ctrl.frameBuf.size = ALIGN(di.frameMemSize, k == MEM_CDRAM ? 256 * 1024 : 4096);
         r = sceAvcdecCreateDecoderInternal(AVC, &t->ctrl, &q);
-        plog("tsp: HD decoder (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
+        if (r < 0) plog("tsp: HD decoder (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
         if (r >= 0) { t->fb_kind = k; break; }
         mem_free(fb, t->fb_uid, 0);
         t->fb_uid = -1;
@@ -791,8 +867,10 @@ static int decoder_core_open(Tsp *t, int nref, int nmin)
         init.vertical = (uint32_t)t->dh;
         init.numOfRefFrames = (uint32_t)n;
         init.numOfStreams = 1;
+        interlaced_mode(t);
         r = sceVideodecInitLibrary(SCE_VIDEODEC_TYPE_HW_AVCDEC, &init);
-        plog("tsp: sceVideodecInitLibrary %dx%d refs %d -> 0x%08X", t->dw, t->dh, n, (unsigned)r);
+        if (r < 0) plog("tsp: sceVideodecInitLibrary %dx%d refs %d -> 0x%08X", t->dw, t->dh, n, (unsigned)r);
+        else plog("tsp: decoder %dx%d, %d pictures", t->dw, t->dh, n);   /* (1.5.1: one line when it works) */
         if (r >= 0) {
             if (n < nref) t->nref_cap = n;                 /* n + 1 was refused: never ask for more */
             nref = n;
@@ -811,7 +889,7 @@ static int decoder_core_open(Tsp *t, int nref, int nmin)
     q.vertical = (uint32_t)t->dh;
     q.numOfRefFrames = (uint32_t)nref;
     r = sceAvcdecQueryDecoderMemSize(SCE_VIDEODEC_TYPE_HW_AVCDEC, &q, &di);
-    plog("tsp: decoder memory %u bytes -> 0x%08X", (unsigned)di.frameMemSize, (unsigned)r);
+    if (r < 0) plog("tsp: decoder memory %u bytes -> 0x%08X", (unsigned)di.frameMemSize, (unsigned)r);
     if (r < 0) return r;
 
     r = -1;
@@ -822,7 +900,7 @@ static int decoder_core_open(Tsp *t, int nref, int nmin)
         t->ctrl.frameBuf.pBuf = fb;
         t->ctrl.frameBuf.size = ALIGN(di.frameMemSize, k == MEM_PHYCONT ? 1024 * 1024 : k == MEM_CDRAM ? 256 * 1024 : 4096);
         r = sceAvcdecCreateDecoder(SCE_VIDEODEC_TYPE_HW_AVCDEC, &t->ctrl, &q);
-        plog("tsp: sceAvcdecCreateDecoder (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
+        if (r < 0) plog("tsp: sceAvcdecCreateDecoder (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
         if (r >= 0) { t->fb_kind = k; break; }
         mem_free(fb, t->fb_uid, 0);
         t->fb_uid = -1;
@@ -860,13 +938,21 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
         /* On a real Vita this ID is rejected (0x805A1000) because the decoder lives in
          * SceAvcodecUser, which is already loaded: a failure here is not fatal. */
         r = sceSysmoduleLoadModule(SCE_SYSMODULE_AVCDEC);
-        plog("tsp: load AVCDEC module -> 0x%08X%s", (unsigned)r, r < 0 ? " (ignored, continuing)" : "");
+        if ((unsigned)r != 0x805A1000u) plog("tsp: load AVCDEC module -> 0x%08X%s", (unsigned)r, r < 0 ? " (ignored, continuing)" : "");   /* (1.5.1: the usual answer not logged) */
         g_module_loaded = 1;
     }
     t->dw = ALIGN(w, 16);
     t->dh = ALIGN(h, 16);
     int mbs = (t->dw / 16) * (t->dh / 16);
     t->internal = mbs > MBS_720P || t->force_internal;
+    if (t->internal && t->dh > 720 && t->dh < 1088 && t->dw <= 1920) {
+        /* 1.2: a film of 1920x1038 (coded 1040) on the HD decoder opened at 1920x1040 failed again and again
+         * (0x80620003, "holds 12 units but gives no picture"); 1080p, opened at 1088, plays. Opened at 1088, the
+         * rows below the picture are cut off as with 1080p. */
+        plog("tsp: %dx%d: the HD decoder opened at %dx1088", w, h, t->dw);
+        t->dh = 1088;
+    }
+    t->yuv = yuv_wanted(t);
     if (t->internal) {
         /* 4 pictures, or what the stream asks for when that is more and fits the level (1920x720 with 5 refs:
          * with 4 nearly every picture failed "out of memory") */
@@ -897,6 +983,9 @@ static int decoder_open(Tsp *t, int w, int h, int refs, int level)
     t->st.width = w;
     t->st.hd = t->internal;
     t->st.height = h;
+    t->yuv_units = 0;
+    t->yuv_open_dec = t->st.decoded;
+    t->yuv_open_err = t->st.errors;
     __sync_synchronize();
     t->ready = 1;
     return 0;
@@ -944,6 +1033,33 @@ static void switch_to_hd_oom(Tsp *t)
     t->grow_pending = 0;
     t->need_key = 1;
     t->st.errors++;
+}
+
+/* 1.2: the HD decoder with YUV pictures gave no picture in its first 60 units: RGBA again for this channel, from
+ * the next keyframe (closed here, opened again below as hd60 does). (Not seen on the device with YUV itself: a
+ * safety net, as a stream that gives nothing at all goes on to the other remedies.) */
+static void yuv_check(Tsp *t, int start_ok)
+{
+    if (!t->yuv || !t->dec_open) return;
+    if (t->st.decoded != t->yuv_open_dec) { t->yuv_units = -1000000; return; }   /* (pictures came: no more checks) */
+    /* no picture yet and an error already (0x80620005 at 1488 wide, with "taking out a picture failed"): at the next
+     * keyframe, not after 60 units */
+    int failed = t->no_drain || t->st.errors != t->yuv_open_err;
+    if ((++t->yuv_units < 60 && !failed) || !start_ok) return;
+    plog("tsp: no picture from the HD decoder in %d units with YUV pictures (%dx%d): RGBA pictures for this width", t->yuv_units, t->dw, t->dh);
+    t->yuv_off = 1;
+    if (!yuv_bad_width(t->dw) && g_yuv_bad_n < 8) g_yuv_bad_w[g_yuv_bad_n++] = t->dw;
+    t->no_drain = 0;                                         /* (set by the YUV failure; RGBA may take pictures out) */
+    sceKernelLockMutex(t->lock, 1, NULL);
+    t->ready = 0;
+    sceKernelUnlockMutex(t->lock, 1);
+    wait_ui_release(t);
+    free_plan(t);
+    decoder_core_close(t);
+    t->no_out = 0;
+    t->grow_pending = 0;
+    t->reopen_pending = 0;
+    t->need_params = 1;
 }
 
 /* 0.4.0: the public decoder gave no picture from the start and the stream carries timing information
@@ -1017,6 +1133,23 @@ static int decode_internal(Tsp *t, SceAvcdecAu *au, SceAvcdecArrayPicture *arr)
 
 #define DEC_AGAIN 1                     /* decode_au: the decoder had no room, give the same unit again */
 
+/* Where and how the decoder writes a picture: RGBA, or (1.2 test) YUV 4:2:0 with the colour planes after the Y
+ * plane, as the GPU's YUV420P2 / P3 textures want them */
+static void pic_frame(Tsp *t, SceAvcdecFrame *f, void *data)
+{
+    f->framePitch = (uint32_t)t->dw;
+    f->frameWidth = (uint32_t)t->dw;
+    f->frameHeight = (uint32_t)t->dh;
+    f->pPicture[0] = data;
+    if (t->yuv) {
+        f->pixelType = SCE_AVCDEC_PIXELFORMAT_YUV420_RASTER;
+        f->pPicture[1] = (uint8_t *)data + (size_t)t->dw * (size_t)t->dh;
+    } else {
+        f->pixelType = SCE_AVCDEC_PIXELFORMAT_RGBA8888;
+        f->opt.rgba.alpha = 0xFF;
+    }
+}
+
 /* Average difference (0-255) between rows a and b of an RGBA picture, over every 8th pixel. */
 static int row_diff(const uint8_t *pic, int pitch, int w, int a, int b)
 {
@@ -1086,12 +1219,7 @@ static int decode_au(Tsp *t, int s0, int s1, size_t n, int64_t pts, int pts_retr
         for (int k = 0; k < nel; k++) {
             memset(&pic[k], 0, sizeof pic[k]);
             pic[k].size = sizeof pic[k];
-            pic[k].frame.pixelType = SCE_AVCDEC_PIXELFORMAT_RGBA8888;
-            pic[k].frame.framePitch = (uint32_t)t->dw;
-            pic[k].frame.frameWidth = (uint32_t)t->dw;
-            pic[k].frame.frameHeight = (uint32_t)t->dh;
-            pic[k].frame.opt.rgba.alpha = 0xFF;
-            pic[k].frame.pPicture[0] = t->slots[slot[k]].data;
+            pic_frame(t, &pic[k].frame, t->slots[slot[k]].data);
         }
         memset(&arr, 0, sizeof arr);
         arr.numOfElm = (uint32_t)nel;
@@ -1152,7 +1280,19 @@ static void take_picture(Tsp *t, SceAvcdecPicture *p, int si)
         /* even half (1.1): a reference picture at an odd place was decoded for the others but is not shown
          * (not while catching up, when only reference pictures are decoded anyway) */
         int hide = t->pre_skip == 2 && !t->catchup && t->st.decoded > 0 && opts >= 0 && !even_place(t, opts);
-        if (t->cur_interlaced) field_check(t, (const uint8_t *)sl->data);
+        if (t->cur_interlaced && !t->yuv) field_check(t, (const uint8_t *)sl->data);
+        /* 1.2: YUV: the decoder puts the colour planes after the Y plane of the picture's own coded height, not
+         * after the height the decoder was opened at (1088): films of 1920x800 / 818 / 1040 were green (the GPU
+         * read the colour from the wrong place); 1080 lines (coded 1088) were right. The texture gets that height
+         * (only its description changes; the slot is not on the screen now). */
+        unsigned ch = p->frame.verticalSize;
+        if (t->yuv && ch >= 16 && ch <= (unsigned)t->dh && (int)ch != sl->tex_h) {
+            if (sceGxmTextureInitLinear(&sl->tex.gxm_tex, sl->data, SCE_GXM_TEXTURE_FORMAT_YUV420P3_CSC1, (unsigned)t->dw, ch, 0) >= 0) {
+                vita2d_texture_set_filters(&sl->tex, SCE_GXM_TEXTURE_FILTER_LINEAR, SCE_GXM_TEXTURE_FILTER_LINEAR);
+                if (!t->yuv_h_logged++) plog("tsp: YUV pictures %ux%u: the colour planes after %u lines", (unsigned)t->dw, ch, ch);
+                sl->tex_h = (int)ch;
+            }
+        }
         if (t->st.decoded == 0 && t->cur_interlaced)
             plog("tsp: interlaced picture: pic struct %u/%u, ct type %u", p->info.picStruct[0], p->info.picStruct[1], p->info.ctType);
         sceKernelLockMutex(t->lock, 1, NULL);
@@ -1182,12 +1322,7 @@ static int hd_get_one(Tsp *t, int si)
     SceAvcdecArrayPicture arr, work;
     memset(&pic, 0, sizeof pic);
     pic.size = sizeof pic;
-    pic.frame.pixelType = SCE_AVCDEC_PIXELFORMAT_RGBA8888;
-    pic.frame.framePitch = (uint32_t)t->dw;
-    pic.frame.frameWidth = (uint32_t)t->dw;
-    pic.frame.frameHeight = (uint32_t)t->dh;
-    pic.frame.opt.rgba.alpha = 0xFF;
-    pic.frame.pPicture[0] = t->slots[si].data;
+    pic_frame(t, &pic.frame, t->slots[si].data);
     memset(&arr, 0, sizeof arr);
     arr.numOfElm = 1;
     arr.pPicture = pp;
@@ -1320,9 +1455,7 @@ static const uint8_t *sps_for_decoder(Tsp *t, const uint8_t *nal, size_t len, si
         if (sps_info(nal, len, &in) == 0) {
             t->hdr_timing = in.nal_hrd || in.vcl_hrd || in.pic_struct;
             t->hdr_no_restr = !in.restriction;
-            if (!t->hdr_logged++)                           /* (to compare channels that play with ones that do not) */
-                plog("tsp: H.264 header: timing %s, HRD %s, picture timing %s, bitstream_restriction %s", in.timing ? "yes" : "no",
-                     in.nal_hrd ? (in.vcl_hrd ? "NAL+VCL" : "NAL") : in.vcl_hrd ? "VCL" : "no", in.pic_struct ? "yes" : "no", in.restriction ? "yes" : "no");
+            t->hdr_logged++;                                /* (1.5.1: the header details are no longer logged) */
         }
         t->sps_fix_len = t->drop_timing ? sps_rewrite(nal, len, t->sps_fix, sizeof t->sps_fix, 1, &reorder) : 0;
         if (t->sps_fix_len && !t->sps_fix_logged++) {
@@ -1428,10 +1561,12 @@ static void log_rcvbuf(Tsp *t)
     if (t->rcvbuf_logged) return;
     t->rcvbuf_logged = 1;
     int rb = cio_last_rcvbuf(), cms = cio_last_connect_ms();
-    plog("tsp: own socket (%s), receive buffer %d KB, connect %d ms (about one round trip: at most %d KB/s with this buffer)",
-         strncasecmp(t->url, "https:", 6) ? "http" : "https", rb / 1024, cms, cms > 0 ? rb / cms : 0);
-    const char *rn = cio_rcvbuf_note();                     /* (once, and again when a size was refused) */
-    if (rn[0]) plog("tsp: receive buffer: %s", rn);
+    int tries = cio_last_connect_tries();
+    plog("tsp: own socket (%s), receive buffer %d KB, connect %d ms%s (about one round trip: at most %d KB/s with this buffer)",
+         strncasecmp(t->url, "https:", 6) ? "http" : "https", rb / 1024, cms, tries > 1 ? (tries == 2 ? ", 2nd socket" : ", 3rd socket") : "",
+         cms > 0 ? rb / cms : 0);
+    const char *rn = cio_rcvbuf_note();                     /* (1.5.1: only when the system gave less) */
+    if (rn[0] && strstr(rn, "refused")) plog("tsp: receive buffer: %s", rn);
 }
 
 /* A decoder slower than the stream (1080p at 50/60 fps may be): leave out the pictures nothing else needs
@@ -1683,8 +1818,7 @@ static void video_packet(Tsp *t, Pkt *p)
         if (m) {
             t->sei_logged = 1;
             t->sei_timing = (m & 3) != 0;
-            plog("tsp: the stream sends SEI messages%s%s%s", m & 1 ? ", buffering period" : "", m & 2 ? ", picture timing" : "",
-                 (m & ~3u) ? ", others" : "");
+            /* (1.5.1: not logged) */
         }
     }
     if (t->hd60_pending && start_ok && t->dec_open) {       /* 720p above 30 fps: the HD decoder from this keyframe */
@@ -1692,13 +1826,19 @@ static void video_packet(Tsp *t, Pkt *p)
         switch_to_hd_oom(t);
         t->st.errors--;                                     /* (not an error) */
     }
+    yuv_check(t, start_ok);                                 /* (1.2; a switch only at a keyframe) */
     if (!t->dec_open) {
         if (!start_ok || i->width == 0 || i->sps_len == 0 || i->pps_len == 0) {
             if (!t->err_set) t->st.state = TSP_WAIT_KEY;
             t->st.dropped++;
             return;
         }
-        if (i->bit_depth != 8 || i->chroma != 1) { set_error_kind(t, TSP_ERRK_FORMAT, "H.264 %d-bit / chroma %d: not supported", i->bit_depth, i->chroma); return; }
+        if (i->bit_depth != 8 || i->chroma != 1) {           /* (1.2: the colour as people know it, "4:4:4", not "chroma 3") */
+            static const char *const cf[4] = { "4:0:0", "4:2:0", "4:2:2", "4:4:4" };
+            set_error_kind(t, TSP_ERRK_FORMAT, "H.264 %d-bit, colour %s (the Vita decodes 8-bit 4:2:0 only)", i->bit_depth,
+                           i->chroma >= 0 && i->chroma <= 3 ? cf[i->chroma] : "?");
+            return;
+        }
         plog("tsp: first %s after %u skipped pictures, %dx%d%s, level %d, %d refs", (flags & TS_FLAG_KEYFRAME) ? "keyframe" : "I-picture",
              t->st.dropped, i->width, i->height, i->interlaced ? " interlaced" : "", i->level, i->refs);
         int mbs = ((i->width + 15) / 16) * ((i->height + 15) / 16);
@@ -1744,6 +1884,7 @@ static void video_packet(Tsp *t, Pkt *p)
                      i->height, i->refs);
             }
         }
+        t->open_interlaced = i->interlaced;
         int r = decoder_open(t, i->width, i->height, i->refs, i->level);
         if (r < 0 && t->oom_hd && t->force_internal) {     /* the HD decoder did not start: back to the public one */
             plog("tsp: HD decoder could not start (0x%08X); back to the normal decoder", (unsigned)r);
@@ -1795,7 +1936,7 @@ static void video_packet(Tsp *t, Pkt *p)
         }
         if (t->frame_us && t->frame_us < 30000) {
             unsigned fps = (1000000u + t->frame_us / 2) / t->frame_us;
-            unsigned mbs = (unsigned)(((t->dw + 15) / 16) * ((t->dh + 15) / 16));
+            unsigned mbs = (unsigned)(((t->dw + 15) / 16) * ((t->vh + 15) / 16));   /* (1.2: the picture, not the 1088 opened) */
             unsigned rate = mbs * fps;
             if (i->interlaced) {                            /* as before 1.1: 1080i only */
                 if (i->height >= 1000) {
@@ -1813,14 +1954,19 @@ static void video_packet(Tsp *t, Pkt *p)
                  * evenly spaced in such streams: P every 3rd picture gives 20 a second). */
                 double nr = (double)t->pre_nonref / t->pre_units;
                 double need = fps * ((1.0 - nr) + nr / 2.0);
-                double can = 320000.0 / mbs;                /* what it gives (1080p: 39), 10% kept free */
+                /* what it gives (1080p: 39), 10% kept free. 1.2: measured with every picture decoded (the memtest
+                 * builds): about 39 a second at 1080p with 2 references, 35 with 4 (a 1080p50 channel with 4: the
+                 * even half needed 35, fell behind in its first seconds - few pictures, the sound paused - and
+                 * only then went to leaving out the pictures nothing refers to; now that from the start) */
+                double can = (i->refs >= 3 ? 290000.0 : 320000.0) / mbs;
                 double refs = fps * (1.0 - nr);              /* the reference pictures alone */
                 t->pre_skip = need <= can * 0.9 ? 2 : refs <= can * 0.95 ? 1 : 3;
                 t->tr_fps = fps;
                 t->tr_cap = can * 0.95;
                 if (i->height >= 1000) t->st.decoder_slow = 1;
                 plog("tsp: %dx%d at %u fps (%u macroblocks a second) is more than the Vita decoder manages (about "
-                     "320 000): %s (%.0f%% not referenced, needs %.0f pictures a second)", t->dw, t->dh, fps, rate,
+                     "%s with %d references): %s (%.0f%% not referenced, needs %.0f pictures a second)", t->dw, t->dh, fps, rate,
+                     i->refs >= 3 ? "290 000" : "320 000", i->refs,
                      t->pre_skip == 2 ? "every second picture shown, evenly" : t->pre_skip == 1 ? "pictures nothing refers to are left out"
                      : "the reference pictures alone are too many: the end of each group of pictures is left out",
                      nr * 100.0, need);
@@ -1883,7 +2029,7 @@ static void video_packet(Tsp *t, Pkt *p)
             if (now_us() - w0 < 1000) { uint64_t b0 = now_us(); sceKernelDelayThread(1500); t->w_busy_us += now_us() - b0; }
             r = decode_au(t, s, -1, n, pts, 1);
         }
-        if (r >= 0 || t->st.decoded > 0 || !is_mem_error(r) || t->plan + 1 >= NPLANS) break;
+        if (r >= 0 || t->st.decoded > 0 || !is_mem_error(r) || t->plan + 1 >= NPLANS || t->yuv) break;   /* (YUV: yuv_check) */
         plog("tsp: decode 0x%08X with memory plan %d, trying the next one", (unsigned)r, t->plan);
         int np = t->plan + 1;
         while (np < NPLANS && set_plan(t, np) < 0) np++;
@@ -1917,6 +2063,11 @@ static void video_packet(Tsp *t, Pkt *p)
      * a keyframe of waiting lost: it gets more units, and each restart that brings nothing back doubles the
      * wait. Units given while paused do not count (the screen holds the pictures). */
     int no_out_max = i->interlaced ? 200 : t->internal ? 120 : 40;
+    /* 1.2: the HD decoder ran out of picture memory on a stream without bitstream_restriction (1920x1038 film and
+     * a 1080p50 channel, both 4 references: pictures for a while, then "out of memory" and none, and restarts
+     * that only froze again): sooner, and with the header adjusted (below) */
+    int hd_restr = t->internal && !i->interlaced && t->oom_errs > 0 && !t->timing_tried && (t->hdr_no_restr || t->hdr_timing || t->sei_timing);
+    if (hd_restr) no_out_max = 40;
     no_out_max <<= t->dry_restarts > 3 ? 3 : t->dry_restarts;
     if (t->st.decoded != out_before) {
         t->no_out = 0;
@@ -1930,6 +2081,15 @@ static void video_packet(Tsp *t, Pkt *p)
         if (t->oom_errs > 0 && !t->internal && !t->oom_hd && g_hd1080 && !i->interlaced) {
             plog("tsp: decoder out of picture memory (%d times); switching to the HD decoder with more pictures", t->oom_errs);
             switch_to_hd_oom(t);
+            return;
+        }
+        if (hd_restr) {
+            plog("tsp: no picture from the HD decoder for %d units after running out of memory (%d times); trying it again with "
+                 "the header adjusted (bitstream_restriction, no HRD / SEI timing)", t->no_out, t->oom_errs);
+            snprintf(g_adj_url, sizeof g_adj_url, "%s", t->url);
+            restart_without_timing(t);                       /* (opened again at the next keyframe) */
+            t->dry_restarts++;
+            t->good_since = 0;
             return;
         }
         plog("tsp: no picture from the decoder for %d units; restarting it at the next keyframe", t->no_out);
@@ -2080,6 +2240,7 @@ static void video_packet(Tsp *t, Pkt *p)
 
 /* Demuxer callbacks (reader thread): copy the unit into a queue. */
 /* ---- 0.7.0: subtitles (Matroska text tracks) ---- */
+static int audio_playable(int c);
 #define SUB_CUES 512
 #define SUB_DEFAULT_MS 4000                 /* a cue without a duration: until the next one, at most this long */
 typedef struct SubCue { int track; int64_t start, dur; char text[240]; } SubCue;
@@ -2088,24 +2249,45 @@ typedef struct SubCue { int track; int64_t start, dur; char text[240]; } SubCue;
  * language, else none (subtitles are off until chosen) */
 static void update_sub_tracks(Tsp *t)
 {
-    if (!t->mkv && !t->mp4) return;                          /* (0.8.0: MP4 text tracks too) */
+    int inner = t->mkv || t->mp4;                            /* (0.8.0: MP4 text tracks too) */
     const TsInfo *i = dmx_info(t);
-    if (i->program < 0 || i->nsubs == t->sub_tracks_n) return;
-    int n = i->nsubs < TSP_MAX_SUBS ? i->nsubs : TSP_MAX_SUBS, cur = -1;
+    if (!inner && !(g_next && t->vod)) return;               /* 1.3.1: files beside a film: any kind of film */
+    if (inner && i->program < 0 && !g_next) return;
+    int nin = inner && i->program >= 0 ? i->nsubs : 0;
+    if (nin + 1 == t->sub_tracks_n) return;                  /* (1.3.1: counted + 1; 0 = not yet) */
+    int n = nin < TSP_MAX_SUBS ? nin : TSP_MAX_SUBS, cur = -1;
     for (int k = 0; k < n; k++) {
         t->st.s_id[k] = i->subs[k].id;
         memcpy(t->st.s_lang[k], i->subs[k].lang, 4);
         snprintf(t->st.s_name[k], sizeof t->st.s_name[k], "%s", i->subs[k].name);
         t->st.s_forced[k] = i->subs[k].forced;
     }
-    if (!g_soff) {
+    for (int k = 0; t->vod && k < g_next && n < TSP_MAX_SUBS; k++, n++) {   /* 1.3.1: the .srt files */
+        t->st.s_id[n] = TSP_EXT_SUB_ID + k;
+        memcpy(t->st.s_lang[n], g_ext_lang[k], 4);
+        snprintf(t->st.s_name[n], sizeof t->st.s_name[n], "SRT");
+        t->st.s_forced[n] = 0;
+    }
+    int show = !g_soff;
+    if (g_soff == 2 && g_slang[0]) {                         /* 1.3: automatic: on in this language only when no sound is */
+        show = 1;
+        for (int k = 0; k < i->nstreams; k++) {
+            const TsStream *s = &i->streams[k];
+            int audio = inner ? s->stream_type == 2 : s->pid == i->audio_pid;   /* (MKV, MP4: the track type; 1.3.1: else the sound playing) */
+            char l3[4];
+            ts_lang3(s->lang, l3);
+            if (audio && l3[0] && !strcmp(l3, g_slang) && audio_playable(s->codec)) { show = 0; break; }
+        }
+        if (!show) plog("tsp: subtitles: automatic: off (the sound is in %s)", g_slang);
+    }
+    if (show) {
         for (int k = 0; k < n && cur < 0; k++) if (t->st.s_id[k] == g_sid) cur = k;
         for (int k = 0; k < n && cur < 0 && g_slang[0]; k++) if (!strcmp(t->st.s_lang[k], g_slang) && !t->st.s_forced[k]) cur = k;
         for (int k = 0; k < n && cur < 0 && g_slang[0]; k++) if (!strcmp(t->st.s_lang[k], g_slang)) cur = k;
     }
     t->st.s_cur = cur;
     t->st.s_n = n;
-    t->sub_tracks_n = i->nsubs;
+    t->sub_tracks_n = nin + 1;
     char list[200];
     size_t o = 0;
     for (int k = 0; k < n && o + 40 < sizeof list; k++)
@@ -2130,6 +2312,7 @@ static void on_sub(void *ctx, int id, const char *text, int64_t pts, int64_t dur
     sceKernelUnlockMutex(t->qlock, 1);
 }
 
+/* off: 1 = none, 0 = id or else lang, 2 (1.3) = lang only when no sound track is in lang */
 void tsp_set_sub(int id, const char *lang, int off)
 {
     g_sid = id;
@@ -2148,10 +2331,19 @@ void tsp_sub_choose(int k)
 
 void tsp_set_sub_delay(int ms) { g_sub_delay = ms; }
 
+void tsp_set_ext_subs(const SrtList *subs, int n)
+{
+    g_ext = subs;
+    g_next = subs ? (n < TSP_EXT_MAX ? n : TSP_EXT_MAX) : 0;
+    for (int k = 0; k < g_next; k++) memcpy(g_ext_lang[k], subs[k].lang, 4);
+}
+
 int tsp_sub_text(char *out, size_t cap)
 {
     Tsp *t = g_tsp;
-    if (!t || !t->cues || t->st.s_cur < 0 || t->st.s_cur >= t->st.s_n || cap < 2) return 0;
+    if (!t || t->st.s_cur < 0 || t->st.s_cur >= t->st.s_n || cap < 2) return 0;
+    int ext = t->st.s_id[t->st.s_cur] >= TSP_EXT_SUB_ID;    /* 1.3.1: a .srt file (no cues of the file needed) */
+    if (!ext && !t->cues) return 0;
     int64_t p = -1;
     sceKernelLockMutex(t->lock, 1, NULL);
     if (t->shown >= 0) p = t->shown_pts;
@@ -2159,6 +2351,14 @@ int tsp_sub_text(char *out, size_t cap)
     if (p < 0) return 0;
     p -= (int64_t)g_sub_delay * 90;                          /* (later subtitles: an earlier point of the film) */
     int track = t->st.s_id[t->st.s_cur], found = 0;
+    if (track >= TSP_EXT_SUB_ID) {                           /* 1.3.1: a .srt file: by the film's time */
+        int k = track - TSP_EXT_SUB_ID;
+        if (k >= g_next || !g_ext) return 0;
+        const SrtCue *c = srt_at(&g_ext[k], film_ms_at(t, p));
+        if (!c) return 0;
+        snprintf(out, cap, "%s", c->text);
+        return 1;
+    }
     int64_t best = -1;
     sceKernelLockMutex(t->qlock, 1, NULL);
     uint32_t n = t->ncues < SUB_CUES ? t->ncues : SUB_CUES;
@@ -2212,7 +2412,8 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
 /* 0.5.0: the audio the player can play: AAC (the Vita's decoder), MPEG audio and AC-3 / E-AC-3 (software) */
 static int audio_playable(int c)
 {
-    return c == TS_CODEC_AAC || c == TS_CODEC_MPEG_AUDIO || ((c == TS_CODEC_AC3 || c == TS_CODEC_EAC3) && a52_available());
+    return c == TS_CODEC_AAC || c == TS_CODEC_MPEG_AUDIO || ((c == TS_CODEC_AC3 || c == TS_CODEC_EAC3) && a52_available()) ||
+           (c == TS_CODEC_OPUS && a52_xiph_available(1)) || (c == TS_CODEC_VORBIS && a52_xiph_available(0));   /* 1.4.2 */
 }
 
 /* the status' list of audio tracks (for the menu), made again when the stream list changes */
@@ -2259,7 +2460,8 @@ static void audio_push(Tsp *t, int codec, const uint8_t *data, size_t len, int64
     memset(p, 0, sizeof *p);
     p->pts = pts;
     p->len = len;
-    p->flags = codec == TS_CODEC_MPEG_AUDIO ? 1 : codec == TS_CODEC_AC3 || codec == TS_CODEC_EAC3 ? 2 : 0;   /* 1 MPEG, 2 AC-3 (software) */
+    p->flags = codec == TS_CODEC_MPEG_AUDIO ? 1 : codec == TS_CODEC_AC3 || codec == TS_CODEC_EAC3 ? 2 :
+               codec == TS_CODEC_OPUS || codec == TS_CODEC_VORBIS ? 3 : 0;   /* 1 MPEG, 2 AC-3, 3 Opus / Vorbis (software) */
     memcpy(p->data, data, len);
     q_push(t, &t->aq, p);
 }
@@ -2273,6 +2475,25 @@ static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
     const TsInfo *i = dmx_info(t);
     if (!t->alt_list) update_audio_tracks(t, i);
     update_sub_tracks(t);                                    /* 0.7.0 */
+    if ((i->audio_codec == TS_CODEC_OPUS || i->audio_codec == TS_CODEC_VORBIS) && i->audio_cfg_gen != t->xcfg_gen &&
+        audio_playable(i->audio_codec)) {
+        /* 1.4.2: the track's set-up goes first, in a packet of its own: [kind][rate 4][ch][CodecPrivate] */
+        size_t n = (size_t)(i->audio_cfg_len > 0 ? i->audio_cfg_len : 0);
+        Pkt *c = malloc(sizeof(Pkt) + 6 + n);
+        if (c) {
+            memset(c, 0, sizeof *c);
+            c->pts = -1;
+            c->len = 6 + n;
+            c->flags = i->audio_codec == TS_CODEC_OPUS ? 4 : 5;
+            c->data[0] = (uint8_t)c->flags;
+            int r = i->audio_cfg_rate;
+            c->data[1] = (uint8_t)(r >> 24); c->data[2] = (uint8_t)(r >> 16); c->data[3] = (uint8_t)(r >> 8); c->data[4] = (uint8_t)r;
+            c->data[5] = (uint8_t)(i->audio_cfg_ch > 0 && i->audio_cfg_ch < 256 ? i->audio_cfg_ch : 0);
+            if (n) memcpy(c->data + 6, i->audio_cfg, n);
+            q_push(t, &t->aq, c);
+            t->xcfg_gen = i->audio_cfg_gen;
+        }
+    }
     audio_push(t, i->audio_codec, data, len, pts);
 }
 
@@ -2347,6 +2568,13 @@ static void alt_feed_packed(Tsp *t, const uint8_t *b, size_t n)
 
 /* ------------------------------------------------------------------ audio */
 
+/* 1.2: the 0x1008 decoder gives AAC's own channel order, C L R Ls Rs LFE (learnt on the device by comparing it with
+ * FFmpeg, 2026-11-11: no delay); map[k] = its slot of L R C LFE Ls Rs. g51_off: it failed (FFmpeg for 5.1 AAC until
+ * the app starts again) */
+static const int g51_map[6] = { 1, 2, 0, 5, 3, 4 };
+static int g51_off;
+void tsp_aac51_reset(void) { g51_off = 0; }                 /* (the PC tests) */
+
 static const int ADTS_RATES[13] = { 96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350 };
 
 static int out_rate_ok(int r)
@@ -2362,6 +2590,10 @@ static void audio_close(Tsp *t)
     if (t->aport >= 0) { sceAudioOutReleasePort(t->aport); t->aport = -1; }
     if (t->adec) { sceAudiodecDeleteDecoder(&t->actrl); t->adec = 0; }
     if (t->aacsw) { a52_destroy(t->aacsw); t->aacsw = NULL; t->asw_rate = t->asw_ch = 0; }
+    free(t->dmx51);
+    t->dmx51 = NULL;
+    t->hw51 = 0;
+    t->st.audio_sw = 0;
     free(t->aes);
     free(t->apcm);
     free(t->asil);
@@ -2381,18 +2613,22 @@ static void audio_disable(Tsp *t, const char *fmt, ...)
     audio_close(t);
 }
 
+#define AUDIODEC_AAC51 0x1008                                /* 1.2: multichannel AAC (VNZBench) */
+
 static int audio_open(Tsp *t, int rate, int ch)
 {
-    int r;
+    int r, type = ch == 6 ? AUDIODEC_AAC51 : SCE_AUDIODEC_TYPE_AAC;
+    if (t->alib && t->alib_type != type) { sceAudiodecTermLibrary(t->alib_type); t->alib = 0; }
     if (!t->alib) {
         SceAudiodecInitParam ip;
         memset(&ip, 0, sizeof ip);
         ip.aac.size = sizeof ip.aac;
         ip.aac.totalStreams = 1;
-        r = sceAudiodecInitLibrary(SCE_AUDIODEC_TYPE_AAC, &ip);
-        plog("tsp: sceAudiodecInitLibrary AAC -> 0x%08X", (unsigned)r);
+        r = sceAudiodecInitLibrary(type, &ip);
+        plog("tsp: sceAudiodecInitLibrary %s -> 0x%08X", type == AUDIODEC_AAC51 ? "AAC 5.1 (0x1008)" : "AAC", (unsigned)r);
         if (r < 0 && (unsigned)r != 0x807F0003u) return r;       /* already initialized is fine */
         t->alib = r >= 0;
+        t->alib_type = type;
     }
     memset(&t->ainfo, 0, sizeof t->ainfo);
     t->ainfo.aac.size = sizeof t->ainfo.aac;
@@ -2400,17 +2636,22 @@ static int audio_open(Tsp *t, int rate, int ch)
     t->ainfo.aac.ch = (SceUInt32)ch;
     t->ainfo.aac.samplingRate = (SceUInt32)rate;
     t->ainfo.aac.isSbr = 0;
+    memset(t->ainfo51, 0, sizeof t->ainfo51);
+    t->ainfo51[0] = 0x18;
+    t->ainfo51[1] = 1;
+    t->ainfo51[2] = (uint32_t)ch;
+    t->ainfo51[3] = (uint32_t)rate;
     memset(&t->actrl, 0, sizeof t->actrl);
     t->actrl.size = sizeof t->actrl;
     t->actrl.wordLength = SCE_AUDIODEC_WORD_LENGTH_16BITS;
-    t->actrl.pInfo = &t->ainfo;
-    r = sceAudiodecCreateDecoder(&t->actrl, SCE_AUDIODEC_TYPE_AAC);
-    plog("tsp: sceAudiodecCreateDecoder AAC %d Hz %d ch -> 0x%08X (max ES %u, max PCM %u)", rate, ch, (unsigned)r,
-         (unsigned)t->actrl.maxEsSize, (unsigned)t->actrl.maxPcmSize);
+    t->actrl.pInfo = type == AUDIODEC_AAC51 ? (SceAudiodecInfo *)t->ainfo51 : &t->ainfo;
+    r = sceAudiodecCreateDecoder(&t->actrl, type);
+    plog("tsp: sceAudiodecCreateDecoder %s %d Hz %d ch -> 0x%08X (max ES %u, max PCM %u)", type == AUDIODEC_AAC51 ? "AAC 5.1" : "AAC",
+         rate, ch, (unsigned)r, (unsigned)t->actrl.maxEsSize, (unsigned)t->actrl.maxPcmSize);
     if (r < 0) return r;
     t->adec = 1;
     uint32_t es = t->actrl.maxEsSize ? t->actrl.maxEsSize : SCE_AUDIODEC_AAC_MAX_ES_SIZE;
-    uint32_t pcm = t->actrl.maxPcmSize ? t->actrl.maxPcmSize : SCE_AUDIODEC_AAC_MAX_SAMPLES * 2 * 2;
+    uint32_t pcm = t->actrl.maxPcmSize ? t->actrl.maxPcmSize : SCE_AUDIODEC_AAC_MAX_SAMPLES * 2 * (uint32_t)ch;
     t->aes = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(es));
     t->apcm = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(pcm));
     if (!t->aes || !t->apcm) return -1;
@@ -2441,14 +2682,26 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
         t->port_rate = rate;
         t->port_ch = ch;
     }
-    {                                                       /* 1.1: volume boost / speaker mode */
-        int b, sp;
-        afx_get_global(&b, &sp);
-        if (b != t->afx_boost || sp != t->afx_speaker) {
-            if (t->afx_boost >= 0 || b || sp) plog("tsp: sound: boost %s, speaker mode %s", b ? (b == 1 ? "+3 dB" : b == 2 ? "+6 dB" : "+9 dB") : "off", sp ? "on" : "off");
+    {                                                       /* 1.1: volume boost / speaker mode; 1.2: one level */
+        int b, sp, lv;
+        afx_get_global(&b, &sp, &lv);
+        if (b != t->afx_boost || sp != t->afx_speaker || lv != t->afx_level) {
+            static int lb = -1, lsp = -1, llv = -1;           /* (1.5.1: said again only when changed) */
+            if ((t->afx_boost >= 0 || b || sp || lv) && (b != lb || sp != lsp || lv != llv))
+                plog("tsp: sound: boost %s, speaker mode %s, one level %s", b ? (b == 1 ? "+3 dB" : b == 2 ? "+6 dB" : "+9 dB") : "off",
+                     sp ? "on" : "off", lv ? "on" : "off");
+            lb = b; lsp = sp; llv = lv;
             t->afx_boost = b;
             t->afx_speaker = sp;
-            afx_set(&t->afx, b, sp);
+            t->afx_level = lv;
+            afx_set(&t->afx, b, sp, lv);
+        }
+        int fd = afx_get_field();                            /* 1.3: the sound field */
+        if (fd != t->afx.field) {
+            static int lfd = -1;                             /* (1.5.1: said again only when changed) */
+            if (fd != lfd) plog("tsp: sound field %s", fd == 1 ? "speakers (wider)" : fd == 2 ? "headphones (crossfeed, 5.1: virtual surround)" : "off");
+            lfd = fd;
+            afx_field(&t->afx, fd);
         }
         afx_process(&t->afx, (int16_t *)pcm, samples, ch, rate);
     }
@@ -2510,11 +2763,13 @@ static void aacsw_frame(void *ctx, const int16_t *pcm, int samples, int rate, in
     t->st.audio_rate = rate;
     t->st.audio_ch = ch;
     t->st.audio_src_ch = src_ch;
+    t->st.audio_sw = !eac3 && t->aacsw;                      /* 1.2 (AC-3 / E-AC-3 show in audio_ac3) */
     audio_out(t, t->a52pcm, samples, rate, ch, pts);
 }
 
 /* one ADTS frame's channel configuration that only the software decoder plays (3 .. 7: 3.0 up to 7.1) */
 static int aac_needs_sw(int ch) { return ch >= 3 && ch <= 7; }
+
 
 /* One ADTS frame. Runs on the audio thread; sceAudioOutOutput blocks in real time. */
 static void audio_packet(Tsp *t, Pkt *p)
@@ -2554,7 +2809,14 @@ static void audio_packet(Tsp *t, Pkt *p)
         }
         t->aparam_new = 0;
         audio_close(t);
-        if (aac_needs_sw(ch) && out_rate_ok(rate)) {                     /* 0.6.0: the Vita's decoder takes 1-2 channels */
+        int hw = 0;
+        if (ch == 6 && !g51_off && out_rate_ok(rate)) {                  /* 1.2: 5.1 on the Vita's decoder */
+            if (audio_open(t, rate, 6) >= 0) {
+                hw = t->hw51 = 1;
+                plog("tsp: AAC %d Hz, 5.1: the Vita's decoder (0x1008), mixed down to stereo", rate);
+            } else { g51_off = 1; audio_close(t); plog("tsp: AAC 5.1: the Vita's decoder did not open; FFmpeg"); }
+        }
+        if (!hw && aac_needs_sw(ch) && out_rate_ok(rate)) {              /* 0.6.0: the Vita's decoder takes 1-2 channels */
             t->aacsw = a52_create_aac();
             t->aacsw_dlg = a52_get_dialog();
             if (!t->aacsw) { audio_disable(t, "Audio has %d channels: not supported", ch); return; }
@@ -2565,10 +2827,12 @@ static void audio_packet(Tsp *t, Pkt *p)
             a52_feed_frame(t->aacsw, d, p->len, p->pts, aacsw_frame, t);
             return;
         }
-        if (ch < 1 || ch > 2) { audio_disable(t, "Audio has %d channels: not supported", ch); return; }
-        if (!out_rate_ok(rate)) { audio_disable(t, "Audio rate %d Hz: not supported", rate); return; }
-        int r = audio_open(t, rate, ch);
-        if (r < 0) { audio_disable(t, "Audio decoder failed (0x%08X)", (unsigned)r); return; }
+        if (!hw) {
+            if (ch < 1 || ch > 2) { audio_disable(t, "Audio has %d channels: not supported", ch); return; }
+            if (!out_rate_ok(rate)) { audio_disable(t, "Audio rate %d Hz: not supported", rate); return; }
+            int r = audio_open(t, rate, ch);
+            if (r < 0) { audio_disable(t, "Audio decoder failed (0x%08X)", (unsigned)r); return; }
+        }
     } else t->aparam_new = 0;
     if (p->len > t->aes_cap) { t->st.audio_errors++; return; }
     memcpy(t->aes, d, p->len);
@@ -2590,6 +2854,12 @@ static void audio_packet(Tsp *t, Pkt *p)
     if (r < 0) {
         t->st.audio_errors++;
         if (t->st.audio_errors <= 5) plog("tsp: audio decode error 0x%08X", (unsigned)r);
+        if (t->hw51 && t->st.audio_frames == 0 && t->st.audio_errors >= 20) {   /* 1.2: back to FFmpeg */
+            g51_off = 1;
+            plog("tsp: AAC 5.1: the Vita's decoder fails here; FFmpeg plays 5.1 AAC");
+            audio_close(t);
+            return;
+        }
         if (t->st.audio_frames == 0 && t->st.audio_errors >= 50) {
             if (t->aac_main) audio_disable(t, "AAC Main audio: the Vita cannot play it (0x%08X)", (unsigned)r);
             else audio_disable(t, "Audio decode failed (0x%08X)", (unsigned)r);
@@ -2598,6 +2868,17 @@ static void audio_packet(Tsp *t, Pkt *p)
     }
     int samples = (int)(t->actrl.outputPcmSize / (2u * (unsigned)ch));
     if (samples <= 0 || samples % 64) { t->st.audio_errors++; return; }
+    if (t->hw51) {                                           /* 1.2: 5.1 from the Vita's decoder: mixed down here */
+        if (!t->dmx51) t->dmx51 = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
+        if (!t->dmx51 || samples > A52_MAX_SAMPLES) { t->st.audio_errors++; return; }
+        VSurr *vs = a52_get_vsurr() ? &t->vs51 : NULL;      /* 1.3: headphones: virtual surround */
+        if (vs) vsurr_prepare(vs, rate);
+        aac51_downmix((const int16_t *)t->apcm, samples, g51_map, a52_get_dialog(), vs, t->dmx51);
+        t->st.audio_ch = 2;
+        t->st.audio_src_ch = 6;
+        audio_out(t, (uint8_t *)t->dmx51, samples, rate, 2, p->pts);
+        return;
+    }
     audio_out(t, t->apcm, samples, rate, ch, p->pts);
 }
 
@@ -2652,6 +2933,60 @@ static void audio_a52(Tsp *t, Pkt *p)
     a52_feed(t->a52, p->data, p->len, p->pts, a52_frame, t);
 }
 
+/* 1.4.2: a piece of Opus / Vorbis sound from the software decoder (stereo already; XIPH_CHUNK samples) */
+static void xiph_frame(void *ctx, const int16_t *pcm, int samples, int rate, int ch, int src_ch, int eac3, int64_t pts)
+{
+    Tsp *t = ctx;
+    (void)eac3;
+    if (t->audio_off) return;
+    t->st.audio_src_ch = src_ch;
+    if (!t->st.audio_frames && !t->a52pcm) plog("tsp: %s audio, %d Hz, %d ch, played as %s (software decoder)", t->xsw_kind == 1 ? "Opus" : "Vorbis",
+                                                rate, src_ch, ch == 1 ? "mono" : "stereo");
+    if (samples % 64 || samples > A52_MAX_SAMPLES) { t->st.audio_errors++; return; }
+    if (!t->a52pcm) t->a52pcm = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
+    if (!t->a52pcm) return;
+    memcpy(t->a52pcm, pcm, (size_t)samples * 2u * (size_t)ch);
+    t->arate = rate;
+    t->ach = ch;
+    t->st.audio_rate = rate;
+    t->st.audio_ch = ch;
+    t->st.audio_xiph = t->xsw_kind;
+    audio_out(t, t->a52pcm, samples, rate, ch, pts);
+}
+
+static void xiph_open(Tsp *t)
+{
+    a52_destroy(t->xsw);
+    t->xsw_dlg = a52_get_dialog();
+    t->xsw = a52_create_xiph(t->xsw_kind == 1, t->xcfg, t->xcfg_len, t->xcfg_rate, t->xcfg_ch);
+    plog("tsp: %s decoder (FFmpeg): %s, set-up %u bytes, %d Hz, %d ch", t->xsw_kind == 1 ? "Opus" : "Vorbis", t->xsw ? "opened" : "FAILED",
+         (unsigned)t->xcfg_len, t->xcfg_rate, t->xcfg_ch);
+}
+
+static void audio_xiph(Tsp *t, Pkt *p)
+{
+    if (p->flags == 4 || p->flags == 5) {                    /* the set-up of a (new) track */
+        if (p->len < 6) return;
+        free(t->xcfg);
+        t->xcfg_len = p->len - 6;
+        t->xcfg = t->xcfg_len ? malloc(t->xcfg_len) : NULL;
+        if (t->xcfg) memcpy(t->xcfg, p->data + 6, t->xcfg_len);
+        else t->xcfg_len = 0;
+        t->xsw_kind = p->flags == 4 ? 1 : 2;
+        t->xcfg_rate = (int)(((uint32_t)p->data[1] << 24) | ((uint32_t)p->data[2] << 16) | ((uint32_t)p->data[3] << 8) | p->data[4]);
+        t->xcfg_ch = p->data[5];
+        xiph_open(t);
+        if (!t->xsw) audio_disable(t, "Audio %s: not supported", t->xsw_kind == 1 ? "opus" : "vorbis");
+        return;
+    }
+    if (t->xsw && t->xsw_dlg != a52_get_dialog()) {          /* 1.1: clear dialogue changed */
+        xiph_open(t);
+        if (!t->xsw) { audio_disable(t, "Audio %s: not supported", t->xsw_kind == 1 ? "opus" : "vorbis"); return; }
+    }
+    if (!t->xsw) { t->st.audio_errors++; return; }           /* (no set-up came: nothing can be decoded) */
+    a52_feed_frame(t->xsw, p->data, p->len, p->pts, xiph_frame, t);
+}
+
 static void audio_mpeg(Tsp *t, Pkt *p)
 {
     if (!t->mpa && !(t->mpa = mpa_create())) { audio_disable(t, "Out of memory"); return; }
@@ -2679,6 +3014,11 @@ static int audio_start_check(Tsp *t)
     int64_t fp = t->first_pic_pts;
     if (t->st.decoded > 0 && fp >= 0) {
         sceKernelLockMutex(t->qlock, 1, NULL);
+        Pkt *cfg = NULL;                                     /* 1.4.2: an Opus / Vorbis set-up first: kept, the old sound after it dropped */
+        if (t->aq.head && t->aq.head->flags >= 4 && t->aq.head->next) {
+            cfg = t->aq.head;
+            t->aq.head = cfg->next;
+        }
         while (t->aq.head && t->aq.head->pts >= 0 && t->aq.head->pts < fp - 4500 && fp - t->aq.head->pts < 90000LL * 10) {
             Pkt *p = t->aq.head;
             t->aq.head = p->next;
@@ -2687,6 +3027,11 @@ static int audio_start_check(Tsp *t)
             t->aq.bytes -= p->len;
             free(p);
             left++;
+        }
+        if (cfg) {
+            cfg->next = t->aq.head;
+            t->aq.head = cfg;
+            if (!cfg->next) t->aq.tail = cfg;
         }
         sceKernelUnlockMutex(t->qlock, 1);
     }
@@ -2721,7 +3066,10 @@ static int audio_main(SceSize args, void *argp)
             sceKernelDelayThread(2000);
             continue;
         }
-        if (!t->audio_off) { if (p->flags == 2) audio_a52(t, p); else if (p->flags) audio_mpeg(t, p); else audio_packet(t, p); }
+        if (!t->audio_off) {
+            if (p->flags >= 3) audio_xiph(t, p);             /* 1.4.2 */
+            else if (p->flags == 2) audio_a52(t, p); else if (p->flags) audio_mpeg(t, p); else audio_packet(t, p);
+        }
         free(p);
     }
     audio_close(t);
@@ -2729,9 +3077,14 @@ static int audio_main(SceSize args, void *argp)
     t->mpa = NULL;
     a52_destroy(t->a52);
     t->a52 = NULL;
+    a52_destroy(t->xsw);                                    /* 1.4.2 */
+    t->xsw = NULL;
+    free(t->xcfg);
+    t->xcfg = NULL;
+    t->xcfg_len = 0;
     free(t->a52pcm);
     t->a52pcm = NULL;
-    if (t->alib) { sceAudiodecTermLibrary(SCE_AUDIODEC_TYPE_AAC); t->alib = 0; }
+    if (t->alib) { sceAudiodecTermLibrary(t->alib_type ? t->alib_type : SCE_AUDIODEC_TYPE_AAC); t->alib = 0; }
     sceKernelLockMutex(t->qlock, 1, NULL);
     t->aclock_valid = 0;
     sceKernelUnlockMutex(t->qlock, 1);
@@ -2777,7 +3130,7 @@ static void cpu_line(Tsp *t, uint64_t now, int loud)
         }
         if (sr >= 0) {
             size_t c = 0;
-            unsigned sum = 0, n = 0;
+            unsigned sum = 0, n = 0, top = 0;
             unsigned mask = si.activeCpuMask;
             if (mask >= 0x10000) mask >>= 16;               /* the Vita gives it as 0x10000 << core (0.2.7 printed nothing) */
             for (int k = 0; k < 4; k++) {
@@ -2785,11 +3138,13 @@ static void cpu_line(Tsp *t, uint64_t now, int loud)
                 uint64_t id = si.cpuInfo[k].idleClock, d = id >= t->idle_prev[k] ? id - t->idle_prev[k] : 0;
                 unsigned busy = d >= dt ? 0 : (unsigned)(100 - d * 100 / dt);
                 sum += busy;
+                if (busy > top) top = busy;
                 n++;
                 c += (size_t)snprintf(co + c, sizeof co - c, "%s%u%%", c ? " " : "", busy);
                 if (c >= sizeof co) break;
             }
             if (n) snprintf(co + (c < sizeof co ? c : sizeof co - 1), sizeof co - (c < sizeof co ? c : sizeof co - 1), " (avg %u%%)", sum / n);
+            t->st.core_hot = top >= 65;                      /* 1.2: the app's ARM speed (main.c) */
         }
         if (loud) plog("tsp: cpu: %s%s%s", th, co[0] ? "; cores busy " : "", co);
     }
@@ -2811,6 +3166,7 @@ static void stats_tick(Tsp *t)
      * information table uses them. */
     uint32_t bad = t->st.dropped + t->st.late + t->st.damaged + t->st.errors + (uint32_t)t->st.skipped;
     int loud = now - t->start_us < 31000000ULL || bad != t->log_bad;
+    int detail = now - t->start_us < 12000000ULL || bad != t->log_bad;   /* 1.5.1: timing / cpu / units: the start, or when lost */
     int brief = loud || ++t->stats_quiet >= 12;
     if (brief) t->stats_quiet = 0;
     t->log_bad = bad;
@@ -2908,14 +3264,15 @@ static void stats_tick(Tsp *t)
             unsigned used = pd + psl + pda + pb;
             uint32_t dr = t->drained;
             t->drained = 0;
-            if (loud) plog("tsp: timing: video thread %u%% in the decoder, %u%% waiting for a free slot, %u%% waiting for data, "
+            if (detail) plog("tsp: timing: video thread %u%% in the decoder, %u%% waiting for a free slot, %u%% waiting for data, "
                  "%u%% HD decoder busy, %u%% other; picture to screen avg %u ms; screen frames with no picture %u, behind %u",
                  pd, psl, pda, pb, used < 100 ? 100 - used : 0, wn ? (unsigned)(wsum / wn / 1000) : 0, (unsigned)none, (unsigned)more);
-            if (dr && loud) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
+            if (dr && detail) plog("tsp: HD decoder had %u more pictures ready (taken out at once)", (unsigned)dr);
         }
     }
-    cpu_line(t, now, loud);
+    cpu_line(t, now, detail);
     if (t->reader_done) return;                             /* (called by the video thread now: no reads to tune) */
+    if (t->vod_file) return;                                 /* 1.3.1: a file is read in CHUNK pieces (no network) */
 
     /* sceHttpReadData returns only when the request is full: small reads keep radio responsive, larger ones
      * (about 30 reads a second) cut the per-call cost on high bit rates. */
@@ -2923,7 +3280,7 @@ static void stats_tick(Tsp *t)
     while (rs < CHUNK && (uint64_t)rs * 2 * 30 <= (uint64_t)kbs * 1024) rs *= 2;
     while (rs > READ_SIZE && (uint64_t)rs * 4 > (uint64_t)kbs * 1024) rs /= 2;   /* below 4 reads a second: smaller */
     if (rs != cur_read_size(t)) {
-        plog("tsp: http read size %u -> %u bytes", cur_read_size(t), rs);
+        /* (1.5.1: not logged) */
         t->read_size = rs;
     }
 }
@@ -3001,14 +3358,22 @@ static void check_stall(Tsp *t)
 /* One HTTP connection. Returns 1 if it may be retried (read error / server closed),
  * 0 when stopping or after a fatal error (already reported). *got counts bytes received. */
 /* 407/429/503/509: IPTV servers say this when the account is already watching (the channel we just
- * left may not be closed on their side yet). Wait a moment and ask again before giving up.
- * Returns 1 to try again. */
+ * left may not be closed on their side yet). 1.2: also 405 and 512, which a server gave for one film and
+ * episode after another while its account showed "connections 1 of 1" (switching quickly). Wait a moment
+ * and ask again before giving up. Returns 1 to try again. */
+/* 1.5: the app knows no connection of this account is in use (no stream or download of it a minute ago): a 405 is
+ * then the server not giving this file (a film that never opens: the 1.4.2 log), not a busy account */
+static volatile int g_acct_free;
+void tsp_set_account_free(int on) { g_acct_free = on ? 1 : 0; }
+static int busy_status(int s) { if (s == 405 && g_acct_free) return 0; return s == 405 || s == 407 || s == 429 || s == 503 || s == 506 || s == 509 || s == 512; }
+
 static int http_refused(Tsp *t, int status)
 {
-    int busy = status == 407 || status == 429 || status == 503 || status == 509;
-    if (busy && t->st.bytes == 0 && t->status_retries++ < 1) {
-        plog("tsp: server answered %d, asking once more in 1.5 s", status);
-        for (int k = 0; k < 75 && !stopping(t); k++) sceKernelDelayThread(20000);
+    int busy = busy_status(status);
+    if (busy && t->st.bytes == 0 && t->status_retries < 2) {   /* (1.2: twice, after 1.5 and 3 s: it lets go in a few seconds) */
+        int ms = t->status_retries++ ? 3000 : 1500;
+        plog("tsp: server answered %d (the account may still be counted on the last channel), asking again in %.1f s", status, ms / 1000.0);
+        for (int k = 0; k < ms / 20 && !stopping(t); k++) sceKernelDelayThread(20000);
         return 1;
     }
     /* 1.0: reconnecting a stream that played: a one-connection account is refused while the server still
@@ -3027,6 +3392,10 @@ static int http_refused(Tsp *t, int status)
     }
     if (status == 407)
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP 407 (the provider refuses: account busy or channel not in the package)");
+    else if (busy)
+        set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d (the provider refuses: account busy?)", status);
+    else if (status == 405)
+        set_error_kind(t, TSP_ERRK_NET, "The server does not give this one (HTTP %d)", status);   /* 1.5 */
     else
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d", status);
     return 0;
@@ -3888,11 +4257,109 @@ static void vc_check_total(Tsp *t, uint64_t tot)
     set_error_kind(t, TSP_ERRK_NET, "The film changed on the server: open it again");
 }
 
+/* ---- 1.3: films on the memory card through the same reader (local and downloaded files) ---- */
+static int lf_open(const char *path)
+{
+#ifdef __vita__
+    SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0);
+    return fd < 0 ? -1 : (int)fd;
+#else
+    return open(path, O_RDONLY);
+#endif
+}
+static int64_t lf_size(int fd)
+{
+#ifdef __vita__
+    return (int64_t)sceIoLseek(fd, 0, SCE_SEEK_END);
+#else
+    return (int64_t)lseek(fd, 0, SEEK_END);
+#endif
+}
+static int lf_pread(int fd, uint8_t *buf, size_t len, uint64_t off)
+{
+#ifdef __vita__
+    return sceIoPread(fd, buf, (SceSize)len, (SceOff)off);
+#else
+    return (int)pread(fd, buf, len, (off_t)off);
+#endif
+}
+static void lf_close(int fd)
+{
+#ifdef __vita__
+    sceIoClose(fd);
+#else
+    close(fd);
+#endif
+}
+
+/* [off, end) of the file as vod_get gives a range (status 206; 404 when it cannot be opened). A file is there
+ * at once: once a few seconds are queued it is read at a calm pace (as read_local), the queues also wait. */
+static int vod_get_file(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, int *status)
+{
+    int fd = lf_open(t->url);
+    if (fd < 0) { *status = 404; t->vod_last_status = 404; plog("tsp: cannot open the file %s", t->url); return 0; }
+    int64_t sz = lf_size(fd);
+    if (sz < 0) { lf_close(fd); *status = 404; t->vod_last_status = 404; return 0; }
+    /* 1.3.2: a file still being downloaded: its whole size counts (lengths, jumps); the film waits for the part
+     * it needs, a header read past what is there finds nothing (as a short file) */
+    uint64_t total = t->file_total > (uint64_t)sz ? t->file_total : (uint64_t)sz;
+    if (!t->vod_total) t->vod_total = total;
+    *status = 206;
+    t->vod_last_status = 206;
+    uint64_t stop = end && end < total ? end : total, pos = off;
+    int ret = 0;
+    unsigned long long waited_since = 0;
+    while (!stopping(t) && pos < stop) {
+        if (pos >= (uint64_t)sz) {                           /* (1.3.2: not downloaded yet) */
+            if (!t->film_phase || t->file_total <= (uint64_t)sz) break;
+            if (!waited_since) {
+                waited_since = now_us();
+                t->st.file_wait = 1;
+                plog("tsp: the download has reached byte %llu MB, the film waits for it", (unsigned long long)(sz >> 20));
+            }
+            sceKernelDelayThread(250000);
+            int64_t s2 = lf_size(fd);
+            if (s2 > sz) {
+                sz = s2; waited_since = 0; t->st.file_wait = 0;
+                plog("tsp: the download came on (%llu MB): playing on", (unsigned long long)(sz >> 20));
+            } else if (now_us() - waited_since > (unsigned long long)FILE_WAIT_MAX_MS * 1000ULL) {
+                t->st.file_wait = 0;
+                set_error_kind(t, TSP_ERRK_FORMAT, "The download has not reached this part yet");
+                ret = -1;
+                break;
+            }
+            continue;
+        }
+        uint64_t lim = stop < (uint64_t)sz ? stop : (uint64_t)sz;
+        size_t ask = CHUNK < lim - pos ? CHUNK : (size_t)(lim - pos);
+        int n = lf_pread(fd, t->rbuf, ask, pos);
+        if (n < 0) { ret = -1; plog("tsp: file read error 0x%08X at byte %llu", (unsigned)n, (unsigned long long)pos); break; }
+        if (n == 0) {                                        /* (the size said more: read it again) */
+            int64_t s2 = lf_size(fd);
+            if (s2 > 0) sz = s2;
+            if ((uint64_t)sz <= pos && t->file_total <= (uint64_t)sz) break;
+            continue;
+        }
+        pos += (uint64_t)n;
+        if (fn(t, ctx, t->rbuf, (size_t)n)) break;
+        if (t->film_phase) {                                 /* (the film itself, not the header reads) */
+            int q_ms = (int)((int64_t)t->vq.count * (t->frame_us ? (int)t->frame_us : 40000) / 1000);
+            if (t->st.decoded > 0 && q_ms > 3000) sceKernelDelayThread(4000);
+        }
+    }
+    t->st.file_wait = 0;
+    lf_close(fd);
+    return ret;
+}
+
+void tsp_set_file_total(uint64_t total) { g_file_total = total; }
+
 /* GET of the bytes [off, end) of the file (end 0 = to its end). Returns 0 when the body ended or fn stopped
  * it, VG_NO_RANGE when the server ignores ranges, < 0 on a network error. *status = HTTP status. */
 static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, int *status)
 {
     *status = 0;
+    if (t->vod_file) return vod_get_file(t, off, end, fn, ctx, status);   /* 1.3 */
     if (via_cio(t, t->url)) {
         VgCtx g = { t, fn, ctx, status, off, 0 };
         uint64_t tot = 0;
@@ -4008,7 +4475,7 @@ static int vod_fetch(Tsp *t, uint64_t off, uint8_t *out, size_t len)
         if (stopping(t)) return -1;
         if (r == VG_NO_RANGE) { t->vod_norange = 1; return -2; }
         if (st >= 400) { vod_status = st; return -1; }
-        if (f.n > 0 && t->vc_rec && st == 206) vc_put(t, off, out, f.n);
+        if (f.n > 0 && t->vc_rec && st == 206 && !t->vod_file) vc_put(t, off, out, f.n);   /* (1.3: a file needs no copy) */
         if (f.n > 0 || r >= 0) return (int)f.n;
         for (int k = 0; k < 15 && !stopping(t); k++) sceKernelDelayThread(20000);
     }
@@ -4056,7 +4523,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
     VodIo io = { t, NULL, 0, 0 };
     uint8_t head[1024];
     vod_status = 0;
-    uint64_t ctot = vc_total_for(t->url);
+    uint64_t ctot = t->vod_file ? 0 : vc_total_for(t->url);
     if (ctot) {                                             /* a jump in the same film: its index is in memory */
         t->vod_total = ctot;
         t->vc_used = 1;
@@ -4065,6 +4532,15 @@ static void read_vod(Tsp *t, uint8_t *buf)
     } else if (!t->vod_stream) tsp_vod_cache_clear();       /* another film: free the old one first */
     t->vc_rec = 1;
     int n = vio_read(&io, 0, head, sizeof head);
+    /* 1.2: refused as busy (the last film or episode still counted): asked again after 1.5 and 3 s */
+    for (int k = 0; k < 2 && n <= 0 && busy_status(vod_status) && !stopping(t); k++) {
+        int ms = k ? 3000 : 1500;
+        plog("tsp: VOD: server answered %d (the account may still be counted on the last film), asking again in %.1f s", vod_status, ms / 1000.0);
+        for (int j = 0; j < ms / 20 && !stopping(t); j++) sceKernelDelayThread(20000);
+        if (stopping(t)) break;
+        vod_status = 0;
+        n = vio_read(&io, 0, head, sizeof head);
+    }
     if (stopping(t)) { free(io.win); return; }
     if (n > 0 && t->vod_last_status == 200) {               /* the whole file came instead of a part */
         if (vod_container(head, (size_t)n) == VOD_MP4) {
@@ -4083,8 +4559,11 @@ static void read_vod(Tsp *t, uint8_t *buf)
     }
     if (n <= 0) {
         free(io.win);
-        if (vod_status == 407 || vod_status == 429 || vod_status == 503 || vod_status == 509)
+        if (t->vod_file) set_error_kind(t, TSP_ERRK_FORMAT, n == 0 ? "The file is empty" : "Cannot open the file");   /* 1.3 */
+        else if (busy_status(vod_status))
             set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d (the provider refuses: account busy?)", vod_status);
+        else if (vod_status == 405 || vod_status == 404 || vod_status == 403 || vod_status == 410)   /* 1.5 */
+            set_error_kind(t, TSP_ERRK_NET, "The server does not give this one (HTTP %d)", vod_status);
         else if (vod_status) set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d", vod_status);
         else set_error_kind(t, TSP_ERRK_NET, "The server did not answer");
         return;
@@ -4120,7 +4599,9 @@ static void read_vod(Tsp *t, uint8_t *buf)
         int r = mp4_read_moov(vio_read, &io, t->vod_total, &moov, &ml);
         if (r != 0) {
             free(io.win);
-            if (!stopping(t)) set_error_kind(t, TSP_ERRK_FORMAT, r == -2 ? "MP4 index too big" : t->vod_norange ?
+            if (!stopping(t) && t->vod_file && t->file_total > (uint64_t)0 && r != -2)   /* 1.3.2: its index is at the end */
+                set_error_kind(t, TSP_ERRK_FORMAT, "This MP4 file can be played only when its download has ended");
+            else if (!stopping(t)) set_error_kind(t, TSP_ERRK_FORMAT, r == -2 ? "MP4 index too big" : t->vod_norange ?
                                               "MP4 file: the server does not allow reading its index" : "Damaged MP4 file (no index)");
             return;
         }
@@ -4179,6 +4660,10 @@ static void read_vod(Tsp *t, uint8_t *buf)
         t->vod_kick = 0;
         int r = vod_get(t, pos, 0, vod_feed_cb, &pos, &st);
         if (stopping(t)) break;
+        if (t->vod_file) {                                  /* 1.3: a file: its end, or it cannot be read */
+            if (t->st.state != TSP_ERROR && !t->err_set && (r < 0 || st >= 400 || pos == before)) set_error_kind(t, TSP_ERRK_FORMAT, "The file cannot be read (at %u MB)", (unsigned)(pos >> 20));
+            break;
+        }
         if (st >= 400) { if (!http_refused(t, st)) break; continue; }
         if (r == VG_NO_RANGE) { set_error_kind(t, TSP_ERRK_NET, "The server stopped sending parts of the file"); break; }
         if (t->mp4 && mp4_finished(t->mp4)) break;
@@ -4216,6 +4701,12 @@ static int worker(SceSize args, void *argp)
         else if (t->vod) read_vod(t, buf);
         else if (m3u8 || strstr(t->url, ".m3u8?") || strstr(t->url, "?m3u8")) { t->is_hls = 1; read_hls(t, buf); }
         else read_http(t, buf);
+    }
+    else if (t->vod) {                                       /* 1.3: a film on the memory card */
+        t->vod_file = 1;
+        t->file_total = g_file_total;                        /* (1.3.2: still being downloaded) */
+        t->rbuf = buf;
+        read_vod(t, buf);
     }
     else read_local(t, buf);
     free(buf);
@@ -4441,7 +4932,8 @@ static void buffer_check(Tsp *t, uint64_t now)
     /* 0.6.0: "slower" only from an interval in which the reader did not wait for room (a full queue reads only
      * what is played, which looked like a slow line); and a network at least twice as fast as the film gets the
      * larger queues too (it fills them in seconds; a longer gap of the server is then ridden out) */
-    int measured = t->vod && t->first_show_us && now - t->first_show_us > 8000000ULL && t->st.need_kbs && t->st.net_kbs;
+    /* 1.3.1: not for a file on the memory card: it is there at once (and the 40 MB stay free) */
+    int measured = t->vod && !t->vod_file && t->first_show_us && now - t->first_show_us > 8000000ULL && t->st.need_kbs && t->st.net_kbs;
     int film_slow = measured && t->net_wait_pct < 10 && t->st.net_kbs < t->st.need_kbs * 9 / 10;
     int film_fast = measured && t->net_free_kbs >= t->st.need_kbs * 2;
     if ((film_slow || film_fast) && !t->big_queues) {
@@ -4722,6 +5214,11 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     if (url_split_headers(t->url, t->url, sizeof t->url, t->hdr_ua, sizeof t->hdr_ua, t->hdr_ref, sizeof t->hdr_ref))
         plog("tsp: link headers:%s%s%s%s", t->hdr_ua[0] ? " User-Agent " : "", t->hdr_ua, t->hdr_ref[0] ? " Referer " : "", t->hdr_ref);
     t->vod = vod;
+    if (g_adj_url[0] && !strcmp(g_adj_url, t->url)) {      /* (1.2: as it ended up the last time) */
+        t->timing_tried = 1;
+        t->drop_timing = 1;
+        plog("tsp: this stream needed its header adjusted before: adjusted from the start");
+    }
     t->vod_start_ms = start_ms > 0 ? start_ms : 0;
     t->vod_first_pts = -1;
     t->first_pic_pts = -1;
@@ -4736,7 +5233,7 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     t->frame_us = 40000;
     t->ev_anchor = t->ev_prev_in = -1;
     afx_init(&t->afx);
-    t->afx_boost = t->afx_speaker = -1;
+    t->afx_boost = t->afx_speaker = t->afx_level = -1;
     t->last_out_pts = t->shown_pts = -1;
     t->fb_uid = t->es_uid = -1;
     t->cm_uid = t->unmap = -1;
@@ -4803,6 +5300,21 @@ void tsp_pause(int on)
     if (!on) t->clock_on = 0;                               /* the video clock starts again from the next picture */
     sceKernelUnlockMutex(t->lock, 1);
     plog("tsp: %s", on ? "paused" : "playing again");
+}
+
+/* 1.3.1: the film's time (ms) of a picture's pts, as tsp_vod_pos counts it */
+static int film_ms_at(Tsp *t, int64_t p)
+{
+    if (t->vod_stream) {
+        int64_t d = t->vod_first_pts >= 0 ? p - t->vod_first_pts : 0;
+        if (d < -90000LL * 3600) d += 1LL << 33;
+        return t->vod_offset_ms + (d < 0 ? 0 : (int)(d / 90));
+    }
+    int64_t base = t->vod_base;
+    if (t->flv && flv_info(t->flv)->first_video_pts > 0) base = flv_info(t->flv)->first_video_pts;
+    int64_t d = p - base;
+    if (d < -90000LL * 3600) d += 1LL << 33;
+    return d < 0 ? 0 : (int)(d / 90);
 }
 
 int tsp_vod_pos(int *pos_ms, int *dur_ms)

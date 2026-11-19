@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 int main(void)
 {
@@ -106,6 +107,43 @@ int main(void)
     assert(!strcmp(xl.items[2].url, "http://host.example:8080/movie/ali/p%40ss/5003.mp4"));
     channel_list_free(&xl);
     channel_list_init(&xl);
+    {   /* 1.4.1: the small copy for searching again finds the same, with the same details (no plot / cast) */
+        const char *big = "[{\"num\":1,\"name\":\"Film \\\"A\\\" \\\\ (2020)\",\"stream_id\":5001,\"rating\":\"7.1\",\"category_id\":\"1\","
+                          "\"container_extension\":\"mkv\",\"stream_icon\":\"http://img.example/a.jpg\",\"plot\":\"Uzun bir konu...\","
+                          "\"cast\":\"A, B\",\"genre\":\"Dram\",\"releasedate\":\"2020-05-01\",\"is_adult\":\"0\",\"backdrop_path\":[\"x\",\"y\"]},"
+                          "{\"name\":\"Film B\",\"stream_id\":\"5002\",\"category_id\":\"2\"},{\"name\":\"no id\"},"
+                          "{\"name\":\"Film C\",\"stream_id\":\"5003\",\"is_adult\":\"1\",\"container_extension\":\"avi\"}]";
+        char *small = NULL;
+        size_t sn = xtream_compact(big, strlen(big), 0, &small);
+        assert(sn > 0 && small && sn < strlen(big));
+        ChannelList a1, a2;
+        channel_list_init(&a1); channel_list_init(&a2);
+        int n1 = xtream_parse_vod_match(big, strlen(big), &xs, cats, nc, &a1, 0, "film", 500);
+        int n2 = xtream_parse_vod_match(small, sn, &xs, cats, nc, &a2, 0, "film", 500);
+        assert(n1 == 3 && n2 == 3);
+        for (int i = 0; i < 3; i++) {
+            assert(!strcmp(a1.items[i].name, a2.items[i].name) && !strcmp(a1.items[i].url, a2.items[i].url) &&
+                   !strcmp(a1.items[i].group, a2.items[i].group) && a1.items[i].adult == a2.items[i].adult);
+            const char tags[] = { CX_RATING, CX_YEAR, CX_GENRE };   /* (1.5.1: films' pictures left out) */
+            assert(!channel_extra(&a2, &a2.items[i], CX_POSTER));
+            for (int t = 0; t < 3; t++) {
+                const char *x = channel_extra(&a1, &a1.items[i], tags[t]), *y = channel_extra(&a2, &a2.items[i], tags[t]);
+                assert((!x && !y) || (x && y && !strcmp(x, y)));
+            }
+        }
+        assert(!strcmp(a2.items[0].name, "Film \"A\" \\ (2020)") && a2.items[2].adult);
+        assert(!channel_extra(&a2, &a2.items[0], CX_PLOT));      /* (left out: the details screen reads it) */
+        channel_list_free(&a1); channel_list_free(&a2);
+        free(small);
+        const char *sj = "[{\"name\":\"Dizi X\",\"series_id\":77,\"cover\":\"http://c/x.jpg\",\"category_id\":\"1\",\"plot\":\"p\"}]";
+        sn = xtream_compact(sj, strlen(sj), 1, &small);
+        channel_list_init(&a2);
+        assert(sn && xtream_parse_vod_match(small, sn, &xs, cats, nc, &a2, 1, "dizi", 500) == 1 && !strcmp(a2.items[0].url, "77") &&
+               a2.items[0].kind == CH_SERIES && !strcmp(channel_extra(&a2, &a2.items[0], CX_POSTER), "http://c/x.jpg"));
+        channel_list_free(&a2);
+        free(small);
+        assert(xtream_compact("[]", 2, 0, &small) == 0 && !small);
+    }
     const char *srj = "[{\"num\":1,\"name\":\"Dizi\",\"series_id\":77,\"cover\":\"x\",\"category_id\":\"1\"},{\"name\":\"no id\"}]";
     assert(xtream_parse_series(srj, strlen(srj), &xs, cats, nc, &xl) == 1);
     assert(xl.items[0].kind == CH_SERIES && !strcmp(xl.items[0].url, "77") && !strcmp(xl.items[0].name, "Dizi"));
@@ -233,6 +271,7 @@ int main(void)
     assert(!strcmp(T_msg("Audio mpeg_audio: not supported"), "Ses mpeg_audio: desteklenmiyor"));
     assert(!strcmp(T_msg("Failed: Out of memory"), "Başarısız: Bellek yetersiz"));       /* the inner text is translated too */
     assert(!strcmp(T_msg("HEVC (H.265) video: the Vita cannot decode it"), "HEVC (H.265) görüntü: Vita bunu çözemiyor"));
+    assert(!strcmp(T_msg("H.264 8-bit, colour 4:4:4 (the Vita decodes 8-bit 4:2:0 only)"), "H.264 8-bit, renk 4:4:4 (Vita yalnız 8-bit 4:2:0 çözer)"));
     assert(!strcmp(T_msg("Server answered HTTP"), "Server answered HTTP"));             /* no number: left alone */
     char fmt_out[64]; snprintf(fmt_out, sizeof fmt_out, T("%d channels"), 16); assert(!strcmp(fmt_out, "16 kanal"));
     lang_set(LANG_EN);
@@ -255,8 +294,14 @@ int main(void)
         assert(settings_format(&sd, sdf, sizeof sdf) > 0);
         Settings se; settings_parse(sdf, &se);
         assert(se.sub_size == 3 && se.sub_color == 2 && se.sub_pos == 1 && se.sub_bg == 2 && se.theme == 3 && !strcmp(se.pin, "1234"));
-        settings_parse("sub_size=9\nsub_color=-1\nsub_pos=x\nsub_bg=3\ntheme=4\n", &se);
+        settings_parse("sub_size=9\nsub_color=-1\nsub_pos=x\nsub_bg=3\ntheme=6\n", &se);   /* 1.4: 6 colours (0..5) */
         assert(se.sub_size == 1 && se.sub_color == 0 && se.sub_pos == 0 && se.sub_bg == 0 && se.theme == 0);
+        /* 1.4: the background: kept, checked, written only when changed */
+        Settings sg; settings_defaults(&sg); assert(sg.bg == 0);
+        settings_format(&sg, sdf, sizeof sdf); assert(!strstr(sdf, "background"));
+        settings_parse("theme=5\nbackground=1\n", &sg); assert(sg.theme == 5 && sg.bg == 1);
+        settings_format(&sg, sdf, sizeof sdf); settings_parse(sdf, &se); assert(se.theme == 5 && se.bg == 1);
+        settings_parse("background=4\n", &se); assert(se.bg == 0);
         char tiny[40]; assert(settings_format(&sd, tiny, sizeof tiny) == -1);
     }
     {   /* 1.1: sound settings: off by default and not written then; kept; out of range -> off */
@@ -270,6 +315,16 @@ int main(void)
         assert(se.snd_boost == 2 && se.snd_speaker == 1 && se.snd_dialog == 1 && se.sub_size == 3 && se.theme == 2);
         settings_parse("snd_boost=7\nsnd_speaker=2\nsnd_dialog=-1\n", &se);
         assert(se.snd_boost == 0 && se.snd_speaker == 0 && se.snd_dialog == 0);
+        {   /* 1.3: the sound field: auto (3) by default, kept (0, 1, 2), out of range -> auto */
+            Settings sf; settings_defaults(&sf);
+            assert(sf.snd_field == 3);
+            char f0[512]; assert(settings_format(&sf, f0, sizeof f0) > 0 && !strstr(f0, "snd_field"));
+            sf.snd_field = 0; assert(settings_format(&sf, f0, sizeof f0) > 0 && strstr(f0, "snd_field=0"));
+            settings_parse("snd_field=2\nsnd_level=1\n", &sf);
+            char ff[512]; assert(settings_format(&sf, ff, sizeof ff) > 0 && strstr(ff, "snd_field=2"));
+            Settings sg; settings_parse(ff, &sg); assert(sg.snd_field == 2 && sg.snd_level == 1);
+            settings_parse("snd_field=9\n", &sg); assert(sg.snd_field == 3);
+        }
         /* 1.1: the server turned off keeps its address; proxy_url refuses it */
         Settings so; settings_defaults(&so);
         snprintf(so.proxy, sizeof so.proxy, "http://192.168.1.20:8090");
@@ -356,7 +411,11 @@ int main(void)
     assert(iptv_is_film_url("https://example.org/films/Sintel.2010.720p.mkv"));
     assert(iptv_is_film_url("http://h:8080/movie/u/p/123.mp4") && iptv_is_film_url("http://h/series/u/p/9.ts"));
     assert(iptv_is_film_url("http://h/a.MOV?token=1") && !iptv_is_film_url("http://h/live/u/p/1.ts"));
-    assert(!iptv_is_film_url("http://h/index.m3u8") && !iptv_is_film_url("ux0:data/VitaIPTV/a.mkv"));
+    assert(!iptv_is_film_url("http://h/index.m3u8"));
+    /* 1.3: video files on the memory card are films (the VOD reader reads files too) */
+    assert(iptv_is_film_url("ux0:data/VitaIPTV/a.mkv") && iptv_is_film_url("ux0:data/VitaIPTV/b.TS") && iptv_is_film_url("uma0:x/c.mp4"));
+    assert(!iptv_is_film_url("ux0:data/VitaIPTV/list.m3u") && iptv_is_local_path("ux0:a") && iptv_is_local_path("uma0:b"));
+    assert(!iptv_is_local_path("http://h/a.ts") && !iptv_is_local_path("a:b") && !iptv_is_local_path("ux:b"));
     {
         const char *m = "#EXTM3U\n#EXTINF:-1,Film\nhttp://h/f.mkv\n#EXTINF:-1,TV\nhttp://h/live/1.ts\n";
         ChannelList fl; channel_list_init(&fl);

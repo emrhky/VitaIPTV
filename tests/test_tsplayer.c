@@ -22,6 +22,7 @@
 static int g_own_http;                      /* 0.6.0: "own socket (http)" was logged */
 static int g_net_slow, g_net_fast;          /* 0.6.0: "the network is slower than the film" / "the network is fast" */
 static int g_asked_again;                   /* 0.6.0: "the film does not come ...: asking the server again" */
+static int g51_direct;                      /* 1.2: the 5.1 AAC decoder (0x1008) opened */
 void plog(const char *fmt, ...)
 {
     char line[1024];
@@ -33,6 +34,7 @@ void plog(const char *fmt, ...)
     if (strstr(line, "network is slower than the film (")) g_net_slow = 1;   /* (the queues line, not "buffering (...: n pictures") */
     if (strstr(line, "network is fast")) g_net_fast = 1;
     if (strstr(line, "asking the server again")) g_asked_again = 1;
+    if (strstr(line, "5.1: the Vita's decoder (0x1008)")) g51_direct = 1;
     if (getenv("VERBOSE")) puts(line);
 }
 extern int mock_mapped;
@@ -75,9 +77,11 @@ static int sps_unrestricted;
 /* 0.4.0: like the Vita with Ciftci TV: a stream with timing information (HRD / pic_struct in the SPS, or
  * SEI units) gets no picture from either decoder ("out of memory" for every unit) */
 static int refuse_timing, sps_timing, refuse_unrestricted, sps_norestr;
+static int refuse_unr_after, unr_units;    /* 1.2: "out of memory" for an SPS without restriction after this many units */
 static int int_refuse_all;                  /* 0.4.1: the HD decoder takes every unit and gives nothing ("out of memory") */
 static int timing_refused(const uint8_t *b, size_t n)
-{ return (refuse_timing && (sps_timing || has_nal(b, n, 6))) || (refuse_unrestricted && sps_norestr); }
+{ return (refuse_timing && (sps_timing || has_nal(b, n, 6))) || (refuse_unrestricted && sps_norestr) ||
+         (refuse_unr_after && sps_norestr && ++unr_units > refuse_unr_after); }
 static void check_sps(const uint8_t *b, size_t n)
 {
     for (size_t i = 0; i + 3 < n; i++) {
@@ -188,10 +192,13 @@ int sceAvcdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArra
 
 /* ---- fake Internal decoder (above 720p): pictures come out two units after they go in ---- */
 typedef struct { SceAvcdecBuf memBuf; SceUID memBufUid; SceUIntVAddr vaContext; SceUInt32 contextSize; } MockVdCtrl;
+static int int_yuv_seen, int_no_yuv;
 static int int_cfg, int_mode, int_creates, int_units, int_soft_every, int_full_every, int_full_left, int_full_hits, int_delay = 2, int_hold_every, int_gets, int_max_pend;
 static int paint_mode;                   /* 1: a normal picture (a gradient top to bottom), 2: two fields one above the other */
 int sceVideodecSetConfigInternal(SceVideodecType c, SceInt32 cfg) { (void)c; int_cfg = cfg; return 0; }
 int sceAvcdecSetDecodeMode(SceVideodecType c, SceInt32 m) { (void)c; int_mode = m; return 0; }
+int mock_ilace;                                             /* 1.2: the decoder's interlaced mode */
+int sceAvcdecSetInterlacedStreamMode(SceVideodecType c, SceInt32 on) { (void)c; mock_ilace = on; return 0; }
 int sceVideodecQueryMemSizeInternal(SceVideodecType c, SceVideodecQueryInitInfo *q, SceUInt32 *size)
 { (void)c; if (q->hwAvc.size != sizeof q->hwAvc || q->hwAvc.numOfStreams != 1) return (int)0x80620802;
   *size = q->hwAvc.horizontal * q->hwAvc.vertical * 5 / 2 + 300000; return 0; }
@@ -237,6 +244,11 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
     if (arr->numOfElm != 1) return (int)0x80620002;
     SceAvcdecPicture *p = arr->pPicture[0];
     if (!p || p->size != sizeof *p || !p->frame.pPicture[0] || p->frame.framePitch < lib_w || p->frame.frameHeight < lib_h) return (int)0x80620002;
+    int yuv = p->frame.pixelType == SCE_AVCDEC_PIXELFORMAT_YUV420_RASTER || p->frame.pixelType == SCE_AVCDEC_PIXELFORMAT_YUV420_PACKED_RASTER;
+    if (yuv) int_yuv_seen = p->frame.pixelType;
+    if (int_no_yuv && yuv) return (int)0x80620002;          /* (a decoder that does not take this format) */
+    if (yuv && p->frame.pPicture[1] != (uint8_t *)p->frame.pPicture[0] + (size_t)p->frame.framePitch * p->frame.frameHeight)
+        return (int)0x80620002;                             /* (the colour planes right after the Y plane, as the GPU wants) */
     arr->numOfOutput = 0;
     if (npend > int_max_pend) int_max_pend = npend;
     if (npend < int_delay + 1 && !(int_flush && npend > 0)) return 0;   /* two units of delay, as on the device */
@@ -268,7 +280,8 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
         }
     }
     memcpy(pix, &o, 8);
-    pix[(size_t)p->frame.framePitch * p->frame.frameHeight * 4 - 1] = 0x5A;
+    size_t psz = (size_t)p->frame.framePitch * p->frame.frameHeight;
+    pix[(yuv ? psz * 3 / 2 : psz * 4) - 1] = 0x5A;          /* touches the last byte (1.2 test: YUV 1.5 bytes a pixel) */
     p->info.pts.upper = o < 0 ? 0xFFFFFFFFu : (uint32_t)((uint64_t)o >> 32);
     p->info.pts.lower = o < 0 ? 0xFFFFFFFFu : (uint32_t)o;
     p->frame.horizontalSize = lib_w; p->frame.verticalSize = lib_h;
@@ -280,13 +293,26 @@ int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *d, SceAvcdec
 static int mock_refuse_lc;
 static int alib_open, adec_open, ports_open, port_len, port_rate, port_ch;
 static uint64_t pcm_frames_out;
+/* 1.2: the multichannel AAC type 0x1008 (VNZBench): 6 channels out, here in AAC's own order C L R Ls Rs LFE
+ * (FFmpeg decodes it) */
+static int mock51_frames;
+static A52Dec *mock51_dec;
+static float mock51_pl[2][6 * 2048];
 SceInt32 sceAudiodecInitLibrary(SceUInt32 type, SceAudiodecInitParam *p)
-{ if (type != SCE_AUDIODEC_TYPE_AAC) return (int)0x807F0001; if (alib_open) return (int)0x807F0003;
+{ if (type != SCE_AUDIODEC_TYPE_AAC && !(type == 0x1008 && a52_aac_available())) return (int)0x807F0001; if (alib_open) return (int)0x807F0003;
   if (p->aac.size != sizeof p->aac || p->aac.totalStreams < 1) return (int)0x807F0002;
   alib_open = 1; return 0; }
 SceInt32 sceAudiodecTermLibrary(SceUInt32 type) { (void)type; alib_open = 0; return 0; }
 SceInt32 sceAudiodecCreateDecoder(SceAudiodecCtrl *c, SceUInt32 type)
-{ if (type != SCE_AUDIODEC_TYPE_AAC || !alib_open) return (int)0x807F0005;
+{ if (type == 0x1008 && alib_open) {
+    const uint32_t *in = (const uint32_t *)c->pInfo;
+    if (c->size != sizeof *c || c->wordLength != 16 || !in || in[0] != 0x18 || in[1] != 1) return (int)0x807F0002;
+    if (in[2] != 6 && in[2] != 2) return (int)0x807F3000;
+    a52_destroy(mock51_dec);
+    mock51_dec = a52_create_aac();
+    mock51_frames = 0;
+    c->handle = 8; c->maxEsSize = 4864; c->maxPcmSize = 12288; adec_open = 1; return 0; }
+  if (type != SCE_AUDIODEC_TYPE_AAC || !alib_open) return (int)0x807F0005;
   if (c->size != sizeof *c || c->wordLength != 16 || !c->pInfo || c->pInfo->aac.size != sizeof c->pInfo->aac || c->pInfo->aac.isAdts != 1) return (int)0x807F0002;
   if (c->pInfo->aac.ch < 1 || c->pInfo->aac.ch > 2) return (int)0x807F3000;
   c->handle = 7; c->maxEsSize = 1536; c->maxPcmSize = 2048 * 2 * 2; adec_open = 1; return 0; }
@@ -294,6 +320,21 @@ SceInt32 sceAudiodecDeleteDecoder(SceAudiodecCtrl *c) { (void)c; adec_open = 0; 
 SceInt32 sceAudiodecDecode(SceAudiodecCtrl *c)
 {
     const uint8_t *e = c->pEs;
+    if (c->handle == 8) {                                    /* 1.2: 0x1008 */
+        int n = a52_aac_raw6(mock51_dec, e, c->inputEsSize, mock51_pl[mock51_frames & 1], 2048);
+        if (n <= 0) return (int)0x807F0000;
+        const float *src = mock51_pl[mock51_frames & 1];
+        static const int SLOT[6] = { 1, 2, 0, 5, 3, 4 };    /* FFmpeg's L R C LFE Ls Rs -> C L R Ls Rs LFE */
+        int16_t *o = (int16_t *)c->pPcm;
+        for (int k = 0; k < 6; k++)
+            for (int i = 0; i < n; i++) {
+                float v = src ? src[k * n + i] * 32767.0f : 0.0f;
+                o[i * 6 + SLOT[k]] = (int16_t)(v > 32767 ? 32767 : v < -32768 ? -32768 : v);
+            }
+        mock51_frames++;
+        c->outputPcmSize = (SceUInt32)(n * 6 * 2);
+        return 0;
+    }
     if (((uintptr_t)c->pEs & 0xFF) || ((uintptr_t)c->pPcm & 0xFF)) return (int)0x807F0008;   /* 256-byte alignment */
     if (e[0] != 0xFF || (e[1] & 0xF6) != 0xF0) return (int)0x807F0002;
     if ((e[2] >> 6) != 1) return (int)0x807F0000;           /* AAC-LC only, as on the Vita */
@@ -410,6 +451,35 @@ static int64_t sub_at(const SubRun *r, const char *text)
 {
     for (int k = 0; k < r->n; k++) if (!strcmp(r->text[k], text)) return r->at[k];
     return -1;
+}
+
+/* 1.3.1: a film with a subtitle file (.srt) beside it: the texts and the film's times (ms) they were seen at */
+#include "srt.h"
+static SubRun vod_sub_play(const char *path, int start_ms, double max_s)
+{
+    SubRun r; memset(&r, 0, sizeof r);
+    assert(tsp_start_vod(path, start_ms) == 0);
+    double t0 = now_s(), end_seen = 0;
+    while (now_s() - t0 < max_s) {
+        int w = 0, h = 0, pos = 0, dur = 0;
+        tsp_frame(&w, &h);
+        char b[640];
+        if (tsp_sub_text(b, sizeof b) && tsp_vod_pos(&pos, &dur)) {
+            int k = 0;
+            while (k < r.n && strcmp(r.text[k], b)) k++;
+            if (k == r.n && r.n < 8) { snprintf(r.text[r.n], sizeof r.text[0], "%s", b); r.at[r.n++] = pos; }
+        }
+        const TspStatus *st = tsp_status();
+        if (st->state == TSP_ERROR) break;
+        if (st->state == TSP_ENDED) { if (!end_seen) end_seen = now_s(); else if (now_s() - end_seen > 0.6) break; }
+        usleep(8000);
+    }
+    r.st = *tsp_status();
+    tsp_stop();
+    printf("               srt: tracks %d, shown %d:", r.st.s_n, r.st.s_cur);
+    for (int k = 0; k < r.n; k++) printf(" '%s' at %.2f s", r.text[k], r.at[k] / 1000.0);
+    printf("\n");
+    return r;
 }
 
 /* ---- films: start at a time, pause, read position ---- */
@@ -564,11 +634,12 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33 || argc == 34 || argc == 35);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33 || argc == 34 || argc == 35 || argc == 36);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "films")) goto films;   /* quicker runs while working on one part */
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "xiph")) goto xiph;     /* 1.4.2 */
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slots")) goto slots;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slow")) goto slow;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "live")) goto live;
@@ -615,6 +686,21 @@ int main(int argc, char **argv)
     printf("               decoder busy %d time(s)\n", int_full_hits);
     assert(int_full_hits >= 6 && r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.dropped <= 3 && r.changes >= 115);
     int_full_every = 0;
+    /* 1.2: the HD decoder hands out YUV pictures (Y, then U, then V); one that does not take them gives no picture:
+     * RGBA again at a keyframe, and the film plays on */
+    {
+        int_yuv_seen = 0; int_creates = 0;
+        r = play(argv[2], 10);
+        show("1080p YUV", &r);
+        assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates == 1 && r.st.decoded >= 118 && r.st.errors == 0);
+        assert(int_yuv_seen == SCE_AVCDEC_PIXELFORMAT_YUV420_RASTER);
+        int_no_yuv = 1; int_creates = 0;
+        r = play(argv[2], 10);
+        int_no_yuv = 0;
+        show("1080p YUV no", &r);
+        printf("               decoder opened %d times\n", int_creates);
+        assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates >= 2 && r.st.decoded >= 20);   /* (a short clip: the next keyframe) */
+    }
     if (argc > 22) {                                         /* 1080i: fields one above the other are found */
         paint_mode = 2;
         r = play(argv[22], 8);
@@ -731,6 +817,39 @@ int main(int argc, char **argv)
             else
                 assert(ra.st.audio_frames == 0 && strstr(ra.st.audio_msg, "6 channels") && ra.changes >= 100);   /* the picture plays */
         }
+        /* 1.4.2: Opus / Vorbis (FFmpeg): played as stereo in pieces of 1024 samples, in time with the picture */
+xiph:
+        {
+            static const char *xn[4] = { "opus.mkv", "vorbis.mkv", "opus51.mkv", "opus_only.webm" };
+            static const int xk[4] = { 1, 2, 1, 1 }, xr[4] = { 48000, 44100, 48000, 48000 }, xs[4] = { 2, 2, 6, 1 };
+            for (int k = 0; k < 4; k++) {
+                snprintf(pa, sizeof pa, "%s/%s", argv[16], xn[k]);
+                Run ra = play(pa, 7);
+                printf("               %s: state %d, audio %d Hz %d ch (stream %d), frames %u, errors %u, kind %d, synced %d, msg '%s'\n", xn[k],
+                       ra.st.state, ra.st.audio_rate, ra.st.audio_ch, ra.st.audio_src_ch, (unsigned)ra.st.audio_frames,
+                       (unsigned)ra.st.audio_errors, ra.st.audio_xiph, ra.synced, ra.st.audio_msg);
+                if (a52_xiph_available(xk[k] == 1)) {
+                    /* 6 s: 48 kHz in 1024-sample pieces is 281 pieces, 44.1 kHz 258 (a few left in the decoder) */
+                    unsigned want = (unsigned)(6.0 * xr[k] / 1024) - 12;
+                    assert(ra.st.state == TSP_ENDED && ra.st.audio_xiph == xk[k] && ra.st.audio_rate == xr[k] &&
+                           ra.st.audio_src_ch == xs[k] && ra.st.audio_frames >= want && !ra.st.audio_msg[0] && ra.st.audio_errors == 0);
+                    if (k < 3) assert(ra.synced && ra.st.audio_ch == 2 && ra.changes >= 120);
+                } else
+                    assert(ra.st.audio_frames == 0 && (k == 3 || ra.changes >= 120));   /* (the picture plays; no sound) */
+            }
+            if (getenv("ONLY") && !strcmp(getenv("ONLY"), "xiph")) { printf("all tsplayer tests passed\n"); return 0; }
+        }
+        /* 1.2: six different tones on the Vita's 5.1 decoder (0x1008, the mock gives AAC's order C L R Ls Rs LFE):
+         * it opens at once, and the mix down puts each tone where FFmpeg's would */
+        if (a52_aac_available()) {
+            tsp_aac51_reset();
+            g51_direct = 0;
+            snprintf(pa, sizeof pa, "%s/aac51d.ts", argv[16]);
+            Run ra = play(pa, 6);
+            printf("               5.1 AAC, six tones: frames %u, Vita decoder %d, synced %d\n",
+                   (unsigned)ra.st.audio_frames, g51_direct, ra.synced);
+            assert(g51_direct && ra.st.audio_frames > 100 && ra.st.audio_ch == 2 && ra.st.audio_src_ch == 6 && ra.synced);
+        }
     }
 subs:
     {   /* 0.7.0: MKV text subtitles: the track by language, switching while playing, off, later / earlier */
@@ -758,7 +877,23 @@ subs:
         tsp_set_sub_delay(-700);                             /* 0.7 s earlier */
         s = sub_play(ps, -1, 0);
         assert(sub_at(&s, "İki") >= 207000 && sub_at(&s, "İki") <= 207000 + 3 * 3600);
-        tsp_set_sub_delay(0); tsp_set_sub(-1, NULL, 1);
+        tsp_set_sub_delay(0);
+        /* 1.3: automatic (no choice for this film): subtitles in the app's language only when the sound is not in it */
+        tsp_set_sub(-1, "tur", 2);
+        s = sub_play(ps, -1, 0);                             /* (the sound has no language) */
+        assert(s.st.s_cur == tur && sub_at(&s, "Bir") >= 90000 && s.n == 2);
+        tsp_set_sub(-1, "fra", 2);                           /* none in that language: off */
+        s = sub_play(ps, -1, 0);
+        assert(s.st.s_cur == -1 && s.n == 0);
+        {
+            static char ps2[512];
+            snprintf(ps2, sizeof ps2, "%s/subs_trau.mkv", argv[16]);   /* the same with Turkish sound: no subtitles */
+            tsp_set_sub(-1, "tur", 2);
+            s = sub_play(ps2, -1, 0);
+            assert(s.st.s_n == 2 && s.st.s_cur == -1 && s.n == 0);
+            puts("               automatic subtitles: on without Turkish sound, off with it");
+        }
+        tsp_set_sub(-1, NULL, 1);
         if (getenv("ONLY") && !strcmp(getenv("ONLY"), "subs")) { puts("subtitle tests passed"); return 0; }
     }
     if (argc > 23) {                                         /* a few AAC frames claiming 7 channels: skipped, sound stays on */
@@ -843,6 +978,26 @@ slow:
         mock_http_reset();
     }
     mock_http_fail_after = 0;
+    {   /* 1.5: a 405 at the start: asked again twice (busy account?); when the app knows the account is free: at once,
+         * "the server does not give this one" */
+        extern int mock_http_status;
+        mock_http_file = argv[1];
+        for (int k = 0; k < 2; k++) {
+            mock_http_status = 405;
+            tsp_set_account_free(k);
+            double t0 = now_s();
+            r = play("http://example.invalid/live/9.ts", 8);
+            double took = r.st.state == TSP_ERROR ? now_s() - t0 : -1;
+            printf("               405, account free %d: state %d, '%s'\n", k, r.st.state, r.st.msg);
+            assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "405"));
+            if (k) assert(strstr(r.st.msg, "does not give"));
+            else assert(strstr(r.st.msg, "busy"));
+            (void)took;
+        }
+        tsp_set_account_free(0);
+        mock_http_status = 200;
+        mock_http_reset();
+    }
 
     r = play(argv[13], 10);                                 /* Matroska instead of MPEG-TS */
     show("mkv", &r);
@@ -1128,6 +1283,17 @@ limit:
              * catches up while the end of the group is left out: no dropped pictures, no jumps) */
             assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 250 && r.st.skipped >= 50);
             assert(r.st.dropped < 40 && r.av_max < 400);
+        }
+        if (argc > 35) {
+            /* 1.2: 1080p25, 4 references, no bitstream_restriction: the HD decoder gives pictures, then runs out of
+             * memory and gives none (the 1920x1038 film): it is opened again with the restriction added, and plays */
+            tsp_set_options(1, 720);
+            refuse_unr_after = 60; unr_units = 0; sps_norestr = 0; sps_unrestricted = 0; int_creates = 0;
+            r = play(argv[35], 14);
+            refuse_unr_after = 0; sps_norestr = 0;
+            show("1080p no restr", &r);
+            printf("               decoder opened %d times, %d SPS without restriction reached it\n", int_creates, sps_unrestricted);
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates == 2 && r.st.decoded >= 130);
         }
         /* a file from the memory card (1080p25, HD decoder in decode order): plays to the end without the sound
          * waiting for pictures that will not come (0.2.7: 10 s of silence and a still picture at the end) */
@@ -1539,6 +1705,103 @@ films:
         mock_http_fail_after = 0;
         vshow("mp4 drops", &v);
         assert(v.r.st.state == TSP_ENDED && v.r.st.reconnects >= 2 && v.r.changes >= 280 && v.r.nonmono == 0);
+        {   /* 1.3: films on the memory card through the same reader (a range = a seek in the file): MP4 (system player
+             * before), MKV and TS (these played as a live channel: no jumps, MKV and MP4 not at all) */
+            mock_http_reset();
+            int rq0 = mock_http_range_requests;              /* (no request may go out) */
+            v = play_vod_url(mp4, NULL, 0, 20, 0, 0);
+            vshow("local mp4 film", &v);
+            assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.r.changes >= 280 && v.r.nonmono == 0 && v.r.synced);
+            assert(v.r.st.seekable && v.r.st.audio_frames > 500 && mock_http_range_requests == rq0);
+            v = play_vod_url(mkv, NULL, 7200, 15, 0, 0);
+            vshow("local mkv from 7.2s", &v);
+            assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.first_pos >= 6900 && v.first_pos <= 7300);
+            assert(v.r.changes >= 100 && v.r.changes <= 140 && v.r.nonmono == 0 && v.r.synced);
+            v = play_vod_url(tsf, NULL, 5000, 15, 0, 0);
+            vshow("local ts from 5s", &v);
+            assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 400 && v.first_pos <= 5100 && v.first_pos >= 1000 && v.r.changes >= 150);
+            {   /* 1.3.1: a .srt beside the film: a track of its own ("SRT"), shown by the film's time, also from a jump */
+                static SrtList sl;
+                const char *srt = "1\n00:00:01,000 --> 00:00:02,500\nBir\n\n2\n00:00:06,000 --> 00:00:07,000\n\xC4\xB0ki\n";
+                assert(srt_parse(&sl, srt, strlen(srt)) == 0);
+                memcpy(sl.lang, "tur", 4);
+                tsp_set_ext_subs(&sl, 1);
+                tsp_set_sub(-1, "tur", 2);                   /* (automatic: the sound has no language: shown) */
+                SubRun sr = vod_sub_play(mkv, 0, 12);
+                assert(sr.st.s_n == 1 && sr.st.s_cur == 0 && !strcmp(sr.st.s_name[0], "SRT") && sr.n == 2);
+                assert(sub_at(&sr, "Bir") >= 900 && sub_at(&sr, "Bir") <= 1300 && sub_at(&sr, "\xC4\xB0ki") >= 5900 && sub_at(&sr, "\xC4\xB0ki") <= 6300);
+                sr = vod_sub_play(tsf, 5000, 6);                 /* a TS film from 5 s: only the second one */
+                assert(sr.st.s_n == 1 && sr.n == 1 && sub_at(&sr, "\xC4\xB0ki") >= 5900 && sub_at(&sr, "\xC4\xB0ki") <= 6300);
+                tsp_set_sub(-1, NULL, 1);                    /* off: none shown */
+                sr = vod_sub_play(mkv, 0, 4);
+                assert(sr.st.s_n == 1 && sr.st.s_cur == -1 && sr.n == 0);
+                tsp_set_ext_subs(NULL, 0);
+                srt_free(&sl);
+            }
+            {   /* 1.3.2: a film still being downloaded: 40 % there, the rest comes 2 s later: it waits and plays to the end */
+                static const char *part = "/tmp/tsp_growing.mkv";
+                FILE *src = fopen(mkv, "rb");
+                assert(src);
+                fseek(src, 0, SEEK_END);
+                long whole = ftell(src);
+                fseek(src, 0, SEEK_SET);
+                char *all = malloc((size_t)whole);
+                assert(all && fread(all, 1, (size_t)whole, src) == (size_t)whole);
+                fclose(src);
+                FILE *dst = fopen(part, "wb");
+                fwrite(all, 1, (size_t)(whole * 4 / 10), dst);
+                fclose(dst);
+                tsp_set_file_total((uint64_t)whole);
+                assert(tsp_start_vod(part, 0) == 0);
+                double t0 = now_s();
+                int appended = 0, waited = 0;
+                while (now_s() - t0 < 25) {
+                    int w, h;
+                    tsp_frame(&w, &h);
+                    const TspStatus *st = tsp_status();
+                    if (st->file_wait) waited = 1;
+                    if (!appended && now_s() - t0 > 2.0) {    /* (the download comes on) */
+                        dst = fopen(part, "ab");
+                        fwrite(all + whole * 4 / 10, 1, (size_t)(whole - whole * 4 / 10), dst);
+                        fclose(dst);
+                        appended = 1;
+                    }
+                    if (st->state == TSP_ENDED || st->state == TSP_ERROR) break;
+                    usleep(10000);
+                }
+                TspStatus gs = *tsp_status();
+                tsp_stop();
+                printf("               growing file: state %d, decoded %u, waited %d, dur %d ms, msg '%s'\n", gs.state, gs.decoded, waited, gs.dur_ms, gs.msg);
+                assert(gs.state == TSP_ENDED && gs.decoded >= 280 && abs(gs.dur_ms - 12000) < 400);
+                /* an MP4 whose index is at its end cannot start before it is there */
+                FILE *m = fopen(mp4, "rb");
+                fseek(m, 0, SEEK_END);
+                long mw = ftell(m);
+                fseek(m, 0, SEEK_SET);
+                char *mb = malloc((size_t)mw);
+                assert(fread(mb, 1, (size_t)mw, m) == (size_t)mw);
+                fclose(m);
+                int moov_end = 0;
+                for (long i = mw / 2; i + 4 < mw; i++) if (!memcmp(mb + i, "moov", 4)) moov_end = 1;
+                dst = fopen(part, "wb");
+                fwrite(mb, 1, (size_t)(mw / 2), dst);
+                fclose(dst);
+                tsp_set_file_total((uint64_t)mw);
+                assert(tsp_start_vod(part, 0) == 0);
+                t0 = now_s();
+                while (now_s() - t0 < 6 && tsp_status()->state != TSP_ERROR && tsp_status()->state != TSP_PLAYING) usleep(10000);
+                gs = *tsp_status();
+                tsp_stop();
+                printf("               growing MP4 (index at its end: %d): state %d, msg '%s'\n", moov_end, gs.state, gs.msg);
+                if (moov_end) assert(gs.state == TSP_ERROR && strstr(gs.msg, "download has ended"));
+                tsp_set_file_total(0);
+                free(all); free(mb);
+                remove(part);
+            }
+            v = play_vod_url("/nonexistent/VitaIPTV/x.mkv", NULL, 0, 5, 0, 0);
+            vshow("local file missing", &v);
+            assert(v.r.st.state == TSP_ERROR && v.r.changes == 0 && mock_http_range_requests == rq0);
+        }
         {   /* a film through the transcoding server: a plain stream cut at 40 s; position counts from there */
             mock_http_reset();
             mock_http_file = tsf;

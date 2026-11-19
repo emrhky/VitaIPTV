@@ -91,6 +91,18 @@ int channel_list_push(ChannelList *l, const Channel *c)
     return 0;
 }
 
+int channel_list_add(ChannelList *l, const Channel *c, const char *tags, const char *const *vals, size_t maxlen)
+{
+    ExtraBuf *xb = malloc(sizeof *xb);
+    if (!xb) return -1;
+    xb->n = 0;
+    for (size_t k = 0; tags && tags[k]; k++) xb_add(xb, tags[k], vals[k], maxlen);
+    Channel ch = *c;
+    ch.extra = xb_commit(l, xb);
+    free(xb);
+    return list_push(l, &ch);
+}
+
 /* Copies up to dstsz-1 bytes without cutting a UTF-8 sequence in half. */
 static void copy_trunc(char *dst, size_t dstsz, const char *src, size_t n)
 {
@@ -144,8 +156,25 @@ static void get_display_name(const char *line, char *out, size_t outsz)
     }
 }
 
+int iptv_is_local_path(const char *url)
+{
+    /* ux0:, ur0:, uma0:, imc0:, xmc0:, grw0:... (a device name of letters and a digit, then ':') */
+    size_t n = 0;
+    while (n < 5 && url[n] && ((url[n] >= 'a' && url[n] <= 'z') || (url[n] >= 'A' && url[n] <= 'Z'))) n++;
+    return n >= 2 && url[n] >= '0' && url[n] <= '9' && url[n + 1] == ':';
+}
+
 int iptv_is_film_url(const char *url)
 {
+    if (iptv_is_local_path(url)) {                           /* 1.3: a video file on the memory card: a film too */
+        static const char *const LEXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".flv", ".avi" };
+        size_t n = strlen(url);
+        for (size_t i = 0; i < sizeof LEXT / sizeof LEXT[0]; i++) {
+            size_t k = strlen(LEXT[i]);
+            if (n > k && !strncasecmp(url + n - k, LEXT[i], k)) return 1;
+        }
+        return 0;
+    }
     if (strncasecmp(url, "http://", 7) && strncasecmp(url, "https://", 8)) return 0;
     if (strstr(url, "/movie/") || strstr(url, "/series/")) return 1;   /* Xtream links in an M3U list */
     size_t n = strcspn(url, "?#|");                         /* (| starts headers: link|User-Agent=...) */
@@ -850,6 +879,71 @@ int xtream_parse_vod_match(const char *json, size_t len, const Source *s, const 
     return n;
 }
 
+/* 1.4.1: the small copy for searching again */
+typedef struct { char *b; size_t n, cap; int series, bad, count; } CompactCtx;
+static void cc_put(CompactCtx *c, const char *s, size_t n)
+{
+    if (c->bad) return;
+    if (c->n + n + 1 > c->cap) {
+        size_t nc = c->cap ? c->cap + c->cap / 2 : 1u << 20;
+        while (nc < c->n + n + 1) nc += nc / 2;
+        char *nb = realloc(c->b, nc);
+        if (!nb) { c->bad = 1; return; }
+        c->b = nb; c->cap = nc;
+    }
+    memcpy(c->b + c->n, s, n);
+    c->n += n;
+}
+static void cc_field(CompactCtx *c, const char *key, const char *v, size_t maxlen)
+{
+    if (!v[0]) return;
+    char tmp[IPTV_URL_MAX * 2 + 64];
+    size_t o = (size_t)snprintf(tmp, sizeof tmp, "%s\"%s\":\"", c->n && c->b[c->n - 1] != '{' ? "," : "", key);
+    for (size_t i = 0; v[i] && i < maxlen && o + 8 < sizeof tmp; i++) {
+        unsigned char ch = (unsigned char)v[i];
+        if (ch == '"' || ch == '\\') { tmp[o++] = '\\'; tmp[o++] = (char)ch; }
+        else if (ch < 0x20) tmp[o++] = ' ';
+        else tmp[o++] = (char)ch;
+    }
+    tmp[o++] = '"';
+    cc_put(c, tmp, o);
+}
+static int compact_cb(const XtObj *o, void *vctx)
+{
+    CompactCtx *c = vctx;
+    const char *id = c->series ? o->sid : o->id;
+    if (!id_ok(id)) return 0;
+    cc_put(c, c->count ? ",{" : "{", c->count ? 2 : 1);
+    cc_field(c, "name", o->name, sizeof o->name);
+    cc_field(c, c->series ? "series_id" : "stream_id", id, 24);
+    cc_field(c, "category_id", o->cat, 24);
+    cc_field(c, "is_adult", o->adult, 8);
+    cc_field(c, "container_extension", o->ext, 12);
+    if (c->series) cc_field(c, "stream_icon", o->icon, IPTV_URL_MAX - 1);   /* (1.5.1: films: the picture comes with
+                                                                               the film's information: the copy is half as big) */
+    cc_field(c, "rating", o->rating, 8);
+    cc_field(c, "year", o->release, 24);
+    cc_field(c, "genre", o->genre, 80);
+    cc_put(c, "}", 1);
+    c->count++;
+    return c->bad ? -1 : 0;
+}
+size_t xtream_compact(const char *json, size_t len, int series, char **out)
+{
+    CompactCtx c;
+    memset(&c, 0, sizeof c);
+    c.series = series;
+    *out = NULL;
+    cc_put(&c, "[", 1);
+    xt_each(json, len, compact_cb, &c);
+    cc_put(&c, "]", 1);
+    if (c.bad || !c.count) { free(c.b); return 0; }
+    c.b[c.n] = 0;
+    char *shrunk = realloc(c.b, c.n + 1);                    /* (the room left over given back) */
+    *out = shrunk ? shrunk : c.b;
+    return c.n;
+}
+
 /* get_series_info: "episodes" is an object of seasons ({"1": [...], "2": [...]}) or an array of them. */
 typedef struct { ChannelList *out; LiveCtx *c; int added; } EpCtx;
 
@@ -1051,6 +1145,10 @@ int sources_parse(const char *text, Source *out, int max)
             if (nf >= 5) copy_trunc(src.pass, sizeof src.pass, f[4], strlen(f[4]));   /* User-Agent */
         } else if (!strcasecmp(f[1], "file")) {
             src.type = SRC_M3U_FILE;
+        } else if (!strcasecmp(f[1], "archive")) {               /* 1.5 */
+            src.type = SRC_ARCHIVE;
+        } else if (!strcasecmp(f[1], "web")) {
+            src.type = SRC_WEB;
         } else {
             continue;
         }
@@ -1197,6 +1295,8 @@ static const char *type_word(SourceType t)
     case SRC_XTREAM: return "xtream";
     case SRC_STREAM: return "stream";
     case SRC_M3U_FILE: return "file";
+    case SRC_ARCHIVE: return "archive";                      /* 1.5 */
+    case SRC_WEB: return "web";
     default: return "m3u";
     }
 }
@@ -1205,7 +1305,7 @@ int sources_format(const Source *src, int n, char *out, size_t outsz)
 {
     size_t o = 0;
     int w = snprintf(out, outsz, "# Vita IPTV sources (written by the app; you can also edit it by hand)\n"
-                                 "# Name | type | address [| username | password]   types: m3u, xtream, stream, file\n"
+                                 "# Name | type | address [| username | password]   types: m3u, xtream, stream, file, archive, web\n"
                                  "# (stream: address [| referer | user agent], for streams that need them)\n");
     if (w < 0 || (size_t)w >= outsz) return -1;
     o = (size_t)w;
@@ -1227,6 +1327,7 @@ void settings_defaults(Settings *st)
     memset(st, 0, sizeof *st);
     st->auto_proxy = 1;
     st->sub_size = 1;                                        /* 0.8.1 */
+    st->snd_field = 3;                                       /* 1.2: the sound field follows the headphones */
 }
 
 /* 0.8.1: a small number setting, kept within 0..max (else the default) */
@@ -1267,10 +1368,13 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "sub_color")) st->sub_color = small_num(v, 3, 0);
             else if (!strcmp(k, "sub_pos")) st->sub_pos = small_num(v, 2, 0);
             else if (!strcmp(k, "sub_bg")) st->sub_bg = small_num(v, 2, 0);
-            else if (!strcmp(k, "theme")) st->theme = small_num(v, 3, 0);
+            else if (!strcmp(k, "theme")) st->theme = small_num(v, 5, 0);   /* (1.4: 6 colours) */
+            else if (!strcmp(k, "background")) st->bg = small_num(v, 3, 0);   /* 1.4 */
             else if (!strcmp(k, "snd_boost")) st->snd_boost = small_num(v, 3, 0);   /* 1.1 */
             else if (!strcmp(k, "snd_speaker")) st->snd_speaker = small_num(v, 1, 0);
             else if (!strcmp(k, "snd_dialog")) st->snd_dialog = small_num(v, 1, 0);
+            else if (!strcmp(k, "snd_level")) st->snd_level = small_num(v, 1, 0);
+            else if (!strcmp(k, "snd_field")) st->snd_field = small_num(v, 3, 3);
             else if (!strcmp(k, "proxy_off")) st->proxy_off = small_num(v, 1, 0);   /* 1.1 */
             /* hide_1080p= (before v0.4.0): that filter is gone, the 4K one starts off */
             else if (!strcmp(k, "resolution")) {
@@ -1291,7 +1395,7 @@ int settings_format(const Settings *st, char *out, size_t outsz)
                      st->plain_letters ? "plain_letters=1\n" : "", st->pin[0] ? "pin=" : "", st->pin, st->pin[0] ? "\n" : "");
     if (w < 0 || (size_t)w >= outsz) return -1;
     /* 0.8.1: subtitles and the theme, only when changed */
-    char ex[192];
+    char ex[256];
     int e = 0;
     ex[0] = 0;
     if (st->sub_size != 1) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_size=%d\n", st->sub_size);
@@ -1299,10 +1403,13 @@ int settings_format(const Settings *st, char *out, size_t outsz)
     if (st->sub_pos) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_pos=%d\n", st->sub_pos);
     if (st->sub_bg) e += snprintf(ex + e, sizeof ex - (size_t)e, "sub_bg=%d\n", st->sub_bg);
     if (st->theme) e += snprintf(ex + e, sizeof ex - (size_t)e, "theme=%d\n", st->theme);
+    if (st->bg) e += snprintf(ex + e, sizeof ex - (size_t)e, "background=%d\n", st->bg);   /* 1.4 */
     if (st->proxy_off) e += snprintf(ex + e, sizeof ex - (size_t)e, "proxy_off=1\n");   /* 1.1 */
     if (st->snd_boost) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_boost=%d\n", st->snd_boost);   /* 1.1 */
     if (st->snd_speaker) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_speaker=1\n");
     if (st->snd_dialog) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_dialog=1\n");
+    if (st->snd_level) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_level=1\n");
+    if (st->snd_field != 3) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_field=%d\n", st->snd_field);
     if ((size_t)w + (size_t)e >= outsz) return -1;
     memcpy(out + w, ex, (size_t)e + 1);
     return w + e;

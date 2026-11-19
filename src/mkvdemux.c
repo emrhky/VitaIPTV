@@ -49,6 +49,8 @@ typedef struct {
     char codec[32];
     uint8_t priv[512];
     int priv_len;
+    uint8_t *bigpriv;                      /* 1.4.2: a longer CodecPrivate (Vorbis' headers: a few KB) */
+    int bigpriv_len;
     int width, height, channels;
     double rate;
     char lang[4];                          /* 0.5.0: ISO 639-2 ("" = not given) */
@@ -170,6 +172,8 @@ static TsCodec audio_codec(const char *c)
     if (!strncmp(c, "A_MPEG/L", 8)) return TS_CODEC_MPEG_AUDIO;
     if (!strcmp(c, "A_AC3")) return TS_CODEC_AC3;
     if (!strcmp(c, "A_EAC3")) return TS_CODEC_EAC3;
+    if (!strcmp(c, "A_OPUS")) return TS_CODEC_OPUS;           /* 1.4.2 (WebM) */
+    if (!strcmp(c, "A_VORBIS")) return TS_CODEC_VORBIS;
     return TS_CODEC_OTHER;
 }
 
@@ -296,6 +300,15 @@ static void choose_tracks(MkvDemux *d)
             if (!d->info.width) { d->info.width = t->width; d->info.height = t->height; }
         }
         if (t->number == d->atrack && d->info.audio_codec == TS_CODEC_AAC) use_aac(d, t);
+        if (t->number == d->atrack && (d->info.audio_codec == TS_CODEC_OPUS || d->info.audio_codec == TS_CODEC_VORBIS)) {
+            static unsigned gen;                             /* 1.4.2: the decoder needs the track's CodecPrivate */
+            d->info.audio_cfg = t->bigpriv ? t->bigpriv : t->priv;
+            d->info.audio_cfg_len = t->bigpriv ? t->bigpriv_len : t->priv_len;
+            d->info.audio_cfg_rate = (int)(t->rate + 0.5);
+            d->info.audio_cfg_ch = t->channels;
+            if (!++gen) gen = 1;
+            d->info.audio_cfg_gen = gen;
+        }
     }
 }
 
@@ -550,6 +563,11 @@ static void on_leaf(MkvDemux *d, uint32_t id, const uint8_t *p, size_t n)
         break;
     case ID_CODECPRIVATE:
         if (d->cur && n <= sizeof d->cur->priv) { memcpy(d->cur->priv, p, n); d->cur->priv_len = (int)n; }
+        else if (d->cur && d->cur->type != 1 && n <= 65536) {     /* 1.4.2: Vorbis' headers (not a video's) */
+            free(d->cur->bigpriv);
+            d->cur->bigpriv = malloc(n);
+            if (d->cur->bigpriv) { memcpy(d->cur->bigpriv, p, n); d->cur->bigpriv_len = (int)n; }
+        }
         break;
     case ID_PIXELWIDTH:    if (d->cur) d->cur->width = (int)read_uint(p, n); break;
     case ID_PIXELHEIGHT:   if (d->cur) d->cur->height = (int)read_uint(p, n); break;
@@ -618,7 +636,7 @@ static void parse(MkvDemux *d, int final)
         if (is_container(id)) {
             if (id == ID_TRACKENTRY) {
                 d->cur = d->ntracks < MAX_TRACKS ? &d->tracks[d->ntracks++] : NULL;
-                if (d->cur) memset(d->cur, 0, sizeof *d->cur);
+                if (d->cur) { free(d->cur->bigpriv); memset(d->cur, 0, sizeof *d->cur); }
                 if (d->cur) d->cur->is_default = 1;          /* (FlagDefault is 1 when the file leaves it out) */
             } else if (id == ID_CLUSTER) {
                 sub_flush(d, 0);
@@ -688,6 +706,7 @@ void mkv_destroy(MkvDemux *d)
     free(d->buf);
     free(d->es);
     free(d->sp_data);
+    for (int i = 0; i < MAX_TRACKS; i++) free(d->tracks[i].bigpriv);
     free(d);
 }
 

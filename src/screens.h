@@ -17,6 +17,8 @@ typedef struct {
     int fav;                            /* 0.5.0: a star before the name (favourite) */
     int moving;                         /* 0.4.5: the row being moved (reordering the favourites) */
     int check;                          /* 0.7.0: a tick before the name (a watched episode) */
+    int folder;                         /* 1.3.1: a folder sign before the name (Videos on the Vita) */
+    int dl;                             /* 1.4.1: a download sign: 1 downloaded, 2 part of it (still coming / stopped) */
 } ScrRow;
 typedef void (*ScrRowFn)(int i, ScrRow *row, void *ctx);
 
@@ -205,7 +207,7 @@ typedef struct {
 } ScrVodDetail;
 void scr_vod_detail(const ScrVodDetail *d);
 
-typedef struct { const char *name, *right; int check; float progress; } ScrEpRow;
+typedef struct { const char *name, *right; int check; float progress; int dl; } ScrEpRow;   /* (dl: as in ScrRow, 1.4.1) */
 typedef void (*ScrEpRowFn)(int i, ScrEpRow *r, void *ctx);
 typedef struct {
     const char *header, *header_sub;

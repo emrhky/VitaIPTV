@@ -4,10 +4,16 @@
 /* Small drawing kit on top of vita2d: bars, PlayStation button glyphs, badges, spinner, meter. */
 #include <vita2d.h>
 
-#define UI_BG      RGBA8(14, 16, 24, 255)
-#define UI_PANEL   RGBA8(26, 30, 44, 255)
-#define UI_PANEL2  RGBA8(36, 41, 60, 255)
-#define UI_LINE    RGBA8(58, 64, 90, 255)
+/* 1.4: the dark surfaces follow the background scheme (ui_set_bg): written as the navy of every version before,
+ * ui_surf turns them into the scheme's (Black (OLED): every surface black, only the thin lines grey) */
+unsigned ui_surf(unsigned navy);
+enum { UI_BG_NAVY, UI_BG_BLACK, UI_BG_GRAPHITE, UI_BG_WARM, UI_BGS };
+void ui_set_bg(int b);
+const char *ui_bg_name(int b);          /* English, for T() */
+#define UI_BG      ui_surf(RGBA8(14, 16, 24, 255))
+#define UI_PANEL   ui_surf(RGBA8(26, 30, 44, 255))
+#define UI_PANEL2  ui_surf(RGBA8(36, 41, 60, 255))
+#define UI_LINE    ui_surf(RGBA8(58, 64, 90, 255))
 /* 0.8.1: the theme's colours (ui_set_theme): the text, the accent and the selection change with it */
 typedef struct {
     unsigned text, dim, accent, sel;
@@ -17,7 +23,7 @@ typedef struct {
     unsigned button;                    /* a main button (Play) when not chosen */
 } UiTheme;
 extern UiTheme ui_theme;
-enum { UI_THEME_BLUE, UI_THEME_GREEN, UI_THEME_PURPLE, UI_THEME_ORANGE, UI_THEMES };
+enum { UI_THEME_BLUE, UI_THEME_GREEN, UI_THEME_PURPLE, UI_THEME_ORANGE, UI_THEME_TEAL, UI_THEME_PINK, UI_THEMES };   /* 1.4: + teal, pink */
 void ui_set_theme(int t);
 const char *ui_theme_name(int t);       /* English, for T() */
 #define UI_ACCENT  (ui_theme.accent)
@@ -43,6 +49,7 @@ typedef struct { int btn; const char *label; } UiHint;
 void ui_init(vita2d_pgf *pgf, int plain_letters);
 /* 2 = the Latin system font is used (Turkish letters as they are), 1 = the default font only, 0 = none */
 int  ui_font_state(void);
+void ui_frame_start(void);                 /* 1.2: at each frame's start, the GPU idle (the sharp text's letters) */
 /* 0.4.5: a short label with every word starting with a capital ("Liste ekle" -> "Liste Ekle"; Turkish i -> İ),
  * small joining words left as they are (of, the, ve...). Returns buf. */
 const char *ui_title(const char *s, char *buf, size_t cap);
@@ -69,6 +76,8 @@ void ui_panel(int x, int y, int w, int h, unsigned fill);
 void ui_header(const char *title, const char *subtitle, const char *right);
 /* hints along the bottom bar; status (if any) is drawn just above it */
 void ui_footer(const UiHint *hints, int n, const char *status, int status_err);
+/* 1.3: the same, the status at most max_lines lines (1: the home's one-line note, 466-496) */
+void ui_footer_lines(const UiHint *hints, int n, const char *status, int status_err, int max_lines);
 int  ui_button(int x, int cy, int btn);           /* draws a glyph starting at x, returns its width */
 int  ui_badge(int x, int y, const char *txt, unsigned col);   /* y = top; returns width */
 void ui_round_rect(int x, int y, int w, int h, int r, unsigned col);

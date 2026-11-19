@@ -37,6 +37,7 @@ typedef struct {
     volatile int hls_hd;                /* HLS offers a 1080p variant (the player can switch to it) */
     /* films and episodes */
     volatile int dur_ms;                /* length (0 = unknown) */
+    volatile int file_wait;             /* 1.3.2: a film still being downloaded waits for its next part */
     volatile int seekable;              /* tsp_start_vod at another time works */
     volatile int paused;
     int fields;                         /* pictures are two fields one above the other: draw the top half */
@@ -60,9 +61,12 @@ typedef struct {
     volatile int hls_no_video;          /* the error: this HLS variant carries no picture (another one may) */
     /* 0.5.0: the audio tracks the player can play (TS / MKV), in the stream's order, and the one playing */
     volatile int audio_ac3;             /* AC-3 (1) / E-AC-3 (2) decoded in software, else 0 */
+    volatile int audio_xiph;            /* 1.4.2: Opus (1) / Vorbis (2) decoded in software, else 0 */
     volatile unsigned net_read_kbs;     /* 0.6.0: the line's speed, last measured while the reader read most of the time
                                          * (with full queues net_kbs is what is played), 0 = same as net_kbs */
     volatile int audio_src_ch;          /* 0.6.0: the stream's channels when more than played (5.1 -> stereo: 6) */
+    volatile int audio_sw;              /* 1.2: AAC decoded by FFmpeg on the ARM (5.1 / 7.1 not on the Vita's decoder) */
+    volatile int core_hot;              /* 1.2: a CPU core was 65% busy or more in the last stats period (5 s) */
     int a_n, a_cur;                     /* a_cur -1 = none */
     int a_id[TSP_MAX_AUDIO];            /* PID / MKV track number (tsp_set_audio) */
     int a_codec[TSP_MAX_AUDIO];         /* TsCodec */
@@ -86,7 +90,14 @@ void              tsp_set_hls_bw(long bw);
 void              tsp_set_audio(int id, const char *lang);
 /* 0.7.0: subtitles for the next tsp_start: the track id (s_id[] of the status), else the first track in lang
  * ("tur"...); off = none shown (the choice of the menu stays for the next films) */
-void              tsp_set_sub(int id, const char *lang, int off);
+void              tsp_set_sub(int id, const char *lang, int off);   /* off: 1 none, 0 shown, 2 (1.3) lang only if no sound in lang */
+/* 1.3.1: subtitle files for the next films (after the file's own tracks; "SRT" in the menu); NULL = none. The
+ * lists stay the caller's: kept until the next call (made only while nothing plays). */
+/* 1.3.2: the next film on the memory card is still being downloaded to this size (0 = a whole file): it waits
+ * for the part it needs (TspStatus.file_wait), and stops after 30 s without any more of it */
+void              tsp_set_file_total(uint64_t total);
+struct SrtList;
+void              tsp_set_ext_subs(const struct SrtList *subs, int n);
 /* 0.7.0: show subtitle track k of the status now (-1 = off), without starting again */
 void              tsp_sub_choose(int k);
 /* 0.7.0: subtitles shown this many ms later (negative: earlier); stays for the next starts */
@@ -101,6 +112,9 @@ int               tsp_start(const char *url);       /* 0 = started */
 /* A film or episode (a file on a server that sends parts of it): starts at start_ms (the keyframe at or
  * before it). MKV, MP4 and TS files. */
 int               tsp_start_vod(const char *url, int start_ms);
+/* 1.5: no connection of the account is known to be in use: an HTTP 405 then means the file is not given (said at
+ * once) instead of "busy: asked again" */
+void              tsp_set_account_free(int on);
 /* A film as a plain stream that starts offset_ms into it (the transcoding server cut it there): pause works,
  * the position counts from offset_ms, jumping means starting the server again. */
 int               tsp_start_vod_stream(const char *url, int offset_ms);
@@ -114,5 +128,8 @@ vita2d_texture   *tsp_frame(int *w, int *h);
 const TspStatus  *tsp_status(void);                  /* NULL if not started */
 /* Shown picture time minus audio time, in ms. Returns 0 if unknown. */
 int               tsp_av_offset(int *ms);
+
+/* 1.2: forget the Vita AAC 5.1 decoder's learnt channel order (PC tests) */
+void tsp_aac51_reset(void);
 
 #endif

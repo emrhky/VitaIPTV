@@ -47,7 +47,11 @@ typedef enum {
     SRC_XTREAM,    /* host + username + password (get.php style)      */
     SRC_STREAM,    /* single direct stream link, played immediately   */
     SRC_M3U_FILE,  /* local M3U file on the Vita memory card          */
-    SRC_MYLIST     /* 1.1: "My List", live channels gathered from the other playlists (mylist.h); never saved */
+    SRC_MYLIST,    /* 1.1: "My List", live channels gathered from the other playlists (mylist.h); never saved */
+    SRC_DOWNLOADS, /* 1.3: "Downloads" (dl.h); 1.3.1: shown while there is one, can be moved; never saved */
+    SRC_DEVICE,    /* 1.3.1: "Videos on the Vita": the video files on the memory cards, folder by folder */
+    SRC_ARCHIVE,   /* 1.5: Internet Archive (archive.org): a collection, a search or an item (websrc.h) */
+    SRC_WEB        /* 1.5: a web page: the videos found in it (websrc.h) */
 } SourceType;
 
 typedef struct {
@@ -73,21 +77,29 @@ typedef struct {
      * place 0-2 (bottom, a little higher, top), background 0-2 (light band, dark box, none); the theme 0-3
      * (blue, green, purple, orange). Written to settings.txt only when not the default. */
     int sub_size, sub_color, sub_pos, sub_bg, theme;
+    int bg;                             /* 1.4: the background scheme 0-3 (navy, black OLED, graphite, warm dark); theme: the colour 0-5 */
     /* 1.1: sound: boost 0-3 (off, +3, +6, +9 dB), speaker mode 0/1, clear dialogue for 5.1 0/1 (audiofx.h,
      * a52dec.h); written only when not off */
-    int snd_boost, snd_speaker, snd_dialog;
+    int snd_boost, snd_speaker, snd_dialog, snd_level;   /* (1.2: snd_level, one level on every channel) */
+    int snd_field;                      /* 1.3: sound field: 0 off, 1 speakers, 2 headphones, 3 auto (the default:
+                                         * headphones when they are plugged in, else speakers) */
 } Settings;
 
 void channel_list_init(ChannelList *l);
 void channel_list_free(ChannelList *l);
 int  channel_list_push(ChannelList *l, const Channel *c);   /* 0.6.0 (films / series favourites); -1 full (extra is cleared) */
+/* 1.5: c added with its extra fields: tags[k] (CX_...) = vals[k] (NULL / "" left out), at most maxlen each */
+int  channel_list_add(ChannelList *l, const Channel *c, const char *tags, const char *const *vals, size_t maxlen);
 /* 0.8.0: an extra field of channel c of list l (CX_...), NULL if it has none */
 const char *channel_extra(const ChannelList *l, const Channel *c, char tag);
 /* 0.8.0: the catch-up template of channel c (its own, else the list's), "" if none */
 const char *channel_catchup_src(const ChannelList *l, const Channel *c);
 
-/* An http(s) link to a film file (.mkv, .mp4, ... or Xtream /movie/ and /series/ links): played as a film. */
+/* An http(s) link to a film file (.mkv, .mp4, ... or Xtream /movie/ and /series/ links): played as a film.
+ * 1.3: also a video file on the memory card (ux0:...mkv / .mp4 / .ts ...): played as a film (pause, jumps). */
 int  iptv_is_film_url(const char *url);
+/* 1.3: a path on the Vita (ux0:, ur0:, uma0:...), not a link */
+int  iptv_is_local_path(const char *url);
 /* Parses M3U/M3U8 text (extended or plain list of links). Returns channel count. */
 int  m3u_parse(const char *text, size_t len, ChannelList *out);
 extern int iptv_headers_dropped;     /* links whose User-Agent/Referer did not fit (they play without them) */
@@ -138,6 +150,10 @@ int  xtream_parse_series(const char *json, size_t len, const Source *s,
  * at most max of them */
 int  xtream_parse_vod_match(const char *json, size_t len, const Source *s, const XtCategory *cats, int ncats,
                             ChannelList *out, int series, const char *folded_query, int max);
+/* 1.4.1: get_vod_streams / get_series made small for searching again: the fields a search result uses (name, id,
+ * category, adult, extension, rating, year, genre; the picture only for series: 1.5.1) as JSON of the same shape (xtream_parse_vod_match
+ * reads it). *out is malloc'd (the caller frees it); returns its length, 0 = none. */
+size_t xtream_compact(const char *json, size_t len, int series, char **out);
 /* get_series_info: the episodes (kind CH_FILM, group "Season N", url .../series/U/P/ID.EXT) */
 int  xtream_parse_episodes(const char *json, size_t len, const Source *s, ChannelList *out);
 

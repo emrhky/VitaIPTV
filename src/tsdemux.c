@@ -38,6 +38,8 @@ const char *ts_codec_name(TsCodec c)
     case TS_CODEC_AC3: return "ac3";
     case TS_CODEC_EAC3: return "eac3";
     case TS_CODEC_OTHER: return "other";
+    case TS_CODEC_OPUS: return "opus";
+    case TS_CODEC_VORBIS: return "vorbis";
     default: return "none";
     }
 }
@@ -80,7 +82,9 @@ static int audio_rank(TsCodec c)
 {
     switch (c) {
     case TS_CODEC_AAC: return 5; case TS_CODEC_AAC_LATM: return 4; case TS_CODEC_MPEG_AUDIO: return 3;
-    case TS_CODEC_AC3: return 2; case TS_CODEC_EAC3: return 1; default: return 0;
+    case TS_CODEC_AC3: return 2; case TS_CODEC_EAC3: return 1;
+    case TS_CODEC_OPUS: case TS_CODEC_VORBIS: return 1;   /* 1.4.2 (Matroska / WebM) */
+    default: return 0;
     }
 }
 

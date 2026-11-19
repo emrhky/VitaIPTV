@@ -15,8 +15,8 @@ set(VITA_APP_NAME "Vita IPTV")
 set(VITA_TITLEID  "VIPTV0001")
 # the version, in one place: the VPK's "00.70" and the app's "v0.7.0" (shown in About and in the log) both come from here
 set(APP_VER_MAJOR 1)
-set(APP_VER_MINOR 1)
-set(APP_VER_PATCH 0)
+set(APP_VER_MINOR 5)
+set(APP_VER_PATCH 2)
 # The VPK takes "XX.YY" (two digits each side): minor and patch share the two digits, so a patch above 9
 # is written as 9 (0.2.10 -> "00.29"; 0.3.0 -> "00.30" is still higher).
 if(APP_VER_PATCH GREATER 9)
@@ -43,6 +43,7 @@ add_executable(${PROJECT_NAME}.elf
   src/probe.c
   src/tsplayer.c
   src/ui.c
+  src/sharptext.c
   src/screens.c
   src/lang.c
   src/mpadec.c
@@ -54,11 +55,17 @@ add_executable(${PROJECT_NAME}.elf
   src/epg.c
   src/a52dec.c
   src/audiofx.c
+  src/aac51.c
+  src/vsurr.c
   src/mylist.c
   src/listcache.c
   src/guide.c
   src/catchup.c
   src/poster.c
+  src/avpref.c
+  src/dl.c
+  src/srt.c
+  src/websrc.c
 )
 target_compile_definitions(${PROJECT_NAME}.elf PRIVATE "APP_VERSION=\"v${APP_VER_MAJOR}.${APP_VER_MINOR}.${APP_VER_PATCH}\"")
 # 0.4.1: when this build was made (the log's second line says it, to tell builds apart while testing). Set when
@@ -88,6 +95,10 @@ if(EXISTS ${FFMPEG_VITA}/lib/libavcodec.a AND EXISTS ${FFMPEG_VITA}/lib/libavuti
   target_include_directories(${PROJECT_NAME}.elf BEFORE PRIVATE ${FFMPEG_VITA}/include)
   target_compile_definitions(${PROJECT_NAME}.elf PRIVATE HAVE_A52)
   set(A52_LIBS ${FFMPEG_VITA}/lib/libavcodec.a ${FFMPEG_VITA}/lib/libavutil.a)
+  # 1.4.2: Opus / Vorbis (WebM, MKV); FFmpeg's opus decoder needs libswresample
+  if(EXISTS ${FFMPEG_VITA}/lib/libswresample.a)
+    set(A52_LIBS ${FFMPEG_VITA}/lib/libavcodec.a ${FFMPEG_VITA}/lib/libswresample.a ${FFMPEG_VITA}/lib/libavutil.a)
+  endif()
   if(EXISTS ${FFMPEG_VITA}/COPYING.LGPLv2.1)
     set(A52_VPK_FILES FILE third_party/ffmpeg-vita/COPYING.LGPLv2.1 licenses/ffmpeg-COPYING.LGPLv2.1.txt)
   endif()
@@ -99,6 +110,12 @@ if(EXISTS ${FFMPEG_VITA}/lib/libavcodec.a AND EXISTS ${FFMPEG_VITA}/lib/libavuti
   else()
     message(WARNING "AAC 5.1 / 7.1: this FFmpeg has no AAC decoder (built before 0.6.0): run tools/build_ffmpeg_vita.sh again "
                     "(rm -rf third_party/ffmpeg-vita build-ffmpeg first). Without it such films play without sound.")
+  endif()
+  file(STRINGS ${FFMPEG_VITA}/lib/libavcodec.a FF_OPUS LIMIT_COUNT 1 REGEX "ff_opus_decoder")
+  if(FF_OPUS)
+    message(STATUS "Opus / Vorbis: FFmpeg's decoders are built in")
+  else()
+    message(WARNING "Opus / Vorbis: this FFmpeg has none (built before 1.4.2): such films play without sound")
   endif()
 else()
   message(STATUS "AC-3 / E-AC-3: not built in (run tools/build_ffmpeg_vita.sh)")

@@ -1,6 +1,7 @@
 #include "ui.h"
 #include "lang.h"
 #include "btn_icons.h"
+#include "sharptext.h"
 #include <math.h>
 #include <stdio.h>
 #include <string.h>
@@ -17,6 +18,7 @@ static void btn_icons_load(void)
     const int w = BTN_ICON_SIZE * BTN_ICON_COUNT, h = BTN_ICON_SIZE;
     g_btn_tex = vita2d_create_empty_texture(w, h);
     if (!g_btn_tex) return;                                  /* (then drawn from shapes as before) */
+    vita2d_texture_set_filters(g_btn_tex, SCE_GXM_TEXTURE_FILTER_POINT, SCE_GXM_TEXTURE_FILTER_POINT);   /* (1.2: 1:1, whole pixels) */
     uint8_t *dst = vita2d_texture_get_datap(g_btn_tex);
     unsigned stride = vita2d_texture_get_stride(g_btn_tex);
     for (int y = 0; y < h; y++) memcpy(dst + (size_t)y * stride, BTN_ICONS + (size_t)y * w, (size_t)w * 4);
@@ -40,6 +42,10 @@ static const UiTheme THEMES[UI_THEMES] = {
       RGBA8(62, 38, 116, 255), RGBA8(134, 108, 184, 255), RGBA8(222, 208, 246, 255), RGBA8(112, 72, 196, 255) },         /* purple */
     { RGBA8(250, 242, 232, 255), RGBA8(176, 158, 138, 255), RGBA8(242, 138, 36, 255), RGBA8(146, 76, 22, 255),
       RGBA8(108, 56, 16, 255), RGBA8(186, 132, 82, 255), RGBA8(246, 222, 196, 255), RGBA8(186, 100, 26, 255) },          /* orange */
+    { RGBA8(232, 246, 246, 255), RGBA8(140, 166, 168, 255), RGBA8(32, 190, 200, 255), RGBA8(18, 98, 110, 255),
+      RGBA8(14, 72, 82, 255), RGBA8(80, 150, 156, 255), RGBA8(196, 238, 240, 255), RGBA8(22, 128, 140, 255) },          /* 1.4: teal */
+    { RGBA8(250, 236, 244, 255), RGBA8(176, 146, 164, 255), RGBA8(236, 90, 160, 255), RGBA8(132, 38, 88, 255),
+      RGBA8(100, 28, 66, 255), RGBA8(184, 110, 148, 255), RGBA8(246, 206, 226, 255), RGBA8(172, 50, 112, 255) },        /* 1.4: pink */
 };
 UiTheme ui_theme = {
     RGBA8(236, 238, 245, 255), RGBA8(142, 148, 170, 255), RGBA8(70, 130, 255, 255), RGBA8(42, 72, 148, 255),
@@ -47,8 +53,37 @@ UiTheme ui_theme = {
 void ui_set_theme(int t) { ui_theme = THEMES[t >= 0 && t < UI_THEMES ? t : 0]; }
 const char *ui_theme_name(int t)
 {
-    static const char *const N[UI_THEMES] = { "Blue", "Green", "Purple", "Orange" };
+    static const char *const N[UI_THEMES] = { "Blue", "Green", "Purple", "Orange", "Teal", "Pink" };
     return N[t >= 0 && t < UI_THEMES ? t : 0];
+}
+
+/* 1.4: the background schemes. Only the navy family is changed (blue-grey and dark: b above r by at most 40, g
+ * near r, no channel above 115): accents, badges, symbols and pictures stay as they are. */
+static int g_bg;
+void ui_set_bg(int b) { g_bg = b >= 0 && b < UI_BGS ? b : 0; }
+const char *ui_bg_name(int b)
+{
+    static const char *const N[UI_BGS] = { "Navy", "Black (OLED)", "Graphite", "Warm dark" };
+    return N[b >= 0 && b < UI_BGS ? b : 0];
+}
+static unsigned clamp8(int v) { return v < 0 ? 0u : v > 255 ? 255u : (unsigned)v; }
+unsigned ui_surf(unsigned c)
+{
+    if (!g_bg) return c;
+    int r = (int)(c & 0xFF), g = (int)((c >> 8) & 0xFF), b = (int)((c >> 16) & 0xFF);
+    unsigned a = c & 0xFF000000u;
+    if (!(b > r && b - r <= 40 && g <= b && g - r <= 16 && b <= 115)) return c;   /* (green / teal shades are not navy) */
+    int l = (r + g + b) / 3;
+    int nr, ng, nb;
+    switch (g_bg) {
+    case UI_BG_BLACK:                                        /* surfaces black; lines, frames, bars a neutral grey */
+        if (l < 40) nr = ng = nb = 0;                        /* (cards, stripes, panels: black; 1.4 the user: no grey stripes) */
+        else nr = ng = nb = l * 7 / 10;
+        break;
+    case UI_BG_GRAPHITE: nr = l * 104 / 100; ng = l * 104 / 100; nb = l * 108 / 100; break;
+    default:             nr = l * 122 / 100; ng = l * 102 / 100; nb = l * 80 / 100; break;   /* warm dark */
+    }
+    return a | (clamp8(nb) << 16) | (clamp8(ng) << 8) | clamp8(nr);
 }
 
 void ui_init(vita2d_pgf *pgf, int plain_letters)
@@ -60,28 +95,44 @@ void ui_init(vita2d_pgf *pgf, int plain_letters)
     cfg[0].in_font_group = in_latin;
     cfg[1].code = SCE_PVF_DEFAULT_LANGUAGE_CODE;
     cfg[1].in_font_group = NULL;
-    g_pvf = vita2d_load_system_pvf(2, cfg);
-    g_turkish = g_pvf != NULL && !plain_letters;
-    if (!g_pvf) g_pvf = vita2d_load_default_pvf();          /* (as before 0.4.5) */
+    /* 1.2: sharp text: the same two fonts, each size made at its own size (src/sharptext.c); vita2d's text only
+     * when that cannot start */
+    static int sharp_latin = -1;                             /* (ui_init may come again: opened once) */
+    if (sharp_latin < 0) {
+        SharpFont sf[2] = { { SCE_PVF_LANGUAGE_LATIN, in_latin }, { SCE_PVF_DEFAULT_LANGUAGE_CODE, NULL } };
+        sharp_latin = sharp_init(2, sf) ? 1 : sharp_init(1, sf + 1) ? 0 : 0;
+    }
+    if (sharp_ready()) {
+        g_turkish = sharp_latin && !plain_letters;
+    } else {
+        g_pvf = vita2d_load_system_pvf(2, cfg);
+        g_turkish = g_pvf != NULL && !plain_letters;
+        if (!g_pvf) g_pvf = vita2d_load_default_pvf();      /* (as before 0.4.5) */
+    }
     if (!g_btn_tex) btn_icons_load();
 }
 
-int ui_font_state(void) { return g_turkish ? 2 : g_pvf ? 1 : 0; }
+void ui_frame_start(void) { sharp_frame_start(); }
+
+int ui_font_state(void) { return g_turkish ? 2 : g_pvf || sharp_ready() ? 1 : 0; }
 
 void ui_shutdown(void)
 {
-    if (g_pvf) vita2d_free_pvf(g_pvf);
+    if (sharp_ready()) sharp_shutdown();
+    else if (g_pvf) vita2d_free_pvf(g_pvf);
     g_pvf = NULL;
 }
 
 static void raw_text(int x, int y, unsigned col, float scale, const char *s)
 {
-    if (g_pvf) vita2d_pvf_draw_text(g_pvf, x, y, col, scale, s);
+    if (sharp_ready()) sharp_draw(x, y, col, scale, s);
+    else if (g_pvf) vita2d_pvf_draw_text(g_pvf, x, y, col, scale, s);
     else vita2d_pgf_draw_text(g_pgf, x, y, col, scale, s);
 }
 
 static int raw_w(float scale, const char *s)
 {
+    if (sharp_ready()) return sharp_width(scale, s);
     return g_pvf ? vita2d_pvf_text_width(g_pvf, scale, s) : vita2d_pgf_text_width(g_pgf, scale, s);
 }
 
@@ -289,12 +340,23 @@ static void thick_line(float x0, float y0, float x1, float y1, unsigned col)
     vita2d_draw_line(x0, y0 - 1, x1, y1 - 1, col);
 }
 
+#define PILL_H 24                              /* 1.3.1: the Start / Select / L / R pill (1.3: 20, the text touched it) */
+#define PILL_SC 0.74f                          /* its text, about 11 px */
+static int pill_w(const char *t)
+{
+    int w = ui_text_w(PILL_SC, t) + 22;                     /* 1.3.1: 11 px each side (and 1 for the bold pass) */
+    return w < PILL_H + 6 ? PILL_H + 6 : w;
+}
+
+/* 1.3.2: a symbol (18-20 px, in the middle of its 30 px cell) takes up to its right edge: the label 7-8 px after
+ * it (was 14) */
+#define ICON_ADV 24
 #define BR 15                                  /* button radius (0.4.0: 13; 30 px like the SELECT pill) */
 #define K(v) ((int)((v) * 1.35f * BR / 11.0f + 0.5f))   /* glyphs were drawn for radius 11; 0.4.0: 35% bigger */
 
 int ui_button(int x, int cy, int btn)
 {
-    const unsigned dark = RGBA8(64, 70, 96, 255);      /* (0.4.0: lighter, the symbols stand out) */
+    const unsigned dark = ui_surf(RGBA8(64, 70, 96, 255));      /* (0.4.0: lighter, the symbols stand out) */
     int cx = x + BR;
     int ic = btn == UI_BTN_CROSS ? BTN_I_CROSS : btn == UI_BTN_CIRCLE ? BTN_I_CIRCLE : btn == UI_BTN_TRIANGLE ? BTN_I_TRIANGLE :
              btn == UI_BTN_SQUARE ? BTN_I_SQUARE : btn == UI_BTN_DPAD ? BTN_I_DPAD : btn == UI_BTN_UPDOWN ? BTN_I_UPDOWN :
@@ -302,7 +364,7 @@ int ui_button(int x, int cy, int btn)
     if (ic >= 0 && g_btn_tex) {                              /* 0.6.0: the smooth symbols, one screen pixel each */
         vita2d_draw_texture_part_scale(g_btn_tex, (float)x, (float)(cy - BTN_ICON_SIZE / 2), (float)(ic * BTN_ICON_SIZE), 0,
                                        BTN_ICON_SIZE, BTN_ICON_SIZE, 1.0f, 1.0f);
-        return 2 * BR;
+        return ICON_ADV;                                     /* 1.3.2: up to the symbol's right edge (the label nearer) */
     }
     switch (btn) {
     case UI_BTN_CROSS: {
@@ -349,27 +411,33 @@ int ui_button(int x, int cy, int btn)
     default: {
         const char *t = btn == UI_BTN_L ? "L" : btn == UI_BTN_R ? "R" : btn == UI_BTN_LR ? "L/R" :
                         btn == UI_BTN_START ? "START" : "SELECT";
-        /* a light rounded pill with bold white text: small grey text on dark looked faded on the Vita */
-        const float sc = 1.0f;
-        const int h = 2 * BR, r = BR;
-        int w = ui_text_w(sc, t) + 24;
-        unsigned bg = RGBA8(86, 96, 128, 255), fg = RGBA8(255, 255, 255, 255);
-        ui_round_rect(x, cy - r, w, h, r, bg);
-        ui_text(x + 12, cy + 7, fg, sc, t);
-        ui_text(x + 13, cy + 7, fg, sc, t);                 /* second pass: bolder strokes */
+        /* 1.3: a small pill with a thin light frame (was a filled grey pill): a 2 px frame, bold ~11 px text,
+         * ~20 px high, fully round ends */
+        int w = pill_w(t);
+        const int h = PILL_H;
+        unsigned frame = RGBA8(170, 176, 198, 255);
+        ui_round_rect(x, cy - h / 2, w, h, h / 2, frame);
+        ui_round_rect(x + 2, cy - h / 2 + 2, w - 4, h - 4, h / 2 - 2, UI_PANEL);
+        int tw = ui_text_w(PILL_SC, t);
+        int tx = x + (w - tw) / 2, ty = cy + 5;
+        unsigned white = RGBA8(255, 255, 255, 255);          /* 1.3.2: the text white (it looked faded in grey) */
+        ui_text(tx, ty, white, PILL_SC, t);
+        ui_text(tx + 1, ty, white, PILL_SC, t);             /* second pass: bold */
         return w;
     }
     }
 }
 
 /* the width ui_button draws (without drawing) */
+static int ui_btn_tex_ready(void) { if (!g_btn_tex) btn_icons_load(); return g_btn_tex != NULL; }
+
 static int button_w(int btn)
 {
     if (btn == UI_BTN_L || btn == UI_BTN_R || btn == UI_BTN_LR || btn == UI_BTN_START || btn == UI_BTN_SELECT) {
         const char *t = btn == UI_BTN_L ? "L" : btn == UI_BTN_R ? "R" : btn == UI_BTN_LR ? "L/R" : btn == UI_BTN_START ? "START" : "SELECT";
-        return ui_text_w(1.0f, t) + 24;
+        return pill_w(t);
     }
-    return 2 * BR;
+    return ui_btn_tex_ready() ? ICON_ADV : 2 * BR;
 }
 
 /* 1.1: the hints always in one order on every screen: on the left up / down (d-pad), X, Square, Triangle, O; on
@@ -395,12 +463,21 @@ static int hint_rank(int btn)
 
 void ui_footer(const UiHint *hints_in, int n_in, const char *status, int status_err)
 {
+    ui_footer_lines(hints_in, n_in, status, status_err, 2);
+}
+
+void ui_footer_lines(const UiHint *hints_in, int n_in, const char *status, int status_err, int max_lines)
+{
     UiHint hints[20];
-    int n = 0, left = 0;
+    int n = 0, left = 0, rank[20];
+    /* 1.3.1: X, Square, Triangle, O on the left; L / R, START, SELECT on the right (1.3 put the home's O right) */
+    for (int i = 0; i < n_in && i < 20; i++) {
+        rank[i] = hint_rank(hints_in[i].btn);
+    }
     for (int pass = 0; pass < 2; pass++)                     /* the left ones, a separator, the right ones */
         for (int r = pass ? 100 : 0; r < (pass ? 200 : 100); r++)
-            for (int i = 0; i < n_in && n < 19; i++)
-                if (hint_rank(hints_in[i].btn) == r) { hints[n++] = hints_in[i]; if (!pass) left++; }
+            for (int i = 0; i < n_in && i < 20 && n < 19; i++)
+                if (rank[i] == r) { hints[n++] = hints_in[i]; if (!pass) left++; }
     if (left < n) {                                          /* (the layout below puts what follows the separator right) */
         memmove(&hints[left + 1], &hints[left], sizeof hints[0] * (size_t)(n - left));
         hints[left] = (UiHint){ UI_BTN_SEP, "" };
@@ -408,11 +485,11 @@ void ui_footer(const UiHint *hints_in, int n_in, const char *status, int status_
     }
     if (status && status[0]) {                               /* 0.5.0: a long one takes two lines */
         UiWrap w;
-        ui_wrap(&w, 1.0f, status, 924, 2);
+        ui_wrap(&w, 1.0f, status, 924, max_lines < 1 ? 1 : max_lines > 2 ? 2 : max_lines);
         int h = 30 + (w.n - 1) * 24;
-        vita2d_draw_rectangle(0, UI_FOOTER_Y - h, 960, h, RGBA8(20, 22, 32, 230));
+        vita2d_draw_rectangle(0, UI_FOOTER_Y - h, 960, h, ui_surf(RGBA8(20, 22, 32, 230)));
         for (int i = 0; i < w.n; i++)
-            ui_text(18, UI_FOOTER_Y - h + 21 + i * 24, status_err ? UI_ERR : UI_DIM, 1.0f, w.line[i]);
+            ui_text(18, UI_FOOTER_Y - h + 21 + i * 24, status_err ? UI_ERR : UI_WARN, 1.0f, w.line[i]);   /* (1.2: amber, was grey) */
     }
     vita2d_draw_rectangle(0, UI_FOOTER_Y, 960, 544 - UI_FOOTER_Y, UI_PANEL);
     vita2d_draw_rectangle(0, UI_FOOTER_Y, 960, 1, UI_LINE);
@@ -423,7 +500,7 @@ void ui_footer(const UiHint *hints_in, int n_in, const char *status, int status_
     for (int i = 0; i < n; i++) if (hints[i].btn == UI_BTN_SEP) { sep = i; break; }
     /* sizes tried in turn: the gaps get narrower first, then the labels smaller */
     static const float SC[] = { 1.15f, 1.15f, 1.05f, 1.0f, 0.95f, 0.9f };
-    static const int GAP[] = { 20, 14, 12, 10, 10, 8 }, PAD[] = { 8, 6, 6, 5, 5, 4 };
+    static const int GAP[] = { 20, 14, 12, 10, 10, 8 }, PAD[] = { 7, 6, 5, 5, 4, 4 };   /* (1.3.2: 7, was 8) */
     float sc = 1.15f;
     int gap = 20, pad = 8, wr = 0;
     for (int k = 0; k < 6; k++) {
@@ -583,7 +660,7 @@ void ui_message(const char *title, const char *line, unsigned title_col, int spi
     if (line && line[0]) ui_wrap(&lw, 1.0f, line, w - 40, 4);
     int extra = lw.n > 1 ? (lw.n - 1) * 26 : 0;
     int h = (spinner ? 150 : 120) + extra, y = (544 - h) / 2 - 10;
-    ui_panel(x, y, w, h, RGBA8(24, 28, 42, 240));
+    ui_panel(x, y, w, h, ui_surf(RGBA8(24, 28, 42, 240)));
     int ty = y + 40;
     if (spinner) { ui_spinner(480, y + 40, t_ms); ty = y + 92; }
     if (ui_text_w(1.15f, title) <= w - 40) ui_text_center(480, ty, title_col, 1.15f, title);

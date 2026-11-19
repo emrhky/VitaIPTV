@@ -8,6 +8,8 @@
 #include <stddef.h>
 
 #define A52_MAX_SAMPLES 2048            /* per channel and frame (AC-3: 1536; E-AC-3: 256..1536; AAC 1024, HE-AAC 2048) */
+#define XIPH_CHUNK      1024            /* 1.4.2: Opus / Vorbis come out in pieces of this many samples (the port wants one size) */
+#define XIPH_MAX_FRAME  8192            /* the most one Opus (5760) / Vorbis (4096) packet gives */
 
 typedef struct A52Dec A52Dec;
 
@@ -27,10 +29,22 @@ void    a52_feed(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out
 int     a52_aac_available(void);
 A52Dec *a52_create_aac(void);
 void    a52_feed_frame(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out out, void *ctx);
+/* 1.2: one whole 5.1 ADTS frame decoded to six planes in the order L R C LFE Ls Rs (n samples each, n returned,
+ * 0 if it is not 5.1); on a decoder of its own (a52_create_aac), only to learn the Vita decoder's channel order */
+int     a52_aac_raw6(A52Dec *d, const uint8_t *frame, size_t len, float *planes, int maxn);
 /* 1.1: "clear dialogue" for 5.1 / 7.1 (Select > Audio): the centre louder in the stereo mix; for decoders
  * created after the call (the player opens a new one when it changes) */
 void    a52_set_dialog(int on);
 int     a52_get_dialog(void);
+/* 1.3: virtual surround for 5.1 / 7.1 on headphones (vsurr.h; Sound field: Headphones), followed at once */
+void    a52_set_vsurr(int on);
+int     a52_get_vsurr(void);
+/* 1.4.2: Opus / Vorbis (WebM, Matroska) with FFmpeg's decoders; cfg = the track's CodecPrivate (Opus: OpusHead;
+ * Vorbis: the three headers, Xiph-laced), rate / ch from the track (0 = from cfg). Fed one whole packet at a time
+ * with a52_feed_frame; the sound comes out in pieces of XIPH_CHUNK samples (Vorbis frames change size, and the
+ * output port would have to be opened again for each new size). NULL when not built in. */
+int     a52_xiph_available(int opus);
+A52Dec *a52_create_xiph(int opus, const uint8_t *cfg, size_t cfg_len, int rate, int ch);
 /* frames decoded, frames that failed */
 void    a52_stats(const A52Dec *d, uint32_t *frames, uint32_t *errors);
 
