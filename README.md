@@ -7,7 +7,7 @@ listen to radio from your own M3U playlists or Xtream accounts, decoded by the V
 
 <p align="center"><img src="https://github.com/user-attachments/assets/010c908b-58ff-4be5-982d-5e6c4701ef0c" width="640" alt="Vita IPTV screenshot"></p>
 
-**Version 1.1** - live TV with a programme guide, smoother 50 / 60 fps channels, My List, fast list opening, louder and clearer sound (volume boost, clear speech), films and series with posters and details, subtitles, favourites, parental lock (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
+**Version 1.2** - downloads to watch without the internet, Internet Archive and web page playlists, videos on the memory card, 5.1 AAC on the Vita's own decoder, Opus / Vorbis sound, themes with a black OLED background, plus live TV with a programme guide, films and series, subtitles and favourites (see [CHANGELOG.md](CHANGELOG.md)). It is a hobby project, provided as is, without support or a roadmap.
 
 This app was developed with the help of AI (Anthropic's Claude), and tested on a real PS Vita.
 
@@ -113,7 +113,7 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   collection like `https://archive.org/details/feature_films`, a film, or `https://archive.org/search?query=...`)
   or just words (`charlie chaplin`). Its films come as a list (500 at a time, with poster, year and story;
   *Next 500...* at the end adds more); when one is opened the app picks the file the Vita plays (MP4 / H.264 up
-  to 1080p) and remembers it. **Square** searches the archive (inside the list, or Select > *Search the whole
+  to 1080p) and remembers it. **Square** searches the film titles (inside the list, or Select > *Search the whole
   archive*), **Select > Order** sorts it (most watched, newest, year, title). Old, free films: silent films,
   classics, documentaries.
 - **Web page:** a playlist of the type *Web page* lists the videos written in a page (`<video>`, the page's video
