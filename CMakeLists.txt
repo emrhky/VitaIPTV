@@ -49,6 +49,7 @@ add_executable(${PROJECT_NAME}.elf
   src/lang.c
   src/mpadec.c
   src/hls.c
+  src/hlsaes.c
   src/spsfix.c
   src/curlio.c
   src/vod.c
@@ -117,6 +118,12 @@ if(EXISTS ${FFMPEG_VITA}/lib/libavcodec.a AND EXISTS ${FFMPEG_VITA}/lib/libavuti
     message(STATUS "Opus / Vorbis: FFmpeg's decoders are built in")
   else()
     message(WARNING "Opus / Vorbis: this FFmpeg has none (built before 1.4.2): such films play without sound")
+  endif()
+  file(STRINGS ${FFMPEG_VITA}/lib/libavcodec.a FF_DCA LIMIT_COUNT 1 REGEX "ff_dca_decoder")
+  if(FF_DCA)
+    message(STATUS "DTS: FFmpeg's decoder is built in")
+  else()
+    message(WARNING "DTS: this FFmpeg has none (built before 1.2.2): such films play without sound")
   endif()
 else()
   message(STATUS "AC-3 / E-AC-3: not built in (run tools/build_ffmpeg_vita.sh)")

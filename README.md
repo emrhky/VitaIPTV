@@ -49,7 +49,7 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 - **Stream analysis:** shows the resolution, codecs, frame rate and download speed of the stream (TS, HLS, MP4, MKV,
   http and https) and whether the Vita can play it (**Select** > *More* while watching).
 - **Audio:** AAC (stereo on the hardware; 5.1 / 7.1 AAC in software), MP2 / MP3, AC-3 / E-AC-3 (Dolby Digital /
-  Dolby Digital Plus, software) and Opus / Vorbis (in MKV / WebM, software). 5.1 and 7.1 come out as stereo. Many TV channels use MP2, many films E-AC-3.
+  Dolby Digital Plus, software), DTS (its core, software) and Opus / Vorbis (in MKV / WebM, software). 5.1 and 7.1 come out as stereo. Many TV channels use MP2, many films E-AC-3.
 - **Audio tracks and subtitles, remembered per stream:** a channel or film with more than one sound lists them in
   **Select** > *Audio* with their language (*Audio: Turkish (AAC)*). What you choose there (and in *Subtitles*) is
   kept for that channel or film only - for a series, for all of its episodes - and comes back the next time.
@@ -120,7 +120,7 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 - **Web page:** a playlist of the type *Web page* lists the videos written in a page (`<video>`, the page's video
   data, `.mp4` / `.m3u8` addresses in it, links to video files, one step into the pages shown inside it).
   JavaScript does not run on the Vita: a site that makes its video only then gives nothing, and the app says why
-  (also: DRM, DASH, H.265, encrypted HLS, WebM / Ogg). A page to try it with:
+  (also: DRM, DASH, H.265, WebM / Ogg). A page to try it with:
   `https://www.w3schools.com/html/html5_video.asp`. `ux0:data/VitaIPTV/webcheck.txt` lists what the last page gave. **Only for pages whose videos
   you may watch this way.**
 - **Search:** Square shows the last five searches first (and *New search...*).
@@ -179,9 +179,9 @@ Kodi style as `link|User-Agent=...&Referer=...`. The app sends them with every r
 | H.264 up to 1920x1080 (see below), AAC, MP2, MP3 | Above 1080p (4K) |
 | MPEG-TS, HLS (MPEG-TS segments), FLV, MKV, MP4 | HEVC / H.265 |
 | Films: MKV, MP4, TS, FLV files (FLV: from the start, no jumping) | AVI files |
-| AC-3 / E-AC-3, 5.1 / 7.1 AAC, Opus, Vorbis audio (as stereo) | Interlaced broadcasts (576i, 1080i may stutter) |
-| http and https | DTS and TrueHD audio |
-| | Encrypted (AES) HLS, HLS with fMP4 segments |
+| AC-3 / E-AC-3, DTS, 5.1 / 7.1 AAC, Opus, Vorbis audio (as stereo) | Interlaced broadcasts (576i, 1080i may stutter) |
+| http and https | TrueHD audio (DTS-HD: its DTS core plays) |
+| AES-128 HLS (the key named in the playlist) | SAMPLE-AES / DRM, HLS with fMP4 segments |
 
 **About "720p":** through the public API, the Vita's hardware decoder is limited to roughly H.264 level 3.1:
 8-bit 4:2:0, progressive, at most 3600 macroblocks per picture (1280x720) and a limited number of reference
@@ -273,7 +273,7 @@ project, not affiliated with or endorsed by Sony.
 - [vita2d](https://github.com/xerpi/libvita2d) - drawing
 - [mbedTLS](https://github.com/Mbed-TLS/mbedtls) (Apache-2.0) - TLS, in `third_party/mbedtls`
 - [minimp3](https://github.com/lieff/minimp3) (CC0) - MP2 / MP3 decoding
-- [FFmpeg](https://ffmpeg.org) (LGPL 2.1+) - AC-3 / E-AC-3, AAC 5.1, Opus and Vorbis decoding
+- [FFmpeg](https://ffmpeg.org) (LGPL 2.1+) - AC-3 / E-AC-3, DTS, AAC 5.1, Opus and Vorbis decoding
 - The VitaSDK and HENkaku / Ensō teams
 
 Inspired by ViTube (the PS Vita YouTube app) - its source showed that the Vita's internal decoder

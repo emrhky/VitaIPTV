@@ -5,11 +5,19 @@
   *Sound field: Speakers*, so it goes off by itself with headphones on Auto. *Same volume on every channel* became
   **Sound levelling: Off / Between channels / Night**; Night also turns loud scenes down at once and brings quiet
   speech up (an explosion about 5 dB over the speech instead of 16-22 dB).
-- **Sound delay:** only "+0.20 s" (no output name), 0 to +1 s (values below 0 did nothing); kept separately for the
-  speakers, wired headphones and Bluetooth.
+- **Sound delay** is kept with the film, the series or the channel it was set on and comes back only there; anything
+  else starts at 0. Shown as "+0.20 s" (no output name), 0 to +1 s (values below 0 did nothing).
 - **Bluetooth headphones** are recognised: Sound field Auto uses the headphones' sound with them.
 - **Downloads wait when the account's connections are all in use** (its check said so) instead of failing with
   "The server does not give this one (HTTP 405)".
+- **DTS sound** plays (films whose only sound was DTS were silent): in MKV, TS / M2TS and MP4, 5.1 mixed to stereo.
+- **AES-128 encrypted HLS** plays (the standard HLS encryption whose key the playlist names), also from web pages.
+  SAMPLE-AES and DRM stay unsupported.
+- **Player, "HTTP 405" right after another stream:** when a stream of the same server ended less than a minute ago,
+  the player tries again every 5 s for up to 45 s with a countdown ("The provider still counts the last stream"),
+  O stops it; then one message. The "account free means 405 for good" guess is gone.
+- Tests: the PC tests run on GitHub with every build (`tests/run_all.py`); a check that the Turkish strings use the
+  same `%d` / `%s` as the English ones; two old player tests brought up to date.
 
 ## 1.2.1 (test)
 - **Internet Archive items with many videos** (archive.org/details/ID): every video is a film of its own in the
