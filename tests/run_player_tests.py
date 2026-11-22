@@ -66,6 +66,11 @@ sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavf
    f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a aac -ac 1 -f mpegts {T}/mono441.ts")
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5 "
    f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a ac3 -ac 6 -f mpegts {T}/ac3.ts")
+# 1.2.2: DTS sound (5.1) in TS and in Matroska
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 6 "
+   f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a dca -strict -2 -ac 6 -b:a 768k -f mpegts {T}/dts.ts")
+sh(f"ffmpeg -loglevel error -y -i {T}/dts.ts -c copy {T}/dts.mkv")
+sh(f"ffmpeg -loglevel error -y -i {T}/dts.ts -c copy -strict -2 {T}/dts.mp4")
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1280x720', r=30)} -c:v libx264 -profile:v high -bf 3 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -f matroska {T}/bframes.mkv")
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5 "
    f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a mp2 -b:a 192k -f mpegts {T}/mp2.ts")
@@ -303,7 +308,7 @@ A52L = (f"{FP}/lib/libavcodec.a " + (f"{FP}/lib/libswresample.a " if os.path.exi
         f"{FP}/lib/libavutil.a") if A52 else ""
 print("AC-3 decoding:", "with FFmpeg from " + FP if A52 else "not built in")
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL {A52} -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {ROOT}/src/srt.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
+   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c {ROOT}/src/hlsaes.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {ROOT}/src/srt.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
 # 1.2.1: a channel whose picture size changes on the way (720p, then 1024x576, then 720p again)
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1024x576', r=30)} -c:v libx264 -profile:v high -bf 3 -g 30 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/s576.ts")
 sh(f"ffmpeg -loglevel error -y -i \"concat:{T}/s720g30.ts|{T}/s576.ts|{T}/s720g30.ts\" -c copy -f mpegts {T}/sizechange.ts")

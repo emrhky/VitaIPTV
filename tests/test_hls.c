@@ -93,7 +93,11 @@ int main(void)
     assert(m.seg[1].uri_len == 16 && !strncmp(m.seg[1].uri, "seg1521.ts?tok=a", 16));
     hls_media_free(&m);
     const char *enc = "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"k\"\n#EXTINF:4,\na.ts\n#EXT-X-ENDLIST\n";
-    assert(hls_parse_media(enc, &m) == 0 && m.encrypted && m.endlist && m.first_seq == 0 && m.seg[0].seq == 0);
+    /* 1.2.2: AES-128 is played (its key and the segment are known), SAMPLE-AES is not */
+    assert(hls_parse_media(enc, &m) == 0 && !m.encrypted && m.aes && m.seg[0].aes && m.endlist && m.first_seq == 0 && m.seg[0].seq == 0);
+    hls_media_free(&m);
+    const char *sae = "#EXTM3U\n#EXT-X-KEY:METHOD=SAMPLE-AES,URI=\"k\"\n#EXTINF:4,\na.ts\n#EXT-X-ENDLIST\n";
+    assert(hls_parse_media(sae, &m) == 0 && m.encrypted && !m.aes && !m.seg[0].aes);
     hls_media_free(&m);
     const char *fm = "#EXTM3U\n#EXT-X-MAP:URI=\"init.mp4\"\n#EXTINF:4,\na.m4s\n";
     assert(hls_parse_media(fm, &m) == 0 && m.fmp4);

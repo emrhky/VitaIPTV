@@ -13,6 +13,8 @@ small.paste((0, 0, 0, 0), (0, 0, 10, 10))
 small.save(f"{T}/small.png")
 Image.new("I;16", (64, 96), 30000).save(f"{T}/gray.png")
 jp = os.environ.get("JPEG_PREFIX")
+if not jp and not any(os.path.exists(f"{d}/jpeglib.h") for d in ("/usr/include", "/usr/local/include", "/usr/include/x86_64-linux-gnu")):
+    print("SKIPPED: no libjpeg (install libjpeg-dev or set JPEG_PREFIX)"); sys.exit(0)   # (1.2.2: tests/run_all.py)
 jflags = f"-I{jp}/include" if jp else ""
 jlib = f"{jp}/lib/libjpeg.a" if jp else "-ljpeg"
 cmd = (f"gcc -g -Wall -Wextra -fsanitize=address,undefined {jflags} -I{ROOT}/src {ROOT}/tests/test_poster.c {ROOT}/src/poster.c "

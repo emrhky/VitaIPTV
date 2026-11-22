@@ -21,6 +21,14 @@ VSRC = ("-f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=44
         "-c:v libx264 -bf 2 -g 25 -keyint_min 25 -sc_threshold 0 -pix_fmt yuv420p -c:a aac -ac 2")
 sh(f"ffmpeg -loglevel error -y {VSRC} {T}/film.mp4")
 sh(f"ffmpeg -loglevel error -y {VSRC} {T}/film.mkv")
+# 1.2.2: AES-128 HLS (the key named in the playlist): without an IV (the sequence number) and with one; a key that is missing
+for name, iv in (("aes", ""), ("aesiv", "\n0a1b2c3d4e5f60718293a4b5c6d7e8f9")):
+    os.makedirs(f"{T}/{name}")
+    open(f"{T}/{name}/key.bin", "wb").write(bytes(range(16, 32)))
+    open(f"{T}/{name}/ki.txt", "w").write(f"key.bin\n{T}/{name}/key.bin{iv}\n")
+    sh(f"ffmpeg -loglevel error -y -i {T}/s720.ts -c copy -f hls -hls_time 1 -hls_list_size 0 -hls_playlist_type vod "
+       f"-hls_key_info_file {T}/{name}/ki.txt -hls_segment_filename {T}/{name}/seg%03d.ts {T}/{name}/index.m3u8")
+open(f"{T}/aes/nokey.m3u8", "w").write(open(f"{T}/aes/index.m3u8").read().replace('URI="key.bin"', 'URI="gone.bin"'))
 open(f"{T}/hls/master.m3u8", "w").write("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2500000,RESOLUTION=1280x720\nindex.m3u8\n")
 sh(f"openssl req -x509 -newkey rsa:2048 -nodes -keyout {T}/k.pem -out {T}/c.pem -days 2 -subj /CN=localhost")
 STALLED = []                                # 0.6.0: /stall/...: the first request into the film's middle sends a little, then nothing
@@ -66,7 +74,7 @@ psrv = ThreadingHTTPServer(("127.0.0.1", 0), partial(Quiet, directory=T))
 threading.Thread(target=psrv.serve_forever, daemon=True).start()
 M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread {MCF} -DSTALL_US=1500000ULL -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c "
+   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c {ROOT}/src/hlsaes.c "
    f"{ROOT}/src/curlio.c {ROOT}/src/vod.c {ROOT}/src/srt.c {M}/mock_rt.c {MLIB} -lm -o {T}/test_https")
 env = dict(os.environ, HTTPS_BASE=f"https://127.0.0.1:{srv.server_address[1]}",
            HTTP_BASE=f"http://127.0.0.1:{psrv.server_address[1]}")

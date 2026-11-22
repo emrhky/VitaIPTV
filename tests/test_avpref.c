@@ -39,6 +39,19 @@ int main(void)
     fputs("zz\t1\n0\t1\ttur\t0\t-1\t\n0000abcd\t-1\tTR\t9\t-1\tEN\n", f);
     fclose(f);
     CHECK(avpref_load(&q, path) == 1 && q.e[0].key == 0xabcd && !strcmp(q.e[0].aud_lang, "tr") && q.e[0].sub_on == 0);
+    /* 1.2.2: the sound delay: saved and read back; an old line (6 fields): 0; out of range: limited */
+    {
+        AvPrefs a;
+        avpref_init(&a);
+        AvPref d = { avpref_key("series:x"), -1, "tur", 2, -1, "", 250 };
+        avpref_put(&a, &d);
+        CHECK(avpref_save(&a, path, 1) == 0);
+        CHECK(avpref_load(&q, path) == 1 && q.e[0].delay_ms == 250);
+        f = fopen(path, "w");
+        fputs("0000abcd\t-1\ttur\t2\t-1\t\n0000abce\t-1\ttur\t2\t-1\t\t5000\n", f);
+        fclose(f);
+        CHECK(avpref_load(&q, path) == 2 && avpref_get(&q, 0xabcd)->delay_ms == 0 && avpref_get(&q, 0xabce)->delay_ms == 1000);
+    }
     remove(path);
     printf("%s (%d failed)\n", fails ? "FAILED" : "all passed", fails);
     return fails != 0;
