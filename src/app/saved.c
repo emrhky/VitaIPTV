@@ -32,15 +32,14 @@ static int out_kind(void)
     if (v & 0x10u) return OUT_BLUETOOTH;
     return avdev_headphones(v) ? OUT_HEADPHONES : OUT_SPEAKERS;
 }
-static int *adelay_slot(void)
-{
-    int k = out_kind();
-    return k == OUT_BLUETOOTH ? &settings.adelay_bt : k == OUT_HEADPHONES ? &settings.adelay_hp : &settings.adelay_sp;
-}
+/* 1.2.2: the sound delay belongs to what plays (the user: a film, a series, a channel; avpref, see av_apply):
+ * anything else starts at 0. (1.2.1-1.2.2a kept it for each output: settings.adelay_*, now not used.) */
+static int cur_adelay;
+static int *adelay_slot(void) { return &cur_adelay; }
 static void adelay_apply(void)
 {
     static int last = -99999, last_k = -1;
-    int d = *adelay_slot(), k = out_kind();
+    int d = cur_adelay, k = out_kind();
     tsp_set_audio_delay(d);
     if (d != last || k != last_k) {
         static const char *const OUT[3] = { "speakers", "headphones", "Bluetooth" };

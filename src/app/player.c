@@ -161,14 +161,17 @@ static void av_apply(int ci)
         sub_off = r->sub_on == 2 ? 2 : !r->sub_on;          /* (2: automatic, as with no choice) */
         sub_id = r->sub_on == 1 ? r->sub_id : -1;
         snprintf(sub_lang, sizeof sub_lang, "%s", r->sub_on == 2 || !r->sub_lang[0] ? (r->sub_on == 2 ? app_lang3() : "") : r->sub_lang);
+        cur_adelay = r->delay_ms;                            /* 1.2.2: its own sound delay */
         plog("player: sound / subtitles as chosen before: %s, subtitles %s", aud_lang[0] ? aud_lang : "-", sub_off == 2 ? "automatic" : sub_off ? "off" : sub_lang[0] ? sub_lang : "on");
     } else {
+        cur_adelay = 0;                                      /* 1.2.2: nothing set for it: no delay */
         aud_id = -1;
         snprintf(aud_lang, sizeof aud_lang, "%s", app_lang3());
         sub_id = -1;
         sub_off = 2;                                         /* (tsplayer: on only when the sound is not in it) */
         snprintf(sub_lang, sizeof sub_lang, "%s", app_lang3());
     }
+    adelay_apply();
 }
 /* the menu's choice, for this stream (and its series) next time */
 static void av_remember(void)
@@ -182,6 +185,7 @@ static void av_remember(void)
     r.sub_on = sub_off == 0 ? 1 : sub_off == 2 ? 2 : 0;   /* (only the sound chosen: subtitles stay automatic) */
     r.sub_id = av_by_lang && sub_lang[0] ? -1 : sub_id;
     snprintf(r.sub_lang, sizeof r.sub_lang, "%s", sub_off == 0 ? sub_lang : "");
+    r.delay_ms = cur_adelay;                                 /* 1.2.2 */
     avpref_put(&avprefs, &r);
     if (avpref_save(&avprefs, AVPREF_FILE, 0) != 0) plog("avpref: cannot save %s", AVPREF_FILE);
 }
@@ -444,10 +448,11 @@ static void play_channel_ex(int vi, int use_proxy)
         }
     }
     if (!iptv_is_local_path(url)) dl_hold_for(url, DL_HOLD_STREAM);   /* 1.4.1: one connection: the download waits */
-    {   /* 1.5: no connection of the account in use for a minute and the last check not full: a 405 is not "busy" */
+    {   /* 1.2.2: a stream of the app ended a minute ago, a download of the server, or the account full: a "busy"
+         * answer is waited out (45 s, counted down) */
         int full = acct_active >= 0 && acct_max > 0 && acct_active >= acct_max && now_ms() - acct_at < 600000;
         int recent = conn_end_ms && now_ms() - conn_end_ms < 60000;
-        tsp_set_account_free(!iptv_is_local_path(url) && !recent && !full && !dl_nheld && !dl_busy_host(url));
+        tsp_set_recent_use(!iptv_is_local_path(url) && (recent || full || dl_nheld || dl_busy_host(url)));
         if (!iptv_is_local_path(url)) net_playing = 1;
     }
     if (net_offline(url)) {                                  /* nothing started: the message stays on the screen */
@@ -621,7 +626,7 @@ static void audio_track_name(const TspStatus *st, int k, char *out, size_t cap)
     const char *l = st->a_lang[k], *name = lang_name(l);
     int c = st->a_codec[k];
     const char *cn = c == TS_CODEC_AAC ? "AAC" : c == TS_CODEC_MPEG_AUDIO ? "MP2" : c == TS_CODEC_AC3 ? "AC-3" : c == TS_CODEC_EAC3 ? "E-AC-3" :
-                     c == TS_CODEC_OPUS ? "Opus" : c == TS_CODEC_VORBIS ? "Vorbis" : "?";
+                     c == TS_CODEC_OPUS ? "Opus" : c == TS_CODEC_VORBIS ? "Vorbis" : c == TS_CODEC_DTS ? "DTS" : "?";
     char up[4];
     for (int i = 0; i < 4; i++) up[i] = (char)(l[i] >= 'a' && l[i] <= 'z' ? l[i] - 32 : l[i]);
     if (name) snprintf(out, cap, "%s (%s)", name, cn);
@@ -890,7 +895,7 @@ static void draw_tsp_screen(int osd)
         char ai[96], kr[24];
         fmt_rate(kr, sizeof kr, st->audio_rate);
         if (st->audio_msg[0]) snprintf(ai, sizeof ai, "%s", T_msg(st->audio_msg));
-        else if (st->audio_frames) snprintf(ai, sizeof ai, "%s   %s   %s", st->audio_ac3 == 2 ? "E-AC-3" : st->audio_ac3 ? "AC-3" :
+        else if (st->audio_frames) snprintf(ai, sizeof ai, "%s   %s   %s", st->audio_ac3 == 3 ? "DTS" : st->audio_ac3 == 2 ? "E-AC-3" : st->audio_ac3 ? "AC-3" :
                                             st->audio_xiph == 1 ? "Opus" : st->audio_xiph ? "Vorbis" :
                                             st->audio_mpeg ? "MP2" : "AAC", kr, ch_label(st));
         else snprintf(ai, sizeof ai, "%s", T("Buffering..."));
@@ -1008,8 +1013,8 @@ static void draw_tsp_screen(int osd)
         case TSP_CONNECTING:
             if (!tx) {
                 static char note_line[96];
-                if (st->note[0] && st->note_pct > 0 && st->note_pct < 100) snprintf(note_line, sizeof note_line, "%s %d%%", T(st->note), st->note_pct);
-                else snprintf(note_line, sizeof note_line, "%s", st->note[0] ? T(st->note) : T("Waiting for the stream"));
+                if (st->note[0] && st->note_pct > 0 && st->note_pct < 100) snprintf(note_line, sizeof note_line, "%s %d%%", T_msg(st->note), st->note_pct);
+                else snprintf(note_line, sizeof note_line, "%s", st->note[0] ? T_msg(st->note) : T("Waiting for the stream"));
                 sp.center_title = "Connecting..."; sp.center_line = note_line; sp.center_col = UI_TEXT; sp.spinner = 1;
             }
             break;
@@ -1065,7 +1070,7 @@ static void draw_tsp_screen(int osd)
                 int av;
                 if (st->audio_msg[0]) snprintf(au, sizeof au, "%s", T("off"));
                 else if (!st->audio_frames) snprintf(au, sizeof au, "%s", T("waiting"));
-                else if (st->audio_ac3) snprintf(au, sizeof au, "%s %s %s", st->audio_ac3 == 2 ? "E-AC-3" : "AC-3", kr, ch_label(st));
+                else if (st->audio_ac3) snprintf(au, sizeof au, "%s %s %s", st->audio_ac3 == 3 ? "DTS" : st->audio_ac3 == 2 ? "E-AC-3" : "AC-3", kr, ch_label(st));
                 else if (st->audio_xiph) snprintf(au, sizeof au, "%s %s %s", st->audio_xiph == 1 ? "Opus" : "Vorbis", kr, ch_label(st));
                 else if (st->audio_mpeg) snprintf(au, sizeof au, "MP%d %s %s", st->audio_mpeg, kr, ch_label(st));
                 else snprintf(au, sizeof au, "AAC %s %s", kr, ch_label(st));
