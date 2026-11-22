@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.2 (test)
+- **Sound menu: five rows.** *Clear sound* (the speakers' sound: less deep bass, clearer voices) is now part of
+  *Sound field: Speakers*, so it goes off by itself with headphones on Auto. *Same volume on every channel* became
+  **Sound levelling: Off / Between channels / Night**; Night also turns loud scenes down at once and brings quiet
+  speech up (an explosion about 5 dB over the speech instead of 16-22 dB).
+- **Sound delay:** only "+0.20 s" (no output name), 0 to +1 s (values below 0 did nothing); kept separately for the
+  speakers, wired headphones and Bluetooth.
+- **Bluetooth headphones** are recognised: Sound field Auto uses the headphones' sound with them.
+- **Downloads wait when the account's connections are all in use** (its check said so) instead of failing with
+  "The server does not give this one (HTTP 405)".
+
 ## 1.2.1 (test)
 - **Internet Archive items with many videos** (archive.org/details/ID): every video is a film of its own in the
   list (where you stopped, favourite, download each), instead of one film with one of the videos.
