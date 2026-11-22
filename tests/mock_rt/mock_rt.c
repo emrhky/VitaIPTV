@@ -26,7 +26,7 @@ SceUID sceKernelCreateThread(const char *n, SceKernelThreadEntry e, int prio, Sc
   for (int i = 1; i < 256; i++) if (!th[i].used) { memset(&th[i], 0, sizeof th[i]); th[i].used = 1; th[i].e = e; return 0x40010000 + i; }
   return -1; }
 int sceKernelStartThread(SceUID t, SceSize args, void *argp)
-{ MT *m = &th[t - 0x40010000]; m->arg = malloc(args); memcpy(m->arg, argp, args); m->args = args; m->started = 1;
+{ MT *m = &th[t - 0x40010000]; m->arg = malloc(args ? args : 1); if (args) memcpy(m->arg, argp, args); m->args = args; m->started = 1;
   return pthread_create(&m->th, NULL, tramp, m) ? -1 : 0; }
 int sceKernelWaitThreadEnd(SceUID t, int *stat, SceUInt *timeout)
 { (void)stat;(void)timeout; MT *m = &th[t - 0x40010000]; if (m->started) { pthread_join(m->th, NULL); m->started = 0; } return 0; }
