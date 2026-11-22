@@ -2709,8 +2709,8 @@ static void audio_out(Tsp *t, uint8_t *pcm, int samples, int rate, int ch, int64
         if (b != t->afx_boost || sp != t->afx_speaker || lv != t->afx_level) {
             static int lb = -1, lsp = -1, llv = -1;           /* (1.5.1: said again only when changed) */
             if ((t->afx_boost >= 0 || b || sp || lv) && (b != lb || sp != lsp || lv != llv))
-                plog("tsp: sound: boost %s, speaker mode %s, one level %s", b ? (b == 1 ? "+3 dB" : b == 2 ? "+6 dB" : "+9 dB") : "off",
-                     sp ? "on" : "off", lv ? "on" : "off");
+                plog("tsp: sound: boost %s, speakers' sound %s, levelling %s", b ? (b == 1 ? "+3 dB" : b == 2 ? "+6 dB" : "+9 dB") : "off",
+                     sp ? "on" : "off", lv == 2 ? "night" : lv ? "between channels" : "off");
             lb = b; lsp = sp; llv = lv;
             t->afx_boost = b;
             t->afx_speaker = sp;
@@ -3195,9 +3195,10 @@ static void stats_tick(Tsp *t)
     t->ui_calls = 0;
     unsigned ms = (unsigned)(dt / 1000);
     if (brief) plog("tsp: stats %u KB, decoded %u, shown %u, dropped %u, late %u, damaged %u, errors %u, skipped %u, frame %u us, "
-         "video %+d ms vs audio, out of order %u, screen %u fps",
+         "video %+d ms vs audio%s, out of order %u, screen %u fps",
          (unsigned)(t->st.bytes / 1024), t->st.decoded, t->st.shown, t->st.dropped, t->st.late, t->st.damaged,
-         t->st.errors, (unsigned)t->st.skipped, (unsigned)t->frame_us, -t->st.av_late_ms, (unsigned)t->out_of_order,
+         t->st.errors, (unsigned)t->st.skipped, (unsigned)t->frame_us, -t->st.av_late_ms,
+         g_audio_delay ? " heard (the picture waits for the sound delay)" : "", (unsigned)t->out_of_order,
          (unsigned)((ui * 1000u + ms / 2) / ms));
 
     /* Second line: rates, queue depth, free memory and how the HTTP reads fill (for tuning READ_SIZE). */

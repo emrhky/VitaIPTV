@@ -18,6 +18,13 @@
 #define LV_TAU    3.0f                  /* seconds the average looks back */
 #define LV_DBS    3.0f                  /* dB a second the gain moves at most (6 in the first 3 s) */
 
+/* 1.2.2 night (level 2): loud scenes down at once, a compressor over the levelled sound */
+#define NC_THR    -20.0f                /* dBFS (RMS of 5 ms) above which it turns the sound down */
+#define NC_RATIO  4.0f
+#define NC_ATTACK 0.005f                /* s */
+#define NC_RELEASE 0.12f                /* s */
+#define NC_REL_DBS 40.0f                /* dB a second the gain may come back up (6 otherwise) */
+
 #define FD_WIDE   0.8f                  /* 1.3 speakers: the sides' difference above 300 Hz, +0.8 (about +5 dB) */
 #define FD_FEED   0.45f                 /* 1.3 headphones: the other side's low / middle sounds at about -7 dB */
 
@@ -36,7 +43,7 @@ void afx_set_global(int boost, int speaker, int level)
 {
     g_boost = boost < 0 ? 0 : boost > 3 ? 3 : boost;
     g_speaker = speaker ? 1 : 0;
-    g_level = level ? 1 : 0;
+    g_level = level < 0 ? 0 : level > 2 ? 2 : level;      /* (1.2.2: 2 night) */
 }
 
 void afx_get_global(int *boost, int *speaker, int *level)
@@ -51,12 +58,13 @@ void afx_init(AudioFx *fx)
     memset(fx, 0, sizeof *fx);
     fx->gain = 1.0f;
     fx->lv_gain = 1.0f;
+    fx->nc_env = -100.0f;
 }
 
 void afx_set(AudioFx *fx, int boost, int speaker, int level)
 {
     if (speaker != fx->speaker) memset(fx->z, 0, sizeof fx->z);
-    if (level != fx->level) { fx->lv_pow = 0; fx->lv_gain = 1.0f; fx->lv_n = 0; }
+    if (level != fx->level) { fx->lv_pow = 0; fx->lv_gain = 1.0f; fx->lv_n = 0; fx->nc_env = -100.0f; }
     fx->boost = boost;
     fx->speaker = speaker;
     fx->level = level;
@@ -115,7 +123,7 @@ void afx_process(AudioFx *fx, int16_t *pcm, int samples, int ch, int rate)
     }
     if (rate != fx->rate || ch != fx->ch) { design(fx, rate); fx->ch = ch; }
     float target = fx->boost ? powf(10.0f, 3.0f * (float)fx->boost / 20.0f) : 1.0f;
-    float rel = powf(10.0f, 6.0f * (float)CHUNK / (float)rate / 20.0f);   /* gain back up: about 6 dB a second */
+    float rel = powf(10.0f, (fx->level == 2 ? NC_REL_DBS : 6.0f) * (float)CHUNK / (float)rate / 20.0f);   /* gain back up: about 6 dB a second (night: 40) */
     float buf[CHUNK * 2];
     float csec = (float)CHUNK / (float)rate;                 /* (a chunk's length in seconds) */
     for (int off = 0; off < samples; off += CHUNK) {
@@ -161,11 +169,20 @@ void afx_process(AudioFx *fx, int16_t *pcm, int samples, int ch, int rate)
             float ms = 0.0f;
             for (int i = 0; i < n * ch; i++) ms += buf[i] * buf[i];
             ms /= (float)(n * ch);
+            float cg = 1.0f;                                 /* 1.2.2 night: the compressor's gain for this chunk */
+            if (fx->level == 2 && ms > 0.0f) {               /* (on the levelled sound; it is measured first, so a loud
+                                                              * scene does not turn the levelling down for seconds) */
+                float db = 10.0f * log10f(ms * fx->lv_gain * fx->lv_gain + 1e-12f);
+                float a = 1.0f - expf(-csec / (db > fx->nc_env ? NC_ATTACK : NC_RELEASE));
+                fx->nc_env += a * (db - fx->nc_env);
+                if (fx->nc_env > NC_THR) cg = powf(10.0f, -(fx->nc_env - NC_THR) * (1.0f - 1.0f / NC_RATIO) / 20.0f);
+            }
             if (ms > LV_SILENT * LV_SILENT) {                /* (pauses do not count) */
+                float mse = ms * cg * cg;
                 int early = fx->lv_n * csec < 3.0f;
                 float a = csec / (early ? 0.5f : LV_TAU);
                 if (a > 1.0f) a = 1.0f;
-                fx->lv_pow = fx->lv_n ? fx->lv_pow + a * (ms - fx->lv_pow) : ms;
+                fx->lv_pow = fx->lv_n ? fx->lv_pow + a * (mse - fx->lv_pow) : mse;
                 fx->lv_n++;
                 float g = sqrtf(LV_TARGET * LV_TARGET / fx->lv_pow);
                 if (g < LV_MIN) g = LV_MIN;
@@ -175,7 +192,7 @@ void afx_process(AudioFx *fx, int16_t *pcm, int samples, int ch, int rate)
                 if (g < fx->lv_gain / stepmax) g = fx->lv_gain / stepmax;
                 fx->lv_gain = g;
             }
-            want *= fx->lv_gain;
+            want *= fx->lv_gain * cg;
         }
         if (peak * want > CEIL) want = CEIL / peak;
         float g0 = fx->gain, g1;

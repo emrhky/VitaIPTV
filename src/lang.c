@@ -16,7 +16,8 @@ static const Pair FIXED[] = {
     { "Clear speech (5.1)", "Konuşma netleştirme (5.1)" },
     { "Same volume on every channel", "Kanallar arası ses eşitleme" },
     { "Sound field", "Ses alanı" }, { "Speakers", "Hoparlör" }, { "Headphones", "Kulaklık" }, { "Auto", "Otomatik" },   /* 1.3 */
-    { "Sound delay", "Ses gecikmesi" }, { "speakers", "hoparlör" }, { "headphones", "kulaklık" },   /* 1.2.1 */
+    { "Sound delay", "Ses gecikmesi" },   /* 1.2.1 */
+    { "Sound levelling", "Ses dengeleme" }, { "Between channels", "Kanallar arası" }, { "Night", "Gece" }, { "s", "sn" },   /* 1.2.2 */
     /* 1.5.1 */
     { "The server sent nothing (an empty answer)", "Sunucu bir şey göndermedi (boş cevap)" },
     { "The Vita slept: the stream was stopped", "Vita uykuya geçti: yayın durduruldu" },
@@ -104,6 +105,7 @@ static const Pair FIXED[] = {
     { "Downloading: %s  %d%%  (%s/s)", "İndiriliyor: %s  %%%d  (%s/sn)" },
     { "Downloading: %s  %d%%  (%s/s)%s", "İndiriliyor: %s  %%%d  (%s/sn)%s" },
     { "Download waits for the Wi-Fi: %s%s", "İndirme Wi-Fi bekliyor: %s%s" },
+    { "Download waits for a free connection of the account: %s%s", "İndirme hesapta boş bağlantı bekliyor: %s%s" },   /* 1.2.2 */
     { "  \xC2\xB7  %d waiting", "  \xC2\xB7  sırada %d" },
     { "Downloading: %s of %s  (%s/s)", "İndiriliyor: %s / %s  (%s/sn)" },
     { "Nothing yet: Select > Download on a film or an episode", "Henüz yok: bir film ya da bölümde Select > İndir" },
@@ -235,6 +237,10 @@ static const Pair FIXED[] = {
       "Kısık ve yüksek sesli kanallar yaklaşık aynı seviyede duyulur (seviye birkaç saniyede ayarlanır)." },
     { "Speakers: wider stereo. Headphones: more natural stereo, and 5.1 sound around you (virtual surround). Auto: headphones when they are plugged in.",
       "Hoparlör: daha geniş stereo. Kulaklık: daha doğal stereo, 5.1 seste çevreleyen ses (sanal çevresel ses). Otomatik: kulaklık takılıysa kulaklık." },
+    { "Between channels: quiet and loud channels about as loud as each other. Night: also loud scenes down and quiet speech up at once.",   /* 1.2.2 */
+      "Kanallar arası: kısık ve yüksek sesli kanallar yaklaşık aynı seviyede duyulur. Gece: ayrıca gürültülü sahneleri anında kısar, kısık konuşmaları yükseltir." },
+    { "Speakers: wider stereo, less of the deep bass they cannot play, clearer voices. Headphones: more natural stereo, and 5.1 sound around you. Auto: headphones when they are plugged in.",
+      "Hoparlör: daha geniş stereo, çalamadığı boğuk bas azalır, sesler netleşir. Kulaklık: daha doğal stereo, 5.1 seste çevreleyen ses. Otomatik: kulaklık takılıysa kulaklık." },
     { "Plays what the Vita cannot (HEVC, 1080i, AC-3...) through tools/vita_iptv_proxy.py on a PC.",
       "Vita'nın oynatamadığı yayınları (HEVC, 1080i, AC-3...) bilgisayardaki tools/vita_iptv_proxy.py ile oynatır." },
     { "The server's address, e.g. http://192.168.1.20:8090", "Sunucunun adresi, örneğin http://192.168.1.20:8090" },

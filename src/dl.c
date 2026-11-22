@@ -518,6 +518,32 @@ static int job_stop(void *ctx) { (void)ctx; return g_stop_cur || g_quit; }
 
 static volatile unsigned long long g_stream_end_ms;    /* 1.4.1: when a stream of the app ended (0 = not yet) */
 void dl_note_stream_end(void) { g_stream_end_ms = now_ms_dl(); }
+/* 1.2.2: the account check said all its connections are in use (another device, or the server still counting the
+ * last stream): its server's 405s are "busy" for a while: the download waits for a free connection */
+static volatile unsigned long long g_acct_full_ms;
+static char g_acct_full_host[128];
+static void host_of_url(const char *u, char *out, size_t cap)
+{
+    const char *h = strstr(u, "://");
+    h = h ? h + 3 : u;
+    size_t k = strcspn(h, "/?#|");
+    if (k >= cap) k = cap - 1;
+    memcpy(out, h, k);
+    out[k] = 0;
+}
+void dl_note_account_full(const char *server_url, int full)
+{
+    if (!full) { g_acct_full_ms = 0; return; }
+    host_of_url(server_url, g_acct_full_host, sizeof g_acct_full_host);
+    g_acct_full_ms = now_ms_dl();
+}
+static int acct_full_for(const char *url)
+{
+    if (!g_acct_full_ms || now_ms_dl() - g_acct_full_ms > 30ULL * 60 * 1000) return 0;
+    char h[128];
+    host_of_url(url, h, sizeof h);
+    return !strcmp(h, g_acct_full_host);
+}
 static int (*volatile g_net_up)(void);
 static volatile int g_asleep;
 void dl_set_net_check(int (*up)(void)) { g_net_up = up; }
@@ -618,7 +644,7 @@ static void run_one(const char *dir)
     char url[DL_URL_MAX], ua[256], ref[512];
     url_split_headers(it->url, url, sizeof url, ua, sizeof ua, ref, sizeof ref);
     if (f_size(vpath) <= 0) get_srt(it, url, ua, ref);      /* 1.3.1 (once, before the film) */
-    int status = 0, fails = 0, busy = 0, empty = 0;
+    int status = 0, fails = 0, busy = 0, empty = 0, acct_waits = 0;
     const char *err = NULL;
     int need_mb = 0, free_mb = 0;
     long long have0 = f_size(vpath);                         /* 1.3.1: the speed of this session (log) */
@@ -672,6 +698,13 @@ static void run_one(const char *dir)
         if (j.nospace) { err = "The memory card is full"; break; }
         if (g_stop_cur || g_quit) break;
         if (status == 416 && it->size && j.have >= it->size) { it->done = 1; break; }   /* (all of it was there) */
+        if (status == 405 && acct_full_for(url) && acct_waits < 40 && !g_stop_cur && !g_quit) {   /* 1.2.2: 20 minutes */
+            if (!acct_waits++) plog("dl: server answered 405 and the account's connections are all in use: waiting for one");
+            lock(); g_cur_st.netwait = 2; unlock();
+            for (int k = 0; k < 300 && !g_stop_cur && !g_quit; k++) sceKernelDelayThread(100000);   /* (30 s) */
+            lock(); g_cur_st.netwait = 0; unlock();
+            continue;
+        }
         if (status >= 400) {
             int after_stream = g_stream_end_ms && now_ms_dl() - g_stream_end_ms < 120000;   /* 1.4.1: up to a minute then */
             if (busy_http(status) && busy++ < (after_stream ? 12 : 3)) {   /* (the account still counted on the last stream) */
