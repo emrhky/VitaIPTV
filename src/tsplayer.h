@@ -102,6 +102,7 @@ void              tsp_set_ext_subs(const struct SrtList *subs, int n);
 void              tsp_sub_choose(int k);
 /* 0.7.0: subtitles shown this many ms later (negative: earlier); stays for the next starts */
 void              tsp_set_sub_delay(int ms);
+void              tsp_set_audio_delay(int ms);   /* 1.2.1: + = the sound is heard later (the picture waits for it) */
 /* 0.7.0: the subtitle for the picture on the screen; 1 = out has text */
 int               tsp_sub_text(char *out, size_t cap);
 /* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */

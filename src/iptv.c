@@ -1375,6 +1375,13 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "snd_dialog")) st->snd_dialog = small_num(v, 1, 0);
             else if (!strcmp(k, "snd_level")) st->snd_level = small_num(v, 1, 0);
             else if (!strcmp(k, "snd_field")) st->snd_field = small_num(v, 3, 3);
+            else if (!strcmp(k, "adelay_sp") || !strcmp(k, "adelay_hp")) {   /* 1.2.1: -500..1000 ms, 50 ms steps */
+                int n = atoi(v);
+                if (n < -500) n = -500;
+                if (n > 1000) n = 1000;
+                n = n / 50 * 50;
+                if (k[7] == 's') st->adelay_sp = n; else st->adelay_hp = n;
+            }
             else if (!strcmp(k, "proxy_off")) st->proxy_off = small_num(v, 1, 0);   /* 1.1 */
             /* hide_1080p= (before v0.4.0): that filter is gone, the 4K one starts off */
             else if (!strcmp(k, "resolution")) {
@@ -1410,6 +1417,8 @@ int settings_format(const Settings *st, char *out, size_t outsz)
     if (st->snd_dialog) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_dialog=1\n");
     if (st->snd_level) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_level=1\n");
     if (st->snd_field != 3) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_field=%d\n", st->snd_field);
+    if (st->adelay_sp) e += snprintf(ex + e, sizeof ex - (size_t)e, "adelay_sp=%d\n", st->adelay_sp);   /* 1.2.1 */
+    if (st->adelay_hp) e += snprintf(ex + e, sizeof ex - (size_t)e, "adelay_hp=%d\n", st->adelay_hp);
     if ((size_t)w + (size_t)e >= outsz) return -1;
     memcpy(out + w, ex, (size_t)e + 1);
     return w + e;

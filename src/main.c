@@ -323,28 +323,31 @@ static void poll_cancel(void);
 static int net_stop_cb(void *ctx) { (void)ctx; poll_cancel(); return net_cancel; }
 
 static const char *http_ua;                 /* 1.5.1 (http_get: this User-Agent instead of the app's; NULL = the app's) */
+static char *http_final;                    /* 1.2.1 (http_get: the address that answered, after redirects; NULL = not asked) */
+static size_t http_final_cap;
 static int http_get_curl(const char *url, const char *user, const char *pass, Mem *m, char *err, size_t errsz)
 {
     CioRequest rq = { url, user, pass, 10, 20, mem_data, net_stop_cb, m };
     rq.ua = http_ua;                                         /* 1.5.1 (web pages: a browser's) */
-    int status = 0;
+    if (http_final) { http_final[0] = 0; rq.final_url = http_final; rq.final_cap = http_final_cap; }
+    int hstatus = 0;
     char e[96];
     unsigned t0 = now_ms();
-    int r = cio_get(&rq, &status, e, sizeof e);
+    int r = cio_get(&rq, &hstatus, e, sizeof e);
     unsigned ms = now_ms() - t0;
     int tries = cio_last_connect_tries();
-    plog("http: GET %.5s -> status %d, %u KB in %u.%u s, connect %d ms%s%s%s", url, status,
+    plog("http: GET %.5s -> status %d, %u KB in %u.%u s, connect %d ms%s%s%s", url, hstatus,
          (unsigned)(m->len / 1024), ms / 1000, ms % 1000 / 100, cio_last_connect_ms(),
          tries > 1 ? (tries == 2 ? " (2nd socket: the first stayed silent)" : " (3rd socket: the first ones stayed silent)") : "",
          r < 0 ? ", " : "", r < 0 ? e : "");
     const char *rn = cio_rcvbuf_note();                     /* (1.5.1: only when the system gave less) */
     if (rn[0] && strstr(rn, "refused")) plog("http: receive buffer: %s", rn);
     if (net_cancel) { snprintf(err, errsz, "Cancelled"); return -1; }
-    if (r < 0 && !status && !m->buf && !strncasecmp(url, "http:", 5)) {      /* (0.6.0: plain http: the system HTTP tries) */
+    if (r < 0 && !hstatus && !m->buf && !strncasecmp(url, "http:", 5)) {      /* (0.6.0: plain http: the system HTTP tries) */
         snprintf(err, errsz, "Connection failed (%s)", e);
         return 1;
     }
-    if (status >= 400) { snprintf(err, errsz, "Server answered HTTP %d", status); return -1; }
+    if (hstatus >= 400) { snprintf(err, errsz, "Server answered HTTP %d", hstatus); return -1; }
     if (m->overflow) { snprintf(err, errsz, "List is too large (over 24 MB)"); return -1; }
     if (r < 0) { snprintf(err, errsz, "Connection failed (%s)", e); return -1; }
     if (!m->buf) { snprintf(err, errsz, "Empty answer"); return -1; }
@@ -409,9 +412,9 @@ static int http_get(const char *url, const char *user, const char *pass, Mem *m,
         goto done;
     }
 
-    int status = 0;
-    sceHttpGetStatusCode(req, &status);
-    if (status >= 400) { snprintf(err, errsz, "Server answered HTTP %d", status); goto done; }
+    int hstatus = 0;
+    sceHttpGetStatusCode(req, &hstatus);
+    if (hstatus >= 400) { snprintf(err, errsz, "Server answered HTTP %d", hstatus); goto done; }
 
     unsigned char buf[16384];
     for (;;) {
@@ -627,6 +630,7 @@ static int power_cb(int notify_id, int notify_count, int arg, void *common)
         pw_flags |= arg;
         pw_suspend = 1;
         dl_set_asleep(1);                                    /* (the Wi-Fi goes: the downloads wait, not fail) */
+        plog_flush();                                        /* 1.2.1: what the log holds, before the sleep */
     }
     if (arg & (SCE_POWER_CB_SYSTEM_RESUMING | SCE_POWER_CB_SYSTEM_RESUME | SCE_POWER_CB_APP_RESUME | SCE_POWER_CB_APP_RESUMING)) {
         pw_flags |= arg;
@@ -757,6 +761,7 @@ int main(void)
     dl_set_net_check(dl_net_up);                             /* 1.5.2: no network: they wait (not counted as failing) */
     dl_refresh();                                            /* (1.3.1: before the playlists: is there a Downloads row?) */
     load_sources();
+    cache_sweep();                                           /* 1.2.1: saved copies of playlists no longer there */
     plog("dl: %d downloads, %lld MB free", dln, dl_free_now >= 0 ? dl_free_now >> 20 : -1);
     while (now_ms() - t0 < 1500) splash_frame(T("Loading playlists..."));   /* let the logo be seen */
     if (splash_img) { vita2d_wait_rendering_done(); vita2d_free_texture(splash_img); splash_img = NULL; }
@@ -801,6 +806,7 @@ int main(void)
         dl_poll();                                           /* 1.3: downloads */
         power_poll();                                        /* 1.5.1: back from sleep */
         status_tick();                                       /* 1.5.2: the notes go by themselves */
+        plog_tick();                                         /* 1.2.1: the log lines of the last second to the card */
         {                                                    /* 0.8.1: the console slept (the clock jumped): the lock closes */
             static int64_t last_wall;
             static unsigned last_check;
@@ -1818,6 +1824,7 @@ int main(void)
     sceHttpTerm();
     sceNetCtlTerm();
     sceNetTerm();
+    plog_flush();
     sceKernelExitProcess(0);
     return 0;
 }

@@ -120,6 +120,7 @@ static uint64_t g_file_total;           /* 1.3.2: tsp_set_file_total */
 typedef struct Tsp Tsp;
 static int film_ms_at(Tsp *t, int64_t p);
 static volatile int g_sub_delay;        /* ms, + = later */
+static volatile int g_audio_delay;      /* 1.2.1: ms, + = the sound is heard later (Bluetooth): the picture waits */
 #define NO_TS        0xFFFFFFFFu
 
 enum { SLOT_FREE = 0, SLOT_READY, SLOT_SHOWN, SLOT_OFF };   /* OFF: the decoder refused its memory */
@@ -334,6 +335,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     uint8_t *mpcm;
     int port_rate, port_ch;
     volatile int is_hls;                /* the address answered with an HLS playlist */
+    int size_changes;                   /* 1.2.1: the picture size changed on the way (the decoder opened again) */
     int skip_nonref;                    /* decoder too small for this stream: drop pictures nothing refers to */
     SceAvcdecCtrl ctrl;
     SceUID fb_uid, es_uid;
@@ -1827,6 +1829,27 @@ static void video_packet(Tsp *t, Pkt *p)
         t->st.errors--;                                     /* (not an error) */
     }
     yuv_check(t, start_ok);                                 /* (1.2; a switch only at a keyframe) */
+    if (t->dec_open && (i->width != t->vw || i->height != t->vh) && i->width > 0 && i->height > 0) {
+        /* 1.2.1: the picture size changed on the way (a channel going from HD to SD for adverts, a region's own
+         * programme): before, "Picture size changed (not supported yet)" stopped the channel. The decoder is
+         * opened again for the new size at its first keyframe; the units before it are left out. */
+        if (!start_ok || i->sps_len == 0 || i->pps_len == 0) { t->st.dropped++; return; }
+        if (++t->size_changes > 30) {
+            set_error_kind(t, TSP_ERRK_FORMAT, "Picture size changed to %dx%d (not supported yet)", i->width, i->height);
+            return;
+        }
+        plog("tsp: the picture size changed: %dx%d -> %dx%d; the decoder is opened again", t->vw, t->vh, i->width, i->height);
+        sceKernelLockMutex(t->lock, 1, NULL);
+        t->ready = 0;
+        sceKernelUnlockMutex(t->lock, 1);
+        wait_ui_release(t);                                 /* the screen may still be drawing a picture */
+        free_plan(t);
+        decoder_core_close(t);
+        t->no_out = 0;
+        t->skip_nonref = 0;
+        t->grow_pending = 0;
+        t->d_errs = 0;
+    }
     if (!t->dec_open) {
         if (!start_ok || i->width == 0 || i->sps_len == 0 || i->pps_len == 0) {
             if (!t->err_set) t->st.state = TSP_WAIT_KEY;
@@ -1900,9 +1923,6 @@ static void video_packet(Tsp *t, Pkt *p)
         }
         t->need_key = 0;
         t->need_params = 1;
-    } else if (i->width != t->vw || i->height != t->vh) {
-        set_error_kind(t, TSP_ERRK_FORMAT, "Picture size changed to %dx%d (not supported yet)", i->width, i->height);
-        return;
     }
 
     /* Damaged pictures are decoded anyway (brief artifacts beat a freeze until the next
@@ -2221,15 +2241,15 @@ static void video_packet(Tsp *t, Pkt *p)
          * reference count. Reopen it with other counts (2, 3, 4) before giving up. */
         if ((unsigned)r == 0x80620002u && t->st.decoded == 0 && t->st.errors >= 2 && t->ladder < 3) {
             static const int TRY[3] = { 2, 3, 4 };
-            int n = TRY[t->ladder++];
-            if (n == t->nref) n = TRY[t->ladder < 3 ? t->ladder++ : 2];
-            plog("tsp: decoder refuses every picture with %d refs, reopening with %d", t->nref, n);
+            int nr = TRY[t->ladder++];
+            if (nr == t->nref) nr = TRY[t->ladder < 3 ? t->ladder++ : 2];
+            plog("tsp: decoder refuses every picture with %d refs, reopening with %d", t->nref, nr);
             decoder_core_close(t);
             t->need_params = 1;
             t->need_key = 1;
             t->pts_retry_done = 0;
             t->use_pts = 1;
-            int rr = decoder_core_open(t, n, n);
+            int rr = decoder_core_open(t, nr, nr);
             if (rr < 0) { set_error(t, "Decoder init failed (0x%08X), see log.txt", (unsigned)rr); return; }
         }
         if (t->st.decoded == 0 && t->st.errors >= 8 && i->interlaced)
@@ -2330,6 +2350,7 @@ void tsp_sub_choose(int k)
 }
 
 void tsp_set_sub_delay(int ms) { g_sub_delay = ms; }
+void tsp_set_audio_delay(int ms) { g_audio_delay = ms; }
 
 void tsp_set_ext_subs(const SrtList *subs, int n)
 {
@@ -4040,9 +4061,9 @@ static void read_hls(Tsp *t, uint8_t *buf)
             next = m.endlist || m.nseg <= back ? m.first_seq : m.seg[m.nseg - back].seq;
             plog("tsp: HLS %s, %d segments of %d ms, starting at #%lld", m.endlist ? "video" : "live", m.nseg, m.target_ms, (long long)next);
             if (alt) {                                       /* 0.6.0: live: the sound starts as far from the end */
-                int64_t back = 0;
-                for (int i = 0; i < m.nseg; i++) if (m.seg[i].seq >= next) back += m.seg[i].duration_ms;
-                alt->back_ms = (int)back;
+                int64_t live_ms = 0;
+                for (int i = 0; i < m.nseg; i++) if (m.seg[i].seq >= next) live_ms += m.seg[i].duration_ms;
+                alt->back_ms = (int)live_ms;
             }
         }
         if (m.nseg && next < m.seg[0].seq) {                /* the playlist moved past us */
@@ -4568,7 +4589,37 @@ static void read_vod(Tsp *t, uint8_t *buf)
         else set_error_kind(t, TSP_ERRK_NET, "The server did not answer");
         return;
     }
+    if (!t->vod_file && hls_is_playlist((const char *)head, (size_t)n)) {   /* 1.2.1: the film's address gave an HLS
+                                                              * playlist (some providers send films so): played as one */
+        free(io.win);
+        plog("tsp: VOD: the address answered with an HLS playlist: played as HLS%s", t->vod_start_ms > 0 ? " (from the start)" : "");
+        t->is_hls = 1;
+        read_hls(t, buf);
+        return;
+    }
     int kind = vod_container(head, (size_t)n);
+    if (kind == VOD_UNKNOWN) {                              /* 1.2.1: what came, in the log (the user's films: "unknown") */
+        char seen[97];
+        size_t k = 0;
+        for (int i = 0; i < n && k < sizeof seen - 1; i++) {
+            unsigned char c = head[i];
+            seen[k++] = c == '\n' || c == '\r' || c == '\t' ? ' ' : (c >= 32 && c < 127) ? (char)c : '.';
+        }
+        seen[k] = 0;
+        plog("tsp: VOD: not a video file (%d bytes read, %llu in all): \"%s\"", n, (unsigned long long)t->vod_total, seen);
+        int html = 0;
+        for (int i = 0; i + 5 <= n && !html; i++) html = !strncasecmp((const char *)head + i, "<html", 5) || !strncasecmp((const char *)head + i, "<!doc", 5);
+        if (html) {
+            free(io.win);
+            set_error_kind(t, TSP_ERRK_NET, "The server sent a web page instead of the film (see log.txt)");
+            return;
+        }
+        if (n < 512 && head[0] == '{') {
+            free(io.win);
+            set_error_kind(t, TSP_ERRK_NET, "The server sent a message instead of the film (see log.txt)");
+            return;
+        }
+    }
     int64_t start = t->vod_start_ms > 0 ? t->vod_start_ms : 0, at = 0;
     uint64_t off = 0;
     plog("tsp: VOD %s file, %llu MB", vod_container_name(kind), (unsigned long long)(t->vod_total >> 20));
@@ -4764,7 +4815,12 @@ static int audio_now(Tsp *t, uint64_t now, int64_t *apts)
     if (t->aclock_valid) {
         int64_t dt = (int64_t)(now - t->aclock_us);
         if (dt < 0) dt = 0;
-        if (dt < ACLOCK_STALE) { *apts = t->aclock_pts + dt * 9 / 100; ok = 1; }
+        if (dt < ACLOCK_STALE) {
+            /* 1.2.1: what is heard now: the sound delay set (Bluetooth: heard ~0.2 s after it is played) */
+            /* (not brought into 0..2^33: the clock may be a little below 0 at the start, as before) */
+            *apts = t->aclock_pts + dt * 9 / 100 - (int64_t)g_audio_delay * 90;
+            ok = 1;
+        }
     }
     sceKernelUnlockMutex(t->qlock, 1);
     return ok;

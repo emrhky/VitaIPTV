@@ -81,6 +81,8 @@ typedef struct {
     /* 1.1: sound: boost 0-3 (off, +3, +6, +9 dB), speaker mode 0/1, clear dialogue for 5.1 0/1 (audiofx.h,
      * a52dec.h); written only when not off */
     int snd_boost, snd_speaker, snd_dialog, snd_level;   /* (1.2: snd_level, one level on every channel) */
+    int adelay_sp, adelay_hp;           /* 1.2.1: the sound delay in ms (+ = the sound comes later: the picture waits for
+                                         * it; Bluetooth headphones): on the speakers / on anything else plugged in */
     int snd_field;                      /* 1.3: sound field: 0 off, 1 speakers, 2 headphones, 3 auto (the default:
                                          * headphones when they are plugged in, else speakers) */
 } Settings;

@@ -43,9 +43,14 @@ int  ia_pick_file(const char *json, size_t len, const char *id, char *url, size_
 void ia_cache_load(const char *path);
 const char *ia_cache_get(const char *id, int *dur_s);
 void ia_cache_put(const char *path, const char *id, const char *url, int dur_s);
+/* 1.2.1: an item with more than one video (the user's archive.org/details/aaa-archive: 45): each uploaded video once,
+ * with the file to play (the archive's H.264 copy, else the upload if it is an MP4), in natural name order.
+ * Returns how many; *left = videos with no file the Vita plays. */
+typedef struct { char url[IPTV_URL_MAX]; char title[IPTV_NAME_MAX]; int dur_s; } IaVideo;
+int  ia_list_videos(const char *json, size_t len, const char *id, IaVideo *out, int max, int *left);
 
 /* ---- web pages ---- */
-#define WEB_MAX_VIDEOS 24
+#define WEB_MAX_VIDEOS 300                  /* 1.2.1: 24 -> 300 (a folder's list of files: archive.org/download/ID/) */
 #define WEB_MAX_FRAMES 3
 enum { WV_FILE = 1, WV_HLS, WV_DASH };
 typedef struct {

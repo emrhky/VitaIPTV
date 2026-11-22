@@ -425,7 +425,7 @@ int ia_parse_search(const char *json, size_t len, const char *group, ChannelList
     return added;
 }
 
-typedef struct { char name[256], format[48], height[12], length[24], size[24]; } IaFile;
+typedef struct { char name[256], format[48], height[12], length[24], size[24], source[16], original[256]; } IaFile;
 static void ia_file_member(void *ctx, const char *key, const char *v, const char *end)
 {
     IaFile *f = ctx;
@@ -434,6 +434,8 @@ static void ia_file_member(void *ctx, const char *key, const char *v, const char
     else if (!strcmp(key, "height")) js_text(v, end, f->height, sizeof f->height);
     else if (!strcmp(key, "length")) js_text(v, end, f->length, sizeof f->length);
     else if (!strcmp(key, "size")) js_text(v, end, f->size, sizeof f->size);
+    else if (!strcmp(key, "source")) js_text(v, end, f->source, sizeof f->source);   /* 1.2.1 */
+    else if (!strcmp(key, "original")) js_text(v, end, f->original, sizeof f->original);
 }
 typedef struct { char *plot; size_t cap; } IaMeta;
 static void ia_meta_member(void *ctx, const char *key, const char *v, const char *end)
@@ -508,6 +510,106 @@ int ia_pick_file(const char *json, size_t len, const char *id, char *url, size_t
     return 0;
 }
 
+/* 1.2.1: names in "natural" order (2 before 10) */
+static int nat_cmp(const char *a, const char *b)
+{
+    while (*a && *b) {
+        if (isdigit((unsigned char)*a) && isdigit((unsigned char)*b)) {
+            while (*a == '0') a++;
+            while (*b == '0') b++;
+            size_t la = 0, lb = 0;
+            while (isdigit((unsigned char)a[la])) la++;
+            while (isdigit((unsigned char)b[lb])) lb++;
+            if (la != lb) return la < lb ? -1 : 1;
+            int c = strncmp(a, b, la);
+            if (c) return c;
+            a += la; b += lb;
+            continue;
+        }
+        int ca = tolower((unsigned char)*a), cb = tolower((unsigned char)*b);
+        if (ca != cb) return ca < cb ? -1 : 1;
+        a++; b++;
+    }
+    return *a ? 1 : *b ? -1 : 0;
+}
+static int is_video_format(const char *f)
+{
+    return ci_str(f, "mpeg4") || ci_str(f, "h.264") || ci_str(f, "matroska") || ci_str(f, "avi") || ci_str(f, "webm") ||
+           ci_str(f, "ogg video") || ci_str(f, "quicktime") || ci_str(f, "mpeg2") || ci_str(f, "mpeg-2") || ci_str(f, "flash video");
+}
+typedef struct { char key[256]; IaFile best; int score, video; } IaGroup;
+static int group_cmp(const void *x, const void *y) { return nat_cmp(((const IaGroup *)x)->key, ((const IaGroup *)y)->key); }
+
+int ia_list_videos(const char *json, size_t len, const char *id, IaVideo *out, int max, int *left)
+{
+    const char *end = json + len;
+    *left = 0;
+    const char *p = js_find_key(json, end, "files");
+    if (!p || *p != '[') return 0;
+    int ng = 0, cap = 64;
+    IaGroup *g = malloc(sizeof *g * (size_t)cap);
+    if (!g) return 0;
+    p++;
+    for (;;) {
+        p = js_ws(p, end);
+        if (!p || p >= end || *p == ']') break;
+        if (*p == ',') { p++; continue; }
+        if (*p != '{') { p = js_skip(p, end); continue; }
+        IaFile f;
+        memset(&f, 0, sizeof f);
+        p = js_object(p, end, ia_file_member, &f);
+        if (!p) break;
+        /* one uploaded video and the copies the archive made of it: one group, named after the upload */
+        const char *key = !strcasecmp(f.source, "derivative") && f.original[0] ? f.original : f.name;
+        int video = is_video_format(f.format), sc = ia_score(&f);
+        if (!video && sc < 0) continue;
+        int k = 0;
+        while (k < ng && strcmp(g[k].key, key)) k++;
+        if (k == ng) {
+            if (ng == cap) {
+                IaGroup *ng2 = realloc(g, sizeof *g * (size_t)(cap * 2));
+                if (!ng2) break;
+                g = ng2;
+                cap *= 2;
+            }
+            memset(&g[ng], 0, sizeof g[ng]);
+            snprintf(g[ng].key, sizeof g[ng].key, "%s", key);
+            g[ng].score = -1;
+            ng++;
+        }
+        g[k].video |= video;
+        if (sc > g[k].score) { g[k].score = sc; g[k].best = f; }
+    }
+    qsort(g, (size_t)ng, sizeof *g, group_cmp);
+    int n = 0;
+    for (int k = 0; k < ng; k++) {
+        if (!g[k].video && g[k].score < 0) continue;
+        if (g[k].score < 0) { (*left)++; continue; }         /* a video the Vita cannot play (no H.264 MP4 of it) */
+        if (n >= max) break;
+        IaVideo *v = &out[n];
+        char en[sizeof g[k].best.name * 3];
+        url_encode_q(g[k].best.name, en, sizeof en, 1);
+        int w = snprintf(v->url, sizeof v->url, "https://archive.org/download/%s/%s", id, en);
+        if (w <= 0 || (size_t)w >= sizeof v->url) continue;
+        const char *base = strrchr(g[k].key, '/');           /* its name: the upload's, without folder and extension */
+        const char *nm = base ? base + 1 : g[k].key;
+        size_t tl = strlen(nm);
+        if (tl >= sizeof v->title) {                         /* (cut, not inside a letter) */
+            tl = sizeof v->title - 1;
+            while (tl && ((unsigned char)nm[tl] & 0xC0) == 0x80) tl--;
+        }
+        memcpy(v->title, nm, tl);
+        v->title[tl] = 0;
+        char *dot = strrchr(v->title, '.');
+        if (dot && dot != v->title) *dot = 0;
+        for (char *c = v->title; *c; c++) if (*c == '_') *c = ' ';
+        v->dur_s = secs_of(g[k].best.length);
+        n++;
+    }
+    free(g);
+    return n;
+}
+
 #define IA_CACHE_MAX 512
 static struct { char id[96]; char url[IPTV_URL_MAX]; int dur; } *g_iac;
 static int g_niac, g_iac_loaded;
@@ -533,6 +635,7 @@ void ia_cache_load(const char *path)
     FILE *f = fopen(path, "r");
     if (!f) return;
     char line[IPTV_URL_MAX + 160];
+    int lines = 0;
     while (fgets(line, sizeof line, f)) {
         line[strcspn(line, "\r\n")] = 0;
         char *a = strchr(line, '|');
@@ -542,8 +645,21 @@ void ia_cache_load(const char *path)
         int dur = 0;
         if (b) { *b++ = 0; dur = atoi(b); }
         if (line[0] && !strncmp(a, "https://", 8)) iac_set(line, a, dur);
+        lines++;
     }
     fclose(f);
+    if (lines > g_niac + 64) {                               /* 1.2.1: only added to before: written again as it is
+                                                              * kept (the newest IA_CACHE_MAX films, each once) */
+        char tmp[300];
+        snprintf(tmp, sizeof tmp, "%s.tmp", path);
+        FILE *w = fopen(tmp, "w");
+        if (!w) return;
+        int ok = 1;
+        for (int k = 0; k < g_niac; k++) ok &= fprintf(w, "%s|%s|%d\n", g_iac[k].id, g_iac[k].url, g_iac[k].dur) > 0;
+        if (fclose(w) != 0 || !ok) { remove(tmp); return; }
+        remove(path);                                        /* (a rename does not replace a file on the Vita) */
+        if (rename(tmp, path) != 0) remove(tmp);
+    }
 }
 
 const char *ia_cache_get(const char *id, int *dur_s)
@@ -650,6 +766,24 @@ static void add_video(WebScan *s, const char *base, const char *raw, size_t rl, 
     if (!k) k = kind_hint;
     if (!k) return;
     for (int i = 0; i < s->n; i++) if (!strcmp(s->v[i].url, abs)) return;
+    /* 1.2.1: archive.org keeps an H.264 copy beside a video it was given: "X.ia.mp4" beside "X.mp4" (or .mkv,
+     * .avi...). One row for both: the copy (it plays on the Vita), with the first one's title */
+    size_t al = strlen(abs);
+    const char *dot = strrchr(abs, '.');
+    if (al > 7 && !strcasecmp(abs + al - 7, ".ia.mp4")) {
+        size_t stem = al - 6;                                /* "X." */
+        for (int i = 0; i < s->n; i++)
+            if (!strncmp(s->v[i].url, abs, stem) && !strchr(s->v[i].url + stem, '.') && !strchr(s->v[i].url + stem, '/')) {
+                memcpy(s->v[i].url, abs, al + 1);
+                return;
+            }
+    } else if (dot) {
+        size_t stem = (size_t)(dot - abs) + 1;               /* "X." */
+        for (int i = 0; i < s->n; i++) {
+            size_t ul = strlen(s->v[i].url);
+            if (ul == stem + 6 && !strncmp(s->v[i].url, abs, stem) && !strcasecmp(s->v[i].url + stem, "ia.mp4")) return;
+        }
+    }
     if (s->n >= WEB_MAX_VIDEOS) return;
     WebVideo *v = &s->v[s->n++];
     memcpy(v->url, abs, strlen(abs) + 1);                    /* (shorter than IPTV_URL_MAX: checked above) */
@@ -718,6 +852,8 @@ void web_scan(const char *html, size_t len, const char *base, WebScan *s)
                 url_decode(slash, (size_t)(f - slash), nm, sizeof nm);
                 char *dot = strrchr(nm, '.');
                 if (dot && dot != nm) *dot = 0;
+                size_t nl = strlen(nm);                      /* 1.2.1: archive.org's copy "X.ia.mp4": "X" */
+                if (nl > 3 && !strcasecmp(nm + nl - 3, ".ia")) nm[nl - 3] = 0;
                 add_video(s, base, a, strlen(a), 0, nm);
             }
         } else if ((tl == 6 && !strncasecmp(t, "iframe", 6)) || (tl == 5 && !strncasecmp(t, "embed", 5))) {

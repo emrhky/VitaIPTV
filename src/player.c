@@ -35,55 +35,11 @@ static volatile int g_audio_run;
 static SceUID g_audio_thread = -1;
 static int g_audio_port = -1;
 
-/* ---- log file: written and closed on every line, so it survives a crash ---- */
-#define LOG_PATH "ux0:data/VitaIPTV/log.txt"
 static int g_module_loaded;
 static volatile int g_audio_logged, g_video_logged;
 static int g_last_active = -1;
 
-/* 0.8.1: the log has a size limit: the app may run for days (the console sleeps, it is not closed). Past 1 MB
- * the regular statistics lines stop; past 3 MB nothing more is written until the app starts again. */
-#define LOG_SOFT (1u << 20)
-#define LOG_HARD (3u << 20)
-static volatile unsigned g_log_bytes;
-
-static int log_periodic(const char *fmt)
-{
-    static const char *const P[] = { "tsp: stats ", "tsp: rates ", "tsp: timing", "tsp: cpu", "tsp: decoder units",
-                                     "tsp: HD decoder units", "tsp: HD decoder had" };
-    for (size_t i = 0; i < sizeof P / sizeof P[0]; i++) if (!strncmp(fmt, P[i], strlen(P[i]))) return 1;
-    return 0;
-}
-
-void plog(const char *fmt, ...)
-{
-    unsigned have = g_log_bytes;
-    if (have >= LOG_HARD) return;
-    if (have >= LOG_SOFT && log_periodic(fmt)) return;
-    FILE *f = fopen(LOG_PATH, "a");
-    if (!f) return;
-    va_list ap;
-    va_start(ap, fmt);
-    int n = vfprintf(f, fmt, ap);
-    va_end(ap);
-    fputc('\n', f);
-    unsigned now = have + (n > 0 ? (unsigned)n : 0) + 1;
-    if (have < LOG_SOFT && now >= LOG_SOFT) fputs("log: 1 MB: the regular statistics lines stop here\n", f);
-    if (now >= LOG_HARD) fputs("log: 3 MB: nothing more is written until the app is started again\n", f);
-    g_log_bytes = now;
-    fclose(f);
-}
-
-void player_log_reset(void)
-{
-    /* the previous run's log stays as log_prev.txt (after a freeze the app is restarted, which used to
-     * wipe the log that showed what happened) */
-    remove("ux0:data/VitaIPTV/log_prev.txt");
-    rename(LOG_PATH, "ux0:data/VitaIPTV/log_prev.txt");
-    FILE *f = fopen(LOG_PATH, "w");
-    if (f) { fputs("Vita IPTV log\n", f); fclose(f); }
-    g_log_bytes = 14;
-}
+/* (1.2.1: the log, plog and player_log_reset, is in applog.c) */
 
 /* ---- allocators required by SceAvPlayer -------------------------------- */
 static void *mem_alloc(void *arg, uint32_t align, uint32_t size)

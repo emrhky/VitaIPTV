@@ -16,6 +16,7 @@ static const Pair FIXED[] = {
     { "Clear speech (5.1)", "Konuşma netleştirme (5.1)" },
     { "Same volume on every channel", "Kanallar arası ses eşitleme" },
     { "Sound field", "Ses alanı" }, { "Speakers", "Hoparlör" }, { "Headphones", "Kulaklık" }, { "Auto", "Otomatik" },   /* 1.3 */
+    { "Sound delay", "Ses gecikmesi" }, { "speakers", "hoparlör" }, { "headphones", "kulaklık" },   /* 1.2.1 */
     /* 1.5.1 */
     { "The server sent nothing (an empty answer)", "Sunucu bir şey göndermedi (boş cevap)" },
     { "The Vita slept: the stream was stopped", "Vita uykuya geçti: yayın durduruldu" },
@@ -338,6 +339,8 @@ static const Pair FIXED[] = {
     { "Jumping is not possible in this file", "Bu dosyada ileri/geri atlanamıyor" },
     { "AVI file: not supported (MKV, MP4, TS and FLV are)", "AVI dosyası: desteklenmiyor (MKV, MP4, TS ve FLV destekleniyor)" },
     { "Unknown file type", "Bilinmeyen dosya türü" },
+    { "The server sent a web page instead of the film (see log.txt)", "Sunucu film yerine bir web sayfası gönderdi (log.txt'ye bakın)" },   /* 1.2.1 */
+    { "The server sent a message instead of the film (see log.txt)", "Sunucu film yerine bir mesaj gönderdi (log.txt'ye bakın)" },
     { "Damaged or unusual Matroska file", "Bozuk veya alışılmadık Matroska dosyası" },
     { "MP4 index too big", "MP4 dizini çok büyük" }, { "Damaged MP4 file (no index)", "Bozuk MP4 dosyası (dizin yok)" },
     { "MP4 file: the server does not allow reading its index", "MP4 dosyası: sunucu dizinin okunmasına izin vermiyor" },
@@ -448,6 +451,8 @@ static const Pair PATTERNS[] = {
     { "The server does not give this one (HTTP %d)", "Sunucu bu içeriği vermiyor (HTTP %s)" },   /* 1.4.1 */
     { "The first %d of %d films (the most watched)", "%s / %s film (en çok izlenenler)" },   /* 1.5 */
     { "%d of %d films (%s)", "%s / %s film (%s)" },   /* 1.5.1 */
+    { "%d videos (%d left out: no MP4 the Vita plays)", "%s video (%s tanesi dışarıda: Vita'nın oynattığı MP4 yok)" },   /* 1.2.1 */
+    { "%d videos", "%s video" },
     { "%d videos left out (the Vita cannot play them: see webcheck.txt)", "%s video dışarıda kaldı (Vita oynatamaz: webcheck.txt'ye bakın)" },
     { "The page could not be opened (%s)", "Sayfa açılamadı (%s)" },
     { "Server answered HTTP %d (the provider refuses: account busy?)", "Sunucu HTTP %s yanıtı verdi (sağlayıcı reddediyor: hesap kullanımda olabilir)" },
