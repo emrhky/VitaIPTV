@@ -21,6 +21,23 @@ static int field_effective(void)
     if (settings.snd_field != 3) return settings.snd_field;
     return g_hp == 1 ? 2 : 1;
 }
+/* 1.2.1: the sound delay goes with where the sound goes: the Vita's speakers, or anything else (headphones, the
+ * dock, Bluetooth; how Bluetooth shows in the device value is not known: so not "headphones" only) */
+static int out_speakers(void)
+{
+    unsigned int v = g_avdev;
+    if (v == 0xFFFFFFFFu || v == 0xFFFFFFFEu) return 1;
+    if (v & 0xFF00u) return (v & 0x1000u) != 0;
+    return (v & ~1u) == 0;
+}
+static int *adelay_slot(void) { return out_speakers() ? &settings.adelay_sp : &settings.adelay_hp; }
+static void adelay_apply(void)
+{
+    static int last = -99999;
+    int d = *adelay_slot();
+    tsp_set_audio_delay(d);
+    if (d != last) { plog("audio out: sound delay %+d ms (%s)", d, out_speakers() ? "speakers" : "headphones / other"); last = d; }
+}
 static void snd_field_apply(void)
 {
     int f = field_effective();
@@ -42,6 +59,7 @@ static void snd_auto_poll(void)
     } else if (v != g_avdev) {
         g_avdev = v;
         plog("audio out: device 0x%X: %s", v, avdev_headphones(v) ? "headphones" : "speakers");
+        adelay_apply();                                      /* 1.2.1 */
     }
     int hp = r >= 0 && avdev_headphones(v);
     if (hp != g_hp) {
@@ -58,6 +76,7 @@ static void apply_look(void)
     scr_sub_style(settings.sub_size, settings.sub_color, settings.sub_pos, settings.sub_bg);
     afx_set_global(settings.snd_boost, settings.snd_speaker, settings.snd_level);   /* 1.1: sound; 1.2: one level */
     a52_set_dialog(settings.snd_dialog);
+    adelay_apply();                                          /* 1.2.1 */
     snd_field_apply();                                       /* 1.3: the sound field; 5.1 on headphones: virtual surround */
 }
 

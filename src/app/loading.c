@@ -76,6 +76,40 @@ static void cache_path(const Source *s, char *out, size_t cap)
     snprintf(out, cap, "%s/live_%08x.bin", CACHE_DIR, (unsigned)listcache_hash(k, strlen(k)));
 }
 
+/* 1.2.1: at the start: saved copies no playlist uses any more (one whose address or user was changed: a new copy;
+ * a version before 1.1 deleted none) go. A copy can be over 10 MB. */
+static void cache_sweep(void)
+{
+    SceUID d = sceIoDopen(CACHE_DIR);
+    if (d < 0) return;
+    char keep[64][24];
+    int nk = 0;
+    for (int i = 0; i < nsources && nk < 64; i++) {
+        if (sources[i].type != SRC_XTREAM && sources[i].type != SRC_M3U_URL) continue;
+        char path[128];
+        cache_path(&sources[i], path, sizeof path);
+        const char *f = strrchr(path, '/');
+        snprintf(keep[nk++], sizeof keep[0], "%s", f ? f + 1 : path);
+    }
+    if (!nk) { sceIoDclose(d); return; }                     /* (no playlist read: nothing is deleted) */
+    SceIoDirent e;
+    int gone = 0;
+    long long freed = 0;
+    char dead[16][300];
+    int nd = 0;
+    while (sceIoDread(d, &e) > 0 && nd < 16) {
+        if (SCE_S_ISDIR(e.d_stat.st_mode) || strncmp(e.d_name, "live_", 5)) continue;
+        int used = 0;
+        for (int k = 0; k < nk && !used; k++) used = !strcmp(e.d_name, keep[k]);
+        if (used) continue;
+        snprintf(dead[nd++], sizeof dead[0], "%s/%s", CACHE_DIR, e.d_name);
+        freed += (long long)e.d_stat.st_size;
+    }
+    sceIoDclose(d);
+    for (int k = 0; k < nd; k++) if (sceIoRemove(dead[k]) >= 0) gone++;
+    if (gone) plog("cache: %d saved copies no playlist uses deleted (%lld KB)", gone, freed >> 10);
+}
+
 static int cache_exists(const Source *s)
 {
     char path[128];
@@ -236,7 +270,57 @@ static ChannelList ia_keep;                 /* the list before a search / the ne
 static int ia_keep_on;
 static const char *const IA_SORT_NAMES[IA_SORTS] = { "Most watched", "Newest added", "Year (newest first)", "Title (A-Z)" };
 
-static int ia_field;                        /* 1.5.2: where the words were found (IA_IN_*): the next pages search there */
+/* 1.2.1: archive.org/details/ID with many videos in it (the user's aaa-archive: 45): each video a film of the list
+ * (its own place to go on from, favourite, download), not one film with the best file. 0/1 = keep the item as it is */
+#define IA_ITEM_MAX 500
+static int ia_field;
+static int ia_expand(const char *id, ChannelList *out, const char *grp, char *note, size_t notesz)
+{
+    char mu[256], err[160] = "";
+    snprintf(mu, sizeof mu, "https://archive.org/metadata/%s", id);
+    set_stage("Loading the archive...");
+    Mem m = {0};
+    if (http_get(mu, NULL, NULL, &m, err, sizeof err) != 0) { free(m.buf); plog("archive: %s: %s", id, err); return 0; }
+    IaVideo *v = malloc(sizeof *v * IA_ITEM_MAX);
+    if (!v) { free(m.buf); return 0; }
+    int left = 0, n = ia_list_videos(m.buf, m.len, id, v, IA_ITEM_MAX, &left);
+    char plot[420] = "";
+    if (n > 1) {
+        int dur;                                             /* (the item's description: for every video) */
+        char u[IPTV_URL_MAX], why[96];
+        ia_pick_file(m.buf, m.len, id, u, sizeof u, &dur, plot, sizeof plot, why, sizeof why);
+    }
+    free(m.buf);
+    plog("archive: %s: %d videos in the item (%d the Vita cannot play)", id, n, left);
+    if (n > 1) {
+        char poster[160], ds[16];
+        snprintf(poster, sizeof poster, "https://archive.org/services/img/%s", id);
+        const char *year = out->count ? channel_extra(out, &out->items[0], CX_YEAR) : "";
+        char yb[16];
+        snprintf(yb, sizeof yb, "%s", year ? year : "");
+        channel_list_free(out);
+        channel_list_init(out);
+        for (int i = 0; i < n; i++) {
+            Channel c;
+            memset(&c, 0, sizeof c);
+            snprintf(c.name, sizeof c.name, "%s", v[i].title);
+            snprintf(c.group, sizeof c.group, "%s", grp);
+            snprintf(c.url, sizeof c.url, "%s", v[i].url);
+            c.kind = CH_FILM;
+            ds[0] = 0;
+            if (v[i].dur_s > 0) snprintf(ds, sizeof ds, "%d", v[i].dur_s);
+            const char *vals[4] = { poster, yb, plot, ds };
+            if (channel_list_add(out, &c, "pydt", vals, 420) != 0) break;
+        }
+        ia_found = out->count;
+        ia_field = IA_IN_ALL;
+        if (left) snprintf(note, notesz, "%d videos (%d left out: no MP4 the Vita plays)", out->count, left);
+        else snprintf(note, notesz, "%d videos", out->count);
+    }
+    free(v);
+    return n;
+}
+
 
 static int load_archive(const Source *s, ChannelList *out, char *err, size_t errsz, char *note, size_t notesz)
 {
@@ -291,6 +375,10 @@ static int load_archive(const Source *s, ChannelList *out, char *err, size_t err
         free(m.buf);
         MemStat ms = mem_stat();
         plog("archive: %s (order %d, page %d): %d films of %d, %u KB app memory", q, ia_sort, ia_page, n, found, ms.used_kb);
+        if (n > 0 && !words && pass == 1 && n == 1 && ia_page == 1) {   /* 1.2.1: one item: its videos, if more than one */
+            int k = ia_expand(id, out, grp, note, notesz);
+            if (k > 1) return 0;
+        }
         if (n > 0) {
             ia_found = found;
             ia_field = field;
@@ -364,6 +452,14 @@ static void web_with_headers(const char *video, const char *page, char *out, siz
 }
 
 /* a web page: its videos (and those of the pages inside it); what was found and why not goes to webcheck.txt */
+/* 1.2.1: text in the first n bytes, any case */
+static int ci_find(const char *b, size_t n, const char *t)
+{
+    size_t k = strlen(t);
+    for (size_t i = 0; i + k <= n; i++) if (!strncasecmp(b + i, t, k)) return 1;
+    return 0;
+}
+
 static int load_web(const Source *s, ChannelList *out, char *err, size_t errsz, char *note, size_t notesz)
 {
     WebScan *sc = calloc(1, sizeof *sc);
@@ -376,9 +472,20 @@ static int load_web(const Source *s, ChannelList *out, char *err, size_t errsz, 
     set_stage("Reading the page...");
     http_ua = WEB_UA;                                        /* 1.5.1 */
     Mem m = {0};
-    char herr[160] = "";
+    char herr[160] = "", base[IPTV_URL_MAX] = "";
+    http_final = base;                                       /* 1.2.1: links are relative to the address that answered */
+    http_final_cap = sizeof base;                            /* (archive.org/download/ID -> .../ID/ : its files) */
     int rc = http_get(s->url, s->user, s->pass, &m, herr, sizeof herr);
-    if (rc == 0) web_scan(m.buf, m.len, s->url, sc);
+    http_final = NULL;
+    if (!base[0]) snprintf(base, sizeof base, "%s", s->url);
+    else if (strcmp(base, s->url) && rf) fprintf(rf, "the page answered from: %s\n", base);
+    if (rc == 0 && base[0] && base[strlen(base) - 1] != '/' && (strstr(base, "archive.org/download/") ||
+        (m.buf && m.len > 16 && ci_find(m.buf, m.len < 4096 ? m.len : 4096, "<title>Index of")))) {
+        const char *last = strrchr(base, '/');               /* a folder's list without its last "/": the links are
+                                                              * inside the folder (the user's aaa-archive) */
+        if (last && !strchr(last, '.') && !strchr(last, '?') && strlen(base) + 1 < sizeof base) strcat(base, "/");
+    }
+    if (rc == 0) web_scan(m.buf, m.len, base, sc);
     if (rf) fprintf(rf, "answer: %s, %u KB; title '%s'; scripts %d, JavaScript player %d, DRM named %d; %d videos, %d inner pages\n",
                     rc == 0 ? "ok" : herr, (unsigned)(m.len >> 10), sc->title, sc->scripts, sc->js_player, sc->drm, sc->n, sc->nframes);
     free(m.buf);
@@ -387,7 +494,13 @@ static int load_web(const Source *s, ChannelList *out, char *err, size_t errsz, 
         snprintf(fu, sizeof fu, "%s", sc->frames[k]);
         Mem fm = {0};
         int before = sc->n;
-        if (http_get(fu, NULL, NULL, &fm, fe, sizeof fe) == 0) web_scan(fm.buf, fm.len, fu, sc);
+        char fbase[IPTV_URL_MAX] = "";
+        http_final = fbase;
+        http_final_cap = sizeof fbase;
+        int frc = http_get(fu, NULL, NULL, &fm, fe, sizeof fe);
+        http_final = NULL;
+        if (!fbase[0]) snprintf(fbase, sizeof fbase, "%s", fu);
+        if (frc == 0) web_scan(fm.buf, fm.len, fbase, sc);
         if (rf) fprintf(rf, "inner page %s: %s, %d videos\n", fu, fe[0] ? fe : "ok", sc->n - before);
         free(fm.buf);
     }

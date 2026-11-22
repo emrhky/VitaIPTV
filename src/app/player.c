@@ -33,9 +33,9 @@ static const char *sub_look_value(int k)
 }
 /* 1.1: sound (Select > Audio): volume boost, speaker mode, clear dialogue; 1.2: the same level on every channel;
  * saved when the menu closes */
-#define SND_N 5
+#define SND_N 6
 static const char *const SND_NAME[SND_N] = { "Volume boost", "Clear sound", "Clear speech (5.1)", "Same volume on every channel",
-                                             "Sound field" };
+                                             "Sound field", "Sound delay" };   /* (1.2.1: the delay) */
 static const char *const FIELD_NAMES[4] = { "Off", "Speakers", "Headphones", "Auto" };   /* 1.3 */
 /* Auto shows what it chose: "Auto: Headphones" */
 static const char *field_name(int v)
@@ -51,6 +51,14 @@ static const char *snd_value(int k)
     static const char *const B[4] = { "Off", "+3 dB", "+6 dB", "+9 dB" };
     if (k == 0) return B[settings.snd_boost & 3];
     if (k == 4) return field_name(settings.snd_field);
+    if (k == 5) {                                            /* 1.2.1: "+0.20 s (headphones)" */
+        static char b[64];
+        int d = *adelay_slot();
+        const char *where = T(out_speakers() ? "speakers" : "headphones");
+        if (!d) snprintf(b, sizeof b, "%s (%s)", T("Off"), where);
+        else snprintf(b, sizeof b, "%c%d.%02d s (%s)", d < 0 ? '-' : '+', abs(d) / 1000, abs(d) % 1000 / 10, where);
+        return b;
+    }
     return (k == 1 ? settings.snd_speaker : k == 2 ? settings.snd_dialog : settings.snd_level) ? "On" : "Off";
 }
 static int sub_look_dirty;
@@ -60,11 +68,18 @@ static void snd_step(int k, int d)
     else if (k == 1) settings.snd_speaker = !settings.snd_speaker;
     else if (k == 2) settings.snd_dialog = !settings.snd_dialog;
     else if (k == 3) settings.snd_level = !settings.snd_level;
+    else if (k == 5) {                                       /* 1.2.1: 50 ms a step, -0.5..+1 s */
+        int *v = adelay_slot();
+        *v += d * 50;
+        if (*v < -500) *v = -500;
+        if (*v > 1000) *v = 1000;
+    }
     else settings.snd_field = (settings.snd_field + d + 4) % 4;   /* 1.3 (Auto: 3) */
     sub_look_dirty = 1;
     afx_set_global(settings.snd_boost, settings.snd_speaker, settings.snd_level);
     a52_set_dialog(settings.snd_dialog);
     snd_field_apply();
+    adelay_apply();
     plog("player: %s %s", SND_NAME[k], snd_value(k));
 }
 static void sub_look_step(int k, int d)
@@ -933,8 +948,8 @@ static void draw_tsp_screen(int osd)
             snprintf(tr, sizeof tr, "%s", b);
             sp.time_l = tl;
             sp.time_r = tr;
-            int watched = pos / 60000, left = dur > pos ? (dur - pos + 59999) / 60000 : 0;
-            snprintf(nl, sizeof nl, T("%d min watched  \xC2\xB7  %d min left"), watched, left);
+            int wmin = pos / 60000, left = dur > pos ? (dur - pos + 59999) / 60000 : 0;
+            snprintf(nl, sizeof nl, T("%d min watched  \xC2\xB7  %d min left"), wmin, left);
             sp.time_note_l = nl;
             int ci = vis[play_vis], n, k = prog_find(ci, arch_start);
             const GProg *gp = guide_progs(&guide, ci, &n);

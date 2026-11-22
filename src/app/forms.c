@@ -167,7 +167,7 @@ static void ime_poll(void)
     if (ime_purpose == IME_NEWPIN) {
         size_t o = 0;
         char np[8];                                          /* (0.8.1: a wrong one keeps the PIN there was) */
-        for (const char *q = b; *q && o + 1 < sizeof np; q++) if (*q >= '0' && *q <= '9') np[o++] = *q;
+        for (const char *d = b; *d && o + 1 < sizeof np; d++) if (*d >= '0' && *d <= '9') np[o++] = *d;
         np[o] = 0;
         if (o && o < 4) { set_status(1, "The PIN needs 4 to 6 digits", NULL); return; }
         if (!o) { f_pin[0] = 0; set_status(0, "The lock is removed when you save", NULL); return; }
