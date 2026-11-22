@@ -37,7 +37,7 @@ make distclean >/dev/null 2>&1 || true
 ./configure \
     --prefix="$OUT" \
     --enable-cross-compile --cross-prefix=arm-vita-eabi- --arch=arm --cpu=cortex-a9 --target-os=none \
-    --disable-everything --enable-decoder=ac3,eac3,aac,opus,vorbis,dca --enable-parser=ac3,dca \
+    --disable-everything --enable-decoder=ac3,eac3,aac,opus,vorbis,dca,mpeg1video,mpeg2video,mpeg4,msmpeg4v3 --enable-parser=ac3,dca,mpegvideo,mpeg4video \
     --disable-programs --disable-doc --disable-network --disable-autodetect \
     --disable-avdevice --disable-avformat --disable-swscale --disable-postproc --disable-avfilter --enable-swresample \
     --disable-pthreads --disable-w32threads --disable-os2threads --disable-runtime-cpudetect \
