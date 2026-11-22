@@ -659,6 +659,9 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "films")) goto films;   /* quicker runs while working on one part */
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "xiph")) goto xiph;     /* 1.4.2 */
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "dts")) goto dts;       /* 1.2.2 */
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "sw")) goto sw;         /* 1.2.2b */
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "pgs")) goto pgs;       /* 1.2.2b */
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "fmp4")) goto fmp4;     /* 1.2.2b */
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slots")) goto slots;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slow")) goto slow;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "live")) goto live;
@@ -846,6 +849,117 @@ dts:
                 assert(r.st.state == TSP_ENDED && r.changes >= 120 && r.st.audio_frames == 0 && strstr(r.st.audio_msg, "dts"));
         }
         if (getenv("ONLY") && !strcmp(getenv("ONLY"), "dts")) { printf("dts tests passed\n"); return 0; }
+    }
+fmp4:
+    {   /* 1.2.2b: HLS with fMP4 segments (init + moof / mdat): next to ac3.ts, through the fake HTTP */
+        static char dir[512], nm[12][32], pth[12][600];
+        snprintf(dir, sizeof dir, "%s", argv[12]);
+        char *sl = strrchr(dir, '/');
+        if (sl) *sl = 0;
+        int q = 0;
+        mock_http_reset();
+        snprintf(nm[q], 32, "fm/index.m3u8"); snprintf(pth[q], 600, "%s/fmp4/index.m3u8", dir); q++;
+        snprintf(nm[q], 32, "fm/init.mp4"); snprintf(pth[q], 600, "%s/fmp4/init.mp4", dir); q++;
+        for (int i = 0; i < 8; i++) {
+            snprintf(nm[q], 32, "fm/s%03d.m4s", i); snprintf(pth[q], 600, "%s/fmp4/s%03d.m4s", dir, i);
+            struct stat fs; if (stat(pth[q], &fs) != 0) break; q++;
+        }
+        struct stat fs0;
+        if (stat(pth[0], &fs0) == 0) {
+            for (int i = 0; i < q; i++) { mock_http_map[i][0] = nm[i]; mock_http_map[i][1] = pth[i]; }
+            r = play("http://example.invalid/fm/index.m3u8", 12);
+            show("hls fmp4", &r);
+            for (int i = 0; i < q; i++) mock_http_map[i][0] = NULL;
+            assert(r.st.state == TSP_ENDED && r.changes >= 140 && r.w == 640 && r.synced && r.nonmono == 0 && r.st.audio_frames > 200 &&
+                   r.av_bad * 5 <= r.avn);
+        } else printf("fmp4: %s missing, skipped\n", pth[0]);
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "fmp4")) { printf("fmp4 tests passed\n"); return 0; }
+    }
+pgs:
+    {   /* 1.2.2b: picture subtitles (PGS) in MKV: where and when they are, their colours */
+        char dp[512];
+        snprintf(dp, sizeof dp, "%s", argv[12]);
+        char *sl = strrchr(dp, '/');
+        snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "pgs.mkv");
+        struct stat ds;
+        if (stat(dp, &ds) == 0) {
+            tsp_set_sub(-1, "tur", 0);
+            assert(tsp_start(dp) == 0);
+            double t0 = now_s();
+            int seen1 = 0, seen2 = 0, after_clear = 0, white = 0, blue = 0, clear_px = 0;
+            int64_t first1 = -1, last1 = -1;
+            uint32_t *px = malloc(640 * 360 * 4);
+            while (now_s() - t0 < 9) {
+                int w = 0, h = 0;
+                vita2d_texture *tx = tsp_frame(&w, &h);
+                int64_t pts = -1;
+                if (tx) memcpy(&pts, tx->gxm_tex.data, 8);
+                uint32_t id;
+                int x, y, bw, bh, cw, ch;
+                if (tx && tsp_sub_bitmap(&id, &x, &y, &bw, &bh, &cw, &ch)) {
+                    assert(cw == 640 && ch == 360);
+                    if (x == 100 && y == 300 && bw == 200 && bh == 20) {
+                        seen1++;
+                        if (first1 < 0) first1 = pts;
+                        last1 = pts;
+                        if (tsp_sub_bitmap_copy(id, px, bw) && px[0] == 0xFFFFFFFFu && px[bw * bh - 1] == 0xFFFFFFFFu) white = 1;
+                    } else if (x == 50 && y == 20 && bw == 370 && bh == 316) {   /* two objects: one picture holding both */
+                        seen2++;
+                        if (tsp_sub_bitmap_copy(id, px, bw)) {
+                            uint32_t c2 = px[300 * bw + 250];        /* the second object: red (Y 81, Cr 240, Cb 90) */
+                            if ((c2 >> 24) == 255 && (c2 & 255) > 200 && ((c2 >> 8) & 255) < 60 && px[0] == 0xFFFFFFFFu) blue = 1;
+                            if ((px[bw - 1] >> 24) == 0) clear_px = 1;   /* (between the objects: clear) */
+                        }
+                    }
+                    if (pts >= 0 && pts > 200000 && pts < 260000) after_clear++;
+                }
+                const TspStatus *s = tsp_status();
+                if (s->state == TSP_ENDED || s->state == TSP_ERROR) break;
+                usleep(8000);
+            }
+            TspStatus st = *tsp_status();
+            tsp_stop();
+            free(px);
+            tsp_set_sub(-1, "", 1);
+            printf("pgs            tracks %d (%s), shown %d; first %d frames %.2f-%.2f s, white %d; second %d frames, red %d, clear %d; after the clear %d\n",
+                   st.s_n, st.s_n ? st.s_name[0] : "", st.s_cur, seen1, first1 / 90000.0, last1 / 90000.0, white, seen2, blue, clear_px, after_clear);
+            assert(st.s_n == 1 && st.s_cur == 0 && strstr(st.s_name[0], "PGS"));
+            /* (ffmpeg moved the .sup's times to start at 0 in the MKV: 0-2 s, 3-4 s) */
+            assert(seen1 > 20 && first1 >= 0 && first1 < 10000 && last1 < 182000 && last1 > 165000 && white);
+            assert(seen2 > 10 && blue && clear_px && after_clear == 0);
+        } else printf("pgs: %s missing, skipped\n", dp);
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "pgs")) { printf("pgs tests passed\n"); return 0; }
+    }
+sw:
+    {   /* 1.2.2b: software video (MPEG-2, MPEG-4 Part 2, DivX 3) in TS, AVI, MKV and MP4: next to ac3.ts */
+        char dp[512];
+        snprintf(dp, sizeof dp, "%s", argv[12]);
+        char *sl = strrchr(dp, '/');
+        static const struct { const char *f; int vod, w, h, frames; } sv[] = {
+            { "mpeg2.ts", 0, 720, 576, 140 }, { "xvid.avi", 1, 640, 352, 290 }, { "divx3.avi", 1, 640, 352, 140 },
+            { "mpeg4.mkv", 1, 640, 352, 140 }, { "mpeg4.mp4", 1, 640, 352, 140 },
+            { "xvid.avi", 0, 640, 352, 290 },                /* (as a stream: no index read, the header from the data) */
+        };
+        for (size_t k = 0; k < sizeof sv / sizeof sv[0]; k++) {
+            snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", sv[k].f);
+            struct stat ds;
+            if (stat(dp, &ds) != 0) { printf("sw: %s missing, skipped\n", dp); continue; }
+            if (sv[k].vod) { VRun v = play_vod(dp, 0, 20, 0, 0); r = v.r; } else r = play(dp, 18);
+            show(sv[k].f, &r);
+            if (!sv[k].vod && a52_available()) assert(r.avn > 100 && r.av_max < 120);   /* (the picture with the sound) */
+            if (a52_available())
+                assert(r.st.state == TSP_ENDED && r.st.decoded >= (uint32_t)sv[k].frames && r.changes >= sv[k].frames - 10 && r.w == sv[k].w &&
+                       r.st.audio_frames > 100 && r.synced && r.av_bad * 5 <= r.avn + 5);   /* (nonmono: the fake decoder's pts in the picture; not here) */
+            else
+                assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "not supported"));
+        }
+        if (a52_available()) {   /* AVI: jumping through its index */
+            snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "xvid.avi");
+            VRun v = play_vod(dp, 6500, 15, 0, 0);
+            vshow("avi from 6.5s", &v);
+            assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.first_pos >= 5900 && v.first_pos <= 6600 && v.r.changes >= 120 && v.r.synced);
+        }
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "sw")) { printf("sw tests passed\n"); return 0; }
     }
     {   /* 0.5.0: two audio tracks (Turkish AAC, English AC-3): the list, the language asked for, a track asked for */
         static char p2[512], p3[512];

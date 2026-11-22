@@ -71,6 +71,43 @@ sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavf
    f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a dca -strict -2 -ac 6 -b:a 768k -f mpegts {T}/dts.ts")
 sh(f"ffmpeg -loglevel error -y -i {T}/dts.ts -c copy {T}/dts.mkv")
 sh(f"ffmpeg -loglevel error -y -i {T}/dts.ts -c copy -strict -2 {T}/dts.mp4")
+# 1.2.2b: picture subtitles (PGS) in MKV: a white bar 200x20 at (100, 300) from 1 s to 3 s, a second one (2 objects) at 4 s
+def pgs_sup(path):
+    import struct
+    def seg(pts, t, payload): return b"PG" + struct.pack(">II", pts, pts) + bytes([t]) + struct.pack(">H", len(payload)) + payload
+    def rle(w, h, c):
+        row = bytes([0, 0xC0 | (w >> 8), w & 255, c, 0, 0])
+        return row * h
+    def ds(pts, objs, num):
+        o = b""
+        pcs = struct.pack(">HHBHBBBB", 640, 360, 0x10, num, 0x80, 0, 0, len(objs))
+        for k, (x, y, w, h) in enumerate(objs): pcs += struct.pack(">HBBHH", k, 0, 0, x, y)
+        o += seg(pts, 0x16, pcs)
+        if objs:
+            o += seg(pts, 0x17, bytes([len(objs)]) + b"".join(struct.pack(">BHHHH", k, x, y, w, h) for k, (x, y, w, h) in enumerate(objs)))
+            o += seg(pts, 0x14, bytes([0, 0]) + bytes([1, 235, 128, 128, 255]) + bytes([2, 81, 240, 90, 255]))
+            for k, (x, y, w, h) in enumerate(objs):
+                data = rle(w, h, 1 + k)
+                o += seg(pts, 0x15, struct.pack(">HBB", k, 0, 0xC0) + struct.pack(">I", len(data) + 4)[1:] + struct.pack(">HH", w, h) + data)
+        o += seg(pts, 0x80, b"")
+        return o
+    open(path, "wb").write(ds(90000, [(100, 300, 200, 20)], 0) + ds(270000, [], 1) + ds(360000, [(50, 20, 100, 10), (300, 320, 120, 16)], 2) + ds(450000, [], 3))
+pgs_sup(f"{T}/pgs.sup")
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 6 "
+   f"-c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 {T}/pgsv.mkv")
+sh(f"ffmpeg -loglevel error -y -i {T}/pgsv.mkv -i {T}/pgs.sup -map 0 -map 1 -c copy -metadata:s:s:0 language=tur {T}/pgs.mkv")
+# 1.2.2b: HLS with fMP4 (CMAF) segments: H.264 with B-pictures, AAC
+os.makedirs(f"{T}/fmp4", exist_ok=True)
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 6 "
+   f"-c:v libx264 -bf 2 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -f hls -hls_segment_type fmp4 -hls_time 2 -hls_playlist_type vod "
+   f"-hls_fmp4_init_filename init.mp4 -hls_segment_filename {T}/fmp4/s%03d.m4s {T}/fmp4/index.m3u8")
+# 1.2.2b: software video: MPEG-2 (SD TV: interlaced, MP2 sound), MPEG-4 Part 2 / DivX 3 in AVI (MP3), MKV, MP4
+SW = "-f lavfi -i testsrc2=size={s}:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t {d}"
+sh(f"ffmpeg -loglevel error -y {SW.format(s='720x576', d=6)} -c:v mpeg2video -b:v 4M -flags +ilme+ildct -top 1 -g 12 -bf 2 -c:a mp2 -b:a 192k -f mpegts {T}/mpeg2.ts")
+sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=12)} -c:v mpeg4 -vtag XVID -q:v 4 -g 50 -bf 2 -c:a libmp3lame -b:a 128k {T}/xvid.avi")
+sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=6)} -c:v msmpeg4 -q:v 4 -g 50 -c:a libmp3lame -b:a 128k {T}/divx3.avi")
+sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=6)} -c:v mpeg4 -q:v 4 -g 50 -bf 2 -c:a ac3 {T}/mpeg4.mkv")
+sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=6)} -c:v mpeg4 -q:v 4 -g 50 -bf 2 -c:a aac {T}/mpeg4.mp4")
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1280x720', r=30)} -c:v libx264 -profile:v high -bf 3 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -f matroska {T}/bframes.mkv")
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5 "
    f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a mp2 -b:a 192k -f mpegts {T}/mp2.ts")
@@ -308,7 +345,7 @@ A52L = (f"{FP}/lib/libavcodec.a " + (f"{FP}/lib/libswresample.a " if os.path.exi
         f"{FP}/lib/libavutil.a") if A52 else ""
 print("AC-3 decoding:", "with FFmpeg from " + FP if A52 else "not built in")
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL {A52} -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c {ROOT}/src/hlsaes.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {ROOT}/src/srt.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
+   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c {ROOT}/src/hlsaes.c {ROOT}/src/swvdec.c {ROOT}/src/avidemux.c {ROOT}/src/pgs.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {ROOT}/src/srt.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
 # 1.2.1: a channel whose picture size changes on the way (720p, then 1024x576, then 720p again)
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1024x576', r=30)} -c:v libx264 -profile:v high -bf 3 -g 30 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/s576.ts")
 sh(f"ffmpeg -loglevel error -y -i \"concat:{T}/s720g30.ts|{T}/s576.ts|{T}/s720g30.ts\" -c copy -f mpegts {T}/sizechange.ts")
