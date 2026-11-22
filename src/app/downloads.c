@@ -438,7 +438,8 @@ static const char *dl_foot_line(void)
             snprintf(t, sizeof t, "%.*s...", (int)k, nm);
         } else snprintf(t, sizeof t, "%s", nm);
         if (waiting > 0) snprintf(more, sizeof more, T("  \xC2\xB7  %d waiting"), waiting);
-        if (st.netwait) snprintf(line, sizeof line, T("Download waits for the Wi-Fi: %s%s"), t, more);
+        if (st.netwait == 2) snprintf(line, sizeof line, T("Download waits for a free connection of the account: %s%s"), t, more);   /* 1.2.2 */
+        else if (st.netwait) snprintf(line, sizeof line, T("Download waits for the Wi-Fi: %s%s"), t, more);
         else {
             char sp[24];
             dl_size_text(st.bps, lang_get() == LANG_TR, sp, sizeof sp);

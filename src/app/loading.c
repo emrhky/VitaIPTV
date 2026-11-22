@@ -199,6 +199,7 @@ static int check_account(const Source *s, char *err, size_t errsz, char *note, s
         xt_srv_off = a.srv_off;                              /* 0.8.0 */
         xt_srv_known = a.srv_known;
         acct_active = a.active; acct_max = a.max; acct_at = now_ms();   /* 1.5 */
+        dl_note_account_full(s->url, a.max > 0 && a.active >= a.max);   /* 1.2.2: its 405s: wait, do not fail */
         if (!a.auth) { free(ma.buf); snprintf(err, errsz, "Wrong username or password"); return -1; }
         if (a.status[0] && strcasecmp(a.status, "Active")) { free(ma.buf); snprintf(err, errsz, "Account %s", a.status); return -1; }
         if (a.max > 0 && a.active >= a.max)

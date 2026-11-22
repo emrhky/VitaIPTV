@@ -13,6 +13,7 @@ static unsigned g_avdev_next;
  * else as a list of devices (bit 0: the speaker; any other bit: something plugged in) */
 static int avdev_headphones(unsigned int v)
 {
+    if (v & 0x10u) return 1;                                 /* 1.2.2: Bluetooth (0x111 in the log, the speaker's 0x101 else) */
     if (v & 0xFF00u) return (v & 0x0400u) && !(v & 0x1000u);
     return (v & ~1u) != 0;
 }
@@ -21,26 +22,39 @@ static int field_effective(void)
     if (settings.snd_field != 3) return settings.snd_field;
     return g_hp == 1 ? 2 : 1;
 }
-/* 1.2.1: the sound delay goes with where the sound goes: the Vita's speakers, or anything else (headphones, the
- * dock, Bluetooth; how Bluetooth shows in the device value is not known: so not "headphones" only) */
-static int out_speakers(void)
+/* 1.2.1: the sound delay goes with where the sound goes. 1.2.2: three outputs, from the device values in the logs:
+ * 0x101 the speakers, 0x505 headphones (wire), 0x111 Bluetooth (bit 0x10). 1.2.1 took 0x101 for "something else". */
+enum { OUT_SPEAKERS, OUT_HEADPHONES, OUT_BLUETOOTH };
+static int out_kind(void)
 {
     unsigned int v = g_avdev;
-    if (v == 0xFFFFFFFFu || v == 0xFFFFFFFEu) return 1;
-    if (v & 0xFF00u) return (v & 0x1000u) != 0;
-    return (v & ~1u) == 0;
+    if (v == 0xFFFFFFFFu || v == 0xFFFFFFFEu) return OUT_SPEAKERS;
+    if (v & 0x10u) return OUT_BLUETOOTH;
+    return avdev_headphones(v) ? OUT_HEADPHONES : OUT_SPEAKERS;
 }
-static int *adelay_slot(void) { return out_speakers() ? &settings.adelay_sp : &settings.adelay_hp; }
+static int *adelay_slot(void)
+{
+    int k = out_kind();
+    return k == OUT_BLUETOOTH ? &settings.adelay_bt : k == OUT_HEADPHONES ? &settings.adelay_hp : &settings.adelay_sp;
+}
 static void adelay_apply(void)
 {
-    static int last = -99999;
-    int d = *adelay_slot();
+    static int last = -99999, last_k = -1;
+    int d = *adelay_slot(), k = out_kind();
     tsp_set_audio_delay(d);
-    if (d != last) { plog("audio out: sound delay %+d ms (%s)", d, out_speakers() ? "speakers" : "headphones / other"); last = d; }
+    if (d != last || k != last_k) {
+        static const char *const OUT[3] = { "speakers", "headphones", "Bluetooth" };
+        plog("audio out: sound delay %d ms (%s)", d, OUT[k]);
+        last = d;
+        last_k = k;
+    }
 }
 static void snd_field_apply(void)
 {
     int f = field_effective();
+    /* 1.2.2: the speakers' sound (less deep bass, the voices a little forward: "Clear sound" before) with the
+     * speakers' field, so it goes off by itself with headphones (Auto) */
+    afx_set_global(settings.snd_boost, f == 1, settings.snd_level);
     afx_set_field(f);
     a52_set_vsurr(f == 2);
 }
@@ -58,7 +72,7 @@ static void snd_auto_poll(void)
         v = 0;
     } else if (v != g_avdev) {
         g_avdev = v;
-        plog("audio out: device 0x%X: %s", v, avdev_headphones(v) ? "headphones" : "speakers");
+        plog("audio out: device 0x%X: %s", v, (v & 0x10u) ? "Bluetooth" : avdev_headphones(v) ? "headphones" : "speakers");
         adelay_apply();                                      /* 1.2.1 */
     }
     int hp = r >= 0 && avdev_headphones(v);
@@ -74,8 +88,7 @@ static void apply_look(void)
     ui_set_theme(settings.theme);
     ui_set_bg(settings.bg);                                  /* 1.4 */
     scr_sub_style(settings.sub_size, settings.sub_color, settings.sub_pos, settings.sub_bg);
-    afx_set_global(settings.snd_boost, settings.snd_speaker, settings.snd_level);   /* 1.1: sound; 1.2: one level */
-    a52_set_dialog(settings.snd_dialog);
+    a52_set_dialog(settings.snd_dialog);                     /* (1.2.2: boost, level, speakers' sound: snd_field_apply) */
     adelay_apply();                                          /* 1.2.1 */
     snd_field_apply();                                       /* 1.3: the sound field; 5.1 on headphones: virtual surround */
 }

@@ -31,11 +31,13 @@ static const char *sub_look_value(int k)
     int v = k == 0 ? settings.sub_size : k == 1 ? settings.sub_color : k == 2 ? settings.sub_pos : settings.sub_bg;
     return V[k & 3][v & 3];
 }
-/* 1.1: sound (Select > Audio): volume boost, speaker mode, clear dialogue; 1.2: the same level on every channel;
- * saved when the menu closes */
-#define SND_N 6
-static const char *const SND_NAME[SND_N] = { "Volume boost", "Clear sound", "Clear speech (5.1)", "Same volume on every channel",
-                                             "Sound field", "Sound delay" };   /* (1.2.1: the delay) */
+/* 1.1: sound (Select > Audio). 1.2.2: five rows: "Clear sound" (the speakers' sound) went into the sound field's
+ * Speakers; "Same volume on every channel" became "Sound levelling" with Night (loud scenes down at once).
+ * Saved when the menu closes. */
+#define SND_N 5
+enum { SND_BOOST, SND_LEVEL, SND_SPEECH, SND_FIELD, SND_DELAY };
+static const char *const SND_NAME[SND_N] = { "Volume boost", "Sound levelling", "Clear speech (5.1)", "Sound field", "Sound delay" };
+static const char *const LEVEL_NAMES[3] = { "Off", "Between channels", "Night" };
 static const char *const FIELD_NAMES[4] = { "Off", "Speakers", "Headphones", "Auto" };   /* 1.3 */
 /* Auto shows what it chose: "Auto: Headphones" */
 static const char *field_name(int v)
@@ -46,39 +48,43 @@ static const char *field_name(int v)
     snprintf(b, sizeof b, "%s: %s", T("Auto"), T(FIELD_NAMES[field_effective()]));
     return b;
 }
+/* 1.2.2: "+0.20 s" (for the output in use; its name is not shown) */
+static const char *delay_name(int d)
+{
+    static char b[24];
+    if (d <= 0) return T("Off");
+    snprintf(b, sizeof b, "+%d%c%02d %s", d / 1000, lang_get() == LANG_TR ? ',' : '.', d % 1000 / 10, T("s"));
+    return b;
+}
 static const char *snd_value(int k)
 {
     static const char *const B[4] = { "Off", "+3 dB", "+6 dB", "+9 dB" };
-    if (k == 0) return B[settings.snd_boost & 3];
-    if (k == 4) return field_name(settings.snd_field);
-    if (k == 5) {                                            /* 1.2.1: "+0.20 s (headphones)" */
-        static char b[64];
-        int d = *adelay_slot();
-        const char *where = T(out_speakers() ? "speakers" : "headphones");
-        if (!d) snprintf(b, sizeof b, "%s (%s)", T("Off"), where);
-        else snprintf(b, sizeof b, "%c%d.%02d s (%s)", d < 0 ? '-' : '+', abs(d) / 1000, abs(d) % 1000 / 10, where);
-        return b;
+    switch (k) {
+    case SND_BOOST: return T(B[settings.snd_boost & 3]);
+    case SND_LEVEL: return T(LEVEL_NAMES[settings.snd_level < 0 || settings.snd_level > 2 ? 0 : settings.snd_level]);
+    case SND_SPEECH: return T(settings.snd_dialog ? "On" : "Off");
+    case SND_FIELD: return field_name(settings.snd_field);
+    default: return delay_name(*adelay_slot());
     }
-    return (k == 1 ? settings.snd_speaker : k == 2 ? settings.snd_dialog : settings.snd_level) ? "On" : "Off";
 }
 static int sub_look_dirty;
 static void snd_step(int k, int d)
 {
-    if (k == 0) settings.snd_boost = (settings.snd_boost + d + 4) % 4;
-    else if (k == 1) settings.snd_speaker = !settings.snd_speaker;
-    else if (k == 2) settings.snd_dialog = !settings.snd_dialog;
-    else if (k == 3) settings.snd_level = !settings.snd_level;
-    else if (k == 5) {                                       /* 1.2.1: 50 ms a step, -0.5..+1 s */
+    switch (k) {
+    case SND_BOOST: settings.snd_boost = (settings.snd_boost + d + 4) % 4; break;
+    case SND_LEVEL: settings.snd_level = (settings.snd_level + d + 3) % 3; break;
+    case SND_SPEECH: settings.snd_dialog = !settings.snd_dialog; break;
+    case SND_FIELD: settings.snd_field = (settings.snd_field + d + 4) % 4; break;   /* 1.3 (Auto: 3) */
+    default: {                                               /* 1.2.1: 50 ms a step; 1.2.2: 0..1 s (X goes round) */
         int *v = adelay_slot();
         *v += d * 50;
-        if (*v < -500) *v = -500;
-        if (*v > 1000) *v = 1000;
+        if (*v > 1000) *v = d > 0 && *v == 1050 ? 0 : 1000;
+        if (*v < 0) *v = 0;
     }
-    else settings.snd_field = (settings.snd_field + d + 4) % 4;   /* 1.3 (Auto: 3) */
+    }
     sub_look_dirty = 1;
-    afx_set_global(settings.snd_boost, settings.snd_speaker, settings.snd_level);
     a52_set_dialog(settings.snd_dialog);
-    snd_field_apply();
+    snd_field_apply();                                       /* (boost, levelling, the speakers' sound too) */
     adelay_apply();
     plog("player: %s %s", SND_NAME[k], snd_value(k));
 }
