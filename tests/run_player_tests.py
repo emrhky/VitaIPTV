@@ -304,8 +304,11 @@ A52L = (f"{FP}/lib/libavcodec.a " + (f"{FP}/lib/libswresample.a " if os.path.exi
 print("AC-3 decoding:", "with FFmpeg from " + FP if A52 else "not built in")
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL {A52} -I{ROOT}/src -I{M} "
    f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {ROOT}/src/srt.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
+# 1.2.1: a channel whose picture size changes on the way (720p, then 1024x576, then 720p again)
+sh(f"ffmpeg -loglevel error -y {SRC.format(s='1024x576', r=30)} -c:v libx264 -profile:v high -bf 3 -g 30 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/s576.ts")
+sh(f"ffmpeg -loglevel error -y -i \"concat:{T}/s720g30.ts|{T}/s576.ts|{T}/s720g30.ts\" -c copy -f mpegts {T}/sizechange.ts")
 r = subprocess.run(f"{T}/test_tsplayer {T}/s720.ts {T}/s1080.ts {T}/hevc.ts {T}/midgop.ts {T}/dropped.ts "
-                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4 {T}/f1080_60.ts {T}/wrap.ts {T}/f1080_50.ts {T}/f1080_50p.ts {T}/nv1080.ts",
+                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4 {T}/f1080_60.ts {T}/wrap.ts {T}/f1080_50.ts {T}/f1080_50p.ts {T}/nv1080.ts {T}/sizechange.ts",
                    shell=True, capture_output=True, text=True)
 print(r.stdout); print(r.stderr[-4000:])
 sys.exit(r.returncode)

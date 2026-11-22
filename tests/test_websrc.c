@@ -174,6 +174,37 @@ static void pages(void)
     for (int i = 0; i < s->n; i++) printf("  link %d: %s [%s]\n", i, s->v[i].url, s->v[i].title);
     fflush(stdout);
     assert(!strcmp(s->v[0].title, "Big Buck Bunny") && !strcmp(s->v[1].title, "trailer_480p") && s->skipped_formats);
+    /* 1.2.1: archive.org/download/ID/: 45 videos, 33 with an ".ia.mp4" copy (one row each, the copy plays), past 24 */
+    {
+        static char big[200000];
+        size_t o = 0;
+        o += (size_t)snprintf(big + o, sizeof big - o, "<html><title>Index of /aaa-archive</title><pre>");
+        for (int i = 0; i < 45; i++) {
+            if (i < 33 && i % 2) o += (size_t)snprintf(big + o, sizeof big - o, "<a href=\"Lucha%%20%02d.ia.mp4\">Lucha %02d.ia.mp4</a>\n", i, i);
+            o += (size_t)snprintf(big + o, sizeof big - o, "<a href=\"Lucha%%20%02d.mp4\">Lucha %02d.mp4</a>\n", i, i);
+            if (i < 33 && !(i % 2)) o += (size_t)snprintf(big + o, sizeof big - o, "<a href=\"Lucha%%20%02d.ia.mp4\">Lucha %02d.ia.mp4</a>\n", i, i);
+            o += (size_t)snprintf(big + o, sizeof big - o, "<a href=\"Lucha%%20%02d_thumb.jpg\">t</a>\n", i);
+        }
+        snprintf(big + o, sizeof big - o, "</pre>");
+        s = scan(big, "https://ia800100.us.archive.org/5/items/aaa-archive/");
+        assert(s->n == 45);
+        int ia = 0;
+        for (int i = 0; i < s->n; i++) {
+            char t[16];
+            int k = -1;
+            assert(sscanf(s->v[i].title, "Lucha %d", &k) == 1 && k >= 0 && k < 45);
+            snprintf(t, sizeof t, "Lucha %02d", k);
+            assert(!strcmp(s->v[i].title, t));                /* (".ia" taken off) */
+            if (strstr(s->v[i].url, ".ia.mp4")) { ia++; assert(k < 33); }
+            else assert(k >= 33);
+            assert(!strncmp(s->v[i].url, "https://ia800100.us.archive.org/5/items/aaa-archive/Lucha%20", 60));
+        }
+        assert(ia == 33);
+        o = 0;                                               /* at most WEB_MAX_VIDEOS */
+        for (int i = 0; i < 400; i++) o += (size_t)snprintf(big + o, sizeof big - o, "<a href=\"v%03d.mp4\">v</a>", i);
+        s = scan(big, "https://x.example/d/");
+        assert(s->n == WEB_MAX_VIDEOS && WEB_MAX_VIDEOS >= 300);
+    }
     s = scan("<video width=\"320\" height=\"240\" controls>\n  <source src=\"movie.mp4\" type=\"video/mp4\">\n"
              "  <source src=\"movie.ogg\" type=\"video/ogg\">\n</video>", "https://www.w3schools.com/html/html5_video.asp");
     assert(s->n == 1 && !strcmp(s->v[0].url, "https://www.w3schools.com/html/movie.mp4"));
@@ -211,8 +242,40 @@ static void hls(void)
            strstr(web_reason(&s, "", WH_FMP4), "fMP4") && strstr(web_reason(&s, "", WH_DRM | WH_AES), "DRM"));
 }
 
+/* 1.2.1: an item with many videos (aaa-archive: uploads, the archive's H.264 copies, thumbnails, an MKV with no copy) */
+static void multi(void)
+{
+    static char js[100000];
+    size_t o = 0;
+    o += (size_t)snprintf(js + o, sizeof js - o, "{\"files\":[{\"name\":\"__ia_thumb.jpg\",\"source\":\"original\",\"format\":\"Item Tile\"}");
+    for (int i = 1; i <= 12; i++) {
+        o += (size_t)snprintf(js + o, sizeof js - o, ",{\"name\":\"Lucha Libre AAA - %d.mp4\",\"source\":\"original\",\"format\":\"MPEG4\",\"length\":\"%d.5\",\"height\":\"720\"}", i, 3600 + i);
+        if (i % 3)
+            o += (size_t)snprintf(js + o, sizeof js - o, ",{\"name\":\"Lucha Libre AAA - %d.ia.mp4\",\"source\":\"derivative\",\"format\":\"h.264 IA\",\"original\":\"Lucha Libre AAA - %d.mp4\",\"length\":\"%d.5\",\"height\":\"480\"}", i, i, 3600 + i);
+        o += (size_t)snprintf(js + o, sizeof js - o, ",{\"name\":\"aaa.thumbs/Lucha Libre AAA - %d_000001.jpg\",\"source\":\"derivative\",\"format\":\"Thumbnail\",\"original\":\"Lucha Libre AAA - %d.mp4\"}", i, i);
+    }
+    o += (size_t)snprintf(js + o, sizeof js - o, ",{\"name\":\"extra_show.mkv\",\"source\":\"original\",\"format\":\"Matroska\"}"
+                                              ",{\"name\":\"aaa_meta.xml\",\"source\":\"original\",\"format\":\"Metadata\"}]}");
+    static IaVideo v[64];
+    int left = -1, n = ia_list_videos(js, o, "aaa-archive", v, 64, &left);
+    for (int i = 0; i < n; i++) printf("  ia video %d: %s | %s | %d s\n", i, v[i].title, v[i].url, v[i].dur_s);
+    assert(n == 12 && left == 1);                            /* (the MKV: no H.264 MP4 of it) */
+    for (int i = 0; i < 12; i++) {
+        char t[64];
+        snprintf(t, sizeof t, "Lucha Libre AAA - %d", i + 1);  /* natural order: 2 before 10 */
+        assert(!strcmp(v[i].title, t) && v[i].dur_s == 3601 + i);
+        int ia = !!strstr(v[i].url, ".ia.mp4");
+        assert(ia == !!((i + 1) % 3));                       /* the archive's copy when there is one */
+        assert(!strncmp(v[i].url, "https://archive.org/download/aaa-archive/Lucha%20Libre%20AAA%20-%20", 66));
+    }
+    assert(ia_list_videos("{\"files\":[]}", 12, "x", v, 64, &left) == 0 && left == 0);
+    n = ia_list_videos(js, o, "aaa-archive", v, 5, &left);   /* (at most max) */
+    assert(n == 5);
+}
+
 int main(void)
 {
+    multi();
     resolve();
     archive();
     pages();

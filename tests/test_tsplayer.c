@@ -634,7 +634,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33 || argc == 34 || argc == 35 || argc == 36);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33 || argc == 34 || argc == 35 || argc == 36 || argc == 37);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r;
@@ -1284,6 +1284,15 @@ limit:
             assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 250 && r.st.skipped >= 50);
             assert(r.st.dropped < 40 && r.av_max < 400);
         }
+        if (argc > 36) {
+            /* 1.2.1: the picture size changes on the way (720p -> 1024x576 -> 720p): it goes on, the decoder opened
+             * again each time (1.2.0: "Picture size changed (not supported yet)") */
+            tsp_set_options(0, 720);
+            r = play(argv[36], 18);
+            show("size changes", &r);
+            assert(r.st.state == TSP_ENDED && r.st.decoded >= 350 && r.w == 1280 && r.h == 720);
+            assert(!strstr(r.st.msg, "size"));
+        }
         if (argc > 35) {
             /* 1.2: 1080p25, 4 references, no bitstream_restriction: the HD decoder gives pictures, then runs out of
              * memory and gives none (the 1920x1038 film): it is opened again with the restriction added, and plays */
@@ -1866,6 +1875,34 @@ films:
         mock_http_no_ranges = 0;
         vshow("no ranges", &v);
         assert(v.r.changes >= 280 && v.r.nonmono == 0);
+    }
+
+    if (argc > 16) {   /* 1.2.1: a film's address that answers with an HLS playlist (the user's provider): played as HLS;
+                        * one that answers with a web page: says so */
+        static char nm[64][24], pth[64][512];
+        int k = 0;
+        snprintf(nm[k], 24, "9.mkv"); snprintf(pth[k], 512, "%s/index.m3u8", argv[16]); k++;
+        for (int i = 0; i < 60 && k < 63; i++) {
+            char f[600];
+            snprintf(f, sizeof f, "%s/seg%03d.ts", argv[16], i);
+            FILE *x = fopen(f, "rb");
+            if (!x) break;
+            fclose(x);
+            snprintf(nm[k], 24, "seg%03d.ts", i); snprintf(pth[k], 512, "%s", f); k++;
+        }
+        mock_http_reset();
+        for (int i = 0; i < k; i++) { mock_http_map[i][0] = nm[i]; mock_http_map[i][1] = pth[i]; }
+        VRun hv = play_vod_url("http://example.invalid/movie/u/p/9.mkv", NULL, 0, 6, 0, 0);
+        vshow("film address gives HLS", &hv);
+        assert(hv.r.st.state != TSP_ERROR && hv.r.changes >= 60);
+        mock_http_reset();
+        FILE *w = fopen("/tmp/tsp_page.html", "w");
+        fputs("<!DOCTYPE html><html><head><title>Account blocked</title></head><body>Your account cannot watch films.</body></html>", w);
+        fclose(w);
+        hv = play_vod_url("http://example.invalid/movie/u/p/10.mkv", "/tmp/tsp_page.html", 0, 4, 0, 0);
+        vshow("film address gives a web page", &hv);
+        assert(hv.r.st.state == TSP_ERROR && strstr(hv.r.st.msg, "web page"));
+        remove("/tmp/tsp_page.html");
     }
 
     r = play("/nonexistent/file.ts", 2);
