@@ -183,6 +183,17 @@ int main(int argc, char **argv)
         printf("4 405 after a stream: state %d after 6 s\n", s2);
         assert(s2 == DL_ACTIVE);
         assert(dl_delete(g.dir) == 0);
+        /* 1.2.2: the account's connections all in use (its check said so): its server's 405 waits for a free one */
+        dl_note_account_full("http://other.example:8080", 1);   /* (another server's account: no effect here) */
+        DlItem g2 = mk(base, "/e405/film2.mkv", "Bekler", 'F');
+        assert(dl_add(&g2) == 0);
+        dl_note_account_full(base, 1);
+        usleep(3000000);
+        int s3 = dl_state(g2.dir, &ds);
+        printf("4 405, account full: state %d, waiting %d after 3 s\n", s3, ds.netwait);
+        assert(s3 == DL_ACTIVE && ds.netwait == 2);
+        assert(dl_delete(g2.dir) == 0);
+        dl_note_account_full(base, 0);
     }
     setenv("DL_TEST_FREE", "104857600", 1);                  /* 100 MB free: below the 200 MB kept free */
     DlItem e = mk(base, "/film2.mkv", "Sığmaz", 'F');

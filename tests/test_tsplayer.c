@@ -652,6 +652,40 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "qsize")) goto qsize;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "subs")) goto subs;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "wrap")) goto wrap;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "adelay")) goto adelay;
+adelay:
+    {   /* 1.2.2: the sound delay (Bluetooth): the picture shown that much later than the sound it belongs to. Measured
+         * against the wall clock: the picture's time minus how long it played, in the second half */
+        double lag[2] = { 0, 0 };
+        for (int k = 0; k < 2; k++) {
+            tsp_set_audio_delay(k ? 500 : 0);
+            assert(tsp_start(argv[1]) == 0);
+            double t0 = now_s(), ta = 0, sum = 0;            /* (the sound starts with the first picture: its time is
+                                                              * the first picture's; ta: when the sound began) */
+            int64_t p0 = -1;
+            int nlag = 0;
+            vita2d_texture *last = NULL;
+            while (now_s() - t0 < 5.5) {
+                int w, h;
+                vita2d_texture *tx = tsp_frame(&w, &h);
+                if (!ta && tsp_status()->audio_frames > 0) ta = now_s();
+                if (tx && tx != last) {
+                    int64_t pts; memcpy(&pts, tx->gxm_tex.data, 8);
+                    if (p0 < 0) p0 = pts;
+                    else if (ta && now_s() - ta > 2.0) { sum += (now_s() - ta) - (double)(pts - p0) / 90000.0; nlag++; }
+                    last = tx;
+                }
+                if (tsp_status()->state == TSP_ENDED || tsp_status()->state == TSP_ERROR) break;
+                usleep(16000);
+            }
+            tsp_stop();
+            lag[k] = nlag ? sum / nlag : -1;
+        }
+        tsp_set_audio_delay(0);
+        printf("sound delay: the picture %.0f ms behind its time without, %.0f ms with +500 ms\n", lag[0] * 1000, lag[1] * 1000);
+        assert(lag[0] > -0.15 && lag[0] < 0.15 && lag[1] - lag[0] > 0.4 && lag[1] - lag[0] < 0.6);   /* (+500 ms: about 500 ms more) */
+    }
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "adelay")) return 0;
     r = play(argv[1], 10);
     show("720p30", &r);
     assert(r.st.state == TSP_ENDED && r.st.errors == 0);

@@ -41,8 +41,46 @@ static double gain_db(int boost, int speaker, double f, double amp, int ch, doub
     return 20.0 * log10(rout / rin);
 }
 
+/* 1.2.2 night: speech (-26 dBFS) for 6 s, an explosion (-4 dBFS) for 1 s, speech again: the explosion's loudness
+ * over the speech (dB) and the speech's level 0.5 s after it (dB below the speech before) */
+static void scene(int level, double *over_db, double *after_db)
+{
+    AudioFx fx;
+    afx_init(&fx);
+    afx_set(&fx, 0, 0, level);
+    static int16_t b[N * 2];
+    double ph = 0, speech = 0, boom = 0, after = 0;
+    int nb = 0;
+    for (int k = 0; k * N < RATE * 9; k++) {
+        double t = (double)k * N / RATE;
+        int loud = t >= 6.0 && t < 7.0;
+        sine(b, N, 2, 440, loud ? 0.63 : 0.05, &ph);
+        afx_process(&fx, b, N, 2, RATE);
+        double r = rms_of(b, N * 2);
+        if (t >= 5.0 && t < 6.0) speech = r;
+        if (loud && t >= 6.1) { boom += r; nb++; }
+        if (t >= 7.5 && t < 7.6) after = r;
+    }
+    boom /= nb;
+    *over_db = 20 * log10(boom / speech);
+    *after_db = 20 * log10(after / speech);
+}
+
 int main(void)
 {
+    {
+        double o1, a1, o2, a2, o0, a0;
+        scene(0, &o0, &a0);
+        scene(1, &o1, &a1);
+        scene(2, &o2, &a2);
+        printf("night: explosion over speech: off %.1f dB, between channels %.1f dB, night %.1f dB; speech 0.5 s after: %.1f / %.1f / %.1f dB\n",
+               o0, o1, o2, a0, a1, a2);
+        assert(o0 > 20.0);                                   /* (-4 vs -26 dBFS: 22 dB, only the limiter's ceiling) */
+        assert(o2 < o1 - 8.0 && o2 < 12.0);                  /* night: the explosion much nearer the speech */
+        fflush(stdout);
+        assert(a2 > -6.0);                                   /* and the speech comes back quickly */
+    }
+
     /* off: not touched at all */
     {
         AudioFx fx;
@@ -110,7 +148,7 @@ int main(void)
         int b, s, l;
         afx_set_global(9, 5, 7);
         afx_get_global(&b, &s, &l);
-        assert(b == 3 && s == 1 && l == 1);
+        assert(b == 3 && s == 1 && l == 2);              /* (1.2.2: levelling 0-2, 2 night) */
         afx_set_global(0, 0, 0);
     }
     /* 1.2: one level: quiet, middle and loud sound end up near -20 dBFS (within -6 / +12 dB); silence is not

@@ -243,13 +243,13 @@ int main(void)
     Settings none; settings_defaults(&none); assert(none.auto_proxy == 1 && proxy_url(&none, "http://a", pu, sizeof pu) == -1);
     char sf[256]; assert(settings_format(&st, sf, sizeof sf) > 0);
     Settings st2; settings_parse(sf, &st2); assert(!strcmp(st2.proxy, st.proxy) && st2.auto_proxy == st.auto_proxy);
-    {   /* 1.2.1: the sound delay (speakers / headphones), -500..1000 ms in steps of 50 */
+    {   /* 1.2.1: the sound delay; 1.2.2: speakers / headphones / Bluetooth, 0..1000 ms in steps of 50 (below 0: 0) */
         Settings a, b; char t[4096];
-        settings_defaults(&a); a.adelay_sp = -150; a.adelay_hp = 250;
+        settings_defaults(&a); a.adelay_sp = 150; a.adelay_hp = 250; a.adelay_bt = 300; a.snd_level = 2;
         assert(settings_format(&a, t, sizeof t) > 0);
-        settings_parse(t, &b); assert(b.adelay_sp == -150 && b.adelay_hp == 250);
-        settings_parse("adelay_hp=99999\nadelay_sp=-9999\n", &b); assert(b.adelay_hp == 1000 && b.adelay_sp == -500);
-        settings_parse("adelay_hp=233\n", &b); assert(b.adelay_hp == 200 && b.adelay_sp == 0);
+        settings_parse(t, &b); assert(b.adelay_sp == 150 && b.adelay_hp == 250 && b.adelay_bt == 300 && b.snd_level == 2);
+        settings_parse("adelay_hp=99999\nadelay_sp=-150\n", &b); assert(b.adelay_hp == 1000 && b.adelay_sp == 0);
+        settings_parse("adelay_bt=233\nsnd_level=1\n", &b); assert(b.adelay_bt == 200 && b.adelay_sp == 0 && b.snd_level == 1);
     }
 
     /* pasted Xtream list links are split into server / user / password */
