@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.2.1 (test)
+- Code: `main.c` (8400 lines) is split into 12 parts in `src/app/` by subject; they are included into `main.c`
+  in the same order, so the app is built exactly as before (no change in what it does).
+
 ## 1.2.0
 
 All changes since 1.1.0.
