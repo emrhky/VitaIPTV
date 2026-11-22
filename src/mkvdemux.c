@@ -162,8 +162,17 @@ static TsCodec video_codec(const char *c)
 {
     if (!strncmp(c, "V_MPEG4/ISO/AVC", 15)) return TS_CODEC_H264;
     if (!strncmp(c, "V_MPEGH/ISO/HEVC", 16)) return TS_CODEC_HEVC;
-    if (!strncmp(c, "V_MPEG2", 7)) return TS_CODEC_MPEG2V;
+    if (!strncmp(c, "V_MPEG2", 7) || !strcmp(c, "V_MPEG1")) return TS_CODEC_MPEG2V;
+    if (!strncmp(c, "V_MPEG4/ISO/", 12)) return TS_CODEC_MPEG4V;   /* 1.2.2b: SP / ASP / AP (DivX, Xvid) */
+    if (!strcmp(c, "V_MS/VFW/FOURCC")) return TS_CODEC_OTHER;      /* (its FourCC decides: vfw_codec) */
     return TS_CODEC_OTHER;
+}
+
+/* 1.2.2b: video from AVI kept in MKV (V_MS/VFW/FOURCC): a BITMAPINFOHEADER, its FourCC at 16 */
+static TsCodec vfw_codec(const uint8_t *priv, int n)
+{
+    TsCodec c = n >= 40 ? ts_fourcc_codec(priv + 16) : TS_CODEC_OTHER;
+    return c == TS_CODEC_H264 ? TS_CODEC_OTHER : c;          /* (H.264 this way has its NAL units in AVI form: not done) */
 }
 
 static TsCodec audio_codec(const char *c)
@@ -183,6 +192,7 @@ static int sub_kind(const char *c)
 {
     if (!strcmp(c, "S_TEXT/UTF8") || !strcmp(c, "S_TEXT/ASCII")) return 1;
     if (!strcmp(c, "S_TEXT/ASS") || !strcmp(c, "S_TEXT/SSA") || !strcmp(c, "S_ASS") || !strcmp(c, "S_SSA")) return 2;
+    if (!strcmp(c, "S_HDMV/PGS")) return 3;                  /* 1.2.2b: picture subtitles (Blu-ray) */
     return 0;
 }
 
@@ -252,6 +262,7 @@ static void choose_tracks(MkvDemux *d)
     for (int i = 0; i < d->ntracks; i++) {
         Track *t = &d->tracks[i];
         TsCodec c = t->type == 1 ? video_codec(t->codec) : t->type == 2 ? audio_codec(t->codec) : TS_CODEC_NONE;
+        if (t->type == 1 && !strcmp(t->codec, "V_MS/VFW/FOURCC")) c = vfw_codec(t->priv, t->priv_len);   /* 1.2.2b */
         if (c == TS_CODEC_NONE) continue;
         if (d->info.nstreams < TS_MAX_STREAMS) {
             TsStream *s = &d->info.streams[d->info.nstreams++];
@@ -278,6 +289,7 @@ static void choose_tracks(MkvDemux *d)
     for (int i = 0; i < d->ntracks && d->info.nsubs < TS_MAX_SUBS; i++) {
         Track *t = &d->tracks[i];
         int k = t->type == 17 ? sub_kind(t->codec) : 0;
+        if (k == 3 && !d->sink.bsub) continue;                /* (picture subtitles only for a player that draws them) */
         if (!k || (t->comp && t->comp_algo != 3
 #ifdef HAVE_MKV_ZLIB
                    && t->comp_algo != 0
@@ -288,6 +300,7 @@ static void choose_tracks(MkvDemux *d)
         memcpy(d->info.subs[n].lang, t->lang, 4);
         snprintf(d->info.subs[n].name, sizeof d->info.subs[n].name, "%s", t->name);
         d->info.subs[n].ass = k == 2;
+        d->info.subs[n].pgs = k == 3;
         d->info.subs[n].forced = t->forced;
         d->info.subs[n].is_default = t->is_default;
     }
@@ -298,6 +311,11 @@ static void choose_tracks(MkvDemux *d)
         Track *t = &d->tracks[i];
         if (t->number == d->vtrack) {
             if (d->info.video_codec == TS_CODEC_H264) use_avcc(d, t);
+            else if (d->info.video_codec == TS_CODEC_MPEG2V || d->info.video_codec == TS_CODEC_MPEG4V || d->info.video_codec == TS_CODEC_DIVX3) {
+                /* 1.2.2b: the header for the software decoder (VFW: what follows the BITMAPINFOHEADER) */
+                int vfw = !strcmp(t->codec, "V_MS/VFW/FOURCC"), off = vfw ? 40 : 0, n = t->priv_len - off;
+                if (n > 0 && n <= (int)sizeof d->info.vcfg) { memcpy(d->info.vcfg, t->priv + off, (size_t)n); d->info.vcfg_len = n; }
+            }
             if (!d->info.width) { d->info.width = t->width; d->info.height = t->height; }
         }
         if (t->number == d->atrack && d->info.audio_codec == TS_CODEC_AAC) use_aac(d, t);
@@ -330,9 +348,12 @@ static int es_reserve(MkvDemux *d, size_t n)
 static void emit_video(MkvDemux *d, const uint8_t *p, size_t n, int64_t pts, int key)
 {
     TsInfo *i = &d->info;
-    if (i->video_codec != TS_CODEC_H264) {               /* still counted, so the player can say why */
+    if (i->video_codec != TS_CODEC_H264) {               /* still counted, so the player can say why (1.2.2b: or decodes it) */
         i->video_aus++;
-        if (d->sink.video) d->sink.video(d->sink.ctx, p, n, pts, pts, 0);
+        if (key) i->keyframes++;
+        if (i->first_video_pts < 0) i->first_video_pts = pts;
+        if (pts > i->max_video_pts) i->max_video_pts = pts;
+        if (d->sink.video) d->sink.video(d->sink.ctx, p, n, pts, pts, key ? TS_FLAG_KEYFRAME : 0);
         return;
     }
     /* length-prefixed NAL units -> start codes */
@@ -469,6 +490,50 @@ static void sub_flush(MkvDemux *d, int64_t dur_ticks)
     d->sink.sub(d->sink.ctx, t->number, text, d->sp_pts, dur);
 }
 
+/* 1.2.2b: a PGS block, unpacked (mkvmerge packs them with zlib by default) */
+static void pgs_block(MkvDemux *d, const Track *t, const uint8_t *src, size_t len, int64_t pts)
+{
+    if (!t || !d->sink.bsub || !len) return;
+    if (t->comp && t->comp_algo == 3) {
+        uint8_t *b = malloc(len + (size_t)t->comp_hdr_len);
+        if (!b) return;
+        memcpy(b, t->comp_hdr, (size_t)t->comp_hdr_len);
+        memcpy(b + t->comp_hdr_len, src, len);
+        d->sink.bsub(d->sink.ctx, t->number, b, len + (size_t)t->comp_hdr_len, pts);
+        free(b);
+        return;
+    }
+#ifdef HAVE_MKV_ZLIB
+    if (t->comp && t->comp_algo == 0) {
+        size_t cap = len * 8 + 4096, o = 0;
+        uint8_t *b = NULL;
+        z_stream z;
+        memset(&z, 0, sizeof z);
+        if (inflateInit(&z) != Z_OK) return;
+        z.next_in = (Bytef *)src;
+        z.avail_in = (uInt)len;
+        int r = Z_OK;
+        while (r == Z_OK && cap <= 8u * 1024 * 1024) {
+            uint8_t *nb = realloc(b, cap);
+            if (!nb) break;
+            b = nb;
+            z.next_out = b + o;
+            z.avail_out = (uInt)(cap - o);
+            r = inflate(&z, Z_NO_FLUSH);
+            o = cap - z.avail_out;
+            if (r == Z_OK && z.avail_out == 0) cap *= 2;
+            else if (r == Z_OK) break;
+        }
+        inflateEnd(&z);
+        if (b && o && (r == Z_STREAM_END || r == Z_OK || r == Z_BUF_ERROR)) d->sink.bsub(d->sink.ctx, t->number, b, o, pts);
+        free(b);
+        return;
+    }
+#endif
+    if (t->comp) return;
+    d->sink.bsub(d->sink.ctx, t->number, src, len, pts);
+}
+
 static void on_block(MkvDemux *d, const uint8_t *p, size_t n, int simple)
 {
     uint64_t track;
@@ -484,6 +549,11 @@ static void on_block(MkvDemux *d, const uint8_t *p, size_t n, int simple)
     int64_t pts = tick < 0 ? 0 : (int64_t)((uint64_t)tick * d->scale * 9 / 100000ULL);   /* ticks of scale ns -> 90 kHz */
     if (!vid && !aud) {                                      /* 0.7.0: a text subtitle: kept until its BlockDuration */
         if (!d->sink.sub || ((flags >> 1) & 3)) return;
+        for (int i = 0; i < d->info.nsubs; i++)
+            if (d->info.subs[i].id == (int)track && d->info.subs[i].pgs) {   /* 1.2.2b: picture subtitles go out at once */
+                pgs_block(d, track_by_number(d, (int)track), p + pos, n - pos, pts);
+                return;
+            }
         for (int i = 0; i < d->info.nsubs; i++)
             if (d->info.subs[i].id == (int)track) {
                 size_t len = n - pos;

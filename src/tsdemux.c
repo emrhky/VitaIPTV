@@ -1,4 +1,5 @@
 #include "tsdemux.h"
+#include <ctype.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -40,6 +41,8 @@ const char *ts_codec_name(TsCodec c)
     case TS_CODEC_OTHER: return "other";
     case TS_CODEC_OPUS: return "opus";
     case TS_CODEC_DTS: return "dts";                         /* 1.2.2 */
+    case TS_CODEC_MPEG4V: return "mpeg4";                    /* 1.2.2b */
+    case TS_CODEC_DIVX3: return "divx3";
     case TS_CODEC_VORBIS: return "vorbis";
     default: return "none";
     }
@@ -69,6 +72,7 @@ static TsCodec codec_from_type(int st)
     case 0x1B: return TS_CODEC_H264;
     case 0x24: return TS_CODEC_HEVC;
     case 0x01: case 0x02: return TS_CODEC_MPEG2V;
+    case 0x10: return TS_CODEC_MPEG4V;                       /* 1.2.2b */
     case 0x0F: return TS_CODEC_AAC;
     case 0x11: return TS_CODEC_AAC_LATM;
     case 0x03: case 0x04: return TS_CODEC_MPEG_AUDIO;
@@ -79,7 +83,7 @@ static TsCodec codec_from_type(int st)
     }
 }
 
-static int video_rank(TsCodec c) { return c == TS_CODEC_H264 ? 3 : c == TS_CODEC_HEVC ? 2 : c == TS_CODEC_MPEG2V ? 1 : 0; }
+static int video_rank(TsCodec c) { return c == TS_CODEC_H264 ? 3 : c == TS_CODEC_HEVC ? 2 : c == TS_CODEC_MPEG2V || c == TS_CODEC_MPEG4V ? 1 : 0; }
 static int audio_rank(TsCodec c)
 {
     switch (c) {
@@ -267,6 +271,28 @@ static int scan_h264(TsDemux *d, const uint8_t *b, size_t n)
     return key ? TS_FLAG_KEYFRAME : intra ? TS_FLAG_INTRA : 0;
 }
 
+/* 1.2.2b: MPEG-2 / MPEG-4 Part 2: a keyframe is an I picture (MPEG-2: also its size from the sequence header) */
+static int scan_mpeg_video(TsDemux *d, const uint8_t *b, size_t n)
+{
+    int key = 0;
+    for (size_t i = 0; i + 6 < n; i++) {
+        if (b[i] || b[i + 1] || b[i + 2] != 1) continue;
+        uint8_t c = b[i + 3];
+        if (d->info.video_codec == TS_CODEC_MPEG2V) {
+            if (c == 0xB3) {
+                d->info.width = (b[i + 4] << 4) | (b[i + 5] >> 4);
+                d->info.height = ((b[i + 5] & 15) << 8) | b[i + 6];
+                key = 1;
+            } else if (c == 0x00 && ((b[i + 5] >> 3) & 7) == 1) key = 1;
+            if (c == 0x00) break;                            /* (the first picture's header is enough) */
+        } else {
+            if (c == 0xB6) { if ((b[i + 4] >> 6) == 0) key = 1; break; }
+        }
+        i += 3;
+    }
+    return key ? TS_FLAG_KEYFRAME : 0;
+}
+
 /* ------------------------------------------------------------------- ADTS */
 
 static const int aac_rates[13] = { 96000, 88200, 64000, 48000, 44100, 32000, 24000,
@@ -285,6 +311,20 @@ static int adts_parse(const uint8_t *p, size_t n, int *obj, int *rate, int *ch, 
     *ch = ((p[2] & 1) << 2) | (p[3] >> 6);
     *flen = fl;
     return 1;
+}
+
+TsCodec ts_fourcc_codec(const uint8_t *f)
+{
+    char c[5];
+    for (int i = 0; i < 4; i++) c[i] = (char)toupper(f[i]);
+    c[4] = 0;
+    static const char *const m4[] = { "XVID", "DIVX", "DX50", "FMP4", "MP4V", "M4S2", "MP4S", "3IV2", "BLZ0", "DXGM", "RMP4", "SEDG", "WV1F", "XVIX", "DM4V", "EM4A", "M4CC", "SMP4", "UMP4", "WAWV", "GEOV", "DMK2" };
+    for (size_t i = 0; i < sizeof m4 / sizeof m4[0]; i++) if (!strcmp(c, m4[i])) return TS_CODEC_MPEG4V;
+    if (!strcmp(c, "DIV3") || !strcmp(c, "MP43") || !strcmp(c, "DIV4") || !strcmp(c, "AP41") || !strcmp(c, "COL1") ||
+        !strcmp(c, "DVX3") || !strcmp(c, "MPG3")) return TS_CODEC_DIVX3;
+    if (!strcmp(c, "H264") || !strcmp(c, "X264") || !strcmp(c, "AVC1") || !strcmp(c, "DAVC")) return TS_CODEC_H264;
+    if (!strcmp(c, "MPG2") || !strcmp(c, "MPEG") || !strcmp(c, "MPG1") || !strcmp(c, "MMES")) return TS_CODEC_MPEG2V;
+    return TS_CODEC_OTHER;
 }
 
 /* -------------------------------------------------------------------- PES */
@@ -318,6 +358,7 @@ static void flush_video(TsDemux *d)
         size_t en = p->len - off;
         int flags = 0;
         if (d->info.video_codec == TS_CODEC_H264) flags |= scan_h264(d, es, en);
+        else if (d->info.video_codec == TS_CODEC_MPEG2V || d->info.video_codec == TS_CODEC_MPEG4V) flags |= scan_mpeg_video(d, es, en);   /* 1.2.2b */
         if (p->damaged) { flags |= TS_FLAG_DAMAGED; d->info.damaged_aus++; }
         d->info.video_aus++;
         if (flags & TS_FLAG_KEYFRAME) d->info.keyframes++;

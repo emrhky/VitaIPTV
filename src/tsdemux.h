@@ -18,7 +18,8 @@ typedef enum {
     TS_CODEC_AAC, TS_CODEC_AAC_LATM, TS_CODEC_MPEG_AUDIO, TS_CODEC_AC3, TS_CODEC_EAC3,
     TS_CODEC_OTHER,
     TS_CODEC_OPUS, TS_CODEC_VORBIS,         /* 1.4.2 (Matroska / WebM only) */
-    TS_CODEC_DTS                            /* 1.2.2 */
+    TS_CODEC_DTS,                           /* 1.2.2 */
+    TS_CODEC_MPEG4V, TS_CODEC_DIVX3         /* 1.2.2b: MPEG-4 Part 2 (DivX / Xvid), DivX 3 (MS-MPEG4 v3; AVI / MKV) */
 } TsCodec;
 
 #define TS_FLAG_KEYFRAME 1      /* IDR picture or recovery-point SEI */
@@ -50,12 +51,14 @@ typedef struct {
     int64_t first_video_pts, min_video_pts, max_video_pts, first_audio_pts;
     /* 0.7.0: text subtitle tracks (Matroska S_TEXT/UTF8, S_TEXT/ASS, S_TEXT/SSA), in the file's order */
     int nsubs;
-    struct { int id; char lang[4]; char name[32]; int ass, forced, is_default; } subs[TS_MAX_SUBS];
+    struct { int id; char lang[4]; char name[32]; int ass, forced, is_default, pgs; } subs[TS_MAX_SUBS];   /* (1.2.2b: pgs = picture subtitles) */
     /* 1.4.2 (Matroska): the chosen audio track's CodecPrivate for Opus / Vorbis (owned by the demuxer), its rate
      * and channels; audio_cfg_gen changes (never 0) whenever another track's set is chosen */
     const uint8_t *audio_cfg;
     int audio_cfg_len, audio_cfg_rate, audio_cfg_ch;
     unsigned audio_cfg_gen;
+    /* 1.2.2b: the video header the container gives for the software decoders (MPEG-4: the VOL), "" = none */
+    uint8_t vcfg[256]; int vcfg_len;
 } TsInfo;
 
 typedef struct {
@@ -65,6 +68,8 @@ typedef struct {
     /* 0.7.0 (Matroska, may be NULL): a subtitle of track id as plain text (lines separated by '\n'; the ASS
      * fields and the style tags taken away), from pts for dur (90 kHz; dur 0 = not given) */
     void (*sub)(void *ctx, int id, const char *text, int64_t pts, int64_t dur);
+    /* 1.2.2b (Matroska, may be NULL): a block of a picture subtitle track (PGS segments), unpacked */
+    void (*bsub)(void *ctx, int id, const uint8_t *data, size_t len, int64_t pts);
 } TsSink;
 
 typedef struct TsDemux TsDemux;
@@ -87,5 +92,7 @@ void          ts_prefer_audio(TsDemux *d, int pid, const char *lang);
 /* Parses an H.264 SPS NAL unit (nal[0] = NAL header) into the video fields of inf. 0 = ok. */
 int           ts_parse_sps(const uint8_t *nal, size_t len, TsInfo *inf);
 double        ts_video_fps(const TsInfo *i);        /* 0 if unknown */
+/* 1.2.2b: an AVI / VFW FourCC ("XVID", "DX50", "H264"...): the codec (TS_CODEC_OTHER when none we know) */
+TsCodec       ts_fourcc_codec(const uint8_t *f);
 
 #endif

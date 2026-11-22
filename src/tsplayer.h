@@ -105,6 +105,11 @@ void              tsp_set_sub_delay(int ms);
 void              tsp_set_audio_delay(int ms);   /* 1.2.1: + = the sound is heard later (the picture waits for it) */
 /* 0.7.0: the subtitle for the picture on the screen; 1 = out has text */
 int               tsp_sub_text(char *out, size_t cap);
+/* 1.2.2b: the picture subtitle (PGS) for the picture on screen: 1 and its id (changes with every new one), its
+ * place and size on a canvas of cw x ch (the video's size); 0 = none. tsp_sub_bitmap_copy writes it as RGBA
+ * (stride in pixels): 0 if that one is gone meanwhile. */
+int               tsp_sub_bitmap(uint32_t *id, int *x, int *y, int *w, int *h, int *cw, int *ch);
+int               tsp_sub_bitmap_copy(uint32_t id, uint32_t *dst, int stride);
 /* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */
 void              tsp_set_via_server(int on);
 /* 0.5.0 test builds: AC-3 / E-AC-3 stutter on the HD decoder. 0 normal, 1 decoded but not played (the picture runs

@@ -345,7 +345,12 @@ int hls_parse_media(const char *text, HlsMedia *m)
             else if (starts(s, e, "#EXT-X-MEDIA-SEQUENCE:")) { m->first_seq = atoll(s + 22); seq = m->first_seq; }
             else if (starts(s, e, "#EXT-X-ENDLIST")) m->endlist = 1;
             else if (starts(s, e, "#EXT-X-DISCONTINUITY") && !starts(s, e, "#EXT-X-DISCONTINUITY-SEQUENCE")) disc = 1;
-            else if (starts(s, e, "#EXT-X-MAP")) m->fmp4 = 1;
+            else if (starts(s, e, "#EXT-X-MAP")) {
+                m->fmp4 = 1;
+                const char *u, *ue;                          /* 1.2.2b: the init segment */
+                if (attr_span(s + 10, e, "URI", &u, &ue) && ue > u && !m->map_uri) { m->map_uri = u; m->map_uri_len = (int)(ue - u); }
+                if (attr_span(s + 10, e, "BYTERANGE", &u, &ue)) m->byterange = 1;
+            } else if (starts(s, e, "#EXT-X-BYTERANGE")) m->byterange = 1;
             else if (starts(s, e, "#EXT-X-KEY:")) {
                 char val[64], ivs[48];
                 const char *u, *ue;

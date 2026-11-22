@@ -78,5 +78,9 @@ uint64_t      mp4_seek(Mp4Demux *d, int64_t target_ms, int64_t *at_ms);
 void          mp4_feed(Mp4Demux *d, uint64_t off, const uint8_t *data, size_t len);
 int           mp4_finished(const Mp4Demux *d);   /* every sample was handed out */
 uint32_t      mp4_samples(const Mp4Demux *d);    /* samples in the index (both tracks) */
+/* 1.2.2b: HLS with fragmented MP4 segments (fMP4 / CMAF): the init segment (#EXT-X-MAP) makes the demuxer, then
+ * every media segment whole (moof + mdat) gives its samples to the sink */
+Mp4Demux     *mp4_create_frag(const uint8_t *init, size_t len, const TsSink *sink, char *err, size_t errsz);
+void          mp4_frag_segment(Mp4Demux *d, const uint8_t *seg, size_t n);
 
 #endif

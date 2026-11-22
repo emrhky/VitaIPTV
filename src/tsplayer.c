@@ -16,6 +16,9 @@
 #include "audiofx.h"
 #include "aac51.h"
 #include "hlsaes.h"
+#include "swvdec.h"
+#include "avidemux.h"
+#include "pgs.h"
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
@@ -130,11 +133,14 @@ enum { SLOT_FREE = 0, SLOT_READY, SLOT_SHOWN, SLOT_OFF };   /* OFF: the decoder 
 typedef struct {
     int codec, width, height, refs, level, bit_depth, chroma, sps_len, pps_len, interlaced;
     uint8_t sps[128], pps[64];
+    int cfg_len;                        /* 1.2.2b: the container's header for the software decoders (MPEG-4: VOL) */
+    uint8_t cfg[256];
 } VInfo;
 
 typedef struct Pkt {
     struct Pkt *next;
     int64_t pts;
+    int64_t dts;                        /* 1.2.2b: decoding time (the software decoders; AVI gives only this) */
     int flags;
     uint32_t frame_us;
     size_t len;
@@ -177,6 +183,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     MkvDemux *mkv;                      /* used instead of dmx when the stream is Matroska */
     FlvDemux *flv;                      /* ... or FLV (HTTP-FLV live streams, .flv files) */
     Mp4Demux *mp4;                      /* film or episode in an MP4 file */
+    AviDemux *avi;                      /* 1.2.2b: ... or an AVI file */
     /* films and episodes (files that can be paused and searched) */
     int vod, vod_start_ms, vod_norange, vod_last_status;
     int vod_file;                       /* 1.3: a film on the memory card (vod_get reads the file, a range = a seek) */
@@ -277,6 +284,17 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     int afx_boost, afx_speaker, afx_level;         /* ... as last applied (-1 = not yet; a change is written to the log) */
     int a52_dlg, aacsw_dlg;             /* 1.1: "clear dialogue" when the software decoders were created */
     int a52_dts;                        /* 1.2.2: t->a52 is the DTS decoder */
+    SwVdec *swv;                        /* 1.2.2b: MPEG-2 / MPEG-4 Part 2 / DivX 3 decoded in software (video thread) */
+    PgsDec *pgsd;                       /* 1.2.2b: picture subtitles of the shown track (reader thread) */
+    int pgs_track;
+    struct BCue *bcues;                 /* ... their pictures (a ring of BCUES, under qlock) */
+    uint32_t nbcues;
+    int swv_failed, sw_w, sw_h, sw_skip, sw_started, sw_wait_units;
+    uint64_t sw_wait_us;                /* ... time its pictures waited for a free slot (not decoding) */
+    int frag;                           /* 1.2.2b: HLS fMP4: segments gathered whole for t->mp4 (mp4_frag_segment) */
+    uint8_t *fbuf;
+    size_t flen, fcap;
+    char map_url[1024];                 /* ... the init segment in use */
     HlsAes *hlsa;                       /* 1.2.2: AES-128 HLS: the decrypter, the key in use and its address */
     int seg_aes;                        /* the segment being fetched is encrypted */
     uint8_t aes_key[16], seg_iv[16];
@@ -450,7 +468,7 @@ static int wait_for_network(Tsp *t)
     if (state == SCE_NETCTL_STATE_CONNECTED) sceKernelDelayThread(1000000);   /* let it settle (DNS, DHCP) */
     return 1;
 }
-static const TsInfo *dmx_info(Tsp *t) { return t->mp4 ? mp4_info(t->mp4) : t->mkv ? mkv_info(t->mkv) : t->flv ? flv_info(t->flv) : ts_info(t->dmx); }
+static const TsInfo *dmx_info(Tsp *t) { return t->mp4 ? mp4_info(t->mp4) : t->avi ? avi_info(t->avi) : t->mkv ? mkv_info(t->mkv) : t->flv ? flv_info(t->flv) : ts_info(t->dmx); }
 static void dmx_feed(Tsp *t, const uint8_t *b, size_t n);
 static void thread_finished(Tsp *t);
 
@@ -1804,6 +1822,165 @@ static uint32_t peek_frame_us(Tsp *t, int64_t pts)
 }
 
 /* One H.264 access unit. Runs on the video thread. */
+/* ---------------------------------------------------------------- 1.2.2b: software video */
+
+/* slots for pictures of w x h from the software decoder: YUV 4:2:0 textures (as the HD decoder's) */
+static int sw_open(Tsp *t, int w, int h)
+{
+    if (t->ready) {
+        t->ready = 0;
+        __sync_synchronize();
+        wait_ui_release(t);                                  /* (the screen may be drawing one of them) */
+    }
+    free_plan(t);
+    t->yuv = 1;
+    t->dw = ALIGN(w, 32);
+    t->dh = ALIGN(h, 2);
+    uint32_t psize = (uint32_t)(t->dw * t->dh * 3 / 2);
+    int want = g_slots_cap < 6 ? g_slots_cap : 6, n = 0;
+    for (; n < want; n++) {
+        Slot *s = &t->slots[n];
+        s->data = mem_alloc(MEM_CDRAM, psize, &s->uid, 1);
+        if (!s->data) s->data = mem_alloc(MEM_PHYCONT, psize, &s->uid, 1);
+        if (!s->data) { s->uid = -1; break; }
+        memset(s->data, 16, (size_t)t->dw * t->dh);          /* (black: the rows below the picture are never seen) */
+        memset((uint8_t *)s->data + t->dw * t->dh, 128, (size_t)psize - (size_t)t->dw * t->dh);
+        if (slot_init(t, s) < 0) { mem_free(s->data, s->uid, 1); s->data = NULL; s->uid = -1; break; }
+    }
+    if (n < 2) { free_plan(t); return -1; }
+    sceKernelLockMutex(t->lock, 1, NULL);
+    t->nslots = t->base_slots = n;
+    t->st.slots = n;
+    t->shown = -1;
+    sceKernelUnlockMutex(t->lock, 1);
+    if (t->sw_w && (t->sw_w != w || t->sw_h != h)) { t->size_changes++; plog("tsp: picture size %dx%d -> %dx%d", t->sw_w, t->sw_h, w, h); }
+    t->sw_w = w;
+    t->sw_h = h;
+    t->vw = w;
+    t->vh = h;
+    t->st.width = w;
+    t->st.height = h;
+    t->st.hd = 0;
+    __sync_synchronize();
+    t->ready = 1;
+    return 0;
+}
+
+/* rows of a plane into the slot; interlaced pictures with each row mixed with the next (the two fields of a
+ * moving picture would show as combs) */
+static void sw_rows(uint8_t *dst, int dpitch, const uint8_t *src, int spitch, int w, int h, int blend)
+{
+    for (int y = 0; y < h; y++) {
+        const uint8_t *a = src + (size_t)y * spitch;
+        uint8_t *o = dst + (size_t)y * dpitch;
+        if (!blend || y + 1 >= h) { memcpy(o, a, (size_t)w); continue; }
+        const uint8_t *b = a + spitch;
+        int x = 0;
+        for (; x + 4 <= w; x += 4) {
+            uint32_t u, v;
+            memcpy(&u, a + x, 4);
+            memcpy(&v, b + x, 4);
+            uint32_t m = (u | v) - (((u ^ v) & 0xFEFEFEFEu) >> 1);   /* the mean of each byte, rounded up */
+            memcpy(o + x, &m, 4);
+        }
+        for (; x < w; x++) o[x] = (uint8_t)((a[x] + b[x] + 1) >> 1);
+    }
+}
+
+static void sw_frame(void *ctx, const SwvFrame *f)
+{
+    Tsp *t = ctx;
+    if (stopping(t) || f->w < 16 || f->h < 16) return;
+    if ((f->w != t->sw_w || f->h != t->sw_h) && sw_open(t, f->w, f->h) < 0) {
+        set_error(t, "Out of memory (%dx%d pictures)", f->w, f->h);
+        return;
+    }
+    uint64_t w0 = now_us();
+    int si;
+    while ((si = take_free_slot(t)) < 0) {
+        if (stopping(t)) return;
+        slot_nap(t);
+    }
+    t->sw_wait_us += now_us() - w0;
+    Slot *sl = &t->slots[si];
+    uint8_t *y = sl->data, *u = y + t->dw * t->dh, *v = u + (t->dw / 2) * (t->dh / 2);
+    int blend = f->interlaced;
+    sw_rows(y, t->dw, f->y, f->ys, f->w, f->h, blend);
+    sw_rows(u, t->dw / 2, f->u, f->us, (f->w + 1) / 2, (f->h + 1) / 2, blend);
+    sw_rows(v, t->dw / 2, f->v, f->vs, (f->w + 1) / 2, (f->h + 1) / 2, blend);
+    if (t->st.decoded == 0) {
+        g_pictures_seen = 1;
+        t->first_pic_pts = f->pts;
+        plog("tsp: first picture %dx%d (software)%s, pts %lld", f->w, f->h, f->interlaced ? ", interlaced (rows mixed)" : "", (long long)f->pts);
+    }
+    if (f->pts >= 0 && t->last_out_pts >= 0 && f->pts < t->last_out_pts && t->last_out_pts - f->pts < 90000LL * 10) t->out_of_order++;
+    if (f->pts >= 0) t->last_out_pts = f->pts;
+    sceKernelLockMutex(t->lock, 1, NULL);
+    sl->pts = f->pts;
+    sl->seq = t->out_seq++;
+    sl->ready_us = now_us();
+    sl->state = SLOT_READY;
+    sceKernelUnlockMutex(t->lock, 1);
+    t->st.decoded++;
+    if (!t->err_set) t->st.state = TSP_PLAYING;
+}
+
+static void sw_video_packet(Tsp *t, Pkt *p)
+{
+    const VInfo *i = &p->vi;
+    if (t->swv_failed) return;
+    if (!t->swv) {
+        if (!swv_available(i->codec)) {
+            set_error_kind(t, TSP_ERRK_FORMAT, "Video is %s: not supported", ts_codec_name((TsCodec)i->codec));
+            t->swv_failed = 1;
+            return;
+        }
+        char err[96];
+        int parse = !t->mkv && !t->flv && !t->mp4 && !t->avi;   /* (TS: pieces of the stream, not whole pictures) */
+        t->swv = swv_create(i->codec, i->cfg_len ? i->cfg : NULL, (size_t)i->cfg_len, i->width, i->height, parse, err, sizeof err);
+        if (!t->swv) {
+            t->swv_failed = 1;
+            set_error_kind(t, TSP_ERRK_FORMAT, "Video is %s: %s", ts_codec_name((TsCodec)i->codec), err);
+            return;
+        }
+        plog("tsp: %s video %dx%d: decoded in software%s", swv_name(i->codec), i->width, i->height, i->cfg_len ? " (with the container's header)" : "");
+        if (i->width * i->height > 1024 * 576)
+            plog("tsp: %dx%d is above SD: the ARM may not decode it in time (pictures nothing refers to are left out then)", i->width, i->height);
+    }
+    if (p->frame_us) t->frame_us = p->frame_us;
+    if (!t->first_unit_us) t->first_unit_us = now_us();
+    if (t->units_in++ == 0) plog("tsp: first video unit: %u bytes, %s", (unsigned)p->len, (p->flags & TS_FLAG_KEYFRAME) ? "keyframe" : "no keyframe yet");
+    if (!t->sw_started) {                                    /* from a keyframe (a picture without its references is grey) */
+        if (!(p->flags & TS_FLAG_KEYFRAME) && ++t->sw_wait_units < 300) return;
+        t->sw_started = 1;
+    }
+    /* behind the sound: leave out pictures nothing refers to, then all but keyframes, until it is close again */
+    int64_t apts, tp = p->pts >= 0 ? p->pts : p->dts;
+    if (t->st.av_sync && tp >= 0 && audio_now(t, now_us(), &apts)) {
+        int64_t behind = pts_diff(apts, tp);
+        int lv = behind > 90000LL * 3 ? 2 : behind > 45000 ? 1 : behind < 9000 ? 0 : t->sw_skip;
+        if (lv != t->sw_skip) {
+            if (lv > t->sw_skip) plog("tsp: software decoder %lld ms behind the sound: %s left out", (long long)(behind / 90),
+                                      lv == 2 ? "all but keyframes" : "pictures nothing refers to");
+            t->sw_skip = lv;
+            swv_skip(t->swv, lv);
+        }
+    }
+    uint64_t t0 = now_us(), w0 = t->sw_wait_us;
+    uint32_t before = t->st.decoded;
+    swv_decode(t->swv, p->data, p->len, p->pts, p->dts, sw_frame, t);
+    uint64_t dus = now_us() - t0 - (t->sw_wait_us - w0);
+    t->dcalls++;
+    t->dus_sum += (uint32_t)dus;
+    if (dus > t->dus_max) t->dus_max = (uint32_t)dus;
+    if (t->st.decoded > before) t->pub_fed++;
+    if (!t->frame_us) {
+        double fps = swv_fps(t->swv);
+        if (fps > 5 && fps < 121) t->frame_us = (uint32_t)(1000000.0 / fps);
+    }
+    t->st.errors = swv_errors(t->swv);
+}
+
 static void video_packet(Tsp *t, Pkt *p)
 {
     const VInfo *i = &p->vi;
@@ -1813,6 +1990,7 @@ static void video_packet(Tsp *t, Pkt *p)
     int flags = p->flags;
 
     if (stopping(t)) return;                                /* an error was reported meanwhile: no decoder now */
+    if (i->codec == TS_CODEC_MPEG2V || i->codec == TS_CODEC_MPEG4V || i->codec == TS_CODEC_DIVX3) { sw_video_packet(t, p); return; }   /* 1.2.2b */
     if (i->codec == TS_CODEC_HEVC) { set_error_kind(t, TSP_ERRK_FORMAT, "HEVC (H.265) video: the Vita cannot decode it"); return; }
     if (i->codec != TS_CODEC_H264) { set_error_kind(t, TSP_ERRK_FORMAT, "Video is %s: not supported", ts_codec_name((TsCodec)i->codec)); return; }
     if (p->frame_us) t->frame_us = p->frame_us;
@@ -2286,6 +2464,8 @@ static void update_sub_tracks(Tsp *t)
         t->st.s_id[k] = i->subs[k].id;
         memcpy(t->st.s_lang[k], i->subs[k].lang, 4);
         snprintf(t->st.s_name[k], sizeof t->st.s_name[k], "%s", i->subs[k].name);
+        if (i->subs[k].pgs)                                  /* 1.2.2b: the menu says which ones are pictures */
+            snprintf(t->st.s_name[k], sizeof t->st.s_name[k], "%.24s%sPGS", i->subs[k].name, i->subs[k].name[0] ? " " : "");
         t->st.s_forced[k] = i->subs[k].forced;
     }
     for (int k = 0; t->vod && k < g_next && n < TSP_MAX_SUBS; k++, n++) {   /* 1.3.1: the .srt files */
@@ -2320,6 +2500,85 @@ static void update_sub_tracks(Tsp *t)
         o += (size_t)snprintf(list + o, sizeof list - o, "%s%s%s%s%s", k ? ", " : "", t->st.s_lang[k][0] ? t->st.s_lang[k] : "-",
                               t->st.s_name[k][0] ? " " : "", t->st.s_name[k], k == cur ? " (shown)" : "");
     if (n) plog("tsp: subtitle tracks: %s", list);
+}
+
+/* 1.2.2b: picture subtitles (PGS): the shown track's display sets, as pictures */
+#define BCUES 16
+typedef struct BCue { int track; uint32_t seq; PgsCue c; } BCue;
+
+static void pgs_cue(void *ctx, PgsCue *c)
+{
+    Tsp *t = ctx;
+    if (!t->bcues && !(t->bcues = calloc(BCUES, sizeof(BCue)))) { free(c->pix); return; }
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    BCue *b = &t->bcues[t->nbcues % BCUES];
+    free(b->c.pix);
+    b->c = *c;
+    b->track = t->pgs_track;
+    b->seq = ++t->nbcues;
+    sceKernelUnlockMutex(t->qlock, 1);
+}
+
+static void on_bsub(void *ctx, int id, const uint8_t *data, size_t len, int64_t pts)
+{
+    Tsp *t = ctx;
+    if (stopping(t) || pts < 0) return;
+    update_sub_tracks(t);
+    int k = t->st.s_cur;
+    if (k < 0 || k >= t->st.s_n || t->st.s_id[k] != id) return;   /* (only the track shown) */
+    if (!t->pgsd || t->pgs_track != id) {
+        pgs_destroy(t->pgsd);
+        t->pgsd = pgs_create();
+        t->pgs_track = id;
+        plog("tsp: picture subtitles (PGS), track %d", id);
+    }
+    pgs_feed(t->pgsd, data, len, pts, pgs_cue, t);
+}
+
+/* the picture subtitle for the picture on screen: the newest display set of the shown track at its time */
+static const BCue *bcue_now(Tsp *t, int64_t p)
+{
+    int k = t->st.s_cur;
+    if (!t->bcues || k < 0 || k >= t->st.s_n) return NULL;
+    int track = t->st.s_id[k];
+    if (p < 0) return NULL;
+    p -= (int64_t)g_sub_delay * 90;
+    const BCue *best = NULL;
+    uint32_t n = t->nbcues < BCUES ? t->nbcues : BCUES;
+    for (uint32_t j = 0; j < n; j++) {
+        const BCue *b = &t->bcues[j];
+        if (b->track != track || b->c.pts > p) continue;
+        if (!best || b->c.pts > best->c.pts || (b->c.pts == best->c.pts && b->seq > best->seq)) best = b;
+    }
+    if (best && (best->c.clear || !best->c.pix || p - best->c.pts > 90000LL * 60)) return NULL;   /* (a minute at most) */
+    return best;
+}
+
+int tsp_sub_bitmap(uint32_t *id, int *x, int *y, int *w, int *h, int *cw, int *ch)
+{
+    Tsp *t = g_tsp;
+    if (!t || !t->bcues) return 0;
+    int64_t p = -1;
+    sceKernelLockMutex(t->lock, 1, NULL);
+    if (t->shown >= 0) p = t->shown_pts;
+    sceKernelUnlockMutex(t->lock, 1);
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    const BCue *b = bcue_now(t, p);
+    if (b) { *id = b->seq; *x = b->c.x; *y = b->c.y; *w = b->c.w; *h = b->c.h; *cw = b->c.cw; *ch = b->c.ch; }
+    sceKernelUnlockMutex(t->qlock, 1);
+    return b != NULL;
+}
+
+int tsp_sub_bitmap_copy(uint32_t id, uint32_t *dst, int stride)
+{
+    Tsp *t = g_tsp;
+    int ok = 0;
+    if (!t || !t->bcues) return 0;
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    for (uint32_t j = 0; j < BCUES; j++)
+        if (t->bcues[j].seq == id && t->bcues[j].c.pix) { pgs_to_rgba(&t->bcues[j].c, dst, stride); ok = 1; break; }
+    sceKernelUnlockMutex(t->qlock, 1);
+    return ok;
 }
 
 static void on_sub(void *ctx, int id, const char *text, int64_t pts, int64_t dur)
@@ -2415,9 +2674,11 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
     if (!p) return;
     memset(p, 0, sizeof *p);
     p->pts = pts;
+    p->dts = dts;
     p->flags = flags;
     p->len = len;
     p->vi.codec = i->video_codec;
+    if (i->vcfg_len > 0 && i->vcfg_len <= (int)sizeof p->vi.cfg) { memcpy(p->vi.cfg, i->vcfg, (size_t)i->vcfg_len); p->vi.cfg_len = i->vcfg_len; }
     p->vi.width = i->width;
     p->vi.height = i->height;
     p->vi.refs = i->ref_frames;
@@ -3583,9 +3844,25 @@ static void read_http(Tsp *t, uint8_t *buf)
 static void dmx_feed(Tsp *t, const uint8_t *b, size_t n)
 {
     if (t->net_err[0] && n) t->net_err[0] = 0;              /* data comes: an earlier failure is not the story any more */
-    if (!t->mkv && !t->flv && t->st.bytes == n) {
-        TsSink sink = { on_video, on_audio, t, on_sub };
-        if (mkv_probe(b, n)) {
+    if (t->frag) {                                           /* 1.2.2b: an fMP4 segment: kept whole (see hls_get_seg) */
+        if (t->flen + n > t->fcap) {
+            size_t c = t->fcap ? t->fcap : 1024 * 1024;
+            while (c < t->flen + n) c *= 2;
+            uint8_t *nb = c <= 64u * 1024 * 1024 ? realloc(t->fbuf, c) : NULL;
+            if (!nb) return;
+            t->fbuf = nb;
+            t->fcap = c;
+        }
+        memcpy(t->fbuf + t->flen, b, n);
+        t->flen += n;
+        return;
+    }
+    if (!t->mkv && !t->flv && !t->avi && t->st.bytes == n) {
+        TsSink sink = { on_video, on_audio, t, on_sub, on_bsub };
+        if (avi_probe(b, n)) {                               /* 1.2.2b: an AVI from the start (a server without ranges) */
+            t->avi = avi_create_stream(&sink);
+            plog("tsp: AVI stream (from the start, no jumping)");
+        } else if (mkv_probe(b, n)) {
             t->mkv = mkv_create(&sink);
             if (t->mkv) mkv_prefer_audio(t->mkv, g_aid, g_alang);
             plog("tsp: Matroska (MKV) stream");
@@ -3594,7 +3871,8 @@ static void dmx_feed(Tsp *t, const uint8_t *b, size_t n)
             plog("tsp: FLV stream");
         }
     }
-    if (t->mkv) mkv_feed(t->mkv, b, n);
+    if (t->avi) avi_feed(t->avi, b, n);
+    else if (t->mkv) mkv_feed(t->mkv, b, n);
     else if (t->flv) flv_feed(t->flv, b, n);
     else ts_feed(t->dmx, b, n);
 }
@@ -3891,7 +4169,17 @@ static int aes_key_for(Tsp *t, const char *base, const HlsSegment *g)
 }
 
 /* a segment: as hls_get, decrypted when it is AES-128 (the key is already in t->aes_key) */
+static int hls_get_seg_once(Tsp *t, const HlsSegment *g, const char *url, uint8_t *buf, int *status);
 static int hls_get_seg(Tsp *t, const HlsSegment *g, const char *url, uint8_t *buf, int *status)
+{
+    t->flen = 0;
+    int r = hls_get_seg_once(t, g, url, buf, status);
+    if (t->frag && r > 0 && *status < 300 && !stopping(t) && t->mp4) mp4_frag_segment(t->mp4, t->fbuf, t->flen);   /* 1.2.2b */
+    t->flen = 0;
+    return r;
+}
+
+static int hls_get_seg_once(Tsp *t, const HlsSegment *g, const char *url, uint8_t *buf, int *status)
 {
     if (!g->aes || !t->hlsa) return hls_get(t, url, NULL, 0, buf, status);
     if (g->has_iv) memcpy(t->seg_iv, g->iv, 16); else hls_seq_iv(g->seq, t->seg_iv);
@@ -3899,7 +4187,8 @@ static int hls_get_seg(Tsp *t, const HlsSegment *g, const char *url, uint8_t *bu
     t->seg_aes = 1;
     int r = hls_get(t, url, NULL, 0, buf, status);
     t->seg_aes = 0;
-    if (r > 0 && *status < 300 && hlsaes_end(t->hlsa, aes_out, t) < 0) {
+    /* (1.2.2b: not when it was cut by stopping: then its end is missing, not wrong) */
+    if (r > 0 && *status < 300 && !stopping(t) && hlsaes_end(t->hlsa, aes_out, t) < 0) {
         plog("tsp: HLS segment #%lld: the decrypted end is wrong (wrong key or a cut segment)", (long long)g->seq);
     }
     return r;
@@ -4137,7 +4426,38 @@ static void read_hls(Tsp *t, uint8_t *buf)
         HlsMedia m;
         if (hls_parse_media(text, &m) < 0) { set_error_kind(t, TSP_ERRK_FORMAT, "HLS playlist without segments"); goto out; }
         if (m.encrypted) { hls_media_free(&m); set_error_kind(t, TSP_ERRK_FORMAT, "Encrypted HLS stream (SAMPLE-AES / DRM): not supported"); goto out; }
-        if (m.fmp4 || (m.nseg && seg_is_mp4(m.seg[0].uri, m.seg[0].uri_len))) {
+        if (m.byterange) {                                   /* 1.2.2b */
+            hls_media_free(&m);
+            set_error_kind(t, TSP_ERRK_FORMAT, "HLS in parts of one file (byte ranges): not supported");
+            goto out;
+        }
+        if (m.fmp4 && m.map_uri) {                           /* 1.2.2b: fMP4 / CMAF: the init segment, then whole segments */
+            char mu[sizeof t->map_url];
+            hls_resolve(base, m.map_uri, m.map_uri_len, mu, sizeof mu);
+            if (!t->mp4 || strcmp(mu, t->map_url)) {
+                size_t cap = 1024 * 1024;
+                char *ib = malloc(cap);
+                int st = 0, r = ib ? hls_get(t, mu, ib, cap, NULL, &st) : -1;
+                if (r <= 0 || st >= 300) {
+                    free(ib);
+                    hls_media_free(&m);
+                    if (!stopping(t)) set_error_kind(t, TSP_ERRK_NET, st >= 400 ? "HLS fMP4: its init segment could not be got (HTTP %d)" : "HLS fMP4: its init segment could not be got", st);
+                    goto out;
+                }
+                TsSink sink = { on_video, on_audio, t, on_sub, on_bsub };
+                char err[96];
+                Mp4Demux *nd = mp4_create_frag((const uint8_t *)ib, (size_t)r, &sink, err, sizeof err);
+                free(ib);
+                if (!nd) { hls_media_free(&m); set_error_kind(t, TSP_ERRK_FORMAT, "%s", err); goto out; }
+                if (t->mp4) mp4_destroy(t->mp4);
+                t->mp4 = nd;
+                t->frag = 1;
+                snprintf(t->map_url, sizeof t->map_url, "%s", mu);
+                const TsInfo *fi = mp4_info(nd);
+                plog("tsp: HLS with fMP4 segments: video %s %dx%d, sound %s (init %d bytes)", ts_codec_name(fi->video_codec), fi->width, fi->height,
+                     ts_codec_name(fi->audio_codec), r);
+            }
+        } else if (m.fmp4 || (m.nseg && seg_is_mp4(m.seg[0].uri, m.seg[0].uri_len))) {
             hls_media_free(&m);
             set_error_kind(t, TSP_ERRK_FORMAT, "HLS with MP4 segments: not supported (MPEG-TS only)");
             goto out;
@@ -4222,6 +4542,10 @@ out:
     if (alt) { free(alt->text); free(alt->seg); free(alt); }
     t->alt_on = 0;
     if (t->adm) { ts_destroy(t->adm); t->adm = NULL; }      /* (only this thread feeds it) */
+    free(t->fbuf);                                          /* 1.2.2b */
+    t->fbuf = NULL;
+    t->flen = t->fcap = 0;
+    t->frag = 0;
     hlsaes_destroy(t->hlsa);                                /* 1.2.2 */
     t->hlsa = NULL;
     t->seg_aes = 0;
@@ -4621,6 +4945,7 @@ static int vod_feed_cb(Tsp *t, void *c, const uint8_t *d, size_t n)
     uint64_t *pos = c;
     t->st.bytes += (uint32_t)n;
     if (t->mp4) mp4_feed(t->mp4, *pos, d, n);
+    else if (t->avi) avi_feed(t->avi, d, n);                 /* 1.2.2b */
     else if (t->mkv) mkv_feed(t->mkv, d, n);
     else if (t->flv) flv_feed(t->flv, d, n);
     else ts_feed(t->dmx, d, n);
@@ -4724,7 +5049,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         t->st.dur_ms = (int)L.duration_ms;
         off = L.first_cluster;
         if (start > 0 && mkv_seek(vio_read, &io, t->vod_total, &L, start, &off, &at) != 0) { off = L.first_cluster; at = 0; }
-        TsSink sink = { on_video, on_audio, t, on_sub };
+        TsSink sink = { on_video, on_audio, t, on_sub, on_bsub };
         t->mkv = mkv_create(&sink);
         if (t->mkv) mkv_prefer_audio(t->mkv, g_aid, g_alang);   /* (0.5.0: the audio track chosen in the menu) */
         if (t->mkv) mkv_feed(t->mkv, L.head, L.head_len);
@@ -4745,7 +5070,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
                                               "MP4 file: the server does not allow reading its index" : "Damaged MP4 file (no index)");
             return;
         }
-        TsSink sink = { on_video, on_audio, t, on_sub };
+        TsSink sink = { on_video, on_audio, t, on_sub, on_bsub };
         char err[96];
         t->mp4 = mp4_create(moov, ml, &sink, err, sizeof err);
         free(moov);
@@ -4755,7 +5080,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
         plog("tsp: MP4: %d s, %u samples, index %u KB, start at %d s (byte %llu)", t->st.dur_ms / 1000, mp4_samples(t->mp4),
              (unsigned)(ml / 1024), (int)(at / 1000), (unsigned long long)off);
     } else if (kind == VOD_FLV) {                           /* no index to jump with: from the start, pause only */
-        TsSink sink = { on_video, on_audio, t, on_sub };
+        TsSink sink = { on_video, on_audio, t, on_sub, on_bsub };
         if (!(t->flv = flv_create(&sink))) { free(io.win); set_error(t, "Out of memory"); return; }
         t->vod_base = 0;
         if (io.win && io.woff == 0) t->st.dur_ms = (int)flv_meta_duration_ms(io.win, io.wlen);
@@ -4770,10 +5095,22 @@ static void read_vod(Tsp *t, uint8_t *buf)
             if (start > 0 && ts_seek(vio_read, &io, t->vod_total, &L, start, &off, &at) != 0) { off = 0; at = 0; }
         }
         plog("tsp: TS file: %d s, start at %d s (byte %llu)", t->st.dur_ms / 1000, (int)(at / 1000), (unsigned long long)off);
+    } else if (kind == VOD_AVI) {                           /* 1.2.2b */
+        TsSink sink = { on_video, on_audio, t, on_sub, on_bsub };
+        char err[96];
+        snprintf(t->st.note, sizeof t->st.note, "%s", "Reading the film's index...");   /* (idx1: at the end of the file) */
+        t->avi = avi_open(vio_read, &io, t->vod_total, &sink, err, sizeof err);
+        if (!t->avi) { free(io.win); if (!stopping(t)) set_error_kind(t, TSP_ERRK_FORMAT, "%s", err); return; }
+        t->st.dur_ms = (int)avi_duration_ms(t->avi);
+        off = avi_seek(t->avi, avi_seekable(t->avi) ? start : 0, &at);
+        const TsInfo *ai = avi_info(t->avi);
+        plog("tsp: AVI: %d s, video %s %dx%d, sound %s, %u keyframes in the index, start at %d s (byte %llu)", t->st.dur_ms / 1000,
+             ts_codec_name(ai->video_codec), ai->width, ai->height, ts_codec_name(ai->audio_codec), avi_keyframes(t->avi),
+             (int)(at / 1000), (unsigned long long)off);
+        if (!avi_seekable(t->avi) && start > 0) plog("tsp: AVI without an index: from the start, no jumping");
     } else {
         free(io.win);
-        if (kind == VOD_AVI) set_error_kind(t, TSP_ERRK_FORMAT, "AVI file: not supported (MKV, MP4, TS and FLV are)");
-        else set_error_kind(t, TSP_ERRK_FORMAT, "Unknown file type");
+        set_error_kind(t, TSP_ERRK_FORMAT, "Unknown file type");
         return;
     }
     free(io.win);
@@ -4781,7 +5118,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
     t->st.note[0] = 0;
     t->st.note_pct = 0;
     if (stopping(t)) return;
-    t->st.seekable = t->st.dur_ms > 0 && !t->flv;
+    t->st.seekable = t->st.dur_ms > 0 && !t->flv && (!t->avi || avi_seekable(t->avi));
     if (t->st.dur_ms > 0 && t->vod_total)                   /* what the film needs on average */
         t->st.need_kbs = (unsigned)(t->vod_total * 1000 / (uint64_t)t->st.dur_ms / 1024);
     t->vod_start_ms = (int)at;                              /* what the position shows until the first picture */
@@ -4819,7 +5156,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
     if (!stopping(t)) {
         if (t->mkv) mkv_flush(t->mkv);
         else if (t->flv) flv_flush(t->flv);
-        else if (!t->mp4) ts_flush(t->dmx);
+        else if (!t->mp4 && !t->avi) ts_flush(t->dmx);
         plog("tsp: VOD file read to the end (%llu MB)", (unsigned long long)(pos >> 20));
     }
 }
@@ -4868,7 +5205,7 @@ static int video_main(SceSize args, void *argp)
         if (t->reader_done) stats_tick(t);
         Pkt *p = q_pop(t, &t->vq);
         if (!p) {
-            if (t->reader_done) { decoder_flush(t); break; }
+            if (t->reader_done) { decoder_flush(t); if (t->swv && !stopping(t)) swv_flush(t->swv, sw_frame, t); break; }
             uint64_t w0 = now_us();
             sceKernelDelayThread(2000);
             t->w_data_us += now_us() - w0;
@@ -4878,6 +5215,12 @@ static int video_main(SceSize args, void *argp)
         free(p);
     }
     t->video_done = 1;
+    if (t->swv) {                                            /* 1.2.2b */
+        plog("tsp: software decoder: %u pictures, %u errors, decoding avg %u us a unit", t->st.decoded, swv_errors(t->swv),
+             t->dcalls ? (unsigned)(t->dus_sum / t->dcalls) : 0);
+        swv_destroy(t->swv);
+        t->swv = NULL;
+    }
     if (!t->cancel && t->st.state != TSP_ERROR && t->st.decoded == 0 && !t->st.audio_only) explain_no_picture(t);
     thread_finished(t);
     plog("tsp: video end: decoded %u, shown %u, dropped %u, late %u, damaged %u, errors %u%s",
@@ -5394,7 +5737,7 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     if (g_vc.lock < 0) g_vc.lock = sceKernelCreateMutex("tsp_vcache", 0, 0, NULL);   /* before any reader thread uses it */
     t->lock = sceKernelCreateMutex("tsp_lock", 0, 0, NULL);
     t->qlock = sceKernelCreateMutex("tsp_qlock", 0, 0, NULL);
-    TsSink sink = { on_video, on_audio, t, on_sub };
+    TsSink sink = { on_video, on_audio, t, on_sub, on_bsub };
     t->dmx = ts_create(&sink);
     if (t->dmx) ts_prefer_audio(t->dmx, g_aid, g_alang);    /* 0.5.0: the audio track chosen in the menu */
     t->st.a_cur = -1;
@@ -5516,6 +5859,10 @@ void tsp_stop(void)
     mkv_destroy(t->mkv);
     flv_destroy(t->flv);
     mp4_destroy(t->mp4);
+    avi_destroy(t->avi);
+    pgs_destroy(t->pgsd);                                   /* 1.2.2b */
+    if (t->bcues) for (int k = 0; k < BCUES; k++) free(t->bcues[k].c.pix);
+    free(t->bcues);
     q_clear(&t->vq);
     q_clear(&t->aq);
     sceKernelDeleteMutex(t->lock);

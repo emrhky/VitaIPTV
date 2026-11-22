@@ -47,6 +47,9 @@ typedef struct {
     int encrypted;                      /* #EXT-X-KEY with a METHOD that is not played (SAMPLE-AES, DRM; 1.2.2: not AES-128) */
     int aes;                            /* 1.2.2: some segments are AES-128 */
     int fmp4;                           /* #EXT-X-MAP: fragmented MP4 segments */
+    const char *map_uri;                /* 1.2.2b: its init segment (in the playlist text, not terminated) */
+    int map_uri_len;
+    int byterange;                      /* 1.2.2b: #EXT-X-BYTERANGE (parts of one file): not played */
     int nseg;
     HlsSegment *seg;                    /* malloc'd, free with hls_media_free */
 } HlsMedia;

@@ -343,6 +343,13 @@ static const Pair FIXED[] = {
     { "Jumping is not possible in this file", "Bu dosyada ileri/geri atlanamıyor" },
     { "AVI file: not supported (MKV, MP4, TS and FLV are)", "AVI dosyası: desteklenmiyor (MKV, MP4, TS ve FLV destekleniyor)" },
     { "Unknown file type", "Bilinmeyen dosya türü" },
+    /* 1.2.2b */
+    { "Not an AVI file", "AVI dosyası değil" }, { "AVI header too big", "AVI başlığı çok büyük" },
+    { "AVI header could not be read", "AVI başlığı okunamadı" }, { "AVI file without its header", "AVI dosyasının başlığı yok" },
+    { "AVI file without its film (movi)", "AVI dosyasında film yok (movi)" }, { "AVI file without video or sound", "AVI dosyasında görüntü ya da ses yok" },
+    { "HLS in parts of one file (byte ranges): not supported", "Tek dosyanın parçalarından oluşan HLS (byte range): desteklenmiyor" },
+    { "HLS fMP4: its init segment could not be got", "HLS fMP4: başlangıç parçası alınamadı" },
+    { "HLS fMP4: the init segment has no moov", "HLS fMP4: başlangıç parçası bozuk" },
     { "The server does not give this now (HTTP 405): the account is busy or it is not available",
       "Sunucu bunu şu an vermiyor (HTTP 405): hesap meşgul ya da içerik kapalı" },   /* 1.2.2 */
     { "The server sent a web page instead of the film (see log.txt)", "Sunucu film yerine bir web sayfası gönderdi (log.txt'ye bakın)" },   /* 1.2.1 */
@@ -497,6 +504,9 @@ static const Pair PATTERNS[] = {
     { "Decoder rejects this stream (0x%08X)", "Çözücü bu yayını kabul etmiyor (0x%s)" },
     { "No memory layout accepted by the decoder (0x%08X)", "Çözücü hiçbir bellek düzenini kabul etmedi (0x%s)" },
     { "Video is %s: not supported", "Görüntü %s: desteklenmiyor" },
+    { "Video is %s: %s", "Görüntü %s: %s" },                 /* 1.2.2b (the software decoder could not open) */
+    { "Out of memory (%dx%d pictures)", "Bellek yetersiz (%sx%s resim)" },
+    { "HLS fMP4: its init segment could not be got (HTTP %d)", "HLS fMP4: başlangıç parçası alınamadı (HTTP %s)" },
     { "H.264 %d-bit, colour %s (the Vita decodes 8-bit 4:2:0 only)", "H.264 %s-bit, renk %s (Vita yalnız 8-bit 4:2:0 çözer)" },
     { "Picture size changed to %dx%d (not supported yet)", "Görüntü boyutu %sx%s oldu (henüz desteklenmiyor)" },
     { "Audio %s: not supported", "Ses %s: desteklenmiyor" },

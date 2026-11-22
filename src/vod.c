@@ -536,6 +536,7 @@ typedef struct {
     int cfg_len;
     int width, height, channels, rate;
     uint32_t cur;                       /* next sample to hand out */
+    uint32_t trex_dur, trex_size, trex_flags;   /* 1.2.2b: fragments (mvex/trex): the defaults */
 } Mp4Track;
 
 struct Mp4Demux {
@@ -617,6 +618,8 @@ static void parse_esds(Mp4Track *t, const uint8_t *p, size_t n)
     if (oti == 0x40 || oti == 0x66 || oti == 0x67 || oti == 0x68) t->codec = TS_CODEC_AAC;
     else if (oti == 0x69 || oti == 0x6B) t->codec = TS_CODEC_MPEG_AUDIO;
     else if (oti >= 0xA9 && oti <= 0xAC) t->codec = TS_CODEC_DTS;   /* 1.2.2: DTS ("mp4a" with DTS inside) */
+    else if (oti == 0x20) t->codec = TS_CODEC_MPEG4V;        /* 1.2.2b: "mp4v": MPEG-4 Part 2, MPEG-2, MPEG-1 */
+    else if ((oti >= 0x60 && oti <= 0x65) || oti == 0x6A) t->codec = TS_CODEC_MPEG2V;
     else t->codec = TS_CODEC_OTHER;
     if (pos < n && p[pos] == 0x05) {
         pos++;
@@ -641,11 +644,13 @@ static void parse_stsd(Mp4Track *t, const Box *stsd)
         if (!memcmp(fmt, "avc1", 4) || !memcmp(fmt, "avc3", 4)) t->codec = TS_CODEC_H264;
         else if (!memcmp(fmt, "hvc1", 4) || !memcmp(fmt, "hev1", 4)) t->codec = TS_CODEC_HEVC;
         else if (!memcmp(fmt, "mp4v", 4)) t->codec = TS_CODEC_OTHER;
+        else if (!memcmp(fmt, "XVID", 4) || !memcmp(fmt, "DIVX", 4) || !memcmp(fmt, "DX50", 4)) t->codec = TS_CODEC_MPEG4V;
         else t->codec = TS_CODEC_OTHER;
         if (bn < 78) return;
         t->width = be16(body + 24);
         t->height = be16(body + 26);
         Box kids = { body + 78, bn - 78 }, c;
+        if (!memcmp(fmt, "mp4v", 4) && box_find(&kids, "esds", &c)) parse_esds(t, c.p, c.n);   /* 1.2.2b: the codec and its VOL */
         if (t->codec == TS_CODEC_H264 && box_find(&kids, "avcC", &c) && c.n <= sizeof t->cfg) {
             memcpy(t->cfg, c.p, c.n);
             t->cfg_len = (int)c.n;
@@ -891,7 +896,7 @@ Mp4Demux *mp4_create(const uint8_t *moov, size_t len, const TsSink *sink, char *
                     parse_stsd(&tmp, &stsd);
                     parse_edits(&tmp, &trak, d->movie_ts);
                     /* a second track of a kind is used only if the first cannot play (e.g. AC-3 next to AAC) */
-                    int usable = kind == 1 ? tmp.codec == TS_CODEC_H264 : (tmp.codec == TS_CODEC_AAC || tmp.codec == TS_CODEC_MPEG_AUDIO);
+                    int usable = kind == 1 ? (tmp.codec == TS_CODEC_H264 || tmp.codec == TS_CODEC_MPEG4V || tmp.codec == TS_CODEC_MPEG2V) : (tmp.codec == TS_CODEC_AAC || tmp.codec == TS_CODEC_MPEG_AUDIO);
                     if (tmp.timescale && build_samples(&tmp, &stbl, err, errsz) == 0) {
                         if (!d->has[kind - 1] || usable) {
                             if (d->has[kind - 1]) free(d->tr[kind - 1].s);
@@ -910,7 +915,7 @@ Mp4Demux *mp4_create(const uint8_t *moov, size_t len, const TsSink *sink, char *
                     tmp.kind = kind;
                     tmp.timescale = mdhd.p[0] == 1 ? be32(mdhd.p + 20) : be32(mdhd.p + 12);
                     parse_stsd(&tmp, &stsd);
-                    int usable = kind == 1 ? tmp.codec == TS_CODEC_H264 : (tmp.codec == TS_CODEC_AAC || tmp.codec == TS_CODEC_MPEG_AUDIO);
+                    int usable = kind == 1 ? (tmp.codec == TS_CODEC_H264 || tmp.codec == TS_CODEC_MPEG4V || tmp.codec == TS_CODEC_MPEG2V) : (tmp.codec == TS_CODEC_AAC || tmp.codec == TS_CODEC_MPEG_AUDIO);
                     if (usable && tmp.timescale) {
                         if (box_find(&trak, "tkhd", &tkhd) && tkhd.n >= 24) tmp.id = (int)(tkhd.p[0] == 1 ? be32(tkhd.p + 20) : be32(tkhd.p + 12));
                         parse_edits(&tmp, &trak, d->movie_ts);
@@ -933,6 +938,7 @@ Mp4Demux *mp4_create(const uint8_t *moov, size_t len, const TsSink *sink, char *
         i->video_pid = v->id ? v->id : 1;
         i->video_codec = v->codec;
         if (v->codec == TS_CODEC_H264) use_avcc(d, v);
+        else if (v->cfg_len > 0 && v->cfg_len <= (int)sizeof i->vcfg) { memcpy(i->vcfg, v->cfg, (size_t)v->cfg_len); i->vcfg_len = v->cfg_len; }   /* 1.2.2b */
         if (!i->width) { i->width = v->width; i->height = v->height; }
         i->streams[i->nstreams].pid = i->video_pid; i->streams[i->nstreams].stream_type = 1; i->streams[i->nstreams++].codec = v->codec;
     }
@@ -1030,7 +1036,8 @@ static void emit_video(Mp4Demux *d, const uint8_t *p, size_t n, int64_t pts, int
     TsInfo *i = &d->info;
     if (i->video_codec != TS_CODEC_H264) {
         i->video_aus++;
-        if (d->sink.video) d->sink.video(d->sink.ctx, p, n, pts, pts, 0);
+        if (key) i->keyframes++;
+        if (d->sink.video) d->sink.video(d->sink.ctx, p, n, pts, pts, key ? TS_FLAG_KEYFRAME : 0);   /* (1.2.2b: the keyframes) */
         return;
     }
     size_t o = 0, pos = 0;
@@ -1168,3 +1175,130 @@ void mp4_feed(Mp4Demux *d, uint64_t off, const uint8_t *data, size_t len)
 }
 
 int mp4_finished(const Mp4Demux *d) { return next_track(d) < 0; }
+
+/* ---------------------------------------------------------------- 1.2.2b: fragmented MP4 (HLS fMP4 / CMAF) */
+
+Mp4Demux *mp4_create_frag(const uint8_t *init, size_t len, const TsSink *sink, char *err, size_t errsz)
+{
+    /* the init segment: ftyp, moov (with mvex) */
+    size_t pos = 0;
+    const uint8_t *moov = NULL;
+    size_t mlen = 0;
+    while (pos + 8 <= len) {
+        uint64_t size = be32(init + pos);
+        if (size == 1 && pos + 16 <= len) size = be64(init + pos + 8);
+        else if (size == 0) size = len - pos;
+        if (size < 8 || pos + size > len) break;
+        if (!memcmp(init + pos + 4, "moov", 4)) { moov = init + pos; mlen = (size_t)size; break; }
+        pos += (size_t)size;
+    }
+    if (!moov) { snprintf(err, errsz, "HLS fMP4: the init segment has no moov"); return NULL; }
+    Mp4Demux *d = mp4_create(moov, mlen, sink, err, errsz);
+    if (!d) return NULL;
+    Box root = { moov + 8, mlen - 8 }, mvex;
+    if (box_find(&root, "mvex", &mvex)) {
+        for (size_t q = 0; q + 8 <= mvex.n; ) {
+            uint32_t sz = be32(mvex.p + q);
+            if (sz < 8 || q + sz > mvex.n) break;
+            if (!memcmp(mvex.p + q + 4, "trex", 4) && sz >= 32) {
+                const uint8_t *t = mvex.p + q + 8;
+                int id = (int)be32(t + 4);
+                for (int k = 0; k < 2; k++)
+                    if (d->has[k] && d->tr[k].id == id) {
+                        d->tr[k].trex_dur = be32(t + 12);
+                        d->tr[k].trex_size = be32(t + 16);
+                        d->tr[k].trex_flags = be32(t + 20);
+                    }
+            }
+            q += sz;
+        }
+    }
+    return d;
+}
+
+static int64_t frag_90k(const Mp4Track *t, int64_t ts)
+{
+    int64_t v = (ts - t->shift) * 90000 / (int64_t)t->timescale + t->delay90;
+    return v & ((1LL << 33) - 1);                            /* (live streams count from long ago: the TS clock's range) */
+}
+
+/* one traf of a moof at moof (its start in seg) */
+static void frag_traf(Mp4Demux *d, const uint8_t *seg, size_t n, size_t moof, const Box *traf)
+{
+    Box tfhd, tfdt;
+    if (!box_find(traf, "tfhd", &tfhd) || tfhd.n < 8) return;
+    uint32_t fl = be32(tfhd.p) & 0xFFFFFF;
+    int id = (int)be32(tfhd.p + 4), k = -1;
+    for (int j = 0; j < 2; j++) if (d->has[j] && d->tr[j].id == id) k = j;
+    if (k < 0) return;
+    Mp4Track *t = &d->tr[k];
+    if (!t->timescale) return;
+    size_t q = 8;
+    uint64_t base = moof;
+    uint32_t ddur = t->trex_dur, dsize = t->trex_size, dflags = t->trex_flags;
+    if (fl & 0x01) { if (q + 8 > tfhd.n) return; base = be64(tfhd.p + q); q += 8; }
+    if (fl & 0x02) q += 4;
+    if (fl & 0x08) { if (q + 4 > tfhd.n) return; ddur = be32(tfhd.p + q); q += 4; }
+    if (fl & 0x10) { if (q + 4 > tfhd.n) return; dsize = be32(tfhd.p + q); q += 4; }
+    if (fl & 0x20) { if (q + 4 > tfhd.n) return; dflags = be32(tfhd.p + q); q += 4; }
+    int64_t dts = 0;
+    if (box_find(traf, "tfdt", &tfdt) && tfdt.n >= 8) dts = tfdt.p[0] == 1 && tfdt.n >= 12 ? (int64_t)be64(tfdt.p + 4) : (int64_t)be32(tfdt.p + 4);
+    uint64_t next_off = base;
+    for (size_t pos = 0; pos + 8 <= traf->n; ) {             /* every trun */
+        uint32_t sz = be32(traf->p + pos);
+        if (sz < 8 || pos + sz > traf->n) break;
+        if (memcmp(traf->p + pos + 4, "trun", 4) || sz < 16) { pos += sz; continue; }
+        const uint8_t *r = traf->p + pos + 8;
+        size_t rn = sz - 8, rq = 8;
+        int ver = r[0];
+        uint32_t rf = be32(r) & 0xFFFFFF, count = be32(r + 4), first_flags = 0;
+        uint64_t off = next_off;
+        if (rf & 0x01) { if (rq + 4 > rn) break; off = base + (uint64_t)(int64_t)(int32_t)be32(r + rq); rq += 4; }
+        int have_first = 0;
+        if (rf & 0x04) { if (rq + 4 > rn) break; first_flags = be32(r + rq); rq += 4; have_first = 1; }
+        size_t es = (size_t)(((rf & 0x100) ? 4 : 0) + ((rf & 0x200) ? 4 : 0) + ((rf & 0x400) ? 4 : 0) + ((rf & 0x800) ? 4 : 0));
+        for (uint32_t i = 0; i < count && rq + es <= rn; i++) {
+            uint32_t dur = ddur, size = dsize, sflags = i == 0 && have_first ? first_flags : dflags;
+            int64_t cto = 0;
+            if (rf & 0x100) { dur = be32(r + rq); rq += 4; }
+            if (rf & 0x200) { size = be32(r + rq); rq += 4; }
+            if (rf & 0x400) { sflags = be32(r + rq); rq += 4; if (i == 0 && have_first) sflags = first_flags; }
+            if (rf & 0x800) { uint32_t c = be32(r + rq); cto = ver ? (int64_t)(int32_t)c : (int64_t)c; rq += 4; }
+            if (size && off <= n && size <= n - off) {
+                int64_t pts = frag_90k(t, dts + cto);
+                int key = !((sflags >> 16) & 1) || ((sflags >> 24) & 3) == 2;
+                if (k == 0) emit_video(d, seg + off, size, pts, key);
+                else emit_audio(d, seg + off, size, pts);
+            }
+            off += size;
+            dts += dur;
+        }
+        next_off = off;
+        pos += sz;
+    }
+}
+
+void mp4_frag_segment(Mp4Demux *d, const uint8_t *seg, size_t n)
+{
+    d->info.bytes += n;
+    for (size_t pos = 0; pos + 8 <= n; ) {
+        uint64_t size = be32(seg + pos);
+        size_t hl = 8;
+        if (size == 1) { if (pos + 16 > n) break; size = be64(seg + pos + 8); hl = 16; }
+        else if (size == 0) size = n - pos;
+        if (size < hl || pos + size > n) break;
+        if (!memcmp(seg + pos + 4, "moof", 4)) {
+            Box moof = { seg + pos + hl, (size_t)size - hl };
+            for (size_t q = 0; q + 8 <= moof.n; ) {
+                uint32_t sz = be32(moof.p + q);
+                if (sz < 8 || q + sz > moof.n) break;
+                if (!memcmp(moof.p + q + 4, "traf", 4)) {
+                    Box traf = { moof.p + q + 8, sz - 8 };
+                    frag_traf(d, seg, n, pos, &traf);
+                }
+                q += sz;
+            }
+        }
+        pos += (size_t)size;
+    }
+}
