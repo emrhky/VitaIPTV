@@ -160,9 +160,7 @@ static const Pair FIXED[] = {
     { "The lock is removed when you save", "Kilit kaydedince kaldırılır" },
     { "No programme guide", "Yayın akışı yok" },
     { "Size", "Boyut" },
-    { "Colour", "Renk" },
     { "Place", "Yer" },
-    { "Background", "Arka plan" },
     { "Small", "Küçük" },
     { "Medium", "Orta" },
     { "Large", "Büyük" },
@@ -199,7 +197,7 @@ static const Pair FIXED[] = {
     { "That programme is not in the archive", "Bu program arşivde yok" }, { "Not on yet", "Henüz yayınlanmadı" },
     { "No later programme in the guide", "Rehberde sonraki program yok" }, { "No earlier programme in the archive", "Arşivde önceki program yok" },
     { "Next programme in %d s", "Sonraki program %d sn içinde" },
-    { "Watch", "İzle" }, { "Time", "Saat" }, { "Day", "Gün" }, { "Choose", "Seç" }, { "Programme", "Program" },
+    { "Time", "Saat" }, { "Day", "Gün" }, { "Choose", "Seç" }, { "Programme", "Program" },
     { "Button", "Düğme" }, { "Previous / next", "Önceki / sonraki" }, { "Season", "Sezon" }, { "Episode", "Bölüm" },
     { "Continue (%s)", "Devam et (%s)" }, { "From the start", "Baştan" }, { "Favourite", "Favori" },
     { "Director:", "Yönetmen:" }, { "Cast:", "Oyuncular:" }, { "Season %d", "Sezon %d" }, { "Episodes", "Bölümler" },
@@ -345,6 +343,8 @@ static const Pair FIXED[] = {
     { "Jumping is not possible in this file", "Bu dosyada ileri/geri atlanamıyor" },
     { "AVI file: not supported (MKV, MP4, TS and FLV are)", "AVI dosyası: desteklenmiyor (MKV, MP4, TS ve FLV destekleniyor)" },
     { "Unknown file type", "Bilinmeyen dosya türü" },
+    { "The server does not give this now (HTTP 405): the account is busy or it is not available",
+      "Sunucu bunu şu an vermiyor (HTTP 405): hesap meşgul ya da içerik kapalı" },   /* 1.2.2 */
     { "The server sent a web page instead of the film (see log.txt)", "Sunucu film yerine bir web sayfası gönderdi (log.txt'ye bakın)" },   /* 1.2.1 */
     { "The server sent a message instead of the film (see log.txt)", "Sunucu film yerine bir mesaj gönderdi (log.txt'ye bakın)" },
     { "Damaged or unusual Matroska file", "Bozuk veya alışılmadık Matroska dosyası" },
@@ -455,10 +455,12 @@ static const Pair PATTERNS[] = {
     { "Account %s", "Hesap durumu: %s" },
     { "Server answered HTTP %d", "Sunucu HTTP %s yanıtı verdi" },
     { "The server does not give this one (HTTP %d)", "Sunucu bu içeriği vermiyor (HTTP %s)" },   /* 1.4.1 */
+    { "The key of the encrypted stream could not be got (HTTP %d)", "Şifreli yayının anahtarı alınamadı (HTTP %s)" },   /* 1.2.2 */
     { "The first %d of %d films (the most watched)", "%s / %s film (en çok izlenenler)" },   /* 1.5 */
     { "%d of %d films (%s)", "%s / %s film (%s)" },   /* 1.5.1 */
     { "%d videos (%d left out: no MP4 the Vita plays)", "%s video (%s tanesi dışarıda: Vita'nın oynattığı MP4 yok)" },   /* 1.2.1 */
     { "%d videos", "%s video" },
+    { "The provider still counts the last stream: %d s", "Sağlayıcı önceki yayını hâlâ sayıyor: %s sn" },   /* 1.2.2 */
     { "%d videos left out (the Vita cannot play them: see webcheck.txt)", "%s video dışarıda kaldı (Vita oynatamaz: webcheck.txt'ye bakın)" },
     { "The page could not be opened (%s)", "Sayfa açılamadı (%s)" },
     { "Server answered HTTP %d (the provider refuses: account busy?)", "Sunucu HTTP %s yanıtı verdi (sağlayıcı reddediyor: hesap kullanımda olabilir)" },
@@ -486,6 +488,8 @@ static const Pair PATTERNS[] = {
     { "No HLS variant answers", "HLS yayınının hiçbir kalitesi yanıt vermiyor" },
     { "Stream stopped (the HLS playlist is not updated)", "Yayın durdu (HLS listesi güncellenmiyor)" },
     { "Encrypted HLS stream (AES): not supported", "Şifreli HLS yayını (AES): desteklenmiyor" },
+    { "Encrypted HLS stream (SAMPLE-AES / DRM): not supported", "Şifreli HLS yayını (SAMPLE-AES / DRM): desteklenmiyor" },   /* 1.2.2 */
+    { "The key of the encrypted stream could not be got", "Şifreli yayının anahtarı alınamadı" },
     { "HLS with MP4 segments: not supported (MPEG-TS only)", "MP4 parçalı HLS: desteklenmiyor (yalnız MPEG-TS)" },
     { "HLS playlist without a usable stream", "HLS listesinde oynatılabilir yayın yok" },
     { "HLS playlist without segments", "HLS listesinde parça yok" },

@@ -33,13 +33,19 @@ typedef struct {
     const char *uri;                    /* points into the playlist text, not terminated */
     int uri_len;
     int discontinuity;                  /* a #EXT-X-DISCONTINUITY comes before it */
+    int aes;                            /* 1.2.2: encrypted with AES-128: key_uri (in the playlist text), iv */
+    const char *key_uri;
+    int key_uri_len;
+    int has_iv;                         /* IV given, else the sequence number */
+    uint8_t iv[16];
 } HlsSegment;
 
 typedef struct {
     int target_ms;                      /* #EXT-X-TARGETDURATION */
     int64_t first_seq;                  /* #EXT-X-MEDIA-SEQUENCE */
     int endlist;                        /* VOD / finished event */
-    int encrypted;                      /* #EXT-X-KEY with a METHOD other than NONE */
+    int encrypted;                      /* #EXT-X-KEY with a METHOD that is not played (SAMPLE-AES, DRM; 1.2.2: not AES-128) */
+    int aes;                            /* 1.2.2: some segments are AES-128 */
     int fmp4;                           /* #EXT-X-MAP: fragmented MP4 segments */
     int nseg;
     HlsSegment *seg;                    /* malloc'd, free with hls_media_free */
@@ -75,5 +81,10 @@ int  hls_parse_media(const char *text, HlsMedia *m);
 void hls_media_free(HlsMedia *m);
 /* ref (absolute, //host, /path or relative) against the playlist address. */
 void hls_resolve(const char *base, const char *ref, int ref_len, char *out, size_t cap);
+
+/* 1.2.2: AES-128: the IV when the playlist gives none (the media sequence number, big-endian), and the IV
+ * attribute ("0x" and up to 32 hex digits, padded on the left): 1 = ok */
+void hls_seq_iv(int64_t seq, uint8_t iv[16]);
+int  hls_parse_iv(const char *s, uint8_t iv[16]);
 
 #endif

@@ -15,6 +15,7 @@
 #include "memstat.h"
 #include "audiofx.h"
 #include "aac51.h"
+#include "hlsaes.h"
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
@@ -275,6 +276,11 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     AudioFx afx;                        /* 1.1: volume boost / speaker mode (Select > Audio) */
     int afx_boost, afx_speaker, afx_level;         /* ... as last applied (-1 = not yet; a change is written to the log) */
     int a52_dlg, aacsw_dlg;             /* 1.1: "clear dialogue" when the software decoders were created */
+    int a52_dts;                        /* 1.2.2: t->a52 is the DTS decoder */
+    HlsAes *hlsa;                       /* 1.2.2: AES-128 HLS: the decrypter, the key in use and its address */
+    int seg_aes;                        /* the segment being fetched is encrypted */
+    uint8_t aes_key[16], seg_iv[16];
+    char aes_key_url[1024];
     volatile int av_started;            /* audio thread: the first picture is there (or there is none to wait for) */
     volatile int64_t first_pic_pts;     /* time of the first decoded picture (-1 = none yet) */
     /* CPU load line (each stats line): run time of the threads and idle time of the cores */
@@ -2434,6 +2440,7 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
 static int audio_playable(int c)
 {
     return c == TS_CODEC_AAC || c == TS_CODEC_MPEG_AUDIO || ((c == TS_CODEC_AC3 || c == TS_CODEC_EAC3) && a52_available()) ||
+           (c == TS_CODEC_DTS && a52_dts_available()) ||   /* 1.2.2 */
            (c == TS_CODEC_OPUS && a52_xiph_available(1)) || (c == TS_CODEC_VORBIS && a52_xiph_available(0));   /* 1.4.2 */
 }
 
@@ -2482,7 +2489,7 @@ static void audio_push(Tsp *t, int codec, const uint8_t *data, size_t len, int64
     p->pts = pts;
     p->len = len;
     p->flags = codec == TS_CODEC_MPEG_AUDIO ? 1 : codec == TS_CODEC_AC3 || codec == TS_CODEC_EAC3 ? 2 :
-               codec == TS_CODEC_OPUS || codec == TS_CODEC_VORBIS ? 3 : 0;   /* 1 MPEG, 2 AC-3, 3 Opus / Vorbis (software) */
+               codec == TS_CODEC_OPUS || codec == TS_CODEC_VORBIS ? 3 : codec == TS_CODEC_DTS ? 6 : 0;   /* 1 MPEG, 2 AC-3, 3 Opus / Vorbis (software), 6 DTS (1.2.2) */
     memcpy(p->data, data, len);
     q_push(t, &t->aq, p);
 }
@@ -2927,7 +2934,7 @@ static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     Tsp *t = ctx;
     if (t->audio_off) return;
     t->st.audio_src_ch = src_ch;
-    if (!t->st.audio_frames && !t->a52pcm) plog("tsp: %s audio, %d Hz, played as %s (software decoder)", eac3 ? "E-AC-3" : "AC-3", rate, ch == 1 ? "mono" : "stereo");
+    if (!t->st.audio_frames && !t->a52pcm) plog("tsp: %s audio, %d Hz, played as %s (software decoder)", eac3 == 2 ? "DTS" : eac3 ? "E-AC-3" : "AC-3", rate, ch == 1 ? "mono" : "stereo");
     if (samples % 64) { t->st.audio_errors++; return; }
     if (!t->a52pcm) t->a52pcm = memalign(SCE_AUDIODEC_ALIGNMENT_SIZE, SCE_AUDIODEC_ROUND_UP(A52_MAX_SAMPLES * 2 * 2));
     if (!t->a52pcm) return;
@@ -2936,20 +2943,22 @@ static void a52_frame(void *ctx, const int16_t *pcm, int samples, int rate, int 
     t->ach = ch;
     t->st.audio_rate = rate;
     t->st.audio_ch = ch;
-    t->st.audio_ac3 = eac3 ? 2 : 1;
+    t->st.audio_ac3 = eac3 == 2 ? 3 : eac3 ? 2 : 1;          /* (1.2.2: 3 DTS) */
     audio_out(t, t->a52pcm, samples, rate, ch, pts);
 }
 
 static void audio_a52(Tsp *t, Pkt *p)
 {
-    if (t->a52 && t->a52_dlg != a52_get_dialog()) {                    /* 1.1: clear dialogue changed */
+    int dts = p->flags == 6;                                 /* 1.2.2 */
+    if (t->a52 && (t->a52_dlg != a52_get_dialog() || t->a52_dts != dts)) {   /* 1.1: clear dialogue changed (1.2.2: or DTS / AC-3) */
+        if (t->a52_dlg != a52_get_dialog()) plog("tsp: clear dialogue %s (AC-3 decoder opened again)", a52_get_dialog() ? "on" : "off");
         a52_destroy(t->a52);
         t->a52 = NULL;
-        plog("tsp: clear dialogue %s (AC-3 decoder opened again)", a52_get_dialog() ? "on" : "off");
     }
     if (!t->a52) {
         t->a52_dlg = a52_get_dialog();
-        if (!(t->a52 = a52_create())) { audio_disable(t, "Audio %s: not supported", "ac3"); return; }
+        t->a52_dts = dts;
+        if (!(t->a52 = dts ? a52_create_dts() : a52_create())) { audio_disable(t, "Audio %s: not supported", dts ? "dts" : "ac3"); return; }
     }
     a52_feed(t->a52, p->data, p->len, p->pts, a52_frame, t);
 }
@@ -3088,8 +3097,9 @@ static int audio_main(SceSize args, void *argp)
             continue;
         }
         if (!t->audio_off) {
-            if (p->flags >= 3) audio_xiph(t, p);             /* 1.4.2 */
-            else if (p->flags == 2) audio_a52(t, p); else if (p->flags) audio_mpeg(t, p); else audio_packet(t, p);
+            if (p->flags == 6 || p->flags == 2) audio_a52(t, p);   /* (1.2.2: 6 DTS) */
+            else if (p->flags >= 3) audio_xiph(t, p);        /* 1.4.2 */
+            else if (p->flags) audio_mpeg(t, p); else audio_packet(t, p);
         }
         free(p);
     }
@@ -3383,21 +3393,39 @@ static void check_stall(Tsp *t)
  * left may not be closed on their side yet). 1.2: also 405 and 512, which a server gave for one film and
  * episode after another while its account showed "connections 1 of 1" (switching quickly). Wait a moment
  * and ask again before giving up. Returns 1 to try again. */
-/* 1.5: the app knows no connection of this account is in use (no stream or download of it a minute ago): a 405 is
- * then the server not giving this file (a film that never opens: the 1.4.2 log), not a busy account */
-static volatile int g_acct_free;
-void tsp_set_account_free(int on) { g_acct_free = on ? 1 : 0; }
-static int busy_status(int s) { if (s == 405 && g_acct_free) return 0; return s == 405 || s == 407 || s == 429 || s == 503 || s == 506 || s == 509 || s == 512; }
+/* 1.2.2: a stream or download of the same server was in use a moment ago (the app tells): the provider may still
+ * count it for a while (the user's log: an episode refused with 405 right after a channel: 1.2.2a gave up after
+ * 4.5 s). Then a "busy" answer is asked again every 5 s for up to 45 s, with a countdown on the screen.
+ * (1.5 took a 405 for "not given" when the account looked free: the account check said "0 of 1" while the
+ * provider still refused: no longer.) */
+static volatile int g_recent_use;
+void tsp_set_recent_use(int on) { g_recent_use = on ? 1 : 0; }
+static int busy_status(int s) { return s == 405 || s == 407 || s == 429 || s == 503 || s == 506 || s == 509 || s == 512; }
+#define BUSY_LONG_TRIES 9                                    /* (x 5 s: 45 s) */
+/* a busy answer before anything came: wait and ask again (1); 0 = no more */
+static int busy_wait(Tsp *t, int status, const char *what)
+{
+    int long_wait = g_recent_use;
+    if (t->status_retries >= (long_wait ? BUSY_LONG_TRIES : 2)) return 0;
+    int ms = long_wait ? 5000 : t->status_retries ? 3000 : 1500;
+    t->status_retries++;
+    plog("tsp: %s: server answered %d (the account may still be counted on the last stream), asking again in %.1f s (%d)",
+         what, status, ms / 1000.0, t->status_retries);
+    for (int k = 0; k < ms / 20 && !stopping(t); k++) {
+        if (long_wait && k % 50 == 0) {                      /* (once a second: the countdown) */
+            int left = (BUSY_LONG_TRIES - t->status_retries) * 5 + (ms - k * 20) / 1000;
+            snprintf(t->st.note, sizeof t->st.note, "The provider still counts the last stream: %d s", left);
+        }
+        sceKernelDelayThread(20000);
+    }
+    t->st.note[0] = 0;
+    return !stopping(t);
+}
 
 static int http_refused(Tsp *t, int status)
 {
     int busy = busy_status(status);
-    if (busy && t->st.bytes == 0 && t->status_retries < 2) {   /* (1.2: twice, after 1.5 and 3 s: it lets go in a few seconds) */
-        int ms = t->status_retries++ ? 3000 : 1500;
-        plog("tsp: server answered %d (the account may still be counted on the last channel), asking again in %.1f s", status, ms / 1000.0);
-        for (int k = 0; k < ms / 20 && !stopping(t); k++) sceKernelDelayThread(20000);
-        return 1;
-    }
+    if (busy && t->st.bytes == 0 && busy_wait(t, status, "stream")) return 1;   /* (1.2: 1.5 and 3 s; 1.2.2: 45 s after a stream) */
     /* 1.0: reconnecting a stream that played: a one-connection account is refused while the server still
      * counts the lost connection (seen after 2 hours: "No data for too long", then 407). It lets it go after
      * a few seconds: asked again after 3, 6 and 10 s (again from the start once it has played a while). */
@@ -3414,10 +3442,10 @@ static int http_refused(Tsp *t, int status)
     }
     if (status == 407)
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP 407 (the provider refuses: account busy or channel not in the package)");
+    else if (status == 405)                                  /* 1.2.2: one message (busy or not given: the server does not say) */
+        set_error_kind(t, TSP_ERRK_NET, "The server does not give this now (HTTP 405): the account is busy or it is not available");
     else if (busy)
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d (the provider refuses: account busy?)", status);
-    else if (status == 405)
-        set_error_kind(t, TSP_ERRK_NET, "The server does not give this one (HTTP %d)", status);   /* 1.5 */
     else
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d", status);
     return 0;
@@ -3603,6 +3631,14 @@ static void thread_finished(Tsp *t)
 
 /* One GET. For playlists (out != NULL) the body goes to out; for segments it is fed to the demuxer.
  * Returns the bytes received, or < 0 (an sceHttp error, or -1). *status gets the HTTP status. */
+/* 1.2.2: segment bytes to the demuxer, decrypted first when the segment is AES-128 */
+static void aes_out(void *ctx, const uint8_t *d, size_t n) { dmx_feed((Tsp *)ctx, d, n); }
+static void seg_feed(Tsp *t, const uint8_t *d, size_t n)
+{
+    if (t->seg_aes && t->hlsa) hlsaes_feed(t->hlsa, d, n, aes_out, t);
+    else dmx_feed(t, d, n);
+}
+
 typedef struct { Tsp *t; char *out; size_t cap; int total; } HgCtx;
 
 static int hg_data(void *ctx, const uint8_t *d, size_t n)
@@ -3619,7 +3655,7 @@ static int hg_data(void *ctx, const uint8_t *d, size_t n)
     }
     h->total += (int)n;
     t->st.bytes += (uint32_t)n;
-    dmx_feed(t, d, n);
+    seg_feed(t, d, n);
     stats_tick(t);
     check_stall(t);
     return 0;
@@ -3800,7 +3836,7 @@ system_http:
         if (n == 0) break;
         if (!out) {
             t->st.bytes += (uint32_t)n;
-            dmx_feed(t, buf, (size_t)n);
+            seg_feed(t, buf, (size_t)n);
             stats_tick(t);
             check_stall(t);
         }
@@ -3818,6 +3854,55 @@ done:
 static void hls_wait(Tsp *t, int ms)
 {
     for (int k = 0; k < ms / 20 && !stopping(t); k++) sceKernelDelayThread(20000);
+}
+
+/* 1.2.2: the key of an AES-128 segment (fetched once per address): 0 = ok, else the error is set */
+static int aes_key_for(Tsp *t, const char *base, const HlsSegment *g)
+{
+    char ku[sizeof t->aes_key_url];
+    hls_resolve(base, g->key_uri, g->key_uri_len, ku, sizeof ku);
+    if (!t->hlsa) {
+        if (!hlsaes_available() || !(t->hlsa = hlsaes_create())) {
+            set_error_kind(t, TSP_ERRK_FORMAT, "Encrypted HLS stream (AES): not supported");
+            return -1;
+        }
+        plog("tsp: HLS segments are encrypted (AES-128): decrypted with the key the playlist names");
+    }
+    if (!strcmp(ku, t->aes_key_url)) return 0;
+    char kb[64];
+    int status = 0, r = -1;
+    for (int k = 0; k < 3 && !stopping(t); k++) {
+        r = hls_get(t, ku, kb, sizeof kb, NULL, &status);
+        if (r == 16 && status < 300) break;
+        hls_wait(t, 500);
+    }
+    if (stopping(t)) return -1;
+    if (r != 16 || status >= 300) {
+        char lp[96];
+        plog("tsp: HLS key failed (%d bytes, status %d, %s)", r, status, url_path_for_log(ku, lp, sizeof lp));
+        if (status >= 400) set_error_kind(t, TSP_ERRK_NET, "The key of the encrypted stream could not be got (HTTP %d)", status);
+        else set_error_kind(t, TSP_ERRK_NET, "The key of the encrypted stream could not be got");
+        t->aes_key_url[0] = 0;
+        return -1;
+    }
+    memcpy(t->aes_key, kb, 16);
+    snprintf(t->aes_key_url, sizeof t->aes_key_url, "%s", ku);
+    return 0;
+}
+
+/* a segment: as hls_get, decrypted when it is AES-128 (the key is already in t->aes_key) */
+static int hls_get_seg(Tsp *t, const HlsSegment *g, const char *url, uint8_t *buf, int *status)
+{
+    if (!g->aes || !t->hlsa) return hls_get(t, url, NULL, 0, buf, status);
+    if (g->has_iv) memcpy(t->seg_iv, g->iv, 16); else hls_seq_iv(g->seq, t->seg_iv);
+    hlsaes_start(t->hlsa, t->aes_key, t->seg_iv);
+    t->seg_aes = 1;
+    int r = hls_get(t, url, NULL, 0, buf, status);
+    t->seg_aes = 0;
+    if (r > 0 && *status < 300 && hlsaes_end(t->hlsa, aes_out, t) < 0) {
+        plog("tsp: HLS segment #%lld: the decrypted end is wrong (wrong key or a cut segment)", (long long)g->seq);
+    }
+    return r;
 }
 
 /* *base (may be NULL) gets the address that answered: what the playlist's short names are relative to */
@@ -3921,7 +4006,7 @@ static void alt_fill(Tsp *t, AltAudio *A, int64_t until_ms, uint8_t *buf)
     while (!stopping(t) && t->alt_on && !A->end && A->ms < until_ms) {
         HlsMedia am;
         if (hls_parse_media(A->text, &am) < 0) { alt_off(t, "no segments"); return; }
-        if (am.encrypted || am.fmp4 || (am.nseg && seg_is_mp4(am.seg[0].uri, am.seg[0].uri_len))) {
+        if (am.encrypted || am.aes || am.fmp4 || (am.nseg && seg_is_mp4(am.seg[0].uri, am.seg[0].uri_len))) {
             hls_media_free(&am);
             alt_off(t, "encrypted or MP4 segments");
             return;
@@ -4051,7 +4136,7 @@ static void read_hls(Tsp *t, uint8_t *buf)
     for (;;) {
         HlsMedia m;
         if (hls_parse_media(text, &m) < 0) { set_error_kind(t, TSP_ERRK_FORMAT, "HLS playlist without segments"); goto out; }
-        if (m.encrypted) { hls_media_free(&m); set_error_kind(t, TSP_ERRK_FORMAT, "Encrypted HLS stream (AES): not supported"); goto out; }
+        if (m.encrypted) { hls_media_free(&m); set_error_kind(t, TSP_ERRK_FORMAT, "Encrypted HLS stream (SAMPLE-AES / DRM): not supported"); goto out; }
         if (m.fmp4 || (m.nseg && seg_is_mp4(m.seg[0].uri, m.seg[0].uri_len))) {
             hls_media_free(&m);
             set_error_kind(t, TSP_ERRK_FORMAT, "HLS with MP4 segments: not supported (MPEG-TS only)");
@@ -4082,14 +4167,15 @@ static void read_hls(Tsp *t, uint8_t *buf)
                 if (stopping(t)) break;
             }
             v_ms += g->duration_ms;
+            if (g->aes && aes_key_for(t, base, g) < 0) { hls_media_free(&m); goto out; }   /* 1.2.2 */
             uint64_t g0 = now_us(), gw0 = t->push_wait_us;
             uint32_t gb0 = t->st.bytes;
-            int status = 0, r = hls_get(t, seg_url, NULL, 0, buf, &status);
+            int status = 0, r = hls_get_seg(t, g, seg_url, buf, &status);
             if (r >= 0 && status < 400) hls_speed(t, now_us() - g0 - (t->push_wait_us - gw0), t->st.bytes - gb0, g->duration_ms);
-            if (r < 0 && !stopping(t) && wait_for_network(t)) { last_new = now_us(); r = hls_get(t, seg_url, NULL, 0, buf, &status); }
+            if (r < 0 && !stopping(t) && wait_for_network(t)) { last_new = now_us(); r = hls_get_seg(t, g, seg_url, buf, &status); }
             if ((r < 0 || status >= 400) && !stopping(t)) {      /* once more, then skip it */
                 hls_wait(t, 300);
-                r = hls_get(t, seg_url, NULL, 0, buf, &status);
+                r = hls_get_seg(t, g, seg_url, buf, &status);
             }
             if (stopping(t)) break;
             if (r < 0 || status >= 400) {
@@ -4136,6 +4222,10 @@ out:
     if (alt) { free(alt->text); free(alt->seg); free(alt); }
     t->alt_on = 0;
     if (t->adm) { ts_destroy(t->adm); t->adm = NULL; }      /* (only this thread feeds it) */
+    hlsaes_destroy(t->hlsa);                                /* 1.2.2 */
+    t->hlsa = NULL;
+    t->seg_aes = 0;
+    t->aes_key_url[0] = 0;
     free(rend);
     free(text);
 }
@@ -4555,11 +4645,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
     t->vc_rec = 1;
     int n = vio_read(&io, 0, head, sizeof head);
     /* 1.2: refused as busy (the last film or episode still counted): asked again after 1.5 and 3 s */
-    for (int k = 0; k < 2 && n <= 0 && busy_status(vod_status) && !stopping(t); k++) {
-        int ms = k ? 3000 : 1500;
-        plog("tsp: VOD: server answered %d (the account may still be counted on the last film), asking again in %.1f s", vod_status, ms / 1000.0);
-        for (int j = 0; j < ms / 20 && !stopping(t); j++) sceKernelDelayThread(20000);
-        if (stopping(t)) break;
+    while (n <= 0 && busy_status(vod_status) && !stopping(t) && busy_wait(t, vod_status, "VOD")) {   /* (1.2.2: 45 s after a stream) */
         vod_status = 0;
         n = vio_read(&io, 0, head, sizeof head);
     }
@@ -4582,9 +4668,11 @@ static void read_vod(Tsp *t, uint8_t *buf)
     if (n <= 0) {
         free(io.win);
         if (t->vod_file) set_error_kind(t, TSP_ERRK_FORMAT, n == 0 ? "The file is empty" : "Cannot open the file");   /* 1.3 */
+        else if (vod_status == 405)                          /* 1.2.2: one message */
+            set_error_kind(t, TSP_ERRK_NET, "The server does not give this now (HTTP 405): the account is busy or it is not available");
         else if (busy_status(vod_status))
             set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d (the provider refuses: account busy?)", vod_status);
-        else if (vod_status == 405 || vod_status == 404 || vod_status == 403 || vod_status == 410)   /* 1.5 */
+        else if (vod_status == 404 || vod_status == 403 || vod_status == 410)   /* 1.5 */
             set_error_kind(t, TSP_ERRK_NET, "The server does not give this one (HTTP %d)", vod_status);
         else if (vod_status) set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP %d", vod_status);
         else set_error_kind(t, TSP_ERRK_NET, "The server did not answer");

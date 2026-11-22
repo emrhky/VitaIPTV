@@ -3,6 +3,7 @@
 /* 1.3: the sound and subtitles chosen for each stream (a channel, a film; a series as a whole, so its episodes
  * share it), the most recent first, at most AVPREF_MAX. A small text file, one line each:
  *   key <tab> audio id <tab> audio language <tab> subtitles (0 off, 1 on, 2 automatic) <tab> subtitle id <tab> language
+ *   [<tab> sound delay in ms]  (1.2.2; a line without it: 0)
  * Plain C, no Vita calls: tested on the PC (tests/test_avpref.c). */
 #include <stdint.h>
 
@@ -15,6 +16,7 @@ typedef struct {
     int sub_on;                 /* 0 = off, 1 = on, 2 = automatic (in the app's language when the sound is not) */
     int sub_id;                 /* -1: by language */
     char sub_lang[4];
+    int delay_ms;               /* 1.2.2: the sound delay for this stream (0..1000; Bluetooth); 0 = none */
 } AvPref;
 
 typedef struct {

@@ -60,7 +60,7 @@ typedef struct {
     long hls_vbw[TSP_MAX_VARIANTS];     /* bit rate, bit/s (tsp_set_hls_bw picks one exactly) */
     volatile int hls_no_video;          /* the error: this HLS variant carries no picture (another one may) */
     /* 0.5.0: the audio tracks the player can play (TS / MKV), in the stream's order, and the one playing */
-    volatile int audio_ac3;             /* AC-3 (1) / E-AC-3 (2) decoded in software, else 0 */
+    volatile int audio_ac3;             /* AC-3 (1) / E-AC-3 (2) / DTS (3, 1.2.2) decoded in software, else 0 */
     volatile int audio_xiph;            /* 1.4.2: Opus (1) / Vorbis (2) decoded in software, else 0 */
     volatile unsigned net_read_kbs;     /* 0.6.0: the line's speed, last measured while the reader read most of the time
                                          * (with full queues net_kbs is what is played), 0 = same as net_kbs */
@@ -113,9 +113,10 @@ int               tsp_start(const char *url);       /* 0 = started */
 /* A film or episode (a file on a server that sends parts of it): starts at start_ms (the keyframe at or
  * before it). MKV, MP4 and TS files. */
 int               tsp_start_vod(const char *url, int start_ms);
-/* 1.5: no connection of the account is known to be in use: an HTTP 405 then means the file is not given (said at
- * once) instead of "busy: asked again" */
-void              tsp_set_account_free(int on);
+/* 1.2.2: a stream or download of the same server was in use a moment ago: a "busy" answer (405, 407...) before
+ * anything came is asked again every 5 s for up to 45 s (st.note counts down); else twice (1.5 and 3 s).
+ * (Replaces 1.5's tsp_set_account_free.) */
+void              tsp_set_recent_use(int on);
 /* A film as a plain stream that starts offset_ms into it (the transcoding server cut it there): pause works,
  * the position counts from offset_ms, jumping means starting the server again. */
 int               tsp_start_vod_stream(const char *url, int offset_ms);

@@ -18,6 +18,7 @@ struct A52Dec {
     int64_t next_pts;                   /* 90 kHz, -1 = unknown */
     int64_t last_pp;                    /* the parser's last time stamp (it repeats it for every frame of a packet) */
     int aac;                            /* 0.6.0: FFmpeg's AAC decoder (whole ADTS frames, no parser) */
+    int dts;                            /* 1.2.2: FFmpeg's DTS decoder (its core: float, 512 samples a frame) */
     int dialog;                         /* 1.1: "clear dialogue" mix (set when created) */
     uint32_t frames, errors;
     VSurr vs;                           /* 1.3: virtual surround on headphones (followed at once) */
@@ -52,6 +53,32 @@ A52Dec *a52_create(void)
     /* 1.2: all channels, mixed below as AAC is (before: the decoder's own mix down, which follows the stream's
      * mix levels: some films leave the surrounds out of the stereo mix, and it sounded narrow on the Vita) */
     if (avcodec_open2(d->ctx, c, NULL) < 0) { a52_destroy(d); return NULL; }
+    d->next_pts = -1;
+    d->last_pp = AV_NOPTS_VALUE;
+    return d;
+}
+
+/* 1.2.2: DTS (films whose only sound is DTS were silent): FFmpeg's decoder with its parser, the core only (DTS-HD's
+ * lossless part is left out: the same sound for stereo, float samples, less work); mixed down like AC-3 */
+int a52_dts_available(void) { return avcodec_find_decoder(AV_CODEC_ID_DTS) != NULL; }
+A52Dec *a52_create_dts(void)
+{
+    A52Dec *d = calloc(1, sizeof *d);
+    if (!d) return NULL;
+    const AVCodec *c = avcodec_find_decoder(AV_CODEC_ID_DTS);
+    d->ctx = c ? avcodec_alloc_context3(c) : NULL;
+    d->parser = av_parser_init(AV_CODEC_ID_DTS);
+    d->pkt = av_packet_alloc();
+    d->frame = av_frame_alloc();
+    if (!d->ctx || !d->parser || !d->pkt || !d->frame) { a52_destroy(d); return NULL; }
+    d->ctx->thread_count = 1;
+    d->dialog = g_dialog;
+    d->dts = 1;
+    AVDictionary *o = NULL;
+    av_dict_set(&o, "core_only", "1", 0);
+    int r = avcodec_open2(d->ctx, c, &o);
+    av_dict_free(&o);
+    if (r < 0) { a52_destroy(d); return NULL; }
     d->next_pts = -1;
     d->last_pp = AV_NOPTS_VALUE;
     return d;
@@ -142,9 +169,11 @@ static int to_pcm(A52Dec *d, int *out_ch)
     AVFrame *f = d->frame;
     int n = f->nb_samples, ch = f->ch_layout.nb_channels;
     if (n <= 0 || n > (d->xiph ? XIPH_MAX_FRAME : A52_MAX_SAMPLES) || ch <= 0) return 0;
+    int s32 = f->format == AV_SAMPLE_FMT_S32P;               /* 1.2.2: DTS's exact (fixed point) output */
     int planar = f->format == AV_SAMPLE_FMT_FLTP, flt = planar || f->format == AV_SAMPLE_FMT_FLT;
-    if (!flt) return 0;
-    #define SAMPLE(c, i) (planar ? ((const float *)f->extended_data[c])[i] : ((const float *)f->data[0])[(i) * ch + (c)])
+    if (!flt && !s32) return 0;
+    #define SAMPLE(c, i) (s32 ? (float)((const int32_t *)f->extended_data[c])[i] * (1.0f / 2147483648.0f) : \
+                          planar ? ((const float *)f->extended_data[c])[i] : ((const float *)f->data[0])[(i) * ch + (c)])
     if (ch == 1) {
         for (int i = 0; i < n; i++) d->pcm[i] = clip16(SAMPLE(0, i));
         *out_ch = 1;
@@ -207,7 +236,7 @@ static void xiph_push(A52Dec *d, int n, int rate, int ch, int src, int64_t pts, 
 
 static void decode(A52Dec *d, const uint8_t *frame, int size, int64_t pts, A52Out out, void *ctx)
 {
-    int eac3 = !d->aac && !d->xiph && size > 5 && (frame[5] >> 3) > 10;  /* bsid above 10: E-AC-3 */
+    int eac3 = d->dts ? 2 : !d->aac && !d->xiph && size > 5 && (frame[5] >> 3) > 10;  /* bsid above 10: E-AC-3 (1.2.2: 2 = DTS) */
     d->pkt->data = (uint8_t *)frame;
     d->pkt->size = size;
     if (avcodec_send_packet(d->ctx, d->pkt) < 0) { d->errors++; return; }
@@ -323,6 +352,8 @@ A52Dec *a52_create_aac(void) { return NULL; }
 int     a52_xiph_available(int opus) { (void)opus; return 0; }
 A52Dec *a52_create_xiph(int opus, const uint8_t *cfg, size_t cfg_len, int rate, int ch)
 { (void)opus; (void)cfg; (void)cfg_len; (void)rate; (void)ch; return NULL; }
+int     a52_dts_available(void) { return 0; }
+A52Dec *a52_create_dts(void) { return NULL; }
 void    a52_feed_frame(A52Dec *d, const uint8_t *data, size_t len, int64_t pts, A52Out out, void *ctx)
 {
     (void)d; (void)data; (void)len; (void)pts; (void)out; (void)ctx;

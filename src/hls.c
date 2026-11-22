@@ -40,7 +40,8 @@ static int starts(const char *s, const char *e, const char *tag)
 }
 
 /* attribute value of NAME= in an attribute list (quotes removed) */
-static int attr(const char *s, const char *e, const char *name, char *out, size_t cap)
+/* where the value of attribute name is (1.2.2: also used for the key's URI, which stays in the text) */
+static int attr_span(const char *s, const char *e, const char *name, const char **vs, const char **vend)
 {
     size_t n = strlen(name);
     const char *p = s;
@@ -54,15 +55,20 @@ static int attr(const char *s, const char *e, const char *name, char *out, size_
         const char *v = p, *ve;
         if (p < e && *p == '"') { v = ++p; while (p < e && *p != '"') p++; ve = p; if (p < e) p++; }
         else { while (p < e && *p != ',') p++; ve = p; }
-        if (match) {
-            size_t len = (size_t)(ve - v);
-            if (len >= cap) len = cap - 1;
-            memcpy(out, v, len);
-            out[len] = 0;
-            return 1;
-        }
+        if (match) { *vs = v; *vend = ve; return 1; }
     }
     return 0;
+}
+
+static int attr(const char *s, const char *e, const char *name, char *out, size_t cap)
+{
+    const char *v, *ve;
+    if (!attr_span(s, e, name, &v, &ve)) return 0;
+    size_t len = (size_t)(ve - v);
+    if (len >= cap) len = cap - 1;
+    memcpy(out, v, len);
+    out[len] = 0;
+    return 1;
 }
 
 void hls_resolve(const char *base, const char *ref, int ref_len, char *out, size_t cap)
@@ -295,12 +301,43 @@ int hls_has_variant_above(const HlsVariant *v, int n, int h_low, int max_h)
     return 0;
 }
 
+/* 1.2.2: AES-128 IVs */
+void hls_seq_iv(int64_t seq, uint8_t iv[16])
+{
+    memset(iv, 0, 16);
+    uint64_t v = (uint64_t)seq;
+    for (int i = 15; i >= 8; i--) { iv[i] = (uint8_t)v; v >>= 8; }
+}
+
+static int hexv(char c)
+{
+    return c >= '0' && c <= '9' ? c - '0' : c >= 'a' && c <= 'f' ? c - 'a' + 10 : c >= 'A' && c <= 'F' ? c - 'A' + 10 : -1;
+}
+
+int hls_parse_iv(const char *s, uint8_t iv[16])
+{
+    if (s[0] != '0' || (s[1] != 'x' && s[1] != 'X')) return 0;
+    s += 2;
+    size_t n = strlen(s);
+    if (!n || n > 32) return 0;
+    memset(iv, 0, 16);
+    for (size_t i = 0; i < n; i++) {                        /* from the right */
+        int v = hexv(s[n - 1 - i]);
+        if (v < 0) return 0;
+        iv[15 - i / 2] |= (uint8_t)(i % 2 ? v << 4 : v);
+    }
+    return 1;
+}
+
 int hls_parse_media(const char *text, HlsMedia *m)
 {
     memset(m, 0, sizeof *m);
     const char *p = text, *s, *e;
     int cap = 0, dur_ms = 0, disc = 0, have_inf = 0;
     int64_t seq = -1;
+    int aes = 0, has_iv = 0, key_len = 0;                    /* 1.2.2: the key in force (AES-128) */
+    const char *key = NULL;
+    uint8_t iv[16] = {0};
     while (next_line(&p, &s, &e)) {
         if (s == e) continue;
         if (*s == '#') {
@@ -310,8 +347,18 @@ int hls_parse_media(const char *text, HlsMedia *m)
             else if (starts(s, e, "#EXT-X-DISCONTINUITY") && !starts(s, e, "#EXT-X-DISCONTINUITY-SEQUENCE")) disc = 1;
             else if (starts(s, e, "#EXT-X-MAP")) m->fmp4 = 1;
             else if (starts(s, e, "#EXT-X-KEY:")) {
-                char val[64];
-                if (attr(s + 11, e, "METHOD", val, sizeof val) && strcasecmp(val, "NONE")) m->encrypted = 1;
+                char val[64], ivs[48];
+                const char *u, *ue;
+                aes = 0;
+                if (attr(s + 11, e, "METHOD", val, sizeof val) && strcasecmp(val, "NONE")) {
+                    if (!strcasecmp(val, "AES-128") && attr_span(s + 11, e, "URI", &u, &ue) && ue > u) {   /* 1.2.2 */
+                        aes = 1;
+                        key = u;
+                        key_len = (int)(ue - u);
+                        has_iv = attr(s + 11, e, "IV", ivs, sizeof ivs) && hls_parse_iv(ivs, iv);
+                        m->aes = 1;
+                    } else m->encrypted = 1;                 /* SAMPLE-AES, DRM: not played */
+                }
             } else if (starts(s, e, "#EXTINF:")) { dur_ms = (int)(atof(s + 8) * 1000); have_inf = 1; }
             continue;
         }
@@ -331,6 +378,11 @@ int hls_parse_media(const char *text, HlsMedia *m)
         g->uri = s;
         g->uri_len = (int)(e - s);
         g->discontinuity = disc;
+        g->aes = aes;
+        g->key_uri = aes ? key : NULL;
+        g->key_uri_len = aes ? key_len : 0;
+        g->has_iv = aes && has_iv;
+        if (g->has_iv) memcpy(g->iv, iv, 16);
         disc = 0;
         have_inf = 0;
     }

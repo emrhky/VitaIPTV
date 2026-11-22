@@ -39,6 +39,7 @@ const char *ts_codec_name(TsCodec c)
     case TS_CODEC_EAC3: return "eac3";
     case TS_CODEC_OTHER: return "other";
     case TS_CODEC_OPUS: return "opus";
+    case TS_CODEC_DTS: return "dts";                         /* 1.2.2 */
     case TS_CODEC_VORBIS: return "vorbis";
     default: return "none";
     }
@@ -73,6 +74,7 @@ static TsCodec codec_from_type(int st)
     case 0x03: case 0x04: return TS_CODEC_MPEG_AUDIO;
     case 0x81: return TS_CODEC_AC3;
     case 0x87: return TS_CODEC_EAC3;
+    case 0x82: case 0x85: case 0x86: return TS_CODEC_DTS;    /* 1.2.2: DTS (Blu-ray / M2TS: 0x82 core, 0x85 / 0x86 HD) */
     default: return TS_CODEC_OTHER;
     }
 }
@@ -84,6 +86,7 @@ static int audio_rank(TsCodec c)
     case TS_CODEC_AAC: return 5; case TS_CODEC_AAC_LATM: return 4; case TS_CODEC_MPEG_AUDIO: return 3;
     case TS_CODEC_AC3: return 2; case TS_CODEC_EAC3: return 1;
     case TS_CODEC_OPUS: case TS_CODEC_VORBIS: return 1;   /* 1.4.2 (Matroska / WebM) */
+    case TS_CODEC_DTS: return 1;                             /* 1.2.2 */
     default: return 0;
     }
 }
@@ -498,6 +501,7 @@ static void on_pmt(TsDemux *d, const uint8_t *s, size_t n)
         for (size_t q = dpos; q + 2 <= dpos + il; q += 2 + (size_t)s[q + 1]) {
             if (type == 0x06 && s[q] == 0x6A) c = TS_CODEC_AC3;
             else if (type == 0x06 && s[q] == 0x7A) c = TS_CODEC_EAC3;
+            else if (type == 0x06 && s[q] == 0x7B) c = TS_CODEC_DTS;   /* 1.2.2: DVB's DTS descriptor */
             else if (s[q] == 0x0A && s[q + 1] >= 3 && q + 5 <= dpos + il) {   /* ISO 639 language (0.5.0) */
                 char raw[4] = { (char)s[q + 2], (char)s[q + 3], (char)s[q + 4], 0 };
                 ts_lang3(raw, lang);

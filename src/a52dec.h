@@ -44,6 +44,9 @@ int     a52_get_vsurr(void);
  * with a52_feed_frame; the sound comes out in pieces of XIPH_CHUNK samples (Vorbis frames change size, and the
  * output port would have to be opened again for each new size). NULL when not built in. */
 int     a52_xiph_available(int opus);
+/* 1.2.2: DTS (its core), fed like AC-3 (a52_feed: the parser finds the frames); the callback's eac3 is 2 */
+int     a52_dts_available(void);
+A52Dec *a52_create_dts(void);
 A52Dec *a52_create_xiph(int opus, const uint8_t *cfg, size_t cfg_len, int rate, int ch);
 /* frames decoded, frames that failed */
 void    a52_stats(const A52Dec *d, uint32_t *frames, uint32_t *errors);

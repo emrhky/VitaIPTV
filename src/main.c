@@ -48,6 +48,7 @@
 #include "avpref.h"
 #include "dl.h"
 #include "websrc.h"
+#include "hlsaes.h"                     /* 1.2.2 */
 #include "srt.h"
 #include <psp2/rtc.h>
 

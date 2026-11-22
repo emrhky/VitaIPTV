@@ -17,7 +17,8 @@ typedef enum {
     TS_CODEC_NONE = 0, TS_CODEC_H264, TS_CODEC_HEVC, TS_CODEC_MPEG2V,
     TS_CODEC_AAC, TS_CODEC_AAC_LATM, TS_CODEC_MPEG_AUDIO, TS_CODEC_AC3, TS_CODEC_EAC3,
     TS_CODEC_OTHER,
-    TS_CODEC_OPUS, TS_CODEC_VORBIS          /* 1.4.2 (Matroska / WebM only) */
+    TS_CODEC_OPUS, TS_CODEC_VORBIS,         /* 1.4.2 (Matroska / WebM only) */
+    TS_CODEC_DTS                            /* 1.2.2 */
 } TsCodec;
 
 #define TS_FLAG_KEYFRAME 1      /* IDR picture or recovery-point SEI */

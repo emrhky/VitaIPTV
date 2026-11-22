@@ -616,6 +616,7 @@ static void parse_esds(Mp4Track *t, const uint8_t *p, size_t n)
     pos += 13;
     if (oti == 0x40 || oti == 0x66 || oti == 0x67 || oti == 0x68) t->codec = TS_CODEC_AAC;
     else if (oti == 0x69 || oti == 0x6B) t->codec = TS_CODEC_MPEG_AUDIO;
+    else if (oti >= 0xA9 && oti <= 0xAC) t->codec = TS_CODEC_DTS;   /* 1.2.2: DTS ("mp4a" with DTS inside) */
     else t->codec = TS_CODEC_OTHER;
     if (pos < n && p[pos] == 0x05) {
         pos++;
@@ -662,6 +663,8 @@ static void parse_stsd(Mp4Track *t, const Box *stsd)
         } else if (!memcmp(fmt, ".mp3", 4)) t->codec = TS_CODEC_MPEG_AUDIO;
         else if (!memcmp(fmt, "ac-3", 4)) t->codec = TS_CODEC_AC3;
         else if (!memcmp(fmt, "ec-3", 4)) t->codec = TS_CODEC_EAC3;
+        else if (!memcmp(fmt, "dtsc", 4) || !memcmp(fmt, "dtsh", 4) || !memcmp(fmt, "dtsl", 4) || !memcmp(fmt, "dtse", 4))
+            t->codec = TS_CODEC_DTS;                         /* 1.2.2 */
         else t->codec = TS_CODEC_OTHER;
     }
 }

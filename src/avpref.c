@@ -26,11 +26,11 @@ int avpref_load(AvPrefs *p, const char *path)
     if (!f) return 0;
     char line[128];
     while (p->n < AVPREF_MAX && fgets(line, sizeof line, f)) {
-        char *fld[6];
+        char *fld[7];
         int k = 0;
         char *s = line;
         line[strcspn(line, "\r\n")] = 0;
-        while (k < 6) {
+        while (k < 7) {
             fld[k++] = s;
             char *t = strchr(s, '\t');
             if (!t) break;
@@ -51,6 +51,10 @@ int avpref_load(AvPrefs *p, const char *path)
         if (r->sub_on < 0 || r->sub_on > 2) r->sub_on = 0;
         r->sub_id = atoi(fld[4]);
         lang_copy(r->sub_lang, fld[5]);
+        if (k >= 7) {                                        /* 1.2.2 */
+            int d = atoi(fld[6]);
+            r->delay_ms = d < 0 ? 0 : d > 1000 ? 1000 : d;
+        }
         p->n++;
     }
     fclose(f);
@@ -66,7 +70,7 @@ int avpref_save(AvPrefs *p, const char *path, int force)
     if (!f) return -1;
     for (int i = 0; i < p->n; i++) {
         const AvPref *r = &p->e[i];
-        fprintf(f, "%08x\t%d\t%s\t%d\t%d\t%s\n", (unsigned)r->key, r->aud_id, r->aud_lang, r->sub_on, r->sub_id, r->sub_lang);
+        fprintf(f, "%08x\t%d\t%s\t%d\t%d\t%s\t%d\n", (unsigned)r->key, r->aud_id, r->aud_lang, r->sub_on, r->sub_id, r->sub_lang, r->delay_ms);
     }
     int bad = ferror(f);
     if (fclose(f) != 0 || bad) { remove(tmp); return -1; }

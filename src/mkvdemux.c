@@ -172,6 +172,7 @@ static TsCodec audio_codec(const char *c)
     if (!strncmp(c, "A_MPEG/L", 8)) return TS_CODEC_MPEG_AUDIO;
     if (!strcmp(c, "A_AC3")) return TS_CODEC_AC3;
     if (!strcmp(c, "A_EAC3")) return TS_CODEC_EAC3;
+    if (!strncmp(c, "A_DTS", 5)) return TS_CODEC_DTS;        /* 1.2.2 (A_DTS, A_DTS/EXPRESS, A_DTS/LOSSLESS: the core) */
     if (!strcmp(c, "A_OPUS")) return TS_CODEC_OPUS;           /* 1.4.2 (WebM) */
     if (!strcmp(c, "A_VORBIS")) return TS_CODEC_VORBIS;
     return TS_CODEC_OTHER;
