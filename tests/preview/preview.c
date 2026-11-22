@@ -321,7 +321,7 @@ int main(int argc, char **argv)
                           { T("Preferred resolution"), T("Automatic"), SCR_F_CHOICE, 1, 0 },
                           { T("Hide adult channels"), T("On"), SCR_F_TOGGLE, 1, 0 }, { T("Hide channels named 4K / UHD"), T("Off"), SCR_F_TOGGLE, 1, 0 },
                           { T("Parental lock (PIN)"), "****", SCR_F_TEXT, 1, 0 },
-                          { T("Volume boost"), "+6 dB", SCR_F_CHOICE, 1, 0 }, { T("Clear sound"), T("On"), SCR_F_TOGGLE, 1, 0 },
+                          { T("Volume boost"), "+6 dB", SCR_F_CHOICE, 1, 0 }, { T("Sound levelling"), T("Between channels"), SCR_F_CHOICE, 1, 0 },
                           { T("Clear speech (5.1)"), T("Off"), SCR_F_TOGGLE, 1, 0 },
                           { T("Transcoding server"), T("When needed"), SCR_F_CHOICE, 1, 0 },
                           { T("Server address"), "http://192.168.1.20:8090", SCR_F_TEXT, 1, 1 }, { T("Test server"), NULL, SCR_F_ACTION, 1, 1 },
