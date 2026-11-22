@@ -6,7 +6,7 @@ projects below, each under its own license. Their copyright notices are kept her
 | Component | Used for | License |
 |---|---|---|
 | [Mbed TLS](https://github.com/Mbed-TLS/mbedtls) | built-in TLS (https) | Apache-2.0 (chosen from Apache-2.0 OR GPL-2.0-or-later); full text in `third_party/mbedtls/LICENSE` |
-| [FFmpeg](https://ffmpeg.org) 7.1 (libavcodec, libavutil) | AC-3 / E-AC-3 and 5.1 / 7.1 AAC audio decoding (only when built in) | LGPL 2.1 or later; full text in `licenses/ffmpeg-COPYING.LGPLv2.1.txt` in the VPK |
+| [FFmpeg](https://ffmpeg.org) 7.1 (libavcodec, libavutil) | AC-3 / E-AC-3, DTS, 5.1 / 7.1 AAC, Opus and Vorbis audio, MPEG-2 and MPEG-4 Part 2 video decoding (only when built in) | LGPL 2.1 or later; full text in `licenses/ffmpeg-COPYING.LGPLv2.1.txt` in the VPK |
 | [minimp3](https://github.com/lieff/minimp3) | MP2 / MP3 audio decoding | CC0 1.0 (public domain); `src/minimp3.LICENSE` |
 | [libvita2d](https://github.com/xerpi/libvita2d) | drawing | MIT |
 | [FreeType](https://freetype.org) | font rendering (through vita2d) | FreeType License (FTL) |

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.2b (test)
+- **MPEG-2 video** (SD TV channels, DVD copies) and **AVI films with DivX / Xvid / DivX 3** play: decoded on the
+  ARM (the Vita's decoder takes only H.264). Also MPEG-4 Part 2 in MKV, MP4 and TS. Interlaced pictures are
+  smoothed (no combs). Above SD the ARM may not keep up: it then leaves out pictures nothing refers to.
+- **AVI files:** jumping through their index, MP3 / MP2 / AC-3 / DTS / AAC sound; from a server without ranges
+  from the start.
+- **PGS subtitles** (Blu-ray copies in MKV): shown as pictures where the film puts them; "PGS" in the menu.
+- **HLS with fMP4 / CMAF segments** plays (before: "not supported"), also from web pages.
+- AES-128 HLS: no false "decrypted end is wrong" in the log when a stream is stopped.
+
 ## 1.2.2 (test)
 - **Sound menu: five rows.** *Clear sound* (the speakers' sound: less deep bass, clearer voices) is now part of
   *Sound field: Speakers*, so it goes off by itself with headphones on Auto. *Same volume on every channel* became

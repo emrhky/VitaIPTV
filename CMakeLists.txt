@@ -50,6 +50,9 @@ add_executable(${PROJECT_NAME}.elf
   src/mpadec.c
   src/hls.c
   src/hlsaes.c
+  src/swvdec.c
+  src/avidemux.c
+  src/pgs.c
   src/spsfix.c
   src/curlio.c
   src/vod.c
@@ -124,6 +127,12 @@ if(EXISTS ${FFMPEG_VITA}/lib/libavcodec.a AND EXISTS ${FFMPEG_VITA}/lib/libavuti
     message(STATUS "DTS: FFmpeg's decoder is built in")
   else()
     message(WARNING "DTS: this FFmpeg has none (built before 1.2.2): such films play without sound")
+  endif()
+  file(STRINGS ${FFMPEG_VITA}/lib/libavcodec.a FF_M2V LIMIT_COUNT 1 REGEX "ff_mpeg2video_decoder")
+  if(FF_M2V)
+    message(STATUS "MPEG-2 / MPEG-4 video: FFmpeg's decoders are built in")
+  else()
+    message(WARNING "MPEG-2 / MPEG-4 video: this FFmpeg has none (built before 1.2.2b): such videos do not play")
   endif()
 else()
   message(STATUS "AC-3 / E-AC-3: not built in (run tools/build_ffmpeg_vita.sh)")

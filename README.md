@@ -36,7 +36,8 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 - **HTTPS** with a built-in TLS stack (mbedTLS, TLS 1.2 / 1.3), so modern https playlists, short links
   (tinyurl and the like) and https/HLS channels work. The Vita's own TLS is too old for most sites today.
 - **Video:** H.264 up to 1920x1080 through the hardware decoder (details below), audio/video sync to the
-  sound, automatic recovery from decoder errors.
+  sound, automatic recovery from decoder errors. MPEG-2 and MPEG-4 Part 2 (DivX / Xvid) in SD are decoded in
+  software.
 - **1080p:** 1080p channels and films play through the same hardware decoder.
 - **50 / 60 fps:** 720p at 50 / 60 fps plays every picture; 1080p at 50 / 60 fps a steady 25 / 30 pictures a
   second (every second picture, evenly spaced).
@@ -177,11 +178,13 @@ Kodi style as `link|User-Agent=...&Referer=...`. The app sends them with every r
 | Works | Does not work (without the transcoding server) |
 |---|---|
 | H.264 up to 1920x1080 (see below), AAC, MP2, MP3 | Above 1080p (4K) |
-| MPEG-TS, HLS (MPEG-TS segments), FLV, MKV, MP4 | HEVC / H.265 |
-| Films: MKV, MP4, TS, FLV files (FLV: from the start, no jumping) | AVI files |
+| MPEG-2, MPEG-4 Part 2 (DivX / Xvid), DivX 3: SD, in software | MPEG-2 / DivX above SD may stutter |
+| MPEG-TS, HLS, FLV, MKV, MP4, AVI | HEVC / H.265 |
+| Films: MKV, MP4, TS, AVI, FLV files (FLV: from the start, no jumping) | WMV, RealVideo |
 | AC-3 / E-AC-3, DTS, 5.1 / 7.1 AAC, Opus, Vorbis audio (as stereo) | Interlaced broadcasts (576i, 1080i may stutter) |
 | http and https | TrueHD audio (DTS-HD: its DTS core plays) |
-| AES-128 HLS (the key named in the playlist) | SAMPLE-AES / DRM, HLS with fMP4 segments |
+| AES-128 HLS, HLS with fMP4 / CMAF segments | SAMPLE-AES / DRM |
+| Subtitles: SRT / ASS text, PGS pictures (MKV) | VobSub (DVD picture subtitles) |
 
 **About "720p":** through the public API, the Vita's hardware decoder is limited to roughly H.264 level 3.1:
 8-bit 4:2:0, progressive, at most 3600 macroblocks per picture (1280x720) and a limited number of reference
@@ -273,7 +276,7 @@ project, not affiliated with or endorsed by Sony.
 - [vita2d](https://github.com/xerpi/libvita2d) - drawing
 - [mbedTLS](https://github.com/Mbed-TLS/mbedtls) (Apache-2.0) - TLS, in `third_party/mbedtls`
 - [minimp3](https://github.com/lieff/minimp3) (CC0) - MP2 / MP3 decoding
-- [FFmpeg](https://ffmpeg.org) (LGPL 2.1+) - AC-3 / E-AC-3, DTS, AAC 5.1, Opus and Vorbis decoding
+- [FFmpeg](https://ffmpeg.org) (LGPL 2.1+) - AC-3 / E-AC-3, DTS, AAC 5.1, Opus, Vorbis, MPEG-2 and MPEG-4 Part 2 decoding
 - The VitaSDK and HENkaku / Ensō teams
 
 Inspired by ViTube (the PS Vita YouTube app) - its source showed that the Vita's internal decoder
