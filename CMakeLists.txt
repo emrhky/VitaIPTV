@@ -36,6 +36,7 @@ add_executable(${PROJECT_NAME}.elf
   src/main.c
   src/iptv.c
   src/player.c
+  src/applog.c
   src/httpio.c
   src/tsdemux.c
   src/mkvdemux.c

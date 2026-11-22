@@ -1,8 +1,18 @@
 # Changelog
 
 ## 1.2.1 (test)
-- Code: `main.c` (8400 lines) is split into 12 parts in `src/app/` by subject; they are included into `main.c`
-  in the same order, so the app is built exactly as before (no change in what it does).
+- **Internet Archive items with many videos** (archive.org/details/ID): every video is a film of its own in the
+  list (where you stopped, favourite, download each), instead of one film with one of the videos.
+- **A channel whose picture size changes** (HD to SD for adverts) goes on; it stopped with "Picture size changed".
+- **Sound delay** (Select > Audio): for Bluetooth headphones, where the sound comes late; kept separately for the
+  speakers and for headphones / other outputs.
+- **Films a server sends as an HLS playlist** play; one that sends a web page or a message instead of the film says
+  so (and the log shows what came) instead of "Unknown file type".
+- Web page playlists: up to 300 videos (24 before); a folder's list without its last "/" works; archive.org's
+  `.ia.mp4` copy and its original are one row.
+- The log is written once a second (errors at once) instead of opening the file for every line.
+- Saved copies of playlists that are gone are deleted at the start; `archive_files.txt` no longer only grows.
+- Code: `main.c` (8400 lines) is split into 12 parts in `src/app/` by subject.
 
 ## 1.2.0
 
