@@ -834,6 +834,36 @@ static void draw_video_texture(vita2d_texture *t, int w, int h, int fields)
     vita2d_draw_texture_part_scale(t, x0, y0, 0, 0, w, h, s, s);
 }
 
+/* 1.2.2b: the picture subtitle (PGS) over the video, where the film puts it (its canvas is the video's size) */
+static void draw_pgs(int vw, int vh)
+{
+    /* two textures: a new subtitle goes into the one the last screen frame did not draw from (the GPU may still
+     * be reading that one) */
+    static vita2d_texture *tex[2];
+    static int tw[2], th[2], cur = -1;
+    static uint32_t shown_id;
+    uint32_t id;
+    int x, y, w, h, cw, ch;
+    if (!tsp_sub_bitmap(&id, &x, &y, &w, &h, &cw, &ch) || w <= 0 || h <= 0 || cw <= 0 || ch <= 0) return;
+    if (id != shown_id || cur < 0) {
+        int k = cur < 0 ? 0 : 1 - cur;
+        if (!tex[k] || w > tw[k] || h > th[k]) {
+            if (tex[k]) vita2d_free_texture(tex[k]);
+            tw[k] = w > tw[k] ? w : tw[k];
+            th[k] = h > th[k] ? h : th[k];
+            tex[k] = vita2d_create_empty_texture((unsigned)tw[k], (unsigned)th[k]);
+            if (!tex[k]) { tw[k] = th[k] = 0; return; }
+        }
+        if (!tsp_sub_bitmap_copy(id, vita2d_texture_get_datap(tex[k]), (int)(vita2d_texture_get_stride(tex[k]) / 4))) return;
+        shown_id = id;
+        cur = k;
+    }
+    float sx = 960.0f / vw, sy = 544.0f / vh, s = sx < sy ? sx : sy;
+    float x0 = (960.0f - vw * s) / 2, y0 = (544.0f - vh * s) / 2;
+    float kx = s * (float)vw / (float)cw, ky = s * (float)vh / (float)ch;
+    vita2d_draw_texture_part_scale(tex[cur], x0 + x * kx, y0 + y * ky, 0, 0, (float)w, (float)h, kx, ky);
+}
+
 /* 1.2: 1080i "bob": the decoder gives each picture as its two fields one above the other; both are shown, the
  * top one first and the bottom one half a picture later, as a television does: 50 movements a second from 25
  * pictures (before: the top field alone, 25). Half a picture: from the time between the last pictures. */
@@ -905,7 +935,7 @@ static void draw_tsp_screen(int osd)
                   st->state == TSP_ENDED ? T("Stream ended") : now_ms() < film_note_until ? film_note : NULL, player_fav());
         return;
     }
-    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields ? bob_field(st) : 0); got_frame = 1; }
+    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields ? bob_field(st) : 0); got_frame = 1; draw_pgs(vw, vh); }
     {                                                    /* (where a start stopped, if it ever does: one crash in 0.2.7) */
         static int last_state = -1;
         int sv = st ? st->state : -1;

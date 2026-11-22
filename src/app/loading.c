@@ -521,7 +521,7 @@ static int load_web(const Source *s, ChannelList *out, char *err, size_t errsz, 
         const WebVideo *v = &sc->v[k];
         why[k] = v->kind == WV_DASH ? "DASH (.mpd): not played" :
                  (vbits[k] & WH_DRM) ? "encrypted (DRM)" : ((vbits[k] & WH_AES) && !hlsaes_available()) ? "encrypted (AES)" :   /* (1.2.2: AES-128 plays) */
-                 (vbits[k] & WH_HEVC) ? "H.265 only" : (vbits[k] & WH_FMP4) ? "HLS with fMP4 parts" : NULL;
+                 (vbits[k] & WH_HEVC) ? "H.265 only" : NULL;   /* (1.2.2b: fMP4 HLS plays) */
         if (rf) fprintf(rf, "video %d: %s %s: %s\n", k + 1, v->kind == WV_HLS ? "HLS" : v->kind == WV_DASH ? "DASH" : "file", v->url, why[k] ? why[k] : "plays");
         if (why[k]) left++; else playable++;
     }
