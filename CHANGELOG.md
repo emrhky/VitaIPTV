@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.4b (test)
+- **Vita's MPEG-4 decoder, new ways:** on the Vita the public library takes only H.264, and the internal library
+  with the internal decoder was refused (0x80620902): left out. Tried now: the internal library with the public
+  decoder in the variants 1.2.4 did not reach (frame memory as asked, one reference), then the library with a
+  codec context in CDRAM, as the HD H.264 decoder works. The video's MPEG-4 profile is in the log (the Vita
+  plays Simple Profile).
+- Above 1280x720 (the Vita's own MPEG-4 limit) the hardware is not tried: 1.2.4 took the refusal at 1080p for
+  "none works" and left SD films to the software for the session too.
+
 ## 1.2.4 (test)
 - **Order of the downloads:** a waiting one shows its place ("Waiting (2)"); *Select > Download it next / Move it
   up one / Download it last* on the Downloads screen.

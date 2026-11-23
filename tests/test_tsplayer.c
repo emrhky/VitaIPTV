@@ -105,7 +105,7 @@ static void check_sps(const uint8_t *b, size_t n)
 
 static int m4v_init(int pub, const SceVideodecQueryInitInfoHwAvcdec *i);
 int sceVideodecInitLibrary(SceVideodecType c, const SceVideodecQueryInitInfoHwAvcdec *i)
-{ if (c == SCE_VIDEODEC_TYPE_HW_M4VDEC) return m4v_init(1, i);
+{ if (c == SCE_VIDEODEC_TYPE_HW_M4VDEC) return m4v_init(0, i);
   if (lib_open) return (int)0x80620808; if (i->size != sizeof *i || i->horizontal % 16 || i->vertical % 16 || i->numOfStreams != 1) return (int)0x80620802;
   if (lib_max_refs && (int)i->numOfRefFrames > lib_max_refs) return (int)0x80620802;   /* like the real library */
   unsigned mbs = (i->horizontal / 16) * (i->vertical / 16);
@@ -121,18 +121,19 @@ int sceAvcdecCreateDecoder(SceVideodecType c, SceAvcdecCtrl *d, const SceAvcdecQ
 int sceAvcdecDeleteDecoder(SceAvcdecCtrl *d) { (void)d; dec_open = 0; return 0; }
 /* 1.2.3: the MPEG-4 hardware. m4v_mode 0: its library refuses (as if the Vita had none: software), 1: it decodes
  * (a picture per VOP, the VOL needed first), 2: it refuses the units (the software takes over).
- * 1.2.3b: m4v_create_ok: which library + decoder pairs create a decoder (bit lib*2+dec: 1 public/public, 2
- * public lib + internal decoder, 4 internal lib + public decoder (as 1.2.3: refused on the Vita), 8 internal/
- * internal); the others 0x80620902 */
+ * 1.2.3b: m4v_create_ok: which library + decoder pairs create a decoder (bit lib*2+dec, lib 0 public, 1 internal,
+ * 2 internal with codec memory; dec 0 public, 1 internal); the others 0x80620902 */
 static int m4v_mode, m4v_lib, m4v_vol_seen, m4v_units, m4v_pics, m4v_bad_es;
-static int m4v_lib_kind, m4v_create_ok = 15, m4v_inits, m4v_creates;
-static int m4v_init(int pub, const SceVideodecQueryInitInfoHwAvcdec *i)
+static int m4v_lib_kind, m4v_create_ok = 63, m4v_inits, m4v_creates;
+/* kind: 0 public (refused for 0x1002, as on the Vita), 1 internal, 2 internal with a codec context */
+static int m4v_init(int kind, const SceVideodecQueryInitInfoHwAvcdec *i)
 { m4v_inits++;
   if (!m4v_mode) return (int)0x80620801;
+  if (kind == 0) return (int)0x80620802;
   if (m4v_lib || i->size != sizeof *i || i->horizontal % 16 || i->vertical % 16 || i->numOfStreams != 1) return (int)0x80620802;
-  m4v_lib = 1; m4v_lib_kind = pub ? 0 : 1; m4v_vol_seen = 0; return 0; }
+  m4v_lib = 1; m4v_lib_kind = kind; m4v_vol_seen = 0; return 0; }
 int sceVideodecInitLibraryInternal(SceVideodecType c, const SceVideodecQueryInitInfoHwAvcdec *i)
-{ if (c != SCE_VIDEODEC_TYPE_HW_M4VDEC) return (int)0x80620801; return m4v_init(0, i); }
+{ if (c != SCE_VIDEODEC_TYPE_HW_M4VDEC) return (int)0x80620801; return m4v_init(1, i); }
 int sceVideodecTermLibrary(SceVideodecType c)
 { if (c == SCE_VIDEODEC_TYPE_HW_M4VDEC) { m4v_lib = 0; return 0; } lib_open = 0; int_lib = 0; return 0; }
 int sceM4vdecQueryDecoderMemSize(SceVideodecType c, const SceAvcdecQueryDecoderInfo *q, SceAvcdecDecoderInfo *d)
@@ -273,8 +274,10 @@ SceUID sceCodecEngineOpenUnmapMemBlock(void *b, SceSize n)
 int sceCodecEngineCloseUnmapMemBlock(SceUID u) { assert(u == 0x40010133); unmaps_open--; return 0; }
 SceUIntVAddr sceCodecEngineAllocMemoryFromUnmapMemBlock(SceUID u, SceUInt32 n, SceUInt32 a) { (void)n; (void)a; return u == 0x40010133 ? 0x62740000 : 0; }
 int sceCodecEngineFreeMemoryFromUnmapMemBlock(SceUID u, SceUIntVAddr v) { (void)u; assert(v == 0x62740000); return 0; }
+static int m4v_init(int kind, const SceVideodecQueryInitInfoHwAvcdec *i);
 int sceVideodecInitLibraryWithUnmapMemInternal(SceVideodecType c, MockVdCtrl *vc, SceVideodecQueryInitInfo *q)
-{ (void)c; if (lib_open) return (int)0x80620808; if (!vc->vaContext || !vc->contextSize || int_cfg != 2) return (int)0x80620002;
+{ if (c == SCE_VIDEODEC_TYPE_HW_M4VDEC) { if (!vc->vaContext || !vc->contextSize) return (int)0x80620002; return m4v_init(2, &q->hwAvc); }
+  if (lib_open) return (int)0x80620808; if (!vc->vaContext || !vc->contextSize || int_cfg != 2) return (int)0x80620002;
   lib_open = 1; int_lib = 1; lib_w = q->hwAvc.horizontal; lib_h = q->hwAvc.vertical; return 0; }
 int sceAvcdecCreateDecoderInternal(SceVideodecType c, SceAvcdecCtrl *d, SceAvcdecQueryDecoderInfo *q)
 { (void)c; (void)q; if (!int_lib || !d->frameBuf.pBuf || mock_mem_type(d->frameBuf.pBuf) != SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW) return (int)0x80620009;
@@ -1029,9 +1032,10 @@ sw:
                     if (mode == 1) assert(m4v_pics >= frames && m4v_bad_es == 0);
                     else assert(m4v_pics == 0 && m4v_units == 3);
                 }
-            /* 1.2.3b: the ways. Only the internal pair creates: found (way 2), then used at once for the next file */
+            /* 1.2.3b / 1.2.4b: the ways. Only codec memory + internal decoder creates: found (way 4), then used at
+             * once for the next file */
             for (int k = 0; k < 4; k++) {
-                static const int ok[4] = { 8, 8, 0, 0 };
+                static const int ok[4] = { 32, 32, 0, 0 };
                 if (k == 0 || k == 2) tsp_set_m4v_hw(1);
                 snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", hf[k & 1]);
                 m4v_mode = 1; m4v_create_ok = ok[k]; m4v_units = m4v_pics = m4v_inits = m4v_creates = 0;
@@ -1042,7 +1046,7 @@ sw:
                 printf("               hardware: %d inits, %d creates, %d pictures\n", m4v_inits, m4v_creates, m4v_pics);
                 int frames = (k & 1) ? 140 : 290;
                 assert(v.r.st.state == TSP_ENDED && v.r.st.decoded >= (uint32_t)frames && v.r.st.audio_frames > 100 && !m4v_lib);
-                if (k == 0) assert(m4v_pics >= frames && m4v_inits == 2);        /* way 1 refused, way 2 worked */
+                if (k == 0) assert(m4v_pics >= frames && m4v_inits == 4 && !unmaps_open);   /* ways 1-3 refused, way 4 worked */
                 if (k == 1) assert(m4v_pics >= frames && m4v_inits == 1 && m4v_creates == 1);
                 if (k == 2) assert(m4v_pics == 0 && m4v_inits == 7);               /* all 7 tried: software */
                 if (k == 3) assert(m4v_pics == 0 && m4v_inits == 0);               /* not again this session */
@@ -1058,7 +1062,7 @@ sw:
                 fclose(f);
                 tsp_set_m4v_hw(1);
                 tsp_set_m4v_mark(mk);
-                m4v_mode = 1; m4v_create_ok = 8; m4v_units = m4v_pics = m4v_inits = m4v_creates = 0;
+                m4v_mode = 1; m4v_create_ok = 32; m4v_units = m4v_pics = m4v_inits = m4v_creates = 0;
                 snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "mpeg4.mkv");
                 VRun v = play_vod(dp, 0, 20, 0, 0);
                 show("mpeg4.mkv mark 1", &v.r);
@@ -1067,7 +1071,7 @@ sw:
                 tsp_set_m4v_mark(NULL);
                 tsp_set_m4v_hw(1);
             }
-            m4v_create_ok = 15;
+            m4v_create_ok = 63;
             m4v_mode = 0;
         }
         if (a52_available()) {   /* AVI: jumping through its index */

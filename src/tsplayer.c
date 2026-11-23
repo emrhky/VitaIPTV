@@ -308,6 +308,8 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     int m4v_on, m4v_failed, m4v_lib, m4v_dec, m4v_errs, m4v_vol_len, m4v_vol_sent, m4v_packed;
     SceAvcdecCtrl m4v_ctrl;
     SceUID m4v_fb_uid, m4v_es_uid;
+    SceUID m4v_cm_uid, m4v_unmap;       /* 1.2.4b: its codec context as the HD H.264 decoder's (way "codec memory") */
+    SceUIntVAddr m4v_va;
     uint8_t *m4v_es;
     uint32_t m4v_out, m4v_in;
     int64_t m4v_dts0, m4v_step;         /* AVI (decoding times only): pictures out are numbered */
@@ -1962,6 +1964,12 @@ static void m4v_close(Tsp *t)
     t->m4v_ctrl.frameBuf.pBuf = NULL;
     if (t->m4v_lib) sceVideodecTermLibrary(M4VDEC);
     t->m4v_lib = 0;
+    if (t->m4v_va) sceCodecEngineFreeMemoryFromUnmapMemBlock(t->m4v_unmap, t->m4v_va);
+    t->m4v_va = 0;
+    if (t->m4v_unmap > 0) sceCodecEngineCloseUnmapMemBlock(t->m4v_unmap);
+    t->m4v_unmap = -1;
+    if (t->m4v_cm_uid >= 0) sceKernelFreeMemBlock(t->m4v_cm_uid);
+    t->m4v_cm_uid = -1;
     if (t->m4v_es) mem_free(t->m4v_es, t->m4v_es_uid, 0);
     t->m4v_es = NULL;
     t->m4v_on = 0;
@@ -1969,18 +1977,23 @@ static void m4v_close(Tsp *t)
 
 /* 1.2.3b: 1.2.3 opened the library with the internal call and created the decoder with the public one: refused
  * on the Vita (0x80620902, all memory kinds). The ways tried in order, each logged; the first that works is
- * kept for the session, none working = software for the session. lib: 0 public sceVideodecInitLibrary,
- * 1 sceVideodecInitLibraryInternal; dec: 0 public query + create, 1 the internal ones; exact: the frame memory
- * size as asked (not rounded up to the block). */
+ * kept for the session, none working = software for the session. lib: 1 sceVideodecInitLibraryInternal,
+ * 2 sceVideodecInitLibraryWithUnmapMemInternal with a codec context in CDRAM (as the HD H.264 decoder; it works
+ * only so); dec: 0 public query + create, 1 the internal ones; exact: the frame memory size as asked (not
+ * rounded up to the block).
+ * 1.2.4b: on the Vita (1.2.4) the public library refused 0x1002 at any size (0x80620802: it takes only H.264, as
+ * vita-headers PR 892 says) and internal library + internal decoder gave 0x80620902: those are left out. Tried
+ * now: the internal library with the public decoder (as the headers describe) in the variants 1.2.4 did not
+ * reach, then the codec-context library. */
 typedef struct { uint8_t lib, dec, refs, exact; } M4vWay;
 static const M4vWay m4v_ways[] = {
-    { 0, 0, 2, 0 },     /* all public (as the headers describe) */
-    { 1, 1, 2, 0 },     /* all internal (as the HD decoder) */
-    { 0, 0, 2, 1 },
-    { 1, 1, 2, 1 },
-    { 0, 0, 1, 0 },     /* one reference (Simple Profile: no B-pictures) */
-    { 1, 1, 1, 0 },
-    { 0, 1, 2, 0 },     /* mixed */
+    { 1, 0, 2, 1 },     /* as the headers describe, the frame memory as asked */
+    { 1, 0, 1, 0 },     /* one reference (Simple Profile: no B-pictures) */
+    { 1, 0, 1, 1 },
+    { 2, 1, 2, 0 },     /* codec context, as the HD H.264 decoder */
+    { 2, 0, 2, 0 },
+    { 2, 1, 1, 0 },
+    { 2, 0, 1, 0 },
 };
 #define M4V_WAYS ((int)(sizeof m4v_ways / sizeof m4v_ways[0]))
 static int g_m4v_way = -1;              /* the way that worked (-1 none yet) */
@@ -2020,8 +2033,38 @@ static int m4v_try(Tsp *t, int w, int h, const M4vWay *wy, uint32_t *fm_kb)
     init.vertical = (uint32_t)ALIGN(h, 16);
     init.numOfRefFrames = wy->refs;
     init.numOfStreams = 1;
-    int r = wy->lib ? sceVideodecInitLibraryInternal(M4VDEC, &init) : sceVideodecInitLibrary(M4VDEC, &init);
-    if (r < 0) { plog("tsp: MPEG-4 hardware: library%s %dx%d refs %d -> 0x%08X", wy->lib ? " (internal)" : "", w, h, wy->refs, (unsigned)r); return r; }
+    int r;
+    if (wy->lib == 2) {                                      /* a codec context in CDRAM, handed to the codec engine */
+        SceVideodecQueryInitInfo qi;
+        memset(&qi, 0, sizeof qi);
+        qi.hwAvc = init;
+        SceUInt32 csize = 0;
+        r = sceVideodecQueryMemSizeInternal(M4VDEC, &qi, &csize);
+        if (r < 0 || (int)csize <= 0) { plog("tsp: MPEG-4 hardware: codec memory size -> 0x%08X (%u KB)", (unsigned)r, (unsigned)(csize >> 10)); return r < 0 ? r : -1; }
+        SceKernelAllocMemBlockOpt opt;
+        memset(&opt, 0, sizeof opt);
+        opt.size = sizeof opt;
+        opt.attr = SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT;
+        opt.alignment = 1024 * 1024;
+        uint32_t cm_size = ALIGN(csize, 1024 * 1024);
+        t->m4v_cm_uid = sceKernelAllocMemBlock("tsp_m4v_codec", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, cm_size, &opt);
+        if (t->m4v_cm_uid < 0) { r = t->m4v_cm_uid; t->m4v_cm_uid = -1; plog("tsp: MPEG-4 hardware: codec memory %u KB -> 0x%08X", (unsigned)(cm_size >> 10), (unsigned)r); return r; }
+        void *cm = NULL;
+        sceKernelGetMemBlockBase(t->m4v_cm_uid, &cm);
+        t->m4v_unmap = sceCodecEngineOpenUnmapMemBlock(cm, cm_size);
+        if (t->m4v_unmap <= 0) { r = t->m4v_unmap; t->m4v_unmap = -1; plog("tsp: MPEG-4 hardware: codec engine memory -> 0x%08X", (unsigned)r); m4v_close(t); return r < 0 ? r : -1; }
+        t->m4v_va = sceCodecEngineAllocMemoryFromUnmapMemBlock(t->m4v_unmap, csize, 256 * 1024);
+        if (!t->m4v_va) { plog("tsp: MPEG-4 hardware: codec engine address failed"); m4v_close(t); return -1; }
+        TspVideodecCtrl vc;
+        memset(&vc, 0, sizeof vc);
+        vc.vaContext = t->m4v_va;
+        vc.contextSize = csize;
+        r = sceVideodecInitLibraryWithUnmapMemInternal(M4VDEC, &vc, &qi);
+        if (r < 0) { plog("tsp: MPEG-4 hardware: library (codec memory %u KB) %dx%d refs %d -> 0x%08X", (unsigned)(csize >> 10), w, h, wy->refs, (unsigned)r); m4v_close(t); return r; }
+    } else {
+        r = sceVideodecInitLibraryInternal(M4VDEC, &init);
+        if (r < 0) { plog("tsp: MPEG-4 hardware: library (internal) %dx%d refs %d -> 0x%08X", w, h, wy->refs, (unsigned)r); return r; }
+    }
     t->m4v_lib = 1;
     /* (room after the query: the internal calls may read a longer one) */
     struct { SceAvcdecQueryDecoderInfo q; uint32_t pad[16]; } qq;
@@ -2066,9 +2109,17 @@ static int m4v_try(Tsp *t, int w, int h, const M4vWay *wy, uint32_t *fm_kb)
 }
 
 /* the hardware for w x h: 0, or -1 (then the software decoder) */
-static int m4v_open(Tsp *t, int w, int h)
+static int m4v_open(Tsp *t, int w, int h, const uint8_t *cfg, int cfg_len)
 {
-    if (w < 16 || h < 16 || w > 1920 || h > 1088 || g_m4v_dead) return -1;
+    if (w < 16 || h < 16 || g_m4v_dead) return -1;
+    /* 1.2.4b: the Vita plays MPEG-4 Simple Profile up to 1280x720 (its own player). Above: not tried (1.2.4 took
+     * the refusal at 1080p for "none works" and left SD to the software too) */
+    if (w * h > 1280 * 720) { plog("tsp: MPEG-4 hardware: %dx%d is above its 1280x720: software", w, h); return -1; }
+    for (int k = 0; k + 4 < cfg_len; k++)                    /* (its profile in the log: 0x01-0x08 Simple, 0xF0-0xF5 Advanced Simple) */
+        if (cfg[k] == 0 && cfg[k + 1] == 0 && cfg[k + 2] == 1 && cfg[k + 3] == 0xB0) {
+            plog("tsp: MPEG-4 profile and level 0x%02X (%s)", cfg[k + 4], cfg[k + 4] >= 0xF0 ? "Advanced Simple" : cfg[k + 4] <= 0x08 ? "Simple" : "other");
+            break;
+        }
     if (!g_m4v_mark_read && g_m4v_mark[0]) {                 /* a way crashed the app last time: it and the later ones are left out */
         g_m4v_mark_read = 1;
         FILE *f = fopen(g_m4v_mark, "r");
@@ -2091,7 +2142,7 @@ static int m4v_open(Tsp *t, int w, int h)
     } else {
         for (int k = 0; k < M4V_WAYS && k < g_m4v_skip_from && r < 0; k++) {
             const M4vWay *wy = &m4v_ways[k];
-            plog("tsp: MPEG-4 hardware: way %d: library %s, decoder %s, refs %d%s", k + 1, wy->lib ? "internal" : "public",
+            plog("tsp: MPEG-4 hardware: way %d: library %s, decoder %s, refs %d%s", k + 1, wy->lib == 2 ? "internal with codec memory" : "internal",
                  wy->dec ? "internal" : "public", wy->refs, wy->exact ? ", exact frame memory" : "");
             m4v_mark(k);
             r = m4v_try(t, w, h, wy, &fm_kb);
@@ -2216,7 +2267,7 @@ static int m4v_packet(Tsp *t, Pkt *p)
     if (i->codec != TS_CODEC_MPEG4V || t->m4v_failed || g_no_m4v_hw) return 0;
     if (!t->m4v_on) {
         if (!(p->flags & TS_FLAG_KEYFRAME)) return 1;        /* (from a keyframe) */
-        if (m4v_open(t, i->width, i->height) < 0) { t->m4v_failed = 1; return 0; }
+        if (m4v_open(t, i->width, i->height, i->cfg, i->cfg_len) < 0) { t->m4v_failed = 1; return 0; }
         t->m4v_vol_len = i->cfg_len > 0 && i->cfg_len <= (int)sizeof t->m4v_vol ? i->cfg_len : 0;
         if (t->m4v_vol_len) memcpy(t->m4v_vol, i->cfg, (size_t)t->m4v_vol_len);
         t->m4v_vol_sent = 0;
@@ -6093,6 +6144,7 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     t->last_out_pts = t->shown_pts = -1;
     t->fb_uid = t->es_uid = -1;
     t->cm_uid = t->unmap = -1;
+    t->m4v_cm_uid = t->m4v_unmap = -1;
     t->aport = -1;
     t->cur_req = -1;
     t->thread = t->vthread = t->athread = -1;
