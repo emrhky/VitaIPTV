@@ -2693,7 +2693,9 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
     double fps = ts_video_fps(i);
     p->frame_us = (fps > 5.0 && fps < 121.0) ? (uint32_t)(1000000.0 / fps) : 0;
     memcpy(p->data, data, len);
-    if (pts >= 0) { t->vq_newest_pts = pts; t->vq_have_pts = 1; }
+    /* (1.2.2b: AVI gives only the decoding time: that one, or the sound waited for the end of the reading / 4 s) */
+    int64_t qp = pts >= 0 ? pts : dts;
+    if (qp >= 0) { t->vq_newest_pts = qp; t->vq_have_pts = 1; }
     q_push(t, &t->vq, p);
 }
 
