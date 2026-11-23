@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.4c (test)
+- Vita's MPEG-4 decoder: the codec memory block now has room beyond the size asked (1.2.4b got no address from
+  the codec engine), then smaller alignments; the size asked, the block and the address are in the log.
+- The MPEG-4 profile line comes first, also when the hardware is not tried (an MP4 / MKV header; an AVI has it
+  in the stream).
+
 ## 1.2.4b (test)
 - **Vita's MPEG-4 decoder, new ways:** on the Vita the public library takes only H.264, and the internal library
   with the internal decoder was refused (0x80620902): left out. Tried now: the internal library with the public
