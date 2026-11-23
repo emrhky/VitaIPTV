@@ -367,6 +367,12 @@ static void dl_hold_for(const char *url, int kind)
 {
     int held_here = dl_nheld && same_host(url, dl_hold_url);   /* (they wait already: a stream from there again) */
     if (!held_here && !dl_busy_host(url)) return;
+    /* 1.2.3: the account has room for the stream and the download (its check, the last 10 min): both go on */
+    if (kind == DL_HOLD_STREAM && !held_here && acct_active >= 0 && acct_max >= 2 && acct_active + 2 <= acct_max &&
+        now_ms() - acct_at < 600000) {
+        plog("dl: the account allows %d connections (%d in use): the download goes on while the stream plays", acct_max, acct_active);
+        return;
+    }
     if (held_here) { dl_release_at = 0; if (kind > dl_hold_kind) dl_hold_kind = kind; }
     int had = dl_nheld;
     for (int k = 0; k < dln && dl_nheld < 16; k++) {        /* (the running one first, then the waiting ones in order) */
@@ -748,6 +754,39 @@ static int dl_queue_items(const int *cis, int n)
     if (fr >= 0 && (uint64_t)fr < DL_RESERVE * 2) { set_status(1, "Little free space on the memory card", NULL); }
     dl_hold_again();
     return q;
+}
+
+/* 1.2.3: Settings > Download the next episode: when 40 percent of episode ci is watched, the next n episodes of
+ * the list (over into the next season) that are not watched to their end and not downloaded yet are queued. An
+ * account's download waits while a stream of the same server plays (dl_hold_again), as every download does. */
+static void dl_auto_next(int ci, int n)
+{
+    if (n <= 0) return;
+    const WatchEntry *w = cur_watch();
+    int cis[2], k = 0;
+    for (int i = ci + 1; i < chans.count && k < n && k < 2; i++) {
+        const Channel *c = &chans.items[i];
+        if (c->kind != CH_FILM) continue;
+        if (w && w->done) {
+            char ek[WATCH_ID];
+            watch_ep_key(c->url, ek, sizeof ek);
+            if (watch_is_done(w, ek)) continue;              /* (watched already: the one after it) */
+        }
+        int there = 0;                                       /* (in Downloads already: done, partly or queued) */
+        for (int j = 0; j < dln && !there; j++) there = !strcmp(dlv[j].url, c->url);
+        if (there) continue;
+        cis[k++] = i;
+    }
+    if (!k) { plog("dl: next episode: nothing to download (the last one, or watched / downloaded)"); return; }
+    int had = dln, q = dl_queue_items(cis, k);
+    plog("dl: next episode: %d of %d queued (%s%s)", q < 0 ? 0 : q, k, chans.items[cis[0]].name, k > 1 ? ", ..." : "");
+    if (q > 0) {
+        snprintf(film_note, sizeof film_note, "%s", T(dl_nheld ? "Next episode queued: it downloads when you stop watching"
+                                                                : "Downloading the next episode"));
+        film_note_until = now_ms() + 4000;
+    }
+    (void)had;
+    status[0] = 0;                                           /* (dl_queue_items' line is for the lists) */
 }
 
 /* 1.3.1: Select > Download on a single film link of the home screen */

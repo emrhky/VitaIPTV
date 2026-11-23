@@ -7,7 +7,7 @@ os.makedirs(T, exist_ok=True)
 def sh(c):
     if os.environ.get("TSP_DIR") and c.startswith("ffmpeg") and os.path.exists(c.split()[-1]): return None
     r = subprocess.run(c, shell=True, capture_output=True, text=True)
-    if r.returncode: print(r.stdout, r.stderr[-3000:]); sys.exit(1)
+    if r.returncode: print(r.stdout, "\n".join(l for l in r.stderr.splitlines() if "error" in l or "undefined" in l)[-3000:] or r.stderr[-3000:]); sys.exit(1)
     return r
 SRC = "-f lavfi -i testsrc2=size={s}:rate={r} -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5"
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1280x720', r=30)} -c:v libx264 -profile:v high -bf 3 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/s720.ts")
@@ -108,6 +108,9 @@ sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=12)} -c:v mpeg4 -vtag X
 sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=6)} -c:v msmpeg4 -q:v 4 -g 50 -c:a libmp3lame -b:a 128k {T}/divx3.avi")
 sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=6)} -c:v mpeg4 -q:v 4 -g 50 -bf 2 -c:a ac3 {T}/mpeg4.mkv")
 sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=6)} -c:v mpeg4 -q:v 4 -g 50 -bf 2 -c:a aac {T}/mpeg4.mp4")
+# 1.2.3: above SD: on three threads (MPEG-2 by slices, MPEG-4 by pictures)
+sh(f"ffmpeg -loglevel error -y {SW.format(s='1280x720', d=6)} -c:v mpeg2video -b:v 8M -g 12 -bf 2 -c:a mp2 -b:a 192k -f mpegts {T}/mpeg2hd.ts")
+sh(f"ffmpeg -loglevel error -y {SW.format(s='1280x720', d=6)} -c:v mpeg4 -vtag XVID -q:v 4 -g 50 -bf 2 -c:a libmp3lame -b:a 128k {T}/xvidhd.avi")
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1280x720', r=30)} -c:v libx264 -profile:v high -bf 3 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -f matroska {T}/bframes.mkv")
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5 "
    f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a mp2 -b:a 192k -f mpegts {T}/mp2.ts")

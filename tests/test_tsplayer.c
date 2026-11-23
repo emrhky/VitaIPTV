@@ -117,6 +117,43 @@ int sceAvcdecCreateDecoder(SceVideodecType c, SceAvcdecCtrl *d, const SceAvcdecQ
   created_refs = (int)q->numOfRefFrames; creates++; wedged = 0; refused_pts = -2;
   d->handle = 1; dec_open = 1; sps_seen = 0; npend = 0; return 0; }
 int sceAvcdecDeleteDecoder(SceAvcdecCtrl *d) { (void)d; dec_open = 0; return 0; }
+/* 1.2.3: the MPEG-4 hardware. m4v_mode 0: its library refuses (as if the Vita had none: software), 1: it decodes
+ * (a picture per VOP, the VOL needed first), 2: it refuses the units (the software takes over) */
+static int m4v_mode, m4v_lib, m4v_vol_seen, m4v_units, m4v_pics, m4v_bad_es;
+int sceVideodecInitLibraryInternal(SceVideodecType c, const SceVideodecQueryInitInfoHwAvcdec *i)
+{ if (c != SCE_VIDEODEC_TYPE_HW_M4VDEC || !m4v_mode) return (int)0x80620801;
+  if (m4v_lib || i->size != sizeof *i || i->horizontal % 16 || i->vertical % 16 || i->numOfStreams != 1) return (int)0x80620802;
+  m4v_lib = 1; m4v_vol_seen = 0; return 0; }
+int sceM4vdecQueryDecoderMemSize(SceVideodecType c, const SceAvcdecQueryDecoderInfo *q, SceAvcdecDecoderInfo *d)
+{ (void)c; if (!m4v_lib) return (int)0x8062000C; d->frameMemSize = q->horizontal * q->vertical * 3 / 2 * (q->numOfRefFrames + 2); return 0; }
+int sceM4vdecCreateDecoder(SceVideodecType c, SceAvcdecCtrl *d, const SceAvcdecQueryDecoderInfo *q)
+{ (void)c; (void)q; if (!d->frameBuf.pBuf) return (int)0x80620009; d->handle = 2; return 0; }
+int sceM4vdecDeleteDecoder(SceAvcdecCtrl *d) { (void)d; m4v_lib = 0; return 0; }
+int sceM4vdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArrayPicture *arr)
+{
+    (void)d;
+    const uint8_t *b = au->es.pBuf;
+    size_t n = au->es.size;
+    m4v_units++;
+    if (m4v_mode == 2) return (int)0x8062000D;
+    if (!(kind_bit(au->es.pBuf) & es_ok)) m4v_bad_es++;
+    int vops = 0;
+    for (size_t k = 0; k + 3 < n; k++) {
+        if (b[k] || b[k + 1] || b[k + 2] != 1) continue;
+        if (b[k + 3] >= 0x20 && b[k + 3] <= 0x2F) m4v_vol_seen = 1;
+        if (b[k + 3] == 0xB6) vops++;
+    }
+    if (!m4v_vol_seen || vops != 1) return (int)0x8062000D;  /* (no header yet, or a packed unit: refused) */
+    SceAvcdecPicture *p = arr->pPicture[0];
+    if (arr->numOfElm < 1 || !p || p->size != sizeof *p || p->frame.pixelType != SCE_AVCDEC_PIXELFORMAT_YUV420_RASTER ||
+        p->frame.frameHeight % 16 || !p->frame.pPicture[0]) return (int)0x80620002;
+    ((uint8_t *)p->frame.pPicture[0])[(size_t)p->frame.framePitch * p->frame.frameHeight * 3 / 2 - 1] = 0x80;   /* (touches the last byte) */
+    p->info.pts = au->pts;
+    arr->numOfOutput = 1;
+    m4v_pics++;
+    return 0;
+}
+int sceM4vdecDecodeStop(const SceAvcdecCtrl *d, SceAvcdecArrayPicture *arr) { (void)d; arr->numOfOutput = 0; return 0; }
 static int au_nonref(const uint8_t *d, size_t n)
 {
     int slices = 0;
@@ -939,6 +976,7 @@ sw:
             { "mpeg2.ts", 0, 720, 576, 140 }, { "xvid.avi", 1, 640, 352, 290 }, { "divx3.avi", 1, 640, 352, 140 },
             { "mpeg4.mkv", 1, 640, 352, 140 }, { "mpeg4.mp4", 1, 640, 352, 140 },
             { "xvid.avi", 0, 640, 352, 290 },                /* (as a stream: no index read, the header from the data) */
+            { "mpeg2hd.ts", 0, 1280, 720, 140 }, { "xvidhd.avi", 1, 1280, 720, 140 },   /* 1.2.3: three threads */
         };
         for (size_t k = 0; k < sizeof sv / sizeof sv[0]; k++) {
             snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", sv[k].f);
@@ -952,6 +990,24 @@ sw:
                        r.st.audio_frames > 100 && r.synced && r.av_bad * 5 <= r.avn + 5);   /* (nonmono: the fake decoder's pts in the picture; not here) */
             else
                 assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "not supported"));
+        }
+        if (a52_available()) {   /* 1.2.3: MPEG-4 on the (fake) hardware: it decodes; it refuses (the software takes over) */
+            static const char *const hf[3] = { "xvid.avi", "mpeg4.mkv", "mpeg4.mp4" };
+            for (int mode = 1; mode <= 2; mode++)
+                for (int k = 0; k < 3; k++) {
+                    snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", hf[k]);
+                    m4v_mode = mode; m4v_units = m4v_pics = m4v_bad_es = 0;
+                    VRun v = play_vod(dp, 0, 20, 0, 0);
+                    char nm[48];
+                    snprintf(nm, sizeof nm, "%s hw%s", hf[k], mode == 1 ? "" : " refused");
+                    show(nm, &v.r);
+                    printf("               hardware: %d units, %d pictures\n", m4v_units, m4v_pics);
+                    int frames = k ? 140 : 290;
+                    assert(v.r.st.state == TSP_ENDED && v.r.st.decoded >= (uint32_t)frames && v.r.changes >= frames - 10 && v.r.st.audio_frames > 100 && !m4v_lib);
+                    if (mode == 1) assert(m4v_pics >= frames && m4v_bad_es == 0);
+                    else assert(m4v_pics == 0 && m4v_units == 3);
+                }
+            m4v_mode = 0;
         }
         if (a52_available()) {   /* AVI: jumping through its index */
             snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "xvid.avi");

@@ -1,5 +1,7 @@
 #include <psp2/kernel/processmgr.h>
 #include <psp2/ctrl.h>
+#include <psp2/touch.h>
+#include <psp2/kernel/sysmem.h>
 #include <psp2/io/stat.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/fcntl.h>
@@ -203,6 +205,7 @@ static int dev_open;                        /* 1.3.1: "Videos on the Vita" open 
 static void draw_device(void);
 static void dev_input(unsigned p);
 static void dev_open_screen(void);
+static void storage_open(void);                     /* 1.2.3: Settings > Storage (app/storage.c) */
 static const char *dev_home_line(char *b, size_t cap);
 static int dl_queue_stream(int si);
 static void clock_of(int64_t t, char *b, size_t n);
@@ -485,6 +488,8 @@ static int read_file(const char *path, Mem *m)
 #include "app/downloads.c"
 
 #include "app/device.c"
+/* 1.2.3: Settings > Storage */
+#include "app/storage.c"
 
 #include "app/detail.c"
 
@@ -706,6 +711,7 @@ int main(void)
     sceAppUtilInit(&aup, &abp);
     sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_LANG, &system_lang);
     load_settings();
+    touch_apply();                                           /* 1.2.3 */
     load_resume();
     load_watched();                                          /* 0.7.0 */
     apply_language();
@@ -754,6 +760,9 @@ int main(void)
     plog("clocks: cpu 444 -> 0x%08X, bus 222 -> 0x%08X, gpu 222 -> 0x%08X, xbar 166 -> 0x%08X",
          (unsigned)clocks_rc[0], (unsigned)clocks_rc[1], (unsigned)clocks_rc[2], (unsigned)clocks_rc[3]);
     plog("https: %s", cio_available() ? "built-in TLS (mbedTLS)" : "system only (built without TLS)");
+#ifdef FFMPEG_BUILD_FLAGS
+    plog("ffmpeg: %s", FFMPEG_BUILD_FLAGS);                  /* 1.2.3: NEON code, threads (software video's speed) */
+#endif
     channel_list_init(&chans);
     load_favorites();                                        /* (before the playlists: they are sorted by it) */
     plog("avpref: %d streams with a chosen sound / subtitles", avpref_load(&avprefs, AVPREF_FILE));   /* 1.3 */
@@ -880,6 +889,10 @@ int main(void)
                 set_status(0, n ? "Watched episodes cleared" : "Nothing to clear", NULL);
             } else if (p & SCE_CTRL_CIRCLE) confirm_clear_watched = 0;
             draw_form();
+        }
+        else if (form_kind == FORM_SETTINGS && sto_on) {     /* 1.2.3: Settings > Storage */
+            storage_input(p);
+            if (sto_on) storage_draw(); else draw_form();
         }
         else if (form_kind == FORM_SETTINGS && form_about) { /* 1.1: "About" from the settings */
             if (p & (SCE_CTRL_CIRCLE | SCE_CTRL_CROSS)) form_about = 0;
@@ -1047,7 +1060,7 @@ int main(void)
                 }
                 case MI_ADD: open_source_form(-1); break;
                 case MI_SORT: src_sort_begin(); break;
-                case MI_RELOAD: load_favorites(); load_mylist(); load_sources(); load_settings(); search_copy_clear(); api_copies_clear(); break;
+                case MI_RELOAD: load_favorites(); load_mylist(); load_sources(); load_settings(); touch_apply(); search_copy_clear(); api_copies_clear(); break;
                 case MI_SETTINGS: open_settings_form(); break;
                 default: quit = 1; break;
                 }
@@ -1606,6 +1619,21 @@ int main(void)
                     film_scrub = 0;
                     if (seek_target >= 0) seek_due = now + 250;     /* let go: jump there */
                 }
+                {   /* 1.2.3: the touch screen (Settings): a touch shows / hides the bar, two pause, the time line drags */
+                    int bar = osd_until_us > now;
+                    int g = touch_gesture(bar, can_jump, dur);
+                    if (g == TG_TAP) osd_until_us = bar ? now : now + 4000;
+                    else if (g == TG_DOUBLE && fs) { tsp_pause(!fs->paused); osd_until_us = now + 4000; }
+                    else if (g == TG_DRAG) {
+                        seek_target = touch_seek_ms;
+                        if (dur > 0 && seek_target > dur - 3000) seek_target = dur - 3000;
+                        int lim = dl_growing_limit_ms(cur_play_url(), dur);   /* (a film being downloaded: not past what has come) */
+                        if (lim >= 0 && seek_target > lim) seek_target = lim;
+                        if (seek_target < 0) seek_target = 0;
+                        seek_due = now + 3600000;
+                        osd_until_us = now + 4000;
+                    } else if (g == TG_DROP && seek_target >= 0) seek_due = now + 50;
+                }
                 if (film && seek_target >= 0 && now >= seek_due) {
                     int target = seek_target;
                     seek_target = -1;
@@ -1757,6 +1785,20 @@ int main(void)
                         fs = tsp_status();
                     }
                 }
+                /* 1.2.3: the first try gave a few KB and then nothing (seen right after the Vita woke: the server
+                 * answered late): once more, by itself. Once per address until it has played. */
+                {
+                    static char nodata_url[256];
+                    const char *cu = cur_play_url();
+                    if (fs && fs->state == TSP_PLAYING && !strncmp(nodata_url, cu, sizeof nodata_url - 1)) nodata_url[0] = 0;
+                    if (!via_proxy && fs && fs->state == TSP_ERROR && !fs->hls_no_video && fs->bytes < 64u * 1024 &&
+                        !strcmp(fs->msg, "No video data received") && strncmp(nodata_url, cu, sizeof nodata_url - 1)) {
+                        snprintf(nodata_url, sizeof nodata_url, "%s", cu);
+                        plog("player: no video data after %u KB: trying once more", (unsigned)(fs->bytes >> 10));
+                        play_channel_ex(play_vis, 0);
+                        fs = tsp_status();
+                    }
+                }
                 int down = fs && fs->slow_network ? res_step_down(fs) : -1;
                 if (!film && !via_proxy && down >= 0 && (!res_fixed() || fs->hls_h >= 1000)) {
                     int was = fs->hls_h > 0 ? fs->hls_h : 720;
@@ -1772,6 +1814,20 @@ int main(void)
                 }
                 if (film) {
                     if (now_ms() - last_pos_save > 60000) { save_film_position(); last_pos_save = now_ms(); }
+                    {   /* 1.2.3: 40 percent of an episode watched: the next episodes are downloaded (Settings) */
+                        static int autodl_ci = -1;
+                        if (settings.auto_dl && in_episodes && return_state == ST_CHANNELS && !arch_on && play_vis < nvis &&
+                            vis[play_vis] != autodl_ci && fs && fs->state == TSP_PLAYING) {
+                            int ap = 0, ad = 0;
+                            tsp_vod_pos(&ap, &ad);
+                            int L = film_length();
+                            if (L > 0 && ap >= L / 5 * 2) {
+                                autodl_ci = vis[play_vis];
+                                plog("player: %d%% of the episode watched: the next %d downloaded", ap / (L / 100 > 0 ? L / 100 : 1), settings.auto_dl);
+                                dl_auto_next(vis[play_vis], settings.auto_dl);
+                            }
+                        }
+                    }
                     fs = tsp_status();
                     if (fs && fs->state == TSP_ENDED && !film_end_done) {
                         film_end_done = 1;

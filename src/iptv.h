@@ -87,6 +87,8 @@ typedef struct {
                                          * waits for it); 1.2.2: kept for each output: speakers / headphones / Bluetooth */
     int snd_field;                      /* 1.3: sound field: 0 off, 1 speakers, 2 headphones, 3 auto (the default:
                                          * headphones when they are plugged in, else speakers) */
+    int auto_dl;                        /* 1.2.3: the next episodes downloaded when 40% of one is watched: 0 off, 1, 2 */
+    int touch;                          /* 1.2.3: the front touch screen in the player: 0 off (the default), 1 on */
 } Settings;
 
 void channel_list_init(ChannelList *l);

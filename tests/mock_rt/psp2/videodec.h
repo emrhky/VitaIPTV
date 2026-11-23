@@ -2,7 +2,7 @@
 #ifndef MOCKRT_VIDEODEC_H
 #define MOCKRT_VIDEODEC_H
 #include <psp2/types.h>
-typedef enum { SCE_VIDEODEC_TYPE_HW_AVCDEC = 0x1001 } SceVideodecType;
+typedef enum { SCE_VIDEODEC_TYPE_HW_AVCDEC = 0x1001, SCE_VIDEODEC_TYPE_HW_M4VDEC = 0x1002 } SceVideodecType;
 typedef enum { SCE_AVCDEC_PIXELFORMAT_RGBA8888 = 0x00, SCE_AVCDEC_PIXELFORMAT_RGBA565 = 0x01, SCE_AVCDEC_PIXELFORMAT_RGBA5551 = 0x02,
                SCE_AVCDEC_PIXELFORMAT_YUV420_RASTER = 0x10, SCE_AVCDEC_PIXELFORMAT_YUV420_PACKED_RASTER = 0x20 } SceAvcdecPixelFormat;
 typedef struct { uint32_t size, horizontal, vertical, numOfRefFrames, numOfStreams; } SceVideodecQueryInitInfoHwAvcdec;

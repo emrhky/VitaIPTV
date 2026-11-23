@@ -834,6 +834,75 @@ static void draw_video_texture(vita2d_texture *t, int w, int h, int fields)
     vita2d_draw_texture_part_scale(t, x0, y0, 0, 0, w, h, s, s);
 }
 
+/* ---------------------------------------------------------------- 1.2.3: the touch screen in the player */
+
+static int is_vita_tv(void)
+{
+    static int known = -1;
+    if (known < 0) known = sceKernelIsPSVitaTV() ? 1 : 0;
+    return known;
+}
+
+/* the front panel's sampling on or off as the setting says (no panel on a Vita TV) */
+static void touch_apply(void)
+{
+    static int on = -1;
+    int want = settings.touch && !is_vita_tv();
+    if (want == on) return;
+    on = want;
+    sceTouchSetSamplingState(SCE_TOUCH_PORT_FRONT, want ? SCE_TOUCH_SAMPLING_STATE_START : SCE_TOUCH_SAMPLING_STATE_STOP);
+    plog("touch: %s", want ? "on in the player" : "off");
+}
+
+/* What a touch did this frame. A touch: the bar shows / hides (after a short wait: a second touch makes it a
+ * double touch, which pauses). With the bar shown, a touch on the time line drags the place to jump to;
+ * letting go jumps. Coordinates: the panel's 1920x1088 halved to the screen's 960x544. */
+enum { TG_NONE, TG_TAP, TG_DOUBLE, TG_DRAG, TG_DROP };
+static int touch_seek_ms = -1;                   /* while dragging: where the jump goes */
+static int touch_gesture(int bar_shown, int can_jump, int dur_ms)
+{
+    static int down, dragging, x0, y0, xl, on_bar;
+    static unsigned t_down, t_last_tap, tap_pending_at;
+    if (!settings.touch || is_vita_tv()) return TG_NONE;
+    SceTouchData td;
+    memset(&td, 0, sizeof td);
+    int touching = sceTouchPeek(SCE_TOUCH_PORT_FRONT, &td, 1) >= 0 && td.reportNum > 0;
+    unsigned now = now_ms();
+    int x = touching ? td.report[0].x / 2 : xl, y = touching ? td.report[0].y / 2 : 0;
+    /* the time line: the bottom of the screen, between the times (see time_line in screens.c) */
+    const int bx0 = 120, bx1 = 850;
+    if (touching && !down) {
+        down = 1; dragging = 0; x0 = xl = x; y0 = y; t_down = now;
+        on_bar = bar_shown && can_jump && dur_ms > 0 && y >= 544 - 140;
+    }
+    if (touching && down) {
+        xl = x;
+        if (on_bar && (dragging || abs(x - x0) > 12)) {
+            dragging = 1;
+            float f = (float)(x - bx0) / (float)(bx1 - bx0);
+            if (f < 0) f = 0;
+            if (f > 1) f = 1;
+            touch_seek_ms = (int)(f * (float)dur_ms);
+            tap_pending_at = 0;
+            return TG_DRAG;
+        }
+        return TG_NONE;
+    }
+    if (!touching && down) {                         /* let go */
+        down = 0;
+        if (dragging) { dragging = 0; return TG_DROP; }
+        if (now - t_down < 400 && abs(xl - x0) < 30) {
+            if (t_last_tap && now - t_last_tap < 400) { t_last_tap = 0; tap_pending_at = 0; return TG_DOUBLE; }
+            t_last_tap = now;
+            tap_pending_at = now + 400;
+        }
+        (void)y0;
+        return TG_NONE;
+    }
+    if (tap_pending_at && now >= tap_pending_at) { tap_pending_at = 0; t_last_tap = 0; return TG_TAP; }
+    return TG_NONE;
+}
+
 /* 1.2.2b: the picture subtitle (PGS) over the video, where the film puts it (its canvas is the video's size) */
 static void draw_pgs(int vw, int vh)
 {

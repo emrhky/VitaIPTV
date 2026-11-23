@@ -259,6 +259,8 @@ static int f_lang, f_adult, f_hd, f_res;
 static int f_theme;                                      /* 0.8.1: shown at once, back if the form is cancelled */
 static int f_bg;                                         /* 1.4: the background, the same way */
 static int f_srv, f_boost, f_speech, f_level, f_field;            /* 1.1: server off / when needed / always; the sound */
+static int f_autodl, f_touch;                                   /* 1.2.3 */
+static const char *const AUTODL_NAMES[3] = { "Off", "1 episode", "2 episodes" };
 static int set_scroll, form_about;                       /* 1.1: the settings' first row shown; "About" asked */
 static int form_ask;                                     /* 1.1: O with changes: "Save the settings?" / "Save the playlist?" */
 static const char *const AUTO_NAMES[3] = { "Off", "When needed", "Always" };
@@ -309,6 +311,8 @@ static void open_settings_form(void)
     f_speech = settings.snd_dialog;
     f_level = settings.snd_level;
     f_field = settings.snd_field;                            /* 1.3 */
+    f_autodl = settings.auto_dl;                             /* 1.2.3 */
+    f_touch = settings.touch;
     set_scroll = 0;
     form_about = 0;
 }
@@ -327,12 +331,13 @@ static int source_field_enabled(int i)
 
 #define SRC_FIELDS 5                                     /* (+1: "Delete playlist" when editing one; 1.1: no Save / Cancel rows) */
 /* 1.1: the settings' rows (the address and the test only while the server is on) */
-enum { SF_LANG, SF_THEME, SF_BG, SF_RES, SF_ADULT, SF_HD, SF_PIN, SF_BOOST, SF_LEVEL, SF_SPEECH, SF_FIELD, SF_SERVER, SF_ADDR, SF_TEST,
-       SF_CLR_RECENT, SF_CLR_WATCHED, SF_ABOUT, SF_N };
+enum { SF_LANG, SF_THEME, SF_BG, SF_RES, SF_ADULT, SF_HD, SF_PIN, SF_BOOST, SF_LEVEL, SF_SPEECH, SF_FIELD, SF_AUTODL, SF_TOUCH,
+       SF_SERVER, SF_ADDR, SF_TEST, SF_STORAGE, SF_CLR_RECENT, SF_CLR_WATCHED, SF_ABOUT, SF_N };
 static int set_rows(int *ids)
 {
     int n = 0;
-    for (int k = 0; k < SF_N; k++) if (f_srv || (k != SF_ADDR && k != SF_TEST)) ids[n++] = k;
+    for (int k = 0; k < SF_N; k++)
+        if ((f_srv || (k != SF_ADDR && k != SF_TEST)) && (k != SF_TOUCH || !is_vita_tv())) ids[n++] = k;   /* (1.2.3: no touch screen on a Vita TV) */
     return n;
 }
 static int set_id(void)
@@ -464,6 +469,9 @@ static void save_settings_form(void)
     settings.snd_dialog = f_speech;
     settings.snd_level = f_level;
     settings.snd_field = f_field;
+    settings.auto_dl = f_autodl;                             /* 1.2.3 */
+    settings.touch = f_touch;
+    touch_apply();
     settings.lang = f_lang;
     settings.hide_adult = f_adult;
     settings.hide_4k = f_hd;
@@ -525,6 +533,9 @@ static void set_step(int dir, int cross)
     case SF_SPEECH: f_speech = !f_speech; break;
     case SF_LEVEL: f_level = (f_level + (dir < 0 ? 2 : 1)) % 3; break;   /* 1.2.2: off, between channels, night */
     case SF_FIELD: f_field = (f_field + (dir < 0 ? 3 : 1)) % 4; break;   /* 1.3 (Auto: 3) */
+    case SF_AUTODL: f_autodl = (f_autodl + (dir < 0 ? 2 : 1)) % 3; break;   /* 1.2.3 */
+    case SF_TOUCH: f_touch = !f_touch; break;
+    case SF_STORAGE: if (cross) storage_open(); break;
     case SF_SERVER: {
         int was = f_srv;
         f_srv = (f_srv + (dir < 0 ? 2 : 1)) % 3;
@@ -568,7 +579,7 @@ static int form_changed(void)
         return f_lang != settings.lang || f_adult != settings.hide_adult || f_hd != settings.hide_4k || strcmp(f_pin, settings.pin) ||
                RES_VALUES[f_res] != settings.res_pref || f_theme != settings.theme || f_bg != settings.bg || strcmp(f_proxy, settings.proxy) ||
                f_srv != srv0 || f_boost != (settings.snd_boost & 3) || f_speech != settings.snd_dialog || f_level != settings.snd_level ||
-               f_field != settings.snd_field;
+               f_field != settings.snd_field || f_autodl != settings.auto_dl || f_touch != settings.touch;
     }
     if (edit_index < 0) return f_name[0] || f_url[0] || f_user[0] || f_pass[0];
     if (edit_index >= nsources) return 0;
@@ -639,9 +650,12 @@ static void draw_form(void)
             "Between channels: quiet and loud channels about as loud as each other. Night: also loud scenes down and quiet speech up at once.",
             "5.1 films and channels: the voices louder in the stereo mix.",
             "Speakers: wider stereo, less of the deep bass they cannot play, clearer voices. Headphones: more natural stereo, and 5.1 sound around you. Auto: headphones when they are plugged in.",
+            "When 40 percent of an episode is watched, the next ones are downloaded. An account with one connection downloads after you stop watching.",
+            "In the player: a touch shows or hides the bar, drag the time line to jump, two touches pause.",
             "Plays what the Vita cannot (HEVC, 1080i, AC-3...) through tools/vita_iptv_proxy.py on a PC.",
             "The server's address, e.g. http://192.168.1.20:8090",
             "Checks that the server answers.",
+            "What the app keeps on the memory card, and clearing it.",
             "Removes the recently watched channels of every playlist. Favorites stay.",
             "Removes the ticks of watched episodes. Where films stopped is kept.",
             "Version, licence and the project's page.",
@@ -665,6 +679,9 @@ static void draw_form(void)
             case SF_SPEECH: *x = (ScrField){ T("Clear speech (5.1)"), T(f_speech ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
             case SF_LEVEL: *x = (ScrField){ T("Sound levelling"), T(LEVEL_NAMES[f_level < 0 || f_level > 2 ? 0 : f_level]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_FIELD: *x = (ScrField){ T("Sound field"), field_name(f_field), SCR_F_CHOICE, 1, 0 }; break;
+            case SF_AUTODL: *x = (ScrField){ T("Download the next episode"), T(AUTODL_NAMES[f_autodl < 0 || f_autodl > 2 ? 0 : f_autodl]), SCR_F_CHOICE, 1, 0 }; break;
+            case SF_TOUCH: *x = (ScrField){ T("Touch screen in the player"), T(f_touch ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
+            case SF_STORAGE: *x = (ScrField){ T("Storage"), NULL, SCR_F_ACTION, 1, 0 }; break;
             case SF_SERVER: *x = (ScrField){ T("Transcoding server"), T(AUTO_NAMES[f_srv]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_ADDR: *x = (ScrField){ T("Server address"), f_proxy, SCR_F_TEXT, 1, 1 }; break;
             case SF_TEST: *x = (ScrField){ T("Test server"), NULL, SCR_F_ACTION, 1, 1 }; break;

@@ -11,7 +11,7 @@ tar xf ff.tar.xz
 cd "ffmpeg-$VER"
 ./configure --prefix="$OUT" --disable-everything --enable-decoder=ac3,eac3,aac,opus,vorbis,dca,mpeg1video,mpeg2video,mpeg4,msmpeg4v3 --enable-parser=ac3,dca,mpegvideo,mpeg4video \
     --disable-programs --disable-doc --disable-network --disable-autodetect --disable-avdevice --disable-avformat \
-    --disable-swscale --disable-postproc --disable-avfilter --enable-swresample --disable-pthreads --disable-debug \
+    --disable-swscale --disable-postproc --disable-avfilter --enable-swresample --enable-pthreads --disable-debug \
     --enable-small --enable-static --disable-shared --disable-asm --extra-cflags=-O1
 make -j"$(nproc)"
 make install

@@ -333,6 +333,14 @@ int main(void)
             Settings sg; settings_parse(ff, &sg); assert(sg.snd_field == 2 && sg.snd_level == 1);
             settings_parse("snd_field=9\n", &sg); assert(sg.snd_field == 3);
         }
+        {   /* 1.2.3: the next episodes downloaded (0-2), the touch screen (0/1): written only when on */
+            Settings sa; settings_defaults(&sa);
+            char fa[512]; assert(settings_format(&sa, fa, sizeof fa) > 0 && !strstr(fa, "auto_dl") && !strstr(fa, "touch"));
+            sa.auto_dl = 2; sa.touch = 1;
+            assert(settings_format(&sa, fa, sizeof fa) > 0 && strstr(fa, "auto_dl=2") && strstr(fa, "touch=1"));
+            Settings sb; settings_parse(fa, &sb); assert(sb.auto_dl == 2 && sb.touch == 1);
+            settings_parse("auto_dl=7\ntouch=5\n", &sb); assert(sb.auto_dl == 0 && sb.touch == 0);
+        }
         /* 1.1: the server turned off keeps its address; proxy_url refuses it */
         Settings so; settings_defaults(&so);
         snprintf(so.proxy, sizeof so.proxy, "http://192.168.1.20:8090");

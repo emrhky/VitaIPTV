@@ -26,6 +26,9 @@ const char *swv_name(int codec);
 /* extra: the stream's header from the container (MPEG-4: the VOL; may be NULL); w, h: from the container (DivX 3
  * has no header of its own). parse = 1 when the data comes in pieces that need not be whole pictures (TS). */
 SwVdec     *swv_create(int codec, const uint8_t *extra, size_t elen, int w, int h, int parse, char *err, size_t errsz);
+/* 1.2.3: on more cores (call before the first unit): MPEG-2 by slices, MPEG-4 by pictures (a few pictures later
+ * out). Only if FFmpeg was built with threads; returns the threads used. */
+int         swv_threads(SwVdec *d, int n);
 void        swv_destroy(SwVdec *d);
 /* one unit (or piece, with parse): pts / dts 90 kHz (-1 = none). Returns the pictures given out (>= 0). */
 int         swv_decode(SwVdec *d, const uint8_t *data, size_t len, int64_t pts, int64_t dts, SwvOut out, void *ctx);

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.3 (test)
+- **DivX / Xvid on the Vita's own MPEG-4 decoder** (sceM4vdec): less work for the ARM, HD DivX possible. If it
+  refuses a stream, the software decoder takes over from its first unit (nothing is lost).
+- **Software video faster:** FFmpeg with the ARM's NEON code; above SD on three cores (MPEG-2 by slices, MPEG-4 by
+  pictures). If this VitaSDK does not build it so, it is built without them (the log's "ffmpeg:" line says).
+- **Download the next episode** (Settings: off / 1 / 2): at 40 percent of an episode the next ones (not watched,
+  not downloaded yet) are queued. An account with room for two connections downloads while you watch; with one,
+  the download starts when you stop watching (as before).
+- **Storage** (Settings): the playlists' and guides' saved copies, unfinished downloads, logs, archive and
+  search records: sizes, each cleared on its own or all at once; finished downloads and free space shown.
+- **Touch screen in the player** (Settings, off by default, not on a Vita TV): touch shows / hides the bar,
+  drag the time line to jump, two touches pause.
+- AVI: the sound waited (up to 4 s) at the start and after jumps; now it starts with the picture.
+- A stream that gave a few KB and then nothing ("No video data received", seen after the Vita woke) is tried once
+  more by itself.
+
 ## 1.2.2b (test)
 - **MPEG-2 video** (SD TV channels, DVD copies) and **AVI films with DivX / Xvid / DivX 3** play: decoded on the
   ARM (the Vita's decoder takes only H.264). Also MPEG-4 Part 2 in MKV, MP4 and TS. Interlaced pictures are

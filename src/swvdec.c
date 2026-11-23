@@ -14,8 +14,11 @@ const char *swv_name(int codec)
 #ifdef HAVE_A52
 #include <libavcodec/avcodec.h>
 
+
 struct SwVdec {
     AVCodecContext *ctx;
+    const AVCodec *codec;
+    int codec_kind;
     AVCodecParserContext *parser;
     AVPacket *pkt;
     AVFrame *frame;
@@ -60,8 +63,36 @@ SwVdec *swv_create(int codec, const uint8_t *extra, size_t elen, int w, int h, i
         d->ctx->extradata = av_mallocz(elen + AV_INPUT_BUFFER_PADDING_SIZE);
         if (d->ctx->extradata) { memcpy(d->ctx->extradata, extra, elen); d->ctx->extradata_size = (int)elen; }
     }
+    d->codec = c;
+    d->codec_kind = codec;
     if (avcodec_open2(d->ctx, c, NULL) < 0) { snprintf(err, errsz, "the %s decoder did not open", swv_name(codec)); swv_destroy(d); return NULL; }
     return d;
+}
+
+int swv_threads(SwVdec *d, int n)
+{
+    /* (an FFmpeg built without threads takes the count and decodes on one: nothing breaks) */
+    if (!d || n <= 1) return 1;
+    int slice = d->codec_kind == TS_CODEC_MPEG2V;
+    if (slice ? !(d->codec->capabilities & AV_CODEC_CAP_SLICE_THREADS) : !(d->codec->capabilities & AV_CODEC_CAP_FRAME_THREADS)) return 1;
+    /* threads are set before opening: open it again with them */
+    AVCodecContext *nc = avcodec_alloc_context3(d->codec);
+    if (!nc) return 1;
+    nc->thread_count = n;
+    nc->thread_type = slice ? FF_THREAD_SLICE : FF_THREAD_FRAME;
+    nc->pkt_timebase = d->ctx->pkt_timebase;
+    nc->width = d->ctx->width;
+    nc->height = d->ctx->height;
+    nc->flags2 = d->ctx->flags2;
+    if (d->ctx->extradata_size > 0) {
+        nc->extradata = av_mallocz((size_t)d->ctx->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (nc->extradata) { memcpy(nc->extradata, d->ctx->extradata, (size_t)d->ctx->extradata_size); nc->extradata_size = d->ctx->extradata_size; }
+    }
+    if (avcodec_open2(nc, d->codec, NULL) < 0) { avcodec_free_context(&nc); return 1; }
+    avcodec_free_context(&d->ctx);
+    d->ctx = nc;
+    if (d->skip) d->ctx->skip_frame = d->skip >= 2 ? AVDISCARD_NONKEY : AVDISCARD_NONREF;
+    return nc->active_thread_type ? nc->thread_count : 1;
 }
 
 void swv_destroy(SwVdec *d)
@@ -182,6 +213,7 @@ SwVdec *swv_create(int codec, const uint8_t *extra, size_t elen, int w, int h, i
     return NULL;
 }
 void    swv_destroy(SwVdec *d) { (void)d; }
+int     swv_threads(SwVdec *d, int n) { (void)d; (void)n; return 1; }
 int     swv_decode(SwVdec *d, const uint8_t *data, size_t len, int64_t pts, int64_t dts, SwvOut out, void *ctx)
 { (void)d; (void)data; (void)len; (void)pts; (void)dts; (void)out; (void)ctx; return 0; }
 void    swv_flush(SwVdec *d, SwvOut out, void *ctx) { (void)d; (void)out; (void)ctx; }

@@ -36,8 +36,9 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 - **HTTPS** with a built-in TLS stack (mbedTLS, TLS 1.2 / 1.3), so modern https playlists, short links
   (tinyurl and the like) and https/HLS channels work. The Vita's own TLS is too old for most sites today.
 - **Video:** H.264 up to 1920x1080 through the hardware decoder (details below), audio/video sync to the
-  sound, automatic recovery from decoder errors. MPEG-2 and MPEG-4 Part 2 (DivX / Xvid) in SD are decoded in
-  software.
+  sound, automatic recovery from decoder errors. MPEG-4 Part 2 (DivX / Xvid) goes to the Vita's own MPEG-4
+  decoder first (the software one takes over if it refuses the stream); MPEG-2 and DivX 3 are decoded in software
+  (on three cores above SD).
 - **1080p:** 1080p channels and films play through the same hardware decoder.
 - **50 / 60 fps:** 720p at 50 / 60 fps plays every picture; 1080p at 50 / 60 fps a steady 25 / 30 pictures a
   second (every second picture, evenly spaced).
@@ -90,8 +91,12 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   language (English / Turkish, follows the console by default), colour (blue, green, purple, orange, teal, pink), background (navy, black for OLED, graphite, warm dark), preferred
   resolution (automatic, 1080p, 720p, 540p, 480p, lowest), hide adult channels, hide channels named 4K / UHD (the
   Vita cannot play 4K), parental lock (PIN), volume boost, clear sound, clear speech (5.1), the transcoding server
-  (off / when needed / always; its address and a test while it is on), clear recently watched, clear watched
-  episodes, About. O with something changed asks whether to save.
+  (off / when needed / always; its address and a test while it is on), download the next episode (off / 1 / 2:
+  when 40 percent of an episode is watched), the touch screen in the player (off by default; not on a Vita TV),
+  storage (what the app keeps on the memory card, each part cleared on its own or all at once), clear recently
+  watched, clear watched episodes, About. O with something changed asks whether to save.
+- **Touch screen in the player** (when turned on): a touch shows or hides the bar, dragging the time line jumps
+  (where it is let go), two touches pause. Lists and menus stay on the buttons.
 - **Playlists' order:** **Select** > *Reorder playlists* on the playlists screen (as for the favourites); My List
   stays on top while it has channels. **O** there asks "Quit Vita IPTV?".
 - **Player top bar:** the channel or film, the time of day in the middle, the picture size on the right.

@@ -106,6 +106,7 @@ int sceCodecEngineFreeMemoryFromUnmapMemBlock(SceUID uid, SceUIntVAddr addr);
 /* options for the next tsp_start (tsp_set_options) */
 int g_slots_cap = NSLOTS;              /* most picture slots (the PC tests compare with the old four) */
 static int g_pictures_seen;             /* some stream gave a picture since the app started (the decoder works) */
+static int g_no_m4v_hw;                 /* 1.2.3: MPEG-4 Part 2 only in software (tsp_set_m4v_hw) */
 static int g_hd1080 = 1;                /* decode above 720p (the HD decoder; always on since v0.2) */
 static int g_hls_want = 720;            /* HLS: the variant to choose (see tsp_set_options) */
 static long g_hls_bw;                   /* ... with exactly this bit rate (0 = any) */
@@ -290,6 +291,17 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     struct BCue *bcues;                 /* ... their pictures (a ring of BCUES, under qlock) */
     uint32_t nbcues;
     int swv_failed, sw_w, sw_h, sw_skip, sw_started, sw_wait_units;
+    int sw_hw;                          /* 1.2.3: the slots are set up for the MPEG-4 hardware (macroblock height) */
+    /* 1.2.3: MPEG-4 Part 2 on the Vita's own decoder (sceM4vdec); on trouble the software decoder takes over */
+    int m4v_on, m4v_failed, m4v_lib, m4v_dec, m4v_errs, m4v_vol_len, m4v_vol_sent, m4v_packed;
+    SceAvcdecCtrl m4v_ctrl;
+    SceUID m4v_fb_uid, m4v_es_uid;
+    uint8_t *m4v_es;
+    uint32_t m4v_out, m4v_in;
+    int64_t m4v_dts0, m4v_step;         /* AVI (decoding times only): pictures out are numbered */
+    struct Pkt *m4v_hold[64];           /* the units before its first picture: the software decoder's if it gives up */
+    int m4v_nhold;
+    uint8_t m4v_vol[256];
     uint64_t sw_wait_us;                /* ... time its pictures waited for a free slot (not decoding) */
     int frag;                           /* 1.2.2b: HLS fMP4: segments gathered whole for t->mp4 (mp4_frag_segment) */
     uint8_t *fbuf;
@@ -1825,7 +1837,7 @@ static uint32_t peek_frame_us(Tsp *t, int64_t pts)
 /* ---------------------------------------------------------------- 1.2.2b: software video */
 
 /* slots for pictures of w x h from the software decoder: YUV 4:2:0 textures (as the HD decoder's) */
-static int sw_open(Tsp *t, int w, int h)
+static int sw_open(Tsp *t, int w, int h, int hw)
 {
     if (t->ready) {
         t->ready = 0;
@@ -1835,7 +1847,8 @@ static int sw_open(Tsp *t, int w, int h)
     free_plan(t);
     t->yuv = 1;
     t->dw = ALIGN(w, 32);
-    t->dh = ALIGN(h, 2);
+    t->dh = hw ? ALIGN(h, 16) : ALIGN(h, 2);
+    t->sw_hw = hw;                 /* (1.2.3: the MPEG-4 hardware writes whole macroblock rows) */
     uint32_t psize = (uint32_t)(t->dw * t->dh * 3 / 2);
     int want = g_slots_cap < 6 ? g_slots_cap : 6, n = 0;
     for (; n < want; n++) {
@@ -1891,7 +1904,7 @@ static void sw_frame(void *ctx, const SwvFrame *f)
 {
     Tsp *t = ctx;
     if (stopping(t) || f->w < 16 || f->h < 16) return;
-    if ((f->w != t->sw_w || f->h != t->sw_h) && sw_open(t, f->w, f->h) < 0) {
+    if ((f->w != t->sw_w || f->h != t->sw_h || t->sw_hw) && sw_open(t, f->w, f->h, 0) < 0) {
         set_error(t, "Out of memory (%dx%d pictures)", f->w, f->h);
         return;
     }
@@ -1925,10 +1938,248 @@ static void sw_frame(void *ctx, const SwvFrame *f)
     if (!t->err_set) t->st.state = TSP_PLAYING;
 }
 
-static void sw_video_packet(Tsp *t, Pkt *p)
+/* ---------------------------------------------------------------- 1.2.3: MPEG-4 Part 2 on the hardware */
+
+#define M4V_ES_CAP (1024 * 1024)
+
+void tsp_set_m4v_hw(int on) { g_no_m4v_hw = !on; }
+
+static void m4v_close(Tsp *t)
+{
+    if (t->m4v_dec) sceM4vdecDeleteDecoder(&t->m4v_ctrl);
+    t->m4v_dec = 0;
+    if (t->m4v_ctrl.frameBuf.pBuf) mem_free(t->m4v_ctrl.frameBuf.pBuf, t->m4v_fb_uid, 0);
+    t->m4v_ctrl.frameBuf.pBuf = NULL;
+    if (t->m4v_lib) sceVideodecTermLibrary(SCE_VIDEODEC_TYPE_HW_M4VDEC);
+    t->m4v_lib = 0;
+    if (t->m4v_es) mem_free(t->m4v_es, t->m4v_es_uid, 0);
+    t->m4v_es = NULL;
+    t->m4v_on = 0;
+}
+
+/* the hardware for w x h: 0, or -1 (then the software decoder) */
+static int m4v_open(Tsp *t, int w, int h)
+{
+    if (w < 16 || h < 16 || w > 1920 || h > 1088) return -1;
+    SceVideodecQueryInitInfoHwAvcdec init;
+    memset(&init, 0, sizeof init);
+    init.size = sizeof init;
+    init.horizontal = (uint32_t)ALIGN(w, 16);
+    init.vertical = (uint32_t)ALIGN(h, 16);
+    init.numOfRefFrames = 2;                                 /* (MPEG-4 Part 2: two references, for B-pictures) */
+    init.numOfStreams = 1;
+    int r = sceVideodecInitLibraryInternal(SCE_VIDEODEC_TYPE_HW_M4VDEC, &init);
+    if (r < 0) { plog("tsp: MPEG-4 hardware: sceVideodecInitLibraryInternal %dx%d -> 0x%08X", w, h, (unsigned)r); return -1; }
+    t->m4v_lib = 1;
+    SceAvcdecQueryDecoderInfo q;
+    SceAvcdecDecoderInfo di;
+    memset(&q, 0, sizeof q);
+    memset(&di, 0, sizeof di);
+    q.horizontal = init.horizontal;
+    q.vertical = init.vertical;
+    q.numOfRefFrames = 2;
+    r = sceM4vdecQueryDecoderMemSize(SCE_VIDEODEC_TYPE_HW_M4VDEC, &q, &di);
+    if (r < 0 || !di.frameMemSize) { plog("tsp: MPEG-4 hardware: memory size -> 0x%08X", (unsigned)r); m4v_close(t); return -1; }
+    r = -1;
+    for (int k = 0; k < MEM_KINDS && r < 0; k++) {
+        void *fb = mem_alloc(k, di.frameMemSize, &t->m4v_fb_uid, 0);
+        if (!fb) continue;
+        memset(&t->m4v_ctrl, 0, sizeof t->m4v_ctrl);
+        t->m4v_ctrl.frameBuf.pBuf = fb;
+        t->m4v_ctrl.frameBuf.size = ALIGN(di.frameMemSize, k == MEM_PHYCONT ? 1024 * 1024 : k == MEM_CDRAM ? 256 * 1024 : 4096);
+        r = sceM4vdecCreateDecoder(SCE_VIDEODEC_TYPE_HW_M4VDEC, &t->m4v_ctrl, &q);
+        if (r < 0) {
+            plog("tsp: MPEG-4 hardware: create (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
+            mem_free(fb, t->m4v_fb_uid, 0);
+            t->m4v_ctrl.frameBuf.pBuf = NULL;
+        }
+    }
+    if (r < 0) { m4v_close(t); return -1; }
+    t->m4v_dec = 1;
+    t->m4v_es = mem_alloc(MEM_PHYCONT, M4V_ES_CAP, &t->m4v_es_uid, 0);
+    if (!t->m4v_es) t->m4v_es = mem_alloc(MEM_CDRAM, M4V_ES_CAP, &t->m4v_es_uid, 0);
+    if (!t->m4v_es || sw_open(t, w, h, 1) < 0) { m4v_close(t); return -1; }
+    t->sw_hw = 1;
+    t->m4v_on = 1;
+    plog("tsp: MPEG-4 video %dx%d on the Vita's decoder (%u KB frame memory)", w, h, (unsigned)(di.frameMemSize / 1024));
+    return 0;
+}
+
+static void m4v_hold_free(Tsp *t)
+{
+    for (int k = 0; k < t->m4v_nhold; k++) free(t->m4v_hold[k]);
+    t->m4v_nhold = 0;
+}
+
+/* the hardware gave up: the software decoder, from the units it was given before its first picture (so nothing
+ * is lost when it refuses the stream at once), else from the next keyframe */
+static void sw_video_packet(Tsp *t, Pkt *p);
+static void m4v_fall_back(Tsp *t, const char *why, int r)
+{
+    plog("tsp: MPEG-4 hardware %s (0x%08X, %u units, %u pictures): the software decoder takes over", why, (unsigned)r, t->m4v_in, t->m4v_out);
+    m4v_close(t);
+    t->m4v_failed = 1;
+    t->sw_started = 0;
+    t->sw_wait_units = 0;
+    int n = t->m4v_nhold;
+    t->m4v_nhold = 0;
+    for (int k = 0; k < n; k++) {
+        if (!stopping(t)) sw_video_packet(t, t->m4v_hold[k]);
+        free(t->m4v_hold[k]);
+    }
+}
+
+/* one VOP (with the VOL before the first) through the hardware; the picture, if one comes, into a slot */
+static int m4v_unit(Tsp *t, const uint8_t *d, size_t n, int64_t pts, int64_t dts)
+{
+    size_t pre = (!t->m4v_vol_sent && t->m4v_vol_len) ? (size_t)t->m4v_vol_len : 0;
+    if (n + pre > M4V_ES_CAP) return 0;
+    if (pre) memcpy(t->m4v_es, t->m4v_vol, pre);
+    memcpy(t->m4v_es + pre, d, n);
+    t->m4v_vol_sent = 1;
+    int si;
+    while ((si = take_free_slot(t)) < 0) {
+        if (stopping(t)) return 0;
+        slot_nap(t);
+    }
+    SceAvcdecAu au;
+    SceAvcdecPicture pic, *pp[1] = { &pic };
+    SceAvcdecArrayPicture arr;
+    memset(&au, 0, sizeof au);
+    au.es.pBuf = t->m4v_es;
+    au.es.size = (uint32_t)(n + pre);
+    au.dts.upper = au.dts.lower = NO_TS;
+    if (pts >= 0) { au.pts.upper = (uint32_t)((uint64_t)pts >> 32); au.pts.lower = (uint32_t)pts; }
+    else au.pts.upper = au.pts.lower = NO_TS;
+    memset(&pic, 0, sizeof pic);
+    pic.size = sizeof pic;
+    pic_frame(t, &pic.frame, t->slots[si].data);
+    memset(&arr, 0, sizeof arr);
+    arr.numOfElm = 1;
+    arr.pPicture = pp;
+    uint64_t d0 = now_us();
+    int r = sceM4vdecDecode(&t->m4v_ctrl, &au, &arr);
+    uint32_t dus = (uint32_t)(now_us() - d0);
+    t->dcalls++;
+    t->dus_sum += dus;
+    if (dus > t->dus_max) t->dus_max = dus;
+    t->m4v_in++;
+    if (r < 0) {
+        t->m4v_errs++;
+        t->st.errors++;
+        if (t->m4v_errs <= 3) plog("tsp: MPEG-4 hardware: unit %u (%u bytes) -> 0x%08X", t->m4v_in, (unsigned)(n + pre), (unsigned)r);
+        if ((!t->m4v_out && t->m4v_errs >= 3) || t->m4v_errs >= 30) { m4v_fall_back(t, "refused the stream", r); return -1; }
+        return 0;
+    }
+    if (t->m4v_out) t->m4v_errs = 0;                         /* (30 in a row: gone wrong for good) */
+    if (arr.numOfOutput < 1) {
+        if (t->m4v_in >= 30 && !t->m4v_out) { m4v_fall_back(t, "gave no picture", 0); return -1; }
+        return 0;
+    }
+    /* its time: what went in with it, or (AVI) the pictures numbered from the first decoding time */
+    int64_t op = -1;
+    if (pic.info.pts.upper != NO_TS || pic.info.pts.lower != NO_TS) op = (int64_t)(((uint64_t)pic.info.pts.upper << 32) | pic.info.pts.lower);
+    if (pts < 0 && dts >= 0 && t->m4v_step > 0) op = t->m4v_dts0 + (int64_t)t->m4v_out * t->m4v_step;
+    if (!t->m4v_out) {
+        g_pictures_seen = 1;
+        t->first_pic_pts = op;
+        plog("tsp: first picture %dx%d (MPEG-4 hardware), pts %lld", t->sw_w, t->sw_h, (long long)op);
+    }
+    t->m4v_out++;
+    Slot *sl = &t->slots[si];
+    sceKernelLockMutex(t->lock, 1, NULL);
+    sl->pts = op;
+    sl->seq = t->out_seq++;
+    sl->ready_us = now_us();
+    sl->state = SLOT_READY;
+    sceKernelUnlockMutex(t->lock, 1);
+    t->st.decoded++;
+    if (!t->err_set) t->st.state = TSP_PLAYING;
+    return 0;
+}
+
+/* 1 = handled by the hardware (also when it just gave up: the unit is the software decoder's from the next
+ * keyframe), 0 = not for the hardware */
+static int m4v_packet(Tsp *t, Pkt *p)
 {
     const VInfo *i = &p->vi;
+    if (i->codec != TS_CODEC_MPEG4V || t->m4v_failed || g_no_m4v_hw) return 0;
+    if (!t->m4v_on) {
+        if (!(p->flags & TS_FLAG_KEYFRAME)) return 1;        /* (from a keyframe) */
+        if (m4v_open(t, i->width, i->height) < 0) { t->m4v_failed = 1; return 0; }
+        t->m4v_vol_len = i->cfg_len > 0 && i->cfg_len <= (int)sizeof t->m4v_vol ? i->cfg_len : 0;
+        if (t->m4v_vol_len) memcpy(t->m4v_vol, i->cfg, (size_t)t->m4v_vol_len);
+        t->m4v_vol_sent = 0;
+        t->m4v_dts0 = p->dts;
+    }
+    if (p->frame_us) t->frame_us = p->frame_us;
+    if (!t->first_unit_us) t->first_unit_us = now_us();
+    if (t->units_in++ == 0) plog("tsp: first video unit: %u bytes, keyframe", (unsigned)p->len);
+    if (!t->m4v_out && t->m4v_nhold < (int)(sizeof t->m4v_hold / sizeof t->m4v_hold[0])) {   /* (kept until a picture comes) */
+        Pkt *c = malloc(sizeof(Pkt) + p->len);
+        if (c) { memcpy(c, p, sizeof(Pkt) + p->len); c->next = NULL; t->m4v_hold[t->m4v_nhold++] = c; }
+    } else if (t->m4v_out && t->m4v_nhold) m4v_hold_free(t);
+    if (p->pts < 0 && p->dts >= 0 && t->m4v_in == 1 && p->dts > t->m4v_dts0 && !t->m4v_step) t->m4v_step = p->dts - t->m4v_dts0;
+    if (p->pts < 0 && p->dts >= 0 && !t->frame_us && t->m4v_step) t->frame_us = (uint32_t)(t->m4v_step * 100 / 9);
+    /* DivX "packed" B-pictures: two VOPs in one unit, then a tiny "not coded" one: one VOP at a time, the
+     * placeholder left out */
+    const uint8_t *d = p->data;
+    size_t n = p->len;
+    size_t vop[8];
+    int nv = 0;
+    for (size_t k = 0; k + 3 < n && nv < 8; k++)
+        if (!d[k] && !d[k + 1] && d[k + 2] == 1 && d[k + 3] == 0xB6) { vop[nv++] = k; k += 3; }
+    if (nv >= 2) t->m4v_packed = 1;
+    if (nv <= 1) {
+        if (t->m4v_packed && n <= 8 && nv == 1) return 1;     /* (the placeholder after a packed unit) */
+        return m4v_unit(t, d, n, p->pts, p->dts) < 0 ? 1 : 1;
+    }
+    for (int k = 0; k < nv; k++) {
+        size_t s = k ? vop[k] : 0, e = k + 1 < nv ? vop[k + 1] : n;
+        if (m4v_unit(t, d + s, e - s, k ? -1 : p->pts, p->dts) < 0) return 1;
+    }
+    return 1;
+}
+
+/* the end of the stream: what the hardware still holds */
+static void m4v_flush(Tsp *t)
+{
+    if (!t->m4v_on) return;
+    for (int k = 0; k < 8 && !stopping(t); k++) {
+        int si;
+        while ((si = take_free_slot(t)) < 0) { if (stopping(t)) return; slot_nap(t); }
+        SceAvcdecPicture pic, *pp[1] = { &pic };
+        SceAvcdecArrayPicture arr;
+        memset(&pic, 0, sizeof pic);
+        pic.size = sizeof pic;
+        pic_frame(t, &pic.frame, t->slots[si].data);
+        memset(&arr, 0, sizeof arr);
+        arr.numOfElm = 1;
+        arr.pPicture = pp;
+        if (sceM4vdecDecodeStop(&t->m4v_ctrl, &arr) < 0 || arr.numOfOutput < 1) break;
+        int64_t op = t->m4v_step > 0 ? t->m4v_dts0 + (int64_t)t->m4v_out * t->m4v_step :
+                     (int64_t)(((uint64_t)pic.info.pts.upper << 32) | pic.info.pts.lower);
+        t->m4v_out++;
+        Slot *sl = &t->slots[si];
+        sceKernelLockMutex(t->lock, 1, NULL);
+        sl->pts = op;
+        sl->seq = t->out_seq++;
+        sl->ready_us = now_us();
+        sl->state = SLOT_READY;
+        sceKernelUnlockMutex(t->lock, 1);
+        t->st.decoded++;
+    }
+}
+
+static void sw_video_packet(Tsp *t, Pkt *p)
+{
+    if (m4v_packet(t, p)) return;                            /* 1.2.3 */
+    const VInfo *i = &p->vi;
     if (t->swv_failed) return;
+    if (!t->sw_started) {                                    /* from a keyframe (a picture without its references is grey; 1.2.3: */
+        if (!(p->flags & TS_FLAG_KEYFRAME) && ++t->sw_wait_units < 300) return;   /* and MPEG-2's size is known there) */
+        t->sw_started = 1;
+    }
     if (!t->swv) {
         if (!swv_available(i->codec)) {
             set_error_kind(t, TSP_ERRK_FORMAT, "Video is %s: not supported", ts_codec_name((TsCodec)i->codec));
@@ -1943,17 +2194,16 @@ static void sw_video_packet(Tsp *t, Pkt *p)
             set_error_kind(t, TSP_ERRK_FORMAT, "Video is %s: %s", ts_codec_name((TsCodec)i->codec), err);
             return;
         }
-        plog("tsp: %s video %dx%d: decoded in software%s", swv_name(i->codec), i->width, i->height, i->cfg_len ? " (with the container's header)" : "");
+        /* 1.2.3: above SD on three cores (MPEG-2 by slices, MPEG-4 by pictures); SD stays on one (it keeps up) */
+        int th = i->width * i->height > 1024 * 576 ? swv_threads(t->swv, 3) : 1;
+        plog("tsp: %s video %dx%d: decoded in software%s, %d thread%s", swv_name(i->codec), i->width, i->height,
+             i->cfg_len ? " (with the container's header)" : "", th, th == 1 ? "" : "s");
         if (i->width * i->height > 1024 * 576)
             plog("tsp: %dx%d is above SD: the ARM may not decode it in time (pictures nothing refers to are left out then)", i->width, i->height);
     }
     if (p->frame_us) t->frame_us = p->frame_us;
     if (!t->first_unit_us) t->first_unit_us = now_us();
     if (t->units_in++ == 0) plog("tsp: first video unit: %u bytes, %s", (unsigned)p->len, (p->flags & TS_FLAG_KEYFRAME) ? "keyframe" : "no keyframe yet");
-    if (!t->sw_started) {                                    /* from a keyframe (a picture without its references is grey) */
-        if (!(p->flags & TS_FLAG_KEYFRAME) && ++t->sw_wait_units < 300) return;
-        t->sw_started = 1;
-    }
     /* behind the sound: leave out pictures nothing refers to, then all but keyframes, until it is close again */
     int64_t apts, tp = p->pts >= 0 ? p->pts : p->dts;
     if (t->st.av_sync && tp >= 0 && audio_now(t, now_us(), &apts)) {
@@ -5207,7 +5457,7 @@ static int video_main(SceSize args, void *argp)
         if (t->reader_done) stats_tick(t);
         Pkt *p = q_pop(t, &t->vq);
         if (!p) {
-            if (t->reader_done) { decoder_flush(t); if (t->swv && !stopping(t)) swv_flush(t->swv, sw_frame, t); break; }
+            if (t->reader_done) { decoder_flush(t); if (t->swv && !stopping(t)) swv_flush(t->swv, sw_frame, t); if (!stopping(t)) m4v_flush(t); break; }
             uint64_t w0 = now_us();
             sceKernelDelayThread(2000);
             t->w_data_us += now_us() - w0;
@@ -5217,6 +5467,12 @@ static int video_main(SceSize args, void *argp)
         free(p);
     }
     t->video_done = 1;
+    if (t->m4v_on || t->m4v_lib) {                           /* 1.2.3 */
+        plog("tsp: MPEG-4 hardware: %u units, %u pictures, %d errors, decoding avg %u us a unit", t->m4v_in, t->m4v_out, t->m4v_errs,
+             t->dcalls ? (unsigned)(t->dus_sum / t->dcalls) : 0);
+        m4v_close(t);
+    }
+    m4v_hold_free(t);
     if (t->swv) {                                            /* 1.2.2b */
         plog("tsp: software decoder: %u pictures, %u errors, decoding avg %u us a unit", t->st.decoded, swv_errors(t->swv),
              t->dcalls ? (unsigned)(t->dus_sum / t->dcalls) : 0);
