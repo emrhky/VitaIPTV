@@ -22,6 +22,32 @@ static int dl_in_group(const DlItem *it, int g)
     if (g == 0) return it->kind != 'E';
     return it->kind == 'E' && !strcmp(it->series[0] ? it->series : "?", dl_gname[g]);
 }
+/* 1.2.4: watched: a finished download played to its end here (info.txt), or an episode ticked as watched to its end
+ * online (watched.txt, the playlist it came from) */
+static int dl_is_watched(const DlItem *it)
+{
+    if (!it->done) return 0;
+    if (it->watched) return 1;
+    if (it->kind != 'E' || !it->source[0] || !watched.n) return 0;
+    char u[DL_URL_MAX], ek[WATCH_ID], sk[FAV_SRC_MAX];
+    snprintf(u, sizeof u, "%s", it->url);
+    u[strcspn(u, "|")] = 0;                                  /* (its headers: a User-Agent has '/' in it) */
+    watch_ep_key(u, ek, sizeof ek);
+    if (!ek[0]) return 0;
+    for (int i = 0; i < nsources; i++) {
+        if (strcmp(sources[i].name, it->source)) continue;
+        fav_source_key(&sources[i], sk, sizeof sk);
+        for (int k = 0; k < watched.n; k++) if (!strcmp(watched.e[k].src, sk) && watch_is_done(&watched.e[k], ek)) return 1;
+    }
+    return 0;
+}
+/* how many watched downloads (g: a group of the screen, -1 all) */
+static int dl_watched_count(int g)
+{
+    int n = 0;
+    for (int i = 0; i < dln; i++) if ((g < 0 || dl_in_group(&dlv[i], g)) && dl_is_watched(&dlv[i])) n++;
+    return n;
+}
 static void dl_group_items(void)
 {
     dl_nitems = 0;
@@ -125,8 +151,16 @@ static const char *dl_right_text(const DlItem *it, char *b, size_t cap)
     int pct = tot ? (int)(have * 100 / tot) : 0;
     if (it->done) {
         dl_size_text(it->size ? it->size : it->have, lang_get() == LANG_TR, b, cap);
+        if (dl_is_watched(it)) {                             /* 1.2.4 */
+            char sz[24];
+            snprintf(sz, sizeof sz, "%s", b);
+            snprintf(b, cap, T("Watched, %s"), sz);
+        }
     } else if (s == DL_ACTIVE) snprintf(b, cap, "%d%%", pct);
-    else if (s == DL_QUEUED) snprintf(b, cap, "%s", T("Waiting"));
+    else if (s == DL_QUEUED) {                               /* 1.2.4: its place in the line */
+        int qp = dl_queue_pos(it->dir);
+        if (qp > 0) snprintf(b, cap, T("Waiting (%d)"), qp); else snprintf(b, cap, "%s", T("Waiting"));
+    }
     else if (s == DL_FAILED) snprintf(b, cap, "%s", T("Could not download"));
     else snprintf(b, cap, T("Stopped %d%%"), pct);
     return b;
@@ -278,6 +312,13 @@ static void draw_downloads(void)
     scr_dual(&d);
     if (dl_ask == 1 && it) scr_confirm(T("Delete this download?"), it->title);
     if (dl_ask == 2) scr_confirm(T("Delete every downloaded episode of this series?"), dl_gname[dl_gsel]);
+    if (dl_ask == 3 || dl_ask == 4) {                        /* 1.2.4: the watched ones */
+        static char q[128];
+        int n = dl_watched_count(dl_ask == 3 ? dl_gsel : -1);
+        if (dl_ask == 3) snprintf(q, sizeof q, T("Delete the %d watched episodes of this series?"), n);
+        else snprintf(q, sizeof q, T("Delete the %d watched downloads?"), n);
+        scr_confirm(q, dl_ask == 3 ? dl_gname[dl_gsel] : T("Films and episodes watched to their end"));
+    }
 }
 
 /* the done downloads of the chosen group become the channel list; it plays as a single film link does */
@@ -520,6 +561,22 @@ static const char *dl_url_of(const char *path)
     return NULL;
 }
 
+/* 1.2.4: a finished download was played up to pos (of dur; ended = to its end): watched to its end (the same rule
+ * as an episode online: the last 5 percent, at least a minute) -> info.txt's "watched" */
+static void dl_played_to(const char *path, int pos, int dur, int ended)
+{
+    int done = ended;
+    if (!done && dur > 0) { int tail = dur / 20 > 60000 ? dur / 20 : 60000; done = pos > dur - tail; }
+    if (!done) return;
+    for (int i = 0; i < dln; i++) {
+        char p[DL_DIR_MAX + 32];
+        dl_path_of(&dlv[i], p, sizeof p);
+        if (strcmp(p, path) || !dlv[i].done || dlv[i].watched) continue;
+        if (dl_set_watched(dlv[i].dir, 1) == 0) { dlv[i].watched = 1; plog("dl: watched to its end: %s", dlv[i].title); }
+        return;
+    }
+}
+
 /* the sound / subtitle key of a downloaded file: the one of the stream it came from (or its series) */
 static uint32_t dl_avkey_of(const char *path, int *series)
 {
@@ -550,8 +607,14 @@ static void dl_input(unsigned p)
             DlState ds;
             for (int k = 0; k < dln; k++) if (dl_state(dlv[k].dir, &ds) == DL_ACTIVE && (dl_ask == 2 ? dl_in_group(&dlv[k], dl_gsel) : it && !strcmp(dlv[k].dir, it->dir))) was_active = 1;
             if (dl_ask == 1 && it) bad = dl_delete(it->dir) != 0;
-            else if (dl_ask == 2)
+            else if (dl_ask == 2) {
                 for (int k = 0; k < dln; k++) if (dl_in_group(&dlv[k], dl_gsel)) bad |= dl_delete(dlv[k].dir) != 0;
+            } else if (dl_ask == 3 || dl_ask == 4) {         /* 1.2.4: the watched ones (finished: none is downloading) */
+                int n = 0;
+                for (int j = 0; j < dln; j++)
+                    if ((dl_ask == 4 || dl_in_group(&dlv[j], dl_gsel)) && dl_is_watched(&dlv[j])) { bad |= dl_delete(dlv[j].dir) != 0; n++; }
+                plog("dl: %d watched downloads deleted%s", n, bad ? " (not all of them)" : "");
+            }
             if (was_active) conn_end_ms = now_ms();          /* 1.5 */
             set_status(bad, bad ? "Could not delete all of it" : was_active ? "Deleted. The provider may count the stopped download as watching for a few minutes" : "Deleted", NULL);
             dl_ask = 0;

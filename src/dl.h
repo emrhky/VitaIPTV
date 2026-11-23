@@ -40,6 +40,7 @@ typedef struct {
     int av_series;                          /* (an episode's: its series') */
     long long added;                        /* when (seconds) */
     char err[96];                           /* 1.4.1: why it stopped for good (English, for T_msg; "" = it did not) */
+    int watched;                            /* 1.2.4: played to its end from the Downloads (info.txt watched=1) */
 } DlItem;
 
 enum { DL_IDLE = 0, DL_QUEUED, DL_ACTIVE, DL_FAILED, DL_DONE };
@@ -76,6 +77,13 @@ void dl_pause(const char *dir);             /* stops it (the file stays: it goes
 void dl_pause_all(void);
 int  dl_delete(const char *dir);            /* stops it, then removes the folder; 0 = ok */
 int  dl_state(const char *dir, DlState *s); /* returns s->state */
+/* 1.2.4: the order of the ones waiting (the one downloading is not in it). dl_queue_pos: its place, 1 = next,
+ * 0 = not waiting; dl_queue_move: to place `to` (1 = next, a big number = last), returns the new place or -1 */
+int  dl_queue_pos(const char *dir);
+int  dl_queue_count(void);
+int  dl_queue_move(const char *dir, int to);
+/* 1.2.4: info.txt's "watched" (0 = ok) */
+int  dl_set_watched(const char *dir, int on);
 int  dl_active(void);                       /* something is being downloaded or waits for it */
 int  dl_queued_count(void);
 /* the free space of the device the root is on (bytes), -1 = cannot be read */

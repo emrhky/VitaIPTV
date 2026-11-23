@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.4 (test)
+- **Order of the downloads:** a waiting one shows its place ("Waiting (2)"); *Select > Download it next / Move it
+  up one / Download it last* on the Downloads screen.
+- **Delete the watched downloads:** a film or an episode played to its end from the Downloads (or an episode
+  watched to its end online) says "Watched, 1.2 GB"; *Select > Delete the watched episodes of this series* /
+  *Delete all watched downloads* (it asks first, with the count).
+- **Vita's MPEG-4 decoder:** 1.2.3's way was refused on the Vita (0x80620902). Now the library and the decoder
+  are opened in up to seven ways (public / internal pairs, one or two references, the frame memory as asked), each
+  in the log; the one that works is used for the rest of the session, none = software as before. If a way should
+  crash the app, it and the later ones are left out at the next start (`m4v_try.txt`).
+- HLS: addresses with "../" or "./" in a playlist are resolved (RFC 3986). A channel whose server does not do it
+  itself answered HTTP 400.
+
 ## 1.2.3 (test)
 - **DivX / Xvid on the Vita's own MPEG-4 decoder** (sceM4vdec): less work for the ARM, HD DivX possible. If it
   refuses a stream, the software decoder takes over from its first unit (nothing is lost).

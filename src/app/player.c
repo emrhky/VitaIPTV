@@ -730,6 +730,7 @@ static void save_film_position(void)
     if (iptv_is_local_path(cur_channel()->url)) {            /* 1.3.1: a download: its address too (online goes on there) */
         const char *ou = dl_url_of(cur_channel()->url);
         if (ou) remember_position(ou, pos, dur);
+        dl_played_to(cur_channel()->url, pos, dur, st->state == TSP_ENDED);   /* 1.2.4 */
     } else if (play_path[0]) remember_position(play_path, pos, dur);   /* 1.4.1: its downloaded copy played: that one too */
     mark_watched(cur_channel(), pos, dur, st->state == TSP_ENDED);   /* 0.7.0: an episode */
 }

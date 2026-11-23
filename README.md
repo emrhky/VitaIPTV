@@ -116,6 +116,10 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   terms and on where the content legally comes from.
   *Select > Black screen while it downloads* on the Downloads screen keeps the screen black (any button brings it
   back): less power on the first Vita's OLED screen during a long download.
+  The waiting ones show their place in the line ("Waiting (2)"); *Select > Download it next / Move it up one /
+  Download it last* changes it. Films and episodes watched to their end (from the Downloads, or an episode online)
+  say "Watched"; *Select > Delete the watched episodes of this series* or *Delete all watched downloads* frees the
+  room (it asks first).
 - **Internet Archive (archive.org):** add a playlist of the type *Internet Archive* with an archive.org address (a
   collection like `https://archive.org/details/feature_films`, a film, or `https://archive.org/search?query=...`)
   or just words (`charlie chaplin`). Its films come as a list (500 at a time, with poster, year and story;

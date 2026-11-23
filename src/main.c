@@ -173,6 +173,7 @@ static void dl_refresh(void);
 static void dl_poll(void);
 static uint32_t dl_avkey_of(const char *path, int *series);
 static const char *dl_url_of(const char *path);
+static void dl_played_to(const char *path, int pos, int dur, int ended);   /* 1.2.4 */
 static const DlItem *dl_item_of_path(const char *path);
 static int dl_growing_pct(const char *path);
 static int dl_unfinished_idle(void);
@@ -712,6 +713,7 @@ int main(void)
     sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_LANG, &system_lang);
     load_settings();
     touch_apply();                                           /* 1.2.3 */
+    tsp_set_m4v_mark(DATA_DIR "/m4v_try.txt");              /* 1.2.3b */
     load_resume();
     load_watched();                                          /* 0.7.0 */
     apply_language();
@@ -944,9 +946,9 @@ int main(void)
             /* 1.1: by the screen: the playlists: add, reorder, reload, settings, quit; the channels: reorder (favourites,
              * My List), Add to / Remove from My List, settings, quit (About is in the settings) */
             enum { MI_EDIT, MI_MY, MI_ADD, MI_SORT, MI_RELOAD, MI_SETTINGS, MI_QUIT, MI_DL, MI_DL_SEASON, MI_DL_STOPALL, MI_DL_GOALL, MI_DL_BLACK,
-                   MI_IA_ORDER, MI_IA_ALL, MI_IA_CLEAR };
-            int acts[10], mn = 0;
-            const char *labels[10];
+                   MI_IA_ORDER, MI_IA_ALL, MI_IA_CLEAR, MI_DL_FIRST, MI_DL_UP, MI_DL_LAST, MI_DL_DELW_SERIES, MI_DL_DELW_ALL };
+            int acts[12], mn = 0;
+            const char *labels[12];
             /* 1.3: a film or an episode chosen (not a file here): Download (an episode: also its season) */
             int dl_ci = state == ST_CHANNELS && (focus == 1 || in_episodes || search_fold[0]) && nvis > 0 && sel < nvis &&
                         chans.items[vis[sel]].kind == CH_FILM && !iptv_is_local_path(chans.items[vis[sel]].url) &&
@@ -961,6 +963,14 @@ int main(void)
                 if (dl_active()) { acts[mn] = MI_DL_STOPALL; labels[mn++] = T("Stop all downloads"); }
                 if (dl_unfinished_idle()) { acts[mn] = MI_DL_GOALL; labels[mn++] = T("Continue all downloads"); }
                 if (dl_active()) { acts[mn] = MI_DL_BLACK; labels[mn++] = T("Black screen while it downloads"); }   /* 1.5 */
+                /* 1.2.4: the chosen one's place in the line; the watched ones */
+                const DlItem *qi = dl_focus == 1 ? dl_cur() : NULL;
+                int qpos = qi ? dl_queue_pos(qi->dir) : 0, qn = dl_queue_count();
+                if (qpos > 1) { acts[mn] = MI_DL_FIRST; labels[mn++] = T("Download it next"); }
+                if (qpos > 2) { acts[mn] = MI_DL_UP; labels[mn++] = T("Move it up one"); }
+                if (qpos > 0 && qpos < qn) { acts[mn] = MI_DL_LAST; labels[mn++] = T("Download it last"); }
+                if (dl_gsel > 0 && dl_watched_count(dl_gsel) > 0) { acts[mn] = MI_DL_DELW_SERIES; labels[mn++] = T("Delete the watched episodes of this series"); }
+                if (dl_watched_count(-1) > 0) { acts[mn] = MI_DL_DELW_ALL; labels[mn++] = T("Delete all watched downloads"); }
             } else if (state == ST_SOURCES && dev_open) {
                 /* (1.3.2: Videos on the Vita: settings, quit) */
             } else if (state == ST_SOURCES) {
@@ -1037,6 +1047,18 @@ int main(void)
                 case MI_IA_ALL: ia_search_all = 1; ime_open("Search the whole archive", "", 0, IME_SEARCH, NULL, 0); break;
                 case MI_IA_CLEAR: ia_words[0] = 0; ia_page = 1; ia_reload(0); break;
                 case MI_DL_BLACK: black_mode = 1; black_since = now_ms(); plog("dl: black screen"); break;   /* 1.5 */
+                case MI_DL_FIRST: case MI_DL_UP: case MI_DL_LAST: {   /* 1.2.4 */
+                    const DlItem *qi = dl_cur();
+                    int qp = qi ? dl_queue_pos(qi->dir) : 0;
+                    if (!qp) { set_status(0, "It is not waiting any more", NULL); break; }
+                    int to = acts[menu_sel] == MI_DL_FIRST ? 1 : acts[menu_sel] == MI_DL_UP ? qp - 1 : 1 << 20;
+                    int newp = dl_queue_move(qi->dir, to);
+                    plog("dl: %s from place %d to %d", qi->title, qp, newp);
+                    set_status(0, newp == 1 ? "It downloads next" : acts[menu_sel] == MI_DL_LAST ? "It downloads last" : "Moved up", NULL);
+                    break;
+                }
+                case MI_DL_DELW_SERIES: dl_ask = 3; break;
+                case MI_DL_DELW_ALL: dl_ask = 4; break;
                 case MI_DL_GOALL: {
                     int n = 0;
                     for (int k = 0; k < dln; k++) { DlState st; if (!dlv[k].done && dl_state(dlv[k].dir, &st) != DL_ACTIVE && st.state != DL_QUEUED && dl_resume(dlv[k].dir) == 0) n++; }

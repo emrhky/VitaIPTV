@@ -71,7 +71,63 @@ static int attr(const char *s, const char *e, const char *name, char *out, size_
     return 1;
 }
 
+/* RFC 3986 5.2.4 remove_dot_segments on the path of an absolute URL, in place.
+ * Only the path between the host and '?'/'#' is touched; ".." never climbs above the root. */
+static void dot_segments(char *url)
+{
+    char *sch = strstr(url, "://");
+    if (!sch) return;
+    char *path = sch + 3 + strcspn(sch + 3, "/?#");
+    if (*path != '/') return;
+    size_t plen = strcspn(path, "?#");
+    int has = 0;
+    for (size_t i = 0; i + 1 < plen; i++)
+        if (path[i] == '/' && path[i + 1] == '.') { has = 1; break; }
+    if (!has) return;
+    char in[HLS_URL_MAX], o[HLS_URL_MAX];
+    if (plen >= sizeof in) return;
+    memcpy(in, path, plen);
+    in[plen] = 0;
+    const char *p = in;
+    size_t on = 0;
+    while (*p) {
+        if (!strncmp(p, "../", 3)) p += 3;
+        else if (!strncmp(p, "./", 2)) p += 2;
+        else if (!strncmp(p, "/./", 3)) p += 2;
+        else if (!strcmp(p, "/.")) { p += 1; in[p - in] = '/'; }          /* "/." at the end -> "/" */
+        else if (!strncmp(p, "/../", 4) || !strcmp(p, "/..")) {
+            if (p[3] == '/') p += 3;
+            else { p += 2; in[p - in] = '/'; }                          /* "/.." at the end -> "/" */
+            while (on > 0 && o[on - 1] != '/') on--;                   /* drop the last segment and its '/' */
+            if (on > 0) on--;
+        } else if (!strcmp(p, ".") || !strcmp(p, "..")) p += strlen(p);
+        else {
+            size_t k = (*p == '/') ? 1 : 0;
+            k += strcspn(p + k, "/");
+            if (on + k >= sizeof o) return;
+            memcpy(o + on, p, k);
+            on += k;
+            p += k;
+        }
+    }
+    if (on == 0) o[on++] = '/';
+    size_t rest = strlen(path + plen);
+    if ((size_t)(path - url) + on + rest >= HLS_URL_MAX) return;
+    memmove(path + on, path + plen, rest + 1);
+    memcpy(path, o, on);
+}
+
+static void resolve_raw(const char *base, const char *ref, int ref_len, char *out, size_t cap);
+
 void hls_resolve(const char *base, const char *ref, int ref_len, char *out, size_t cap)
+{
+    char t[HLS_URL_MAX];
+    resolve_raw(base, ref, ref_len, t, sizeof t);
+    if (strlen(t) < sizeof t - 1) dot_segments(t);     /* a cut URL is left as it is */
+    snprintf(out, cap, "%s", t);
+}
+
+static void resolve_raw(const char *base, const char *ref, int ref_len, char *out, size_t cap)
 {
     char r[HLS_URL_MAX];
     if (ref_len < 0) ref_len = (int)strlen(ref);

@@ -112,6 +112,9 @@ int               tsp_sub_bitmap(uint32_t *id, int *x, int *y, int *w, int *h, i
 int               tsp_sub_bitmap_copy(uint32_t id, uint32_t *dst, int stride);
 /* 1.2.3: MPEG-4 Part 2 (DivX / Xvid) on the Vita's own decoder first (default 1); 0 = only in software */
 void              tsp_set_m4v_hw(int on);
+/* 1.2.3b: a file the player writes the MPEG-4 hardware way into while trying it (a crash in one: it and the
+ * later ones are skipped at the next start); "" or NULL = none */
+void              tsp_set_m4v_mark(const char *path);
 /* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */
 void              tsp_set_via_server(int on);
 /* 0.5.0 test builds: AC-3 / E-AC-3 stutter on the HD decoder. 0 normal, 1 decoded but not played (the picture runs

@@ -247,6 +247,35 @@ int main(int argc, char **argv)
         assert(st == DL_IDLE && same_file(vid, src));
     }
     dl_set_net_check(NULL);
+    /* 7. 1.2.4: the order of the waiting ones; info.txt's "watched" */
+    {
+        DlItem q[4];
+        static const char *const qp[4] = { "/slow/q0/film3.mkv", "/slow/q1/film3.mkv", "/slow/q2/film3.mkv", "/slow/q3/film3.mkv" };
+        for (int k = 0; k < 4; k++) { char t[16]; snprintf(t, sizeof t, "Sira %d", k); q[k] = mk(base, qp[k], t, 'F'); assert(dl_add(&q[k]) == 0); }
+        usleep(300000);
+        assert(dl_state(q[0].dir, &ds) == DL_ACTIVE && dl_queue_pos(q[0].dir) == 0 && dl_queue_count() == 3);
+        assert(dl_queue_pos(q[1].dir) == 1 && dl_queue_pos(q[2].dir) == 2 && dl_queue_pos(q[3].dir) == 3);
+        assert(dl_queue_move(q[3].dir, 1) == 1);                                  /* the last one next */
+        assert(dl_queue_pos(q[3].dir) == 1 && dl_queue_pos(q[1].dir) == 2 && dl_queue_pos(q[2].dir) == 3);
+        assert(dl_queue_move(q[3].dir, 99) == 3);                                 /* and to the end again */
+        assert(dl_queue_pos(q[1].dir) == 1 && dl_queue_pos(q[2].dir) == 2 && dl_queue_pos(q[3].dir) == 3);
+        assert(dl_queue_move(q[1].dir, 2) == 2 && dl_queue_pos(q[2].dir) == 1);   /* one step down */
+        assert(dl_queue_move(q[0].dir, 1) == -1);                                 /* (the active one is not in it) */
+        printf("7 order: %d %d %d\n", dl_queue_pos(q[1].dir), dl_queue_pos(q[2].dir), dl_queue_pos(q[3].dir));
+        dl_pause(q[0].dir);                                                       /* the next one is the one moved first */
+        for (int k = 0; k < 100 && dl_state(q[2].dir, &ds) != DL_ACTIVE; k++) usleep(20000);
+        assert(dl_state(q[2].dir, &ds) == DL_ACTIVE && dl_queue_pos(q[1].dir) == 1 && dl_queue_count() == 2);
+        for (int k = 0; k < 4; k++) assert(dl_delete(q[k].dir) == 0);
+        DlItem r;
+        assert(dl_info_read(&r, h.dir) == 0 && r.done && !r.watched);
+        assert(dl_set_watched(h.dir, 1) == 0 && dl_info_read(&r, h.dir) == 0 && r.watched && r.done);
+        DlItem lst[16];
+        int n = dl_scan(lst, 16), seen = 0;
+        for (int i = 0; i < n; i++) if (!strcmp(lst[i].dir, h.dir)) { seen = 1; assert(lst[i].watched); }
+        assert(seen);
+        assert(dl_set_watched(h.dir, 0) == 0 && dl_info_read(&r, h.dir) == 0 && !r.watched);
+        printf("7 watched: ok\n");
+    }
     dl_shutdown();
     printf("all download tests passed\n");
     return 0;

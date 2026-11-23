@@ -48,9 +48,9 @@ static void dl_grp_pv(int i, ScrRow *r, void *c)
 static void dl_item_pv(int i, ScrRow *r, void *c)
 {
     static const char *fn[] = { "Kurak Günler (2022)", "Ayla (2017)", "Babam ve Oğlum (2005)", "Kış Uykusu (2014)" };
-    static const char *fr[] = { "2,1 GB", "%42", "Durdu %18", "Sırada" };
+    static const char *fr[] = { "İzlendi, 2,1 GB", "%42", "Durdu %18", "Sırada (2)" };   /* (1.2.4) */
     static const char *en[] = { "S01E01  Bölüm 1", "S01E02  Bölüm 2", "S01E03  Bölüm 3" };
-    static const char *er[] = { "1,2 GB", "1,1 GB", "Hata" };
+    static const char *er[] = { "İzlendi, 1,2 GB", "1,1 GB", "Hata" };
     (void)c;
     if (dl_pv_ep) { r->name = en[i]; r->right = er[i]; r->check = i < 2; }
     else { r->name = fn[i]; r->right = fr[i]; r->check = i == 0; }
@@ -570,6 +570,15 @@ int main(int argc, char **argv)
             preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); shot("u_downloads_series");
             dd.focus = 1; dd.preview = &card;
             preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); scr_confirm(T("Delete this download?"), "S01E02  Bölüm 2"); shot("u_downloads_delete");
+            {   /* 1.2.4: the menu with the order and the watched ones; its question */
+                const char *ml[] = { T("Stop all downloads"), T("Black screen while it downloads"), T("Download it next"), T("Move it up one"),
+                                     T("Download it last"), T("Delete the watched episodes of this series"), T("Delete all watched downloads"),
+                                     T("Settings"), T("Quit") };
+                preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); scr_menu(T("Menu"), ml, 9, 2); shot("u_downloads_menu124");
+                char q[128];
+                snprintf(q, sizeof q, T("Delete the %d watched episodes of this series?"), 2);
+                preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); scr_confirm(q, "Gönül Dağı"); shot("u_downloads_delw");
+            }
             dd.status = T("Not enough free space: 2810 MB needed, 1450 MB free"); dd.status_err = 1; dd.preview = &card;
             preview_clear(UI_BG); gs = cs = 0; scr_dual(&dd); shot("u_downloads_nospace");
         }

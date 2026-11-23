@@ -8,7 +8,7 @@ static void res(const char *base, const char *ref, const char *want)
 {
     char out[HLS_URL_MAX];
     hls_resolve(base, ref, -1, out, sizeof out);
-    if (strcmp(out, want)) { printf("resolve %s + %s = %s (want %s)\n", base, ref, out, want); assert(0); }
+    if (strcmp(out, want)) { printf("resolve %s + %s = %s (want %s)\n", base, ref, out, want); fflush(stdout); assert(0); }
 }
 
 int main(void)
@@ -22,6 +22,19 @@ int main(void)
     res("http://a.tv", "s.ts", "http://a.tv/s.ts");
     res("http://a.tv/live/x/master.m3u8?old=1", "?q=720", "http://a.tv/live/x/master.m3u8?q=720");   /* 0.4.0 */
     res("http://b.tv/dyg_star/live.m3u8?st=T&e=1", "live_720p/index.m3u8?st=U", "http://b.tv/dyg_star/live_720p/index.m3u8?st=U");
+    /* 1.2.3b: dot segments (RFC 3986 5.2.4) */
+    res("http://a.tv/v1/a/b/c/master.m3u8", "../../../../manifest/x.m3u8?k=1", "http://a.tv/manifest/x.m3u8?k=1");
+    res("http://a.tv/v1/a/b/master.m3u8", "../c/x.m3u8", "http://a.tv/v1/a/c/x.m3u8");
+    res("http://a.tv/v1/a/b/master.m3u8", "./x.m3u8", "http://a.tv/v1/a/b/x.m3u8");
+    res("http://a.tv/v1/master.m3u8", "../../../../x.ts", "http://a.tv/x.ts");            /* never above the root */
+    res("http://a.tv/v1/a/master.m3u8", "..", "http://a.tv/v1/");
+    res("http://a.tv/v1/a/master.m3u8", ".", "http://a.tv/v1/a/");
+    res("http://a.tv/v1/a/master.m3u8", "b/./c/../d.ts", "http://a.tv/v1/a/b/d.ts");
+    res("http://a.tv/v1/a/master.m3u8", "/x/../y/z.ts", "http://a.tv/y/z.ts");
+    res("http://a.tv/v1/a/master.m3u8", "x.ts?p=../../q", "http://a.tv/v1/a/x.ts?p=../../q");   /* the query is not touched */
+    res("http://a.tv/v1/a/master.m3u8", "http://b.tv/a/../b.ts", "http://b.tv/b.ts");
+    res("http://a.tv/v1/a/master.m3u8", "x..y/.hidden/s.ts", "http://a.tv/v1/a/x..y/.hidden/s.ts");
+    res("http://a.tv/v1//a/master.m3u8", "s.ts", "http://a.tv/v1//a/s.ts");                 /* double slashes stay */
 
     const char *master =
         "\xEF\xBB\xBF#EXTM3U\r\n#EXT-X-VERSION:3\r\n"

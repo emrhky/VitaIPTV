@@ -191,6 +191,7 @@ int dl_info_write(const DlItem *it)
     fprintf(f, "size=%llu\ndone=%d\navkey=%08x\nav_series=%d\nadded=%lld\n", (unsigned long long)it->size, it->done,
             (unsigned)it->avkey, it->av_series, it->added);
     if (it->err[0] && !it->done) put(f, "error", it->err);  /* 1.4.1 */
+    if (it->watched) fprintf(f, "watched=1\n");             /* 1.2.4 */
     int bad = ferror(f);
     if (fclose(f) != 0 || bad) { remove(tmp); return -1; }
     remove(p);                                               /* (a rename does not replace a file on the Vita) */
@@ -236,6 +237,7 @@ int dl_info_read(DlItem *it, const char *dir)
         else if (!strcmp(k, "av_series")) it->av_series = atoi(v) != 0;
         else if (!strcmp(k, "added")) it->added = atoll(v);
         else if (!strcmp(k, "error")) cpy(it->err, sizeof it->err, v);
+        else if (!strcmp(k, "watched")) it->watched = atoi(v) != 0;
     }
     fclose(f);
     if (!it->kind) it->kind = 'F';
@@ -968,6 +970,52 @@ int dl_state(const char *dir, DlState *s)
     }
     unlock();
     return s->state;
+}
+
+int dl_set_watched(const char *dir, int on)
+{
+    DlItem *it = malloc(sizeof *it);
+    if (!it) return -1;
+    int r = dl_info_read(it, dir);
+    if (r == 0 && it->watched != (on != 0)) {
+        it->watched = on != 0;
+        r = dl_info_write(it);
+    }
+    free(it);
+    return r;
+}
+
+int dl_queue_pos(const char *dir)
+{
+    lock();
+    int k = 0;
+    for (int i = 0; i < g_nq && !k; i++) if (!strcmp(g_queue[i], dir)) k = i + 1;
+    unlock();
+    return k;
+}
+
+int dl_queue_count(void)
+{
+    lock();
+    int n = g_nq;
+    unlock();
+    return n;
+}
+
+int dl_queue_move(const char *dir, int to)
+{
+    lock();
+    int i = 0;
+    while (i < g_nq && strcmp(g_queue[i], dir)) i++;
+    if (i == g_nq) { unlock(); return -1; }
+    int j = to <= 1 ? 0 : to > g_nq ? g_nq - 1 : to - 1;
+    char t[DL_DIR_MAX];
+    memcpy(t, g_queue[i], sizeof t);
+    if (j < i) memmove(&g_queue[j + 1], &g_queue[j], sizeof g_queue[0] * (size_t)(i - j));
+    else if (j > i) memmove(&g_queue[i], &g_queue[i + 1], sizeof g_queue[0] * (size_t)(j - i));
+    memcpy(g_queue[j], t, sizeof t);
+    unlock();
+    return j + 1;
 }
 
 int dl_active(void)
