@@ -2046,14 +2046,20 @@ static int m4v_try(Tsp *t, int w, int h, const M4vWay *wy, uint32_t *fm_kb)
         opt.size = sizeof opt;
         opt.attr = SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_ALIGNMENT;
         opt.alignment = 1024 * 1024;
-        uint32_t cm_size = ALIGN(csize, 1024 * 1024);
+        /* 1.2.4c: room beyond the size asked (1.2.4b: a block of exactly the size rounded to 1 MB gave no address
+         * on the Vita: the codec engine may keep some of the block for itself); then smaller alignments */
+        uint32_t cm_size = ALIGN(csize + 512 * 1024, 1024 * 1024);
         t->m4v_cm_uid = sceKernelAllocMemBlock("tsp_m4v_codec", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, cm_size, &opt);
         if (t->m4v_cm_uid < 0) { r = t->m4v_cm_uid; t->m4v_cm_uid = -1; plog("tsp: MPEG-4 hardware: codec memory %u KB -> 0x%08X", (unsigned)(cm_size >> 10), (unsigned)r); return r; }
         void *cm = NULL;
         sceKernelGetMemBlockBase(t->m4v_cm_uid, &cm);
         t->m4v_unmap = sceCodecEngineOpenUnmapMemBlock(cm, cm_size);
         if (t->m4v_unmap <= 0) { r = t->m4v_unmap; t->m4v_unmap = -1; plog("tsp: MPEG-4 hardware: codec engine memory -> 0x%08X", (unsigned)r); m4v_close(t); return r < 0 ? r : -1; }
-        t->m4v_va = sceCodecEngineAllocMemoryFromUnmapMemBlock(t->m4v_unmap, csize, 256 * 1024);
+        static const uint32_t al[3] = { 256 * 1024, 64 * 1024, 4096 };
+        uint32_t used = 0;
+        for (int a = 0; a < 3 && !t->m4v_va; a++) { used = al[a]; t->m4v_va = sceCodecEngineAllocMemoryFromUnmapMemBlock(t->m4v_unmap, csize, al[a]); }
+        plog("tsp: MPEG-4 hardware: codec memory asked %u bytes (%u KB), block %u KB at %p, engine block 0x%08X, address 0x%08X (aligned %u KB)",
+             (unsigned)csize, (unsigned)(csize >> 10), (unsigned)(cm_size >> 10), cm, (unsigned)t->m4v_unmap, (unsigned)t->m4v_va, (unsigned)(used >> 10));
         if (!t->m4v_va) { plog("tsp: MPEG-4 hardware: codec engine address failed"); m4v_close(t); return -1; }
         TspVideodecCtrl vc;
         memset(&vc, 0, sizeof vc);
@@ -2111,15 +2117,17 @@ static int m4v_try(Tsp *t, int w, int h, const M4vWay *wy, uint32_t *fm_kb)
 /* the hardware for w x h: 0, or -1 (then the software decoder) */
 static int m4v_open(Tsp *t, int w, int h, const uint8_t *cfg, int cfg_len)
 {
-    if (w < 16 || h < 16 || g_m4v_dead) return -1;
-    /* 1.2.4b: the Vita plays MPEG-4 Simple Profile up to 1280x720 (its own player). Above: not tried (1.2.4 took
-     * the refusal at 1080p for "none works" and left SD to the software too) */
-    if (w * h > 1280 * 720) { plog("tsp: MPEG-4 hardware: %dx%d is above its 1280x720: software", w, h); return -1; }
-    for (int k = 0; k + 4 < cfg_len; k++)                    /* (its profile in the log: 0x01-0x08 Simple, 0xF0-0xF5 Advanced Simple) */
+    /* (its profile in the log: 0x01-0x08 Simple, 0xF0-0xF5 Advanced Simple; 1.2.4c: first, also when the hardware
+     * is not tried; an AVI has it in the stream, not in a header: not shown) */
+    for (int k = 0; k + 4 < cfg_len; k++)
         if (cfg[k] == 0 && cfg[k + 1] == 0 && cfg[k + 2] == 1 && cfg[k + 3] == 0xB0) {
             plog("tsp: MPEG-4 profile and level 0x%02X (%s)", cfg[k + 4], cfg[k + 4] >= 0xF0 ? "Advanced Simple" : cfg[k + 4] <= 0x08 ? "Simple" : "other");
             break;
         }
+    if (w < 16 || h < 16 || g_m4v_dead) return -1;
+    /* 1.2.4b: the Vita plays MPEG-4 Simple Profile up to 1280x720 (its own player). Above: not tried (1.2.4 took
+     * the refusal at 1080p for "none works" and left SD to the software too) */
+    if (w * h > 1280 * 720) { plog("tsp: MPEG-4 hardware: %dx%d is above its 1280x720: software", w, h); return -1; }
     if (!g_m4v_mark_read && g_m4v_mark[0]) {                 /* a way crashed the app last time: it and the later ones are left out */
         g_m4v_mark_read = 1;
         FILE *f = fopen(g_m4v_mark, "r");
