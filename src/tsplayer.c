@@ -95,6 +95,15 @@ int sceAvcdecQueryDecoderMemSizeInternal(SceVideodecType type, SceAvcdecQueryDec
 int sceVideodecInitLibraryWithUnmapMemInternal(SceVideodecType type, TspVideodecCtrl *ctrl, SceVideodecQueryInitInfo *query);
 int sceAvcdecCreateDecoderInternal(SceVideodecType type, SceAvcdecCtrl *decoder, SceAvcdecQueryDecoderInfo *query);
 int sceAvcdecDecodeAuInternal(SceAvcdecCtrl *decoder, SceAvcdecAu *au, SceInt32 *pic);
+/* 1.2.3: the MPEG-4 decoder; declared here too (older VitaSDK headers do not have them: an implicit declaration
+ * is an error with GCC 14+). The same as in newer <psp2/videodec.h>. */
+#define M4VDEC ((SceVideodecType)0x1002)
+int sceVideodecInitLibraryInternal(SceVideodecType codec, const SceVideodecQueryInitInfoHwAvcdec *initInfo);
+int sceM4vdecQueryDecoderMemSize(SceVideodecType type, const SceAvcdecQueryDecoderInfo *query, SceAvcdecDecoderInfo *decoderInfo);
+int sceM4vdecCreateDecoder(SceVideodecType type, SceAvcdecCtrl *decoder, const SceAvcdecQueryDecoderInfo *query);
+int sceM4vdecDeleteDecoder(SceAvcdecCtrl *decoder);
+int sceM4vdecDecode(const SceAvcdecCtrl *decoder, const SceAvcdecAu *au, SceAvcdecArrayPicture *array_picture);
+int sceM4vdecDecodeStop(const SceAvcdecCtrl *decoder, SceAvcdecArrayPicture *array_picture);
 int sceAvcdecDecodeGetPictureWithWorkPictureInternal(SceAvcdecCtrl *decoder, SceAvcdecArrayPicture *pictures,
                                                       SceAvcdecArrayPicture *work, SceInt32 *pic);
 SceUID sceCodecEngineOpenUnmapMemBlock(void *base, SceSize size);
@@ -1950,7 +1959,7 @@ static void m4v_close(Tsp *t)
     t->m4v_dec = 0;
     if (t->m4v_ctrl.frameBuf.pBuf) mem_free(t->m4v_ctrl.frameBuf.pBuf, t->m4v_fb_uid, 0);
     t->m4v_ctrl.frameBuf.pBuf = NULL;
-    if (t->m4v_lib) sceVideodecTermLibrary(SCE_VIDEODEC_TYPE_HW_M4VDEC);
+    if (t->m4v_lib) sceVideodecTermLibrary(M4VDEC);
     t->m4v_lib = 0;
     if (t->m4v_es) mem_free(t->m4v_es, t->m4v_es_uid, 0);
     t->m4v_es = NULL;
@@ -1968,7 +1977,7 @@ static int m4v_open(Tsp *t, int w, int h)
     init.vertical = (uint32_t)ALIGN(h, 16);
     init.numOfRefFrames = 2;                                 /* (MPEG-4 Part 2: two references, for B-pictures) */
     init.numOfStreams = 1;
-    int r = sceVideodecInitLibraryInternal(SCE_VIDEODEC_TYPE_HW_M4VDEC, &init);
+    int r = sceVideodecInitLibraryInternal(M4VDEC, &init);
     if (r < 0) { plog("tsp: MPEG-4 hardware: sceVideodecInitLibraryInternal %dx%d -> 0x%08X", w, h, (unsigned)r); return -1; }
     t->m4v_lib = 1;
     SceAvcdecQueryDecoderInfo q;
@@ -1978,7 +1987,7 @@ static int m4v_open(Tsp *t, int w, int h)
     q.horizontal = init.horizontal;
     q.vertical = init.vertical;
     q.numOfRefFrames = 2;
-    r = sceM4vdecQueryDecoderMemSize(SCE_VIDEODEC_TYPE_HW_M4VDEC, &q, &di);
+    r = sceM4vdecQueryDecoderMemSize(M4VDEC, &q, &di);
     if (r < 0 || !di.frameMemSize) { plog("tsp: MPEG-4 hardware: memory size -> 0x%08X", (unsigned)r); m4v_close(t); return -1; }
     r = -1;
     for (int k = 0; k < MEM_KINDS && r < 0; k++) {
@@ -1987,7 +1996,7 @@ static int m4v_open(Tsp *t, int w, int h)
         memset(&t->m4v_ctrl, 0, sizeof t->m4v_ctrl);
         t->m4v_ctrl.frameBuf.pBuf = fb;
         t->m4v_ctrl.frameBuf.size = ALIGN(di.frameMemSize, k == MEM_PHYCONT ? 1024 * 1024 : k == MEM_CDRAM ? 256 * 1024 : 4096);
-        r = sceM4vdecCreateDecoder(SCE_VIDEODEC_TYPE_HW_M4VDEC, &t->m4v_ctrl, &q);
+        r = sceM4vdecCreateDecoder(M4VDEC, &t->m4v_ctrl, &q);
         if (r < 0) {
             plog("tsp: MPEG-4 hardware: create (frame memory %s) -> 0x%08X", mem_name(k), (unsigned)r);
             mem_free(fb, t->m4v_fb_uid, 0);

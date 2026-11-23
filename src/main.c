@@ -1788,7 +1788,7 @@ int main(void)
                 /* 1.2.3: the first try gave a few KB and then nothing (seen right after the Vita woke: the server
                  * answered late): once more, by itself. Once per address until it has played. */
                 {
-                    static char nodata_url[256];
+                    static char nodata_url[IPTV_URL_MAX];
                     const char *cu = cur_play_url();
                     if (fs && fs->state == TSP_PLAYING && !strncmp(nodata_url, cu, sizeof nodata_url - 1)) nodata_url[0] = 0;
                     if (!via_proxy && fs && fs->state == TSP_ERROR && !fs->hls_no_video && fs->bytes < 64u * 1024 &&
