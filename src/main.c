@@ -2,6 +2,7 @@
 #include <psp2/ctrl.h>
 #include <psp2/touch.h>
 #include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/dmac.h>
 #include <psp2/io/stat.h>
 #include <psp2/io/dirent.h>
 #include <psp2/io/fcntl.h>

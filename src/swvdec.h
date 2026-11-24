@@ -33,6 +33,9 @@ int         swv_threads(SwVdec *d, int n);
  * than the Vita's screen when the ARM is behind. Opens the decoder again (the next pictures up to a keyframe are
  * left out); returns the lowres now used. */
 int         swv_lowres(SwVdec *d, int lowres);
+/* 1.2.4f: MPEG-2 only: 4 slice workers, one held on the 4th core. 1 = done; 0 = not possible (the 4th core is
+ * not open to apps: nothing changes, the decoder keeps its threads) */
+int         swv_core3(SwVdec *d);
 void        swv_destroy(SwVdec *d);
 /* one unit (or piece, with parse): pts / dts 90 kHz (-1 = none). Returns the pictures given out (>= 0). */
 int         swv_decode(SwVdec *d, const uint8_t *data, size_t len, int64_t pts, int64_t dts, SwvOut out, void *ctx);

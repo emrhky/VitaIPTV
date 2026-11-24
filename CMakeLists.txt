@@ -157,7 +157,7 @@ target_link_libraries(${PROJECT_NAME}.elf
   ${A52_LIBS}
   vita2d
   freetype png jpeg z m pthread
-  SceRtc_stub
+  SceRtc_stub SceDmacmgr_stub
   SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceCodecEngine_stub SceAudiodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
   SceCtrl_stub SceTouch_stub SceSysmodule_stub SceDisplay_stub SceGxm_stub SceCommonDialog_stub

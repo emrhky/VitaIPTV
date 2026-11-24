@@ -78,6 +78,7 @@ typedef struct {
     int ok, http;
     uint32_t *px;                       /* a poster, decoded */
     int pw, ph;
+    unsigned dl_us, dec_us;             /* 1.2.4f: how long it took to come / to decode */
 } QJob;
 static QJob qjob;
 
@@ -108,13 +109,17 @@ static void run_qjob(QJob *j)
     int st = 0;
     char e[96] = "";
     int r;
+    uint64_t t0 = sceKernelGetProcessTimeWide();
     if (iptv_is_local_path(j->url)) r = read_file(j->url, &m) == 0 ? 0 : -1;   /* 1.3: a download's poster */
     else r = cio_get(&rq, &st, e, sizeof e);
+    uint64_t t1 = sceKernelGetProcessTimeWide();
+    j->dl_us = (unsigned)(t1 - t0);
     j->http = st;
     j->ok = r >= 0 && st < 400 && m.buf != NULL;
     j->px = NULL;
     if (j->kind == QJ_POSTER) {
         if (j->ok) j->ok = poster_decode((const uint8_t *)m.buf, m.len, POSTER_BOX_W, POSTER_BOX_H, &j->px, &j->pw, &j->ph) == 0;
+        j->dec_us = (unsigned)(sceKernelGetProcessTimeWide() - t1);
         free(m.buf);
         memset(&j->m, 0, sizeof j->m);
     } else j->m = m;
@@ -420,7 +425,24 @@ static void poster_take(QJob *j)
     if (t) {
         uint8_t *dst = vita2d_texture_get_datap(t);
         unsigned stride = vita2d_texture_get_stride(t);
-        for (int y = 0; y < j->ph; y++) memcpy(dst + (size_t)y * stride, j->px + (size_t)y * j->pw, (size_t)j->pw * 4);
+        uint64_t c0 = sceKernelGetProcessTimeWide();
+        /* 1.2.4f: rows end to end: one DMA (the texture is in CDRAM, slow for the ARM); off after a fault */
+        static int no_dma, checked;
+        size_t n = (size_t)j->pw * 4 * (size_t)j->ph;
+        int done = 0;
+        if (!no_dma && stride == (unsigned)j->pw * 4) {
+            int r = sceDmacMemcpy(dst, j->px, (SceSize)n);
+            if (r >= 0 && checked < 3) { checked++; if (memcmp(dst + n - 64, (const uint8_t *)j->px + n - 64, 64) || memcmp(dst, j->px, 64)) r = -2; }
+            if (r >= 0) done = 1;
+            else { no_dma = 1; plog("poster: DMA copy %s (0x%08X): the ARM copies", r == -2 ? "wrong" : "failed", (unsigned)r); }
+        }
+        if (!done) for (int y = 0; y < j->ph; y++) memcpy(dst + (size_t)y * stride, j->px + (size_t)y * j->pw, (size_t)j->pw * 4);
+        unsigned cp = (unsigned)(sceKernelGetProcessTimeWide() - c0);
+        static unsigned cnt, sdl, sdec, scp, sdma;           /* (1.2.4f: the first one and every 20th: the averages) */
+        cnt++; sdl += j->dl_us / 1000; sdec += j->dec_us; scp += cp; sdma += done;
+        if (cnt == 1 || cnt % 20 == 0)
+            plog("poster: %u opened (%s): avg came in %u ms, decoded in %u us, copied in %u us (%u by DMA); this one %dx%d",
+                 cnt, poster_jpeg_lib(), sdl / cnt, sdec / cnt, scp / cnt, sdma, j->pw, j->ph);
         if (poster_tex) vita2d_free_texture(poster_tex);     /* (the frame before is done: guide_tick runs first in a frame) */
         poster_tex = t;
         snprintf(poster_have, sizeof poster_have, "%s", j->key);

@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.4f (test)
+- **Software video (MPEG-2, MPEG-4, DivX 3) copied by DMA:** the ARM writes the picture memory at only ~200 MB/s
+  (1080p: 15 ms a picture, more than decoding it). The slots now take FFmpeg's row length and each colour plane
+  goes over in one DMA; the first pictures are checked, and after an error the ARM copies as before.
+- **Interlaced software pictures are mixed on the screen:** the GPU draws the picture a second time one row higher
+  at half strength (each row the mean of two), in place of the ARM.
+- **The 4th core** (open only with a plugin; closed: everything as before, 3 threads): MPEG-2 gets a 4th slice
+  worker held there (the reader stays); other software video moves the reader there; HTTPS streams move the reader
+  there (TLS decryption took up to 80% of a core). A reader that finds that core full twice goes back.
+- **HTTPS:** ChaCha20-Poly1305 is offered first (no AES instructions on the Vita's ARM: about twice as fast in
+  software); the suite in use is in the log.
+- **Posters:** copied into their texture by DMA; the log shows how long they take to come, to decode and to copy,
+  and which JPEG library the build has.
+
 ## 1.2.4d / 1.2.4e (test)
 - **HLS films could freeze (H.264):** some servers put the picture settings (SPS / PPS / SEI) in a packet of their
   own before the picture; the Vita decoder refused both and the picture stood still. Such packets are now joined

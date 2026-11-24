@@ -817,8 +817,10 @@ static void activate_item(int vi)
     }
 }
 
-/* fields: 0 a whole picture; 1 / 2 the top / bottom of two fields one above the other (1080i), stretched */
-static void draw_video_texture(vita2d_texture *t, int w, int h, int fields)
+/* fields: 0 a whole picture; 1 / 2 the top / bottom of two fields one above the other (1080i), stretched.
+ * mix (1.2.4f): an interlaced software picture: drawn again one picture row higher at half strength, so each
+ * screen row is the mean of two picture rows (the two fields' combs go; the ARM did this before) */
+static void draw_video_texture(vita2d_texture *t, int w, int h, int fields, int mix)
 {
     float sx = 960.0f / w, sy = 544.0f / h, s = sx < sy ? sx : sy;
     float x0 = (960.0f - w * s) / 2, y0 = (544.0f - h * s) / 2;
@@ -833,6 +835,7 @@ static void draw_video_texture(vita2d_texture *t, int w, int h, int fields)
         return;
     }
     vita2d_draw_texture_part_scale(t, x0, y0, 0, 0, w, h, s, s);
+    if (mix && h > 2) vita2d_draw_texture_tint_part_scale(t, x0, y0, 0, 1, w, h - 1, s, s, RGBA8(255, 255, 255, 128));
 }
 
 /* ---------------------------------------------------------------- 1.2.3: the touch screen in the player */
@@ -1005,7 +1008,7 @@ static void draw_tsp_screen(int osd)
                   st->state == TSP_ENDED ? T("Stream ended") : now_ms() < film_note_until ? film_note : NULL, player_fav());
         return;
     }
-    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields ? bob_field(st) : 0); got_frame = 1; draw_pgs(vw, vh); }
+    if (tx && vw > 0 && vh > 0) { draw_video_texture(tx, vw, vh, st && st->fields ? bob_field(st) : 0, st && st->mix_rows); got_frame = 1; draw_pgs(vw, vh); }
     {                                                    /* (where a start stopped, if it ever does: one crash in 0.2.7) */
         static int last_state = -1;
         int sv = st ? st->state : -1;
@@ -1206,7 +1209,7 @@ static void draw_mp4_screen(int osd)
 {
     const Channel *c = cur_channel();
     vita2d_texture *t = player_poll();
-    if (t) { got_frame = 1; draw_video_texture(t, vita2d_texture_get_width(t), vita2d_texture_get_height(t), 0); }
+    if (t) { got_frame = 1; draw_video_texture(t, vita2d_texture_get_width(t), vita2d_texture_get_height(t), 0, 0); }
     ScrPlayer sp;
     memset(&sp, 0, sizeof sp);
     sp.backdrop = !got_frame;

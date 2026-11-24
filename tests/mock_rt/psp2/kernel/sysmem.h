@@ -14,4 +14,5 @@ int sceKernelFreeMemBlock(SceUID uid);
 extern int mock_live_blocks;
 typedef struct SceKernelFreeMemorySizeInfo { int size, size_user, size_cdram, size_phycont; } SceKernelFreeMemorySizeInfo;
 int sceKernelGetFreeMemorySize(SceKernelFreeMemorySizeInfo *info);
+int sceKernelSyncVMDomain(SceUID uid, void *data, SceSize size);   /* 1.2.4f */
 #endif

@@ -33,11 +33,16 @@ int sceKernelWaitThreadEnd(SceUID t, int *stat, SceUInt *timeout)
 int sceKernelDeleteThread(SceUID t) { MT *m = &th[t - 0x40010000]; free(m->arg); m->used = 0; return 0; }
 int sceKernelDelayThread(SceUInt us) { usleep(us); return 0; }
 /* 1.2.4e: the 4th core (mask 0x80000) as on a Vita without a plugin: refused; mock_core3 = 1 opens it */
-int mock_core3, mock_core3_moves;
+int mock_core3, mock_core3_moves, mock_core3_self;
 int sceKernelChangeThreadCpuAffinityMask(SceUID t, int mask)
-{ if (t <= 0x40010000 || t >= 0x40010100) return (int)0x80020001;
+{ if (t < 0) return (int)0x80020001;   /* (0: the calling thread) */
   if (mask == 0x80000 && !mock_core3) return (int)0x80028025;
-  mock_core3_moves++; return 0; }
+  if (mask == 0x80000) { if (t == 0) mock_core3_self++; else mock_core3_moves++; }
+  return 0; }
+/* 1.2.4f: DMA as a copy (mock_dma_fail: an error) */
+int mock_dma_fail, mock_dma_calls;
+int sceKernelSyncVMDomain(SceUID uid, void *data, SceSize size) { (void)uid; (void)data; (void)size; return 0; }
+int sceDmacMemcpy(void *d, const void *s, unsigned n) { mock_dma_calls++; if (mock_dma_fail) return (int)0x80020002; memcpy(d, s, n); return 0; }
 /* CPU line: thread run time from the PC's thread clocks, core idle time from /proc/stat */
 #include <time.h>
 #include <stdio.h>

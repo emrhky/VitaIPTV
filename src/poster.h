@@ -10,4 +10,6 @@
  * like vita2d's RGBA8). 0 = ok, -1 = not a picture this can read (or out of memory). */
 int poster_decode(const uint8_t *data, size_t n, int max_w, int max_h, uint32_t **px, int *w, int *h);
 
+/* 1.2.4f: the JPEG library's name for the log */
+const char *poster_jpeg_lib(void);
 #endif

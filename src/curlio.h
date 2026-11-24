@@ -41,5 +41,7 @@ int  cio_last_rcvbuf(void);
 int  cio_last_connect_ms(void);
 int  cio_last_connect_tries(void);   /* 1.5.1: sockets the last connect took (2, 3: the first stayed silent) */
 const char *cio_rcvbuf_note(void);
+/* 1.2.4f: the TLS suite of the last https connection ("" none / not yet) */
+const char *cio_last_suite(void);
 
 #endif

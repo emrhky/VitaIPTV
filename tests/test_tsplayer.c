@@ -1016,22 +1016,33 @@ sw:
                 assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "not supported"));
         }
         if (a52_available()) {   /* 1.2.4e: a slow ARM: behind, half size from a keyframe on; the 4th core for the reader */
-            extern int mock_core3, mock_core3_moves;
-            static const struct { const char *f; int vod; } lf[2] = { { "mpeg2hd.ts", 0 }, { "xvidhd.avi", 1 } };
-            for (int k = 0; k < 2; k++) {
+            extern int mock_core3, mock_core3_moves, mock_core3_self, mock_dma_fail, mock_dma_calls;
+            /* 1.2.4f: k 0: the 4th core closed (as on most Vitas: nothing changes); 1: open, Xvid: the reader goes
+             * there; 2: open, MPEG-2: a slice worker held there, the reader stays; 3: DMA fails: the ARM copies */
+            static const struct { const char *f; int vod, core3, dmafail; } lf[4] = {
+                { "mpeg2hd.ts", 0, 0, 0 }, { "xvidhd.avi", 1, 1, 0 }, { "mpeg2hd.ts", 0, 1, 0 }, { "mpeg2hd.ts", 0, 0, 1 } };
+            for (int k = 0; k < 4; k++) {
                 snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", lf[k].f);
-                mock_core3 = k; mock_core3_moves = 0;
+                mock_core3 = lf[k].core3; mock_core3_moves = mock_core3_self = 0; mock_dma_fail = lf[k].dmafail; mock_dma_calls = 0;
+                tsp_test_core3_unknown();
+                tsp_set_dma(1);
                 tsp_test_sw_delay(70000);
                 if (lf[k].vod) { VRun v = play_vod(dp, 0, 25, 0, 0); r = v.r; } else r = play(dp, 22);
                 tsp_test_sw_delay(0);
                 char nm[48];
                 snprintf(nm, sizeof nm, "%s slow ARM", lf[k].f);
                 show(nm, &r);
-                printf("               4th core moves %d\n", mock_core3_moves);
+                printf("               4th core: reader moves %d, decoder worker %d; DMA calls %d\n", mock_core3_moves, mock_core3_self, mock_dma_calls);
                 assert(r.st.state == TSP_ENDED && r.w == 640 && r.st.decoded >= 30 && r.st.audio_frames > 100);
-                assert(k ? mock_core3_moves == 1 : mock_core3_moves == 0);
+                if (k == 0) assert(mock_core3_moves == 0 && mock_core3_self == 0);
+                if (k == 1) assert(mock_core3_moves == 1 && mock_core3_self == 0);
+                if (k == 2) assert(mock_core3_moves == 0 && mock_core3_self == 1);
+                if (k < 3) assert(mock_dma_calls >= 3 * 30);       /* (three planes a picture) */
+                if (k == 3) assert(mock_dma_calls == 1);           /* (the first error: never again) */
             }
-            mock_core3 = 0;
+            mock_core3 = 0; mock_dma_fail = 0;
+            tsp_set_dma(1);
+            tsp_test_core3_unknown();
         }
         if (a52_available()) {   /* 1.2.3: MPEG-4 on the (fake) hardware: it decodes; it refuses (the software takes over) */
             static const char *const hf[3] = { "xvid.avi", "mpeg4.mkv", "mpeg4.mp4" };

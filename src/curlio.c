@@ -271,6 +271,27 @@ static void conn_close(Conn *c)
     c->fd = -1;
 }
 
+/* 1.2.4f: ChaCha20-Poly1305 first among the offered suites: the Vita's ARM has no AES instructions, and in
+ * software ChaCha20 is about twice as fast as AES-GCM (an HTTPS 1080p stream took 80% of a core). Servers that
+ * follow the client's order take it; the others keep choosing as before. */
+static int g_suites[160];
+static char g_last_suite[64];
+static const int *suites(void)
+{
+    if (g_suites[0]) return g_suites;
+    const int *all = mbedtls_ssl_list_ciphersuites();
+    int n = 0;
+    for (int pass = 0; pass < 2; pass++)
+        for (const int *p = all; *p && n < (int)(sizeof g_suites / sizeof g_suites[0]) - 1; p++) {
+            const char *nm = mbedtls_ssl_get_ciphersuite_name(*p);
+            int cc = nm && strstr(nm, "CHACHA20");
+            if (cc == !pass) g_suites[n++] = *p;
+        }
+    g_suites[n] = 0;
+    return g_suites;
+}
+const char *cio_last_suite(void) { return g_last_suite; }
+
 static int conn_open(Conn *c, const char *host, int port, int tls, char *err, size_t errsz)
 {
     c->fd = tcp_connect(host, port, c->rq, err, errsz);
@@ -287,6 +308,7 @@ static int conn_open(Conn *c, const char *host, int port, int tls, char *err, si
         mbedtls_ssl_conf_authmode(&c->conf, MBEDTLS_SSL_VERIFY_NONE);
         mbedtls_ssl_conf_rng(&c->conf, mbedtls_ctr_drbg_random, &c->drbg);
         mbedtls_ssl_conf_read_timeout(&c->conf, TICK_MS);
+        mbedtls_ssl_conf_ciphersuites(&c->conf, suites());
         r = mbedtls_ssl_setup(&c->ssl, &c->conf);
     }
     if (!r) r = mbedtls_ssl_set_hostname(&c->ssl, host);     /* SNI: CDNs need it */
@@ -304,6 +326,7 @@ static int conn_open(Conn *c, const char *host, int port, int tls, char *err, si
         snprintf(err, errsz, "TLS handshake failed (-0x%04X %s)", (unsigned)-r, e);
         return -1005;
     }
+    snprintf(g_last_suite, sizeof g_last_suite, "%s", mbedtls_ssl_get_ciphersuite(&c->ssl) ? mbedtls_ssl_get_ciphersuite(&c->ssl) : "");
     return 0;
 }
 
@@ -599,6 +622,7 @@ int cio_last_rcvbuf(void) { return 0; }
 int cio_last_connect_ms(void) { return 0; }
 int cio_last_connect_tries(void) { return 0; }
 const char *cio_rcvbuf_note(void) { return ""; }
+const char *cio_last_suite(void) { return ""; }
 void cio_init(void) {}
 int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 {

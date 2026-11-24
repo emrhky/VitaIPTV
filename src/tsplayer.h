@@ -41,6 +41,7 @@ typedef struct {
     volatile int seekable;              /* tsp_start_vod at another time works */
     volatile int paused;
     int fields;                         /* pictures are two fields one above the other: draw the top half */
+    int mix_rows;                       /* 1.2.4f: an interlaced software picture: the screen mixes each row with the next (GPU) */
     int slots;                          /* decoded pictures held between the decoder and the screen */
     uint32_t skipped;                   /* pictures left out on purpose (catching up, decoder memory) */
     volatile int slow_network;          /* live: the line cannot carry this picture size (the UI may pick a smaller one) */
@@ -115,6 +116,10 @@ void              tsp_set_m4v_hw(int on);
 /* 1.2.3b: a file the player writes the MPEG-4 hardware way into while trying it (a crash in one: it and the
  * later ones are skipped at the next start); "" or NULL = none */
 void              tsp_set_m4v_mark(const char *path);
+/* 1.2.4f: software pictures into the slots by DMA (on by default; off: the ARM copies) */
+void              tsp_set_dma(int on);
+/* 1.2.4f: tests only: the 4th core not known again (as at a start) */
+void              tsp_test_core3_unknown(void);
 /* 1.2.4e: tests only: each software-decoded unit takes this much longer (a slow ARM) */
 void              tsp_test_sw_delay(int us);
 /* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */

@@ -25,6 +25,7 @@
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/kernel/sysmem.h>
+#include <psp2/kernel/dmac.h>
 #include <psp2/net/http.h>
 #include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
@@ -126,6 +127,13 @@ static int g_pictures_seen;             /* some stream gave a picture since the 
  * picture), to come in 1.2.6 */
 static int g_no_m4v_hw = 1;
 static int g_sw_delay_us;               /* 1.2.4e: tests only (tsp_test_sw_delay) */
+/* 1.2.4f: software pictures go into the slots (CDRAM) by DMA: the ARM writes CDRAM at only ~200 MB/s (1080p:
+ * 15 ms a picture, more than decoding it). Off for the session after an error or a wrong copy. */
+static int g_no_dma;
+void tsp_set_dma(int on) { g_no_dma = !on; }
+/* 1.2.4f: the 4th core: -1 not known yet, 0 closed to apps (the Vita's normal state: nothing uses it), 1 open */
+static int g_core3 = -1;
+void tsp_test_core3_unknown(void) { g_core3 = -1; }   /* (tests: as at a start) */
 void tsp_test_sw_delay(int us) { g_sw_delay_us = us; }
 static int g_hd1080 = 1;                /* decode above 720p (the HD decoder; always on since v0.2) */
 static int g_hls_want = 720;            /* HLS: the variant to choose (see tsp_set_options) */
@@ -327,9 +335,13 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     uint8_t m4v_vol[256];
     uint64_t sw_wait_us;                /* ... time its pictures waited for a free slot (not decoding) */
     uint64_t sw_copy_us;                /* 1.2.4d: ... time copying (and mixing rows of) its pictures into the slots */
+    int sw_pitch, sw_pitch_tried;       /* 1.2.4f: the slots' row length as FFmpeg's (one DMA a plane) */
+    uint32_t sw_dma, sw_dma_checked;    /* 1.2.4f: pictures copied by DMA; the first ones checked */
     uint32_t sw_copies;
     int sw_lowres, sw_lowres_want;      /* 1.2.4e: decoded at half size (behind, bigger than the screen) */
-    int sw_core3;                       /* 1.2.4e: the reader moved to the 4th core (1 done, -1 not possible) */
+    int sw_core3;                       /* 1.2.4e/f: 1 the reader on the 4th core, 2 an MPEG-2 slice worker there, -1 not */
+    int rd_core3;                       /* 1.2.4f: the reader is on the 4th core now */
+    int core3_full, rd_core3_off;       /* (found full: back, and not again for this stream) */
     int sw_blend_seen;
     int frag;                           /* 1.2.2b: HLS fMP4: segments gathered whole for t->mp4 (mp4_frag_segment) */
     uint8_t *fbuf;
@@ -1631,6 +1643,7 @@ static void log_rcvbuf(Tsp *t)
     plog("tsp: own socket (%s), receive buffer %d KB, connect %d ms%s (about one round trip: at most %d KB/s with this buffer)",
          strncasecmp(t->url, "https:", 6) ? "http" : "https", rb / 1024, cms, tries > 1 ? (tries == 2 ? ", 2nd socket" : ", 3rd socket") : "",
          cms > 0 ? rb / cms : 0);
+    if (!strncasecmp(t->url, "https:", 6) && cio_last_suite()[0]) plog("tsp: TLS suite %s", cio_last_suite());   /* 1.2.4f */
     const char *rn = cio_rcvbuf_note();                     /* (1.5.1: only when the system gave less) */
     if (rn[0] && strstr(rn, "refused")) plog("tsp: receive buffer: %s", rn);
 }
@@ -1875,6 +1888,7 @@ static int sw_open(Tsp *t, int w, int h, int hw)
     free_plan(t);
     t->yuv = 1;
     t->dw = ALIGN(w, 32);
+    if (!hw && t->sw_pitch >= t->dw && t->sw_pitch <= t->dw + 256 && t->sw_pitch % 32 == 0) t->dw = t->sw_pitch;   /* 1.2.4f */
     t->dh = hw ? ALIGN(h, 16) : ALIGN(h, 2);
     t->sw_hw = hw;                 /* (1.2.3: the MPEG-4 hardware writes whole macroblock rows) */
     uint32_t psize = (uint32_t)(t->dw * t->dh * 3 / 2);
@@ -1936,7 +1950,11 @@ static void sw_frame(void *ctx, const SwvFrame *f)
 {
     Tsp *t = ctx;
     if (stopping(t) || f->w < 16 || f->h < 16) return;
-    if ((f->w != t->sw_w || f->h != t->sw_h || t->sw_hw) && sw_open(t, f->w, f->h, 0) < 0) {
+    /* 1.2.4f: the slots get FFmpeg's row length once (then a plane is one DMA) */
+    int pitch_ok = !g_no_dma && f->ys == 2 * f->us && f->us == f->vs && f->ys % 32 == 0 && f->ys >= ALIGN(f->w, 32) && f->ys <= ALIGN(f->w, 32) + 256;
+    int reopen = pitch_ok && !t->sw_pitch_tried && t->dw != f->ys;
+    if (pitch_ok && !t->sw_pitch_tried) { t->sw_pitch_tried = 1; t->sw_pitch = f->ys; }
+    if ((reopen || f->w != t->sw_w || f->h != t->sw_h || t->sw_hw) && sw_open(t, f->w, f->h, 0) < 0) {
         set_error(t, "Out of memory (%dx%d pictures)", f->w, f->h);
         return;
     }
@@ -1949,18 +1967,42 @@ static void sw_frame(void *ctx, const SwvFrame *f)
     t->sw_wait_us += now_us() - w0;
     Slot *sl = &t->slots[si];
     uint8_t *y = sl->data, *u = y + t->dw * t->dh, *v = u + (t->dw / 2) * (t->dh / 2);
-    int blend = f->interlaced;
-    uint64_t c0 = now_us();                                  /* 1.2.4d: the copy (and row mixing) apart from decoding */
-    sw_rows(y, t->dw, f->y, f->ys, f->w, f->h, blend);
-    sw_rows(u, t->dw / 2, f->u, f->us, (f->w + 1) / 2, (f->h + 1) / 2, blend);
-    sw_rows(v, t->dw / 2, f->v, f->vs, (f->w + 1) / 2, (f->h + 1) / 2, blend);
+    /* 1.2.4f: an interlaced picture is copied as it is; the screen mixes each row with the next (GPU, two draws)
+     * in place of the ARM */
+    t->st.mix_rows = f->interlaced;
+    if (f->interlaced) t->sw_blend_seen = 1;
+    uint64_t c0 = now_us();                                  /* 1.2.4d: the copy apart from decoding */
+    int ch = (f->h + 1) / 2;
+    int done = 0;
+    if (!g_no_dma && t->dw == f->ys && t->dw / 2 == f->us && f->us == f->vs) {
+        size_t ny = (size_t)f->ys * (size_t)f->h, nc = (size_t)f->us * (size_t)ch;
+        sceKernelSyncVMDomain(sl->uid, sl->data, (SceSize)((size_t)t->dw * t->dh * 3 / 2));
+        int r = sceDmacMemcpy(y, f->y, (SceSize)ny);
+        if (r >= 0) r = sceDmacMemcpy(u, f->u, (SceSize)nc);
+        if (r >= 0) r = sceDmacMemcpy(v, f->v, (SceSize)nc);
+        if (r >= 0 && t->sw_dma_checked < 3) {               /* the first pictures: is it really there? */
+            t->sw_dma_checked++;
+            const size_t at[3] = { 0, ny / 2, ny - 64 };
+            for (int k = 0; k < 3 && r >= 0; k++) if (memcmp(y + at[k], f->y + at[k], 64)) r = -2;
+            if (r >= 0 && memcmp(v + nc - 32, f->v + nc - 32, 32)) r = -2;
+        }
+        if (r >= 0) { done = 1; t->sw_dma++; }
+        else {
+            g_no_dma = 1;
+            plog("tsp: DMA copy %s (0x%08X): the ARM copies from now on", r == -2 ? "gave a wrong picture" : "failed", (unsigned)r);
+        }
+    }
+    if (!done) {
+        sw_rows(y, t->dw, f->y, f->ys, f->w, f->h, 0);
+        sw_rows(u, t->dw / 2, f->u, f->us, (f->w + 1) / 2, ch, 0);
+        sw_rows(v, t->dw / 2, f->v, f->vs, (f->w + 1) / 2, ch, 0);
+    }
     t->sw_copy_us += now_us() - c0;
     t->sw_copies++;
-    if (blend) t->sw_blend_seen = 1;
     if (t->st.decoded == 0) {
         g_pictures_seen = 1;
         t->first_pic_pts = f->pts;
-        plog("tsp: first picture %dx%d (software)%s, pts %lld", f->w, f->h, f->interlaced ? ", interlaced (rows mixed)" : "", (long long)f->pts);
+        plog("tsp: first picture %dx%d (software)%s, pts %lld, copied by %s", f->w, f->h, f->interlaced ? ", interlaced (rows mixed on the screen)" : "", (long long)f->pts, done ? "DMA" : "the ARM");
     }
     if (f->pts >= 0 && t->last_out_pts >= 0 && f->pts < t->last_out_pts && t->last_out_pts - f->pts < 90000LL * 10) t->out_of_order++;
     if (f->pts >= 0) t->last_out_pts = f->pts;
@@ -2362,6 +2404,23 @@ static void m4v_flush(Tsp *t)
     }
 }
 
+/* 1.2.4f: the reader onto the 4th core (on = 1) or back where it was; 1 = it is there now */
+static int reader_core3(Tsp *t, int on)
+{
+    if (t->thread <= 0 || g_core3 == 0 || (on && t->rd_core3_off)) return 0;   /* (0 would be the calling thread itself) */
+    int r = sceKernelChangeThreadCpuAffinityMask(t->thread, on ? 0x00080000 : 0x00070000);   /* (back: SCE_KERNEL_CPU_MASK_USER_ALL) */
+    if (on) {
+        if (r < 0) { if (g_core3 < 0) { g_core3 = 0; plog("tsp: 4th core not open to apps (0x%08X): as before", (unsigned)r); } return 0; }
+        g_core3 = 1;
+        if (!t->rd_core3) plog("tsp: 4th core open: the reader runs there");
+        t->rd_core3 = 1;
+        return 1;
+    }
+    if (r >= 0 && t->rd_core3) plog("tsp: the reader back on the other cores");
+    t->rd_core3 = 0;
+    return 0;
+}
+
 static void sw_video_packet(Tsp *t, Pkt *p)
 {
     if (m4v_packet(t, p)) return;                            /* 1.2.3 */
@@ -2391,11 +2450,19 @@ static void sw_video_packet(Tsp *t, Pkt *p)
              i->cfg_len ? " (with the container's header)" : "", th, th == 1 ? "" : "s");
         if (i->width * i->height > 1024 * 576) {
             plog("tsp: %dx%d is above SD: the ARM may not decode it in time (pictures nothing refers to are left out then)", i->width, i->height);
-            /* 1.2.4e: with the 4th core open (a plugin), the reader goes there: the decoder's threads keep three */
-            if (!t->sw_core3 && t->thread > 0) {             /* (0 would be this thread itself) */
-                int r = sceKernelChangeThreadCpuAffinityMask(t->thread, 0x00080000);   /* (SCE_KERNEL_CPU_MASK_SYSTEM) */
-                t->sw_core3 = r >= 0 ? 1 : -1;
-                plog("tsp: 4th core %s (0x%08X)", r >= 0 ? "open: the reader runs there" : "not open to apps", (unsigned)r);
+            /* 1.2.4f: the 4th core (open only with a plugin; closed: nothing changes). MPEG-2: a 4th slice worker
+             * held there, the reader stays (the two would share it); the others (FFmpeg's own frame threads cannot
+             * be held on a core): the reader goes there (1.2.4e) */
+            if (!t->sw_core3 && g_core3 != 0) {
+                if (i->codec == TS_CODEC_MPEG2V && swv_core3(t->swv)) {
+                    t->sw_core3 = 2;
+                    g_core3 = 1;
+                    if (t->rd_core3) reader_core3(t, 0);
+                    plog("tsp: 4th core open: MPEG-2 on 4 workers, one of them there");
+                } else if (i->codec != TS_CODEC_MPEG2V || g_core3 == 1) {
+                    t->sw_core3 = reader_core3(t, 1) ? 1 : -1;
+                } else t->sw_core3 = -1;
+                if (t->sw_core3 < 0 && g_core3 < 0) { g_core3 = 0; plog("tsp: 4th core not open to apps: as before (3 threads)"); }
             }
         }
     }
@@ -3894,6 +3961,7 @@ static void cpu_line(Tsp *t, uint64_t now, int loud)
     uint64_t dt = now - t->cpu_t0;
     if (t->cpu_t0 && dt > 0) {
         char th[128] = "", co[96] = "";
+        int core3_busy = -1;
         size_t o = 0;
         for (int k = 0; k < 4; k++) {
             if (ids[k] < 0) continue;
@@ -3915,12 +3983,18 @@ static void cpu_line(Tsp *t, uint64_t now, int loud)
                 if (busy > top) top = busy;
                 n++;
                 c += (size_t)snprintf(co + c, sizeof co - c, "%s%u%%", c ? " " : "", busy);
+                if (k == 3) core3_busy = (int)busy;
                 if (c >= sizeof co) break;
             }
             if (n) snprintf(co + (c < sizeof co ? c : sizeof co - 1), sizeof co - (c < sizeof co ? c : sizeof co - 1), " (avg %u%%)", sum / n);
             t->st.core_hot = top >= 65;                      /* 1.2: the app's ARM speed (main.c) */
         }
         if (loud) plog("tsp: cpu: %s%s%s", th, co[0] ? "; cores busy " : "", co);
+        /* 1.2.4f: the 4th core is the system's too: a reader there that finds it full twice goes back */
+        if (t->rd_core3 && core3_busy >= 0) {
+            t->core3_full = core3_busy >= 97 ? t->core3_full + 1 : 0;
+            if (t->core3_full >= 2) { plog("tsp: the 4th core is full (%d%%)", core3_busy); reader_core3(t, 0); t->core3_full = 0; t->rd_core3_off = 1; }
+        }
     }
     t->cpu_t0 = now;
     for (int k = 0; k < 4; k++) {
@@ -5704,9 +5778,10 @@ static int video_main(SceSize args, void *argp)
     }
     m4v_hold_free(t);
     if (t->swv) {                                            /* 1.2.2b */
-        plog("tsp: software decoder: %u pictures, %u errors, decoding avg %u us a unit, of it copying%s avg %u us a picture%s", t->st.decoded,
-             swv_errors(t->swv), t->dcalls ? (unsigned)(t->dus_sum / t->dcalls) : 0, t->sw_blend_seen ? " and mixing rows" : "",
-             t->sw_copies ? (unsigned)(t->sw_copy_us / t->sw_copies) : 0, t->sw_lowres ? " (half size)" : "");
+        plog("tsp: software decoder: %u pictures, %u errors, decoding avg %u us a unit, of it copying avg %u us a picture (%u by DMA)%s%s", t->st.decoded,
+             swv_errors(t->swv), t->dcalls ? (unsigned)(t->dus_sum / t->dcalls) : 0,
+             t->sw_copies ? (unsigned)(t->sw_copy_us / t->sw_copies) : 0, t->sw_dma, t->sw_blend_seen ? ", rows mixed on the screen" : "",
+             t->sw_lowres ? " (half size)" : "");
         swv_destroy(t->swv);
         t->swv = NULL;
     }
@@ -6251,6 +6326,8 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
         tsp_stop();
         return -1;
     }
+    /* 1.2.4f: HTTPS: the reader decrypts TLS (up to 80% of a core at 1080p): onto the 4th core when it is open */
+    if (!strncasecmp(t->url, "https:", 6)) reader_core3(t, 1);
     return 0;
 }
 

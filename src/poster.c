@@ -7,7 +7,21 @@
 #include <jpeglib.h>
 #include <png.h>
 
-#define POSTER_MAX_SRC 8192                  /* sides bigger than this are not decoded at all */
+#define POSTER_MAX_SRC 8192
+
+/* 1.2.4f: which JPEG library this build has (libjpeg-turbo decodes with NEON) */
+const char *poster_jpeg_lib(void)
+{
+#ifdef LIBJPEG_TURBO_VERSION
+#define PJ_STR2(x) #x
+#define PJ_STR(x) PJ_STR2(x)
+    return "libjpeg-turbo " PJ_STR(LIBJPEG_TURBO_VERSION);
+#else
+    static char b[24];
+    snprintf(b, sizeof b, "libjpeg %d", JPEG_LIB_VERSION);
+    return b;
+#endif
+}                  /* sides bigger than this are not decoded at all */
 
 /* src (sw x sh, 3 or 4 bytes a pixel) averaged down into dst (dw x dh RGBA) */
 static void shrink(const uint8_t *src, int sw, int sh, int bpp, size_t stride, uint32_t *dst, int dw, int dh)
