@@ -1015,6 +1015,24 @@ sw:
             else
                 assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "not supported"));
         }
+        if (a52_available()) {   /* 1.2.4e: a slow ARM: behind, half size from a keyframe on; the 4th core for the reader */
+            extern int mock_core3, mock_core3_moves;
+            static const struct { const char *f; int vod; } lf[2] = { { "mpeg2hd.ts", 0 }, { "xvidhd.avi", 1 } };
+            for (int k = 0; k < 2; k++) {
+                snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", lf[k].f);
+                mock_core3 = k; mock_core3_moves = 0;
+                tsp_test_sw_delay(70000);
+                if (lf[k].vod) { VRun v = play_vod(dp, 0, 25, 0, 0); r = v.r; } else r = play(dp, 22);
+                tsp_test_sw_delay(0);
+                char nm[48];
+                snprintf(nm, sizeof nm, "%s slow ARM", lf[k].f);
+                show(nm, &r);
+                printf("               4th core moves %d\n", mock_core3_moves);
+                assert(r.st.state == TSP_ENDED && r.w == 640 && r.st.decoded >= 30 && r.st.audio_frames > 100);
+                assert(k ? mock_core3_moves == 1 : mock_core3_moves == 0);
+            }
+            mock_core3 = 0;
+        }
         if (a52_available()) {   /* 1.2.3: MPEG-4 on the (fake) hardware: it decodes; it refuses (the software takes over) */
             static const char *const hf[3] = { "xvid.avi", "mpeg4.mkv", "mpeg4.mp4" };
             tsp_set_m4v_hw(1);                               /* (the software tests before: the library refused, none worked) */

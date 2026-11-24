@@ -93,6 +93,7 @@ int main(int argc, char **argv)
            (unsigned long long)i->packets, (unsigned long long)i->bytes, i->sync_losses, i->cc_errors,
            i->tei_errors, i->scrambled_packets, i->pes_overflows);
     printf("video_aus=%u\nkeyframes=%u\nintra_aus=%u\ndamaged_aus=%u\naudio_frames=%u\n", i->video_aus, i->keyframes, i->intra_aus, i->damaged_aus, i->audio_frames);
+    printf("joined_aus=%u\n", i->joined_aus);
     printf("subs=%d\ncues=%u\n", i->nsubs, ncues);
     for (int k = 0; k < i->nsubs; k++)
         printf("subtrack%d=%d|%s|%s|%d|%d|%d\n", k, i->subs[k].id, i->subs[k].lang, i->subs[k].name, i->subs[k].ass, i->subs[k].forced, i->subs[k].is_default);

@@ -247,6 +247,52 @@ int main(int argc, char **argv)
         assert(st == DL_IDLE && same_file(vid, src));
     }
     dl_set_net_check(NULL);
+    /* 8. 1.2.4d: the address answers with an HLS playlist: the segments one after the other in video.ts */
+    if (argc > 3) {
+        const char *plain = argv[3];
+        static const char *const hp[3] = { "/hls/film.mkv", "/hlsaes/film.mkv", "/hls403/film.mkv" };
+        for (int k = 0; k < 3; k++) {
+            char t8[16]; snprintf(t8, sizeof t8, "HLS %d", k);
+            DlItem h8 = mk(base, hp[k], t8, 'E');
+            assert(dl_add(&h8) == 0);
+            int s8 = wait_end(h8.dir, 60);
+            DlItem r8;
+            assert(dl_info_read(&r8, h8.dir) == 0);
+            snprintf(vid, sizeof vid, "%s/%s", h8.dir, r8.video);
+            printf("8 %s: state %d, %s %lld bytes, segments %d of %d, err '%s'\n", hp[k], s8, r8.video, fsize(vid), r8.hls_seg, r8.hls_nseg, r8.err);
+            assert(s8 == DL_IDLE && r8.done && r8.hls && !strcmp(r8.video, "video.ts") && r8.hls_seg == 12 && r8.hls_nseg == 12);
+            assert(same_file(vid, plain) && r8.size == (uint64_t)fsize(plain));
+            char old[700]; snprintf(old, sizeof old, "%s/video.mkv", h8.dir);
+            assert(fsize(old) < 0);                              /* (the playlist is not kept as the film) */
+        }
+        /* not downloadable: fragmented MP4 parts, a live stream */
+        static const char *const bad[2] = { "/hlsfmp4/film.mkv", "/hlslive/film.mkv" };
+        for (int k = 0; k < 2; k++) {
+            DlItem h8 = mk(base, bad[k], bad[k], 'F');
+            assert(dl_add(&h8) == 0);
+            int s8 = wait_end(h8.dir, 30);
+            DlItem r8;
+            assert(dl_info_read(&r8, h8.dir) == 0);
+            printf("8 %s: state %d, err '%s'\n", bad[k], s8, r8.err);
+            assert(s8 == DL_FAILED && !r8.done && r8.err[0]);
+            assert(dl_delete(h8.dir) == 0);
+        }
+        /* paused in the middle: on from the next segment, the same file in the end */
+        DlItem hs = mk(base, "/hlsslow/film.mkv", "HLS slow", 'F');
+        assert(dl_add(&hs) == 0);
+        DlItem rs;
+        for (int k = 0; k < 200; k++) { usleep(50000); if (dl_info_read(&rs, hs.dir) == 0 && rs.hls_seg >= 3) break; }
+        dl_pause(hs.dir);
+        assert(dl_info_read(&rs, hs.dir) == 0 && rs.hls && !rs.done && rs.hls_seg >= 3 && rs.hls_seg < 12);
+        int at = rs.hls_seg;
+        snprintf(vid, sizeof vid, "%s/video.ts", hs.dir);
+        assert((uint64_t)fsize(vid) == rs.hls_bytes);
+        assert(dl_resume(hs.dir) == 0);
+        int s9 = wait_end(hs.dir, 60);
+        assert(dl_info_read(&rs, hs.dir) == 0);
+        printf("8 paused at segment %d: state %d, %d segments, same %d\n", at, s9, rs.hls_seg, same_file(vid, plain));
+        assert(s9 == DL_IDLE && rs.done && rs.hls_seg == 12 && same_file(vid, plain));
+    }
     /* 7. 1.2.4: the order of the waiting ones; info.txt's "watched" */
     {
         DlItem q[4];

@@ -161,6 +161,79 @@ p = write("scrambled", bytes(sc))
 i = tsinfo(p)
 check(int(i["scrambled"]) > 0 and int(i["video_aus"]) == 0, f"scrambled: {i['scrambled']} packets, {i['video_aus']} AUs")
 
+print("== 1.2.4d: H.264 parameter sets in a PES of their own")
+# Every unit of s360 is cut in two PES: what comes before its first slice (AUD / SPS / PPS / SEI) and the slices.
+# The Vita decoder refused such parameter-only units (0x8062000F, "Last of Us" HLS froze): they must be joined.
+_xp = f"{TMP}/split_src"
+tsinfo(files["s360"], "-o", _xp)
+_es = open(_xp + ".video", "rb").read()
+def _nals(b):
+    out, k = [], 0
+    while True:
+        k = b.find(b"\x00\x00\x01", k)
+        if k < 0: break
+        out.append(k); k += 3
+    return out
+_starts = _nals(_es)
+_aus, _cur, _seen_aud = [], [], False
+for _n, _st in enumerate(_starts):
+    _beg = _st - 1 if _st > 0 and _es[_st - 1] == 0 else _st
+    _end = (_starts[_n + 1] - (1 if _es[_starts[_n + 1] - 1] == 0 else 0)) if _n + 1 < len(_starts) else len(_es)
+    _t = _es[_st + 3] & 0x1F
+    if _t == 9:
+        if _cur and _seen_aud: _aus.append(_cur)
+        _cur = []; _seen_aud = True
+    if _seen_aud: _cur.append((_t, _es[_beg:_end]))   # (tsinfo's own SPS / PPS before the first AUD: left out)
+if _cur: _aus.append(_cur)
+def _pes(payload, pts):
+    p5 = bytes([0x21 | ((pts >> 29) & 0x0E), (pts >> 22) & 0xFF, 0x01 | ((pts >> 14) & 0xFE), (pts >> 7) & 0xFF, 0x01 | ((pts << 1) & 0xFE)])
+    return b"\x00\x00\x01\xE0\x00\x00\x80\x80\x05" + p5 + payload
+def _crc(b):
+    c = 0xFFFFFFFF
+    for x in b:
+        c ^= x << 24
+        for _ in range(8): c = ((c << 1) ^ 0x04C11DB7) & 0xFFFFFFFF if c & 0x80000000 else (c << 1) & 0xFFFFFFFF
+    return c.to_bytes(4, "big")
+def _section(pid, body):
+    sec = body + _crc(body)
+    return bytes([0x47, 0x40 | (pid >> 8), pid & 0xFF, 0x10, 0]) + sec + b"\xFF" * (183 - len(sec))
+_pat = _section(0, bytes([0x00, 0xB0, 13, 0, 1, 0xC1, 0, 0, 0, 1, 0xE1, 0x00]))
+_pmt = _section(0x100, bytes([0x02, 0xB0, 18, 0, 1, 0xC1, 0, 0, 0xE1, 0x01, 0xF0, 0, 0x1B, 0xE1, 0x01, 0xF0, 0]))
+_cc = [0]
+def _pkts(pes):
+    out, first = [], True
+    while pes:
+        chunk = pes[:184]
+        hdr = bytes([0x47, (0x40 if first else 0) | 0x01, 0x01])
+        if len(chunk) < 184:
+            pad = 184 - len(chunk) - 1
+            af = bytes([pad]) + (bytes([0]) + b"\xFF" * (pad - 1) if pad > 0 else b"")
+            out.append(hdr + bytes([0x30 | _cc[0]]) + af + chunk)
+        else:
+            out.append(hdr + bytes([0x10 | _cc[0]]) + chunk)
+        _cc[0] = (_cc[0] + 1) & 15
+        pes = pes[184:]; first = False
+    return out
+_out, _nsplit = [_pat, _pmt], 0
+for _k, _au in enumerate(_aus):
+    _pts = 126000 + _k * 3600
+    _pre = b"".join(d for t, d in _au[:next((j for j, (t, _d) in enumerate(_au) if 1 <= t <= 5), len(_au))])
+    _rest = b"".join(d for t, d in _au)[len(_pre):]
+    if _pre and _rest:
+        _out += _pkts(_pes(_pre, _pts)); _nsplit += 1
+    if _rest: _out += _pkts(_pes(_rest, _pts))
+    elif _pre: _out += _pkts(_pes(_pre, _pts))
+_sp = write("split_params", b"".join(_out))
+i = tsinfo(_sp, "-o", f"{TMP}/split_out")
+check(int(i["joined_aus"]) == _nsplit, f"split params: {i['joined_aus']} joined, {_nsplit} parameter-only PES")
+check(int(i["video_aus"]) == len(_aus), f"split params: {i['video_aus']} units, {len(_aus)} pictures")
+_bk = tsinfo(files["s360"])["keyframes"]
+check(i["keyframes"] == _bk, f"split params: keyframes {i['keyframes']} vs {_bk}")
+_dec = sh(f"ffmpeg -hide_banner -loglevel error -f h264 -i {TMP}/split_out.video -f null -", check=False)
+check(_dec.returncode == 0 and _dec.stderr.strip() == "", f"split params: joined stream decode errors: {_dec.stderr[:200]}")
+check(open(f"{TMP}/split_out.video", "rb").read() == _es, "split params: the joined stream differs from the original")
+print(f"  {len(_aus)} pictures, {_nsplit} parameter-only PES joined")
+
 print("== fuzz (sanitizers)")
 r = sh(f"{TMP}/fuzz_ts 140 {files['s720']} {files['sbase']} {files['sinter']} {files['shevc']} {files['smpeg2']}", check=False)
 print(r.stdout.strip())
