@@ -13,26 +13,6 @@ const char *swv_name(int codec)
 
 #ifdef HAVE_A52
 #include <libavcodec/avcodec.h>
-#include <pthread.h>
-#include <psp2/kernel/threadmgr.h>
-
-/* 1.2.4f: MPEG-2's slices on our own workers, one of them held on the 4th core (only when a plugin opens it to
- * apps): FFmpeg's own slice threads cannot be put on a core. The caller decodes a share too: 4 at once. */
-#define POOL_W 3
-#define CORE3_MASK 0x00080000                   /* (SCE_KERNEL_CPU_MASK_SYSTEM) */
-typedef struct {
-    pthread_t th[POOL_W];
-    pthread_mutex_t m;
-    pthread_cond_t go, done;
-    int gen, quit, busy, nth;
-    int pinned;                                 /* -1 not yet, 0 refused, 1 the last worker is on the 4th core */
-    /* the job */
-    AVCodecContext *c;
-    int (*func)(AVCodecContext *, void *);
-    char *arg;
-    int *ret, count, size;
-    volatile int next;
-} Pool;
 
 
 struct SwVdec {
@@ -46,7 +26,6 @@ struct SwVdec {
     int skip;
     int threads, lowres;                /* 1.2.4e: as opened */
     int w0, h0;
-    Pool *pool;                         /* 1.2.4f */
     int wait_key;                       /* 1.2.4e: opened again mid-stream: pictures left out up to a keyframe */
 };
 
@@ -96,104 +75,6 @@ SwVdec *swv_create(int codec, const uint8_t *extra, size_t elen, int w, int h, i
     return d;
 }
 
-
-static void pool_jobs(Pool *p)
-{
-    for (;;) {
-        int i = __sync_fetch_and_add(&p->next, 1);
-        if (i >= p->count) break;
-        int r = p->func(p->c, p->arg + (size_t)i * (size_t)p->size);
-        if (p->ret) p->ret[i] = r;
-    }
-}
-
-typedef struct { Pool *p; int k; } PoolArg;
-
-static void *pool_main(void *a)
-{
-    PoolArg *pa = a;
-    Pool *p = pa->p;
-    int k = pa->k;
-    free(pa);
-    if (k == POOL_W - 1) {                                   /* the last one: the 4th core */
-        int r = sceKernelChangeThreadCpuAffinityMask(0, CORE3_MASK);   /* (0: this thread) */
-        pthread_mutex_lock(&p->m);
-        p->pinned = r >= 0;
-        pthread_cond_broadcast(&p->done);
-        pthread_mutex_unlock(&p->m);
-    }
-    int seen = 0;
-    pthread_mutex_lock(&p->m);
-    for (;;) {
-        while (!p->quit && p->gen == seen) pthread_cond_wait(&p->go, &p->m);
-        if (p->quit) break;
-        seen = p->gen;
-        pthread_mutex_unlock(&p->m);
-        pool_jobs(p);
-        pthread_mutex_lock(&p->m);
-        if (--p->busy == 0) pthread_cond_broadcast(&p->done);
-    }
-    pthread_mutex_unlock(&p->m);
-    return NULL;
-}
-
-static void pool_free(Pool *p)
-{
-    if (!p) return;
-    pthread_mutex_lock(&p->m);
-    p->quit = 1;
-    pthread_cond_broadcast(&p->go);
-    pthread_mutex_unlock(&p->m);
-    for (int k = 0; k < p->nth; k++) pthread_join(p->th[k], NULL);
-    pthread_mutex_destroy(&p->m);
-    pthread_cond_destroy(&p->go);
-    pthread_cond_destroy(&p->done);
-    free(p);
-}
-
-/* AVCodecContext.execute: the slices on the workers and this thread */
-static int pool_execute(AVCodecContext *c, int (*func)(AVCodecContext *c2, void *arg2), void *arg, int *ret, int count, int size)
-{
-    Pool *p = ((SwVdec *)c->opaque)->pool;
-    if (!p || count <= 1) {
-        for (int i = 0; i < count; i++) { int r = func(c, (char *)arg + (size_t)i * (size_t)size); if (ret) ret[i] = r; }
-        return 0;
-    }
-    pthread_mutex_lock(&p->m);
-    p->c = c; p->func = func; p->arg = arg; p->ret = ret; p->count = count; p->size = size; p->next = 0;
-    p->busy = p->nth;
-    p->gen++;
-    pthread_cond_broadcast(&p->go);
-    pthread_mutex_unlock(&p->m);
-    pool_jobs(p);
-    pthread_mutex_lock(&p->m);
-    while (p->busy) pthread_cond_wait(&p->done, &p->m);
-    pthread_mutex_unlock(&p->m);
-    return 0;
-}
-
-static Pool *pool_new(void)
-{
-    Pool *p = calloc(1, sizeof *p);
-    if (!p) return NULL;
-    pthread_mutex_init(&p->m, NULL);
-    pthread_cond_init(&p->go, NULL);
-    pthread_cond_init(&p->done, NULL);
-    p->pinned = -1;
-    for (int k = 0; k < POOL_W; k++) {
-        PoolArg *pa = malloc(sizeof *pa);
-        if (!pa) break;
-        pa->p = p; pa->k = k;
-        if (pthread_create(&p->th[k], NULL, pool_main, pa) != 0) { free(pa); break; }
-        p->nth++;
-    }
-    pthread_mutex_lock(&p->m);
-    while (p->nth == POOL_W && p->pinned < 0) pthread_cond_wait(&p->done, &p->m);
-    pthread_mutex_unlock(&p->m);
-    if (p->nth < POOL_W || p->pinned != 1) { pool_free(p); return NULL; }
-    return p;
-}
-
 /* open the decoder again with these threads / this lowres (both are set before opening); 0 = done */
 static int reopen(SwVdec *d, int n, int lowres)
 {
@@ -214,9 +95,7 @@ static int reopen(SwVdec *d, int n, int lowres)
         nc->extradata = av_mallocz((size_t)d->ctx->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
         if (nc->extradata) { memcpy(nc->extradata, d->ctx->extradata, (size_t)d->ctx->extradata_size); nc->extradata_size = d->ctx->extradata_size; }
     }
-    nc->opaque = d;
     if (avcodec_open2(nc, d->codec, NULL) < 0) { avcodec_free_context(&nc); return -1; }
-    if (d->pool && slice && nc->active_thread_type == FF_THREAD_SLICE) nc->execute = pool_execute;   /* 1.2.4f */
     avcodec_free_context(&d->ctx);
     d->ctx = nc;
     d->threads = nc->active_thread_type ? nc->thread_count : 1;
@@ -233,21 +112,6 @@ int swv_threads(SwVdec *d, int n)
     if (slice ? !(d->codec->capabilities & AV_CODEC_CAP_SLICE_THREADS) : !(d->codec->capabilities & AV_CODEC_CAP_FRAME_THREADS)) return 1;
     if (reopen(d, n, d->lowres) < 0) return d->threads ? d->threads : 1;
     return d->threads;
-}
-
-int swv_core3(SwVdec *d)
-{
-    if (!d || d->pool || d->codec_kind != TS_CODEC_MPEG2V || !(d->codec->capabilities & AV_CODEC_CAP_SLICE_THREADS)) return 0;
-    d->pool = pool_new();
-    if (!d->pool) return 0;                                  /* (the 4th core is not open: as before) */
-    if (reopen(d, POOL_W + 1, d->lowres) < 0 || d->ctx->execute != pool_execute) {
-        Pool *p = d->pool;
-        d->pool = NULL;
-        reopen(d, d->threads > 1 ? d->threads : 1, d->lowres);
-        pool_free(p);
-        return 0;
-    }
-    return 1;
 }
 
 int swv_lowres(SwVdec *d, int lowres)
@@ -270,7 +134,6 @@ void swv_destroy(SwVdec *d)
     if (!d) return;
     if (d->parser) av_parser_close(d->parser);
     avcodec_free_context(&d->ctx);
-    pool_free(d->pool);
     av_packet_free(&d->pkt);
     av_frame_free(&d->frame);
     free(d);
@@ -393,7 +256,6 @@ SwVdec *swv_create(int codec, const uint8_t *extra, size_t elen, int w, int h, i
 void    swv_destroy(SwVdec *d) { (void)d; }
 int     swv_threads(SwVdec *d, int n) { (void)d; (void)n; return 1; }
 int     swv_lowres(SwVdec *d, int lowres) { (void)d; (void)lowres; return 0; }
-int     swv_core3(SwVdec *d) { (void)d; return 0; }
 int     swv_decode(SwVdec *d, const uint8_t *data, size_t len, int64_t pts, int64_t dts, SwvOut out, void *ctx)
 { (void)d; (void)data; (void)len; (void)pts; (void)dts; (void)out; (void)ctx; return 0; }
 void    swv_flush(SwVdec *d, SwvOut out, void *ctx) { (void)d; (void)out; (void)ctx; }

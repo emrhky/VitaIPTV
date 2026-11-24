@@ -73,6 +73,7 @@ static const Pair FIXED[] = {
     /* 1.4.1: downloads and playing the downloaded copy */
     { "Watching from the same server: the download waits", "Aynı sunucudan izleniyor: indirme bekliyor" },
     { "Playing the downloaded copy", "İndirilenden oynatılıyor" },
+    { "An earlier video did not close and still holds memory: restart the app", "Önceki video kapanamadı ve belleği tutuyor: uygulamayı yeniden başlatın" },
     { "Playing the downloaded copy (still downloading)", "İndirilenden oynatılıyor (indirme sürüyor)" },
     { "Downloaded: %s", "İndirildi: %s" }, { "Could not download: %s", "İndirilemedi: %s" },
     { "Not enough free space on the memory card (%s free)", "Hafıza kartında yer yetmiyor (boş: %s)" },

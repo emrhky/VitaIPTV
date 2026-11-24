@@ -120,6 +120,8 @@ void              tsp_set_m4v_mark(const char *path);
 void              tsp_set_dma(int on);
 /* 1.2.4f: tests only: the 4th core not known again (as at a start) */
 void              tsp_test_core3_unknown(void);
+/* 1.2.4g: players that could not be stopped (a stuck thread): their memory stays taken until the app ends */
+int               tsp_leaked(void);
 /* 1.2.4e: tests only: each software-decoded unit takes this much longer (a slow ARM) */
 void              tsp_test_sw_delay(int us);
 /* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */

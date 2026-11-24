@@ -129,7 +129,8 @@ static int g_no_m4v_hw = 1;
 static int g_sw_delay_us;               /* 1.2.4e: tests only (tsp_test_sw_delay) */
 /* 1.2.4f: software pictures go into the slots (CDRAM) by DMA: the ARM writes CDRAM at only ~200 MB/s (1080p:
  * 15 ms a picture, more than decoding it). Off for the session after an error or a wrong copy. */
-static int g_no_dma;
+/* 1.2.4g: off: on the Vita the DMA copied a 1080p picture in 23-26 ms, the ARM in 15.6 (the tests turn it on) */
+static int g_no_dma = 1;
 void tsp_set_dma(int on) { g_no_dma = !on; }
 /* 1.2.4f: the 4th core: -1 not known yet, 0 closed to apps (the Vita's normal state: nothing uses it), 1 open */
 static int g_core3 = -1;
@@ -245,6 +246,10 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     int dry_restarts, good_since;       /* restarts that did not bring steady pictures back (each waits longer) */
     int es_full_fails;                  /* HD decoder: "ES buffer full" even after a picture was taken out */
     int joined_said;                    /* 1.2.4d */
+    /* 1.2.4g: live, after a reconnect: a server that starts its times again (a phone sending a file from the
+     * start) went back seconds; the times after it are moved on to follow the ones before (one timeline) */
+    int64_t rc_off, rc_last_v, rc_last_a;
+    int rc_check_v, rc_check_a, rc_moves;
     int force_internal, f_errs, f_errs2;   /* the public decoder refuses the stream (0x8062000F): use the HD one */
     int d_errs, d_units;
     char net_err[96];                   /* the last network failure, for "no picture" (a keyframe was not the problem) */                /* "invalid stream" (0x8062000D) from the public decoder, in a window of units */
@@ -339,7 +344,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     uint32_t sw_dma, sw_dma_checked;    /* 1.2.4f: pictures copied by DMA; the first ones checked */
     uint32_t sw_copies;
     int sw_lowres, sw_lowres_want;      /* 1.2.4e: decoded at half size (behind, bigger than the screen) */
-    int sw_core3;                       /* 1.2.4e/f: 1 the reader on the 4th core, 2 an MPEG-2 slice worker there, -1 not */
+    int sw_core3;                       /* 1.2.4e: 1 the reader on the 4th core, -1 not */
     int rd_core3;                       /* 1.2.4f: the reader is on the 4th core now */
     int core3_full, rd_core3_off;       /* (found full: back, and not again for this stream) */
     int sw_blend_seen;
@@ -2450,18 +2455,11 @@ static void sw_video_packet(Tsp *t, Pkt *p)
              i->cfg_len ? " (with the container's header)" : "", th, th == 1 ? "" : "s");
         if (i->width * i->height > 1024 * 576) {
             plog("tsp: %dx%d is above SD: the ARM may not decode it in time (pictures nothing refers to are left out then)", i->width, i->height);
-            /* 1.2.4f: the 4th core (open only with a plugin; closed: nothing changes). MPEG-2: a 4th slice worker
-             * held there, the reader stays (the two would share it); the others (FFmpeg's own frame threads cannot
-             * be held on a core): the reader goes there (1.2.4e) */
+            /* 1.2.4f/g: the 4th core (open only with a plugin; closed: nothing changes): the reader goes there and
+             * the decoder keeps its 3 threads (1.2.4e). (1.2.4f held a 4th MPEG-2 slice worker there: on the Vita it
+             * waited 135 ms a picture and the player could not stop: gone) */
             if (!t->sw_core3 && g_core3 != 0) {
-                if (i->codec == TS_CODEC_MPEG2V && swv_core3(t->swv)) {
-                    t->sw_core3 = 2;
-                    g_core3 = 1;
-                    if (t->rd_core3) reader_core3(t, 0);
-                    plog("tsp: 4th core open: MPEG-2 on 4 workers, one of them there");
-                } else if (i->codec != TS_CODEC_MPEG2V || g_core3 == 1) {
-                    t->sw_core3 = reader_core3(t, 1) ? 1 : -1;
-                } else t->sw_core3 = -1;
+                t->sw_core3 = reader_core3(t, 1) ? 1 : -1;
                 if (t->sw_core3 < 0 && g_core3 < 0) { g_core3 = 0; plog("tsp: 4th core not open to apps: as before (3 threads)"); }
             }
         }
@@ -3066,6 +3064,7 @@ static void on_bsub(void *ctx, int id, const uint8_t *data, size_t len, int64_t 
 {
     Tsp *t = ctx;
     if (stopping(t) || pts < 0) return;
+    if (t->rc_off) pts = (pts + t->rc_off) & ((1LL << 33) - 1);   /* 1.2.4g (see rc_map) */
     update_sub_tracks(t);
     int k = t->st.s_cur;
     if (k < 0 || k >= t->st.s_n || t->st.s_id[k] != id) return;   /* (only the track shown) */
@@ -3128,6 +3127,7 @@ static void on_sub(void *ctx, int id, const char *text, int64_t pts, int64_t dur
 {
     Tsp *t = ctx;
     if (stopping(t) || pts < 0) return;
+    if (t->rc_off) pts = (pts + t->rc_off) & ((1LL << 33) - 1);   /* 1.2.4g (see rc_map) */
     update_sub_tracks(t);
     if (!t->cues && !(t->cues = calloc(SUB_CUES, sizeof(SubCue)))) return;
     sceKernelLockMutex(t->qlock, 1, NULL);
@@ -3207,6 +3207,32 @@ int tsp_sub_text(char *out, size_t cap)
     return found;
 }
 
+/* 1.2.4g: the times after a reconnect (see rc_off). The first unit of each kind after it is compared with the
+ * newest time before it: more than 2 s back is a new start, moved on to 40 ms after it. Before any reconnect,
+ * and for films, the times stay as they are. */
+#define PTS_MASK ((1LL << 33) - 1)
+static int64_t rc_map(Tsp *t, int64_t pts, int video)
+{
+    if (pts < 0) return pts;
+    int64_t m = (pts + t->rc_off) & PTS_MASK;
+    int *chk = video ? &t->rc_check_v : &t->rc_check_a;
+    if (*chk) {
+        *chk = 0;
+        int64_t ref = t->rc_last_v;
+        if (t->rc_last_a >= 0 && (ref < 0 || pts_diff(t->rc_last_a, ref) > 0)) ref = t->rc_last_a;
+        int64_t d = ref >= 0 ? pts_diff(m, ref) : 0;
+        if (d < -90000LL * 2) {
+            int64_t want = (ref + 3600) & PTS_MASK;
+            t->rc_off = (t->rc_off + pts_diff(want, m)) & PTS_MASK;
+            m = want;
+            if (t->rc_moves++ < 3)
+                plog("tsp: after the reconnect the stream's times start again (%lld ms back): played on as one", (long long)(-d / 90));
+        }
+    }
+    (video ? &t->rc_last_v : &t->rc_last_a)[0] = m;
+    return m;
+}
+
 static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, int64_t dts, int flags)
 {
     (void)dts;
@@ -3216,6 +3242,11 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
         plog("tsp: H.264 units with no picture (parameter sets / SEI in a packet of their own) are joined to the next one");
     }
     if (stopping(t)) return;
+    if (!t->vod) {                                          /* 1.2.4g */
+        int64_t np = rc_map(t, pts >= 0 ? pts : dts, 1);
+        if (pts >= 0 && dts >= 0) dts = (np - pts + dts) & PTS_MASK;
+        if (pts >= 0) pts = np; else dts = np;
+    }
     const TsInfo *i = dmx_info(t);
     Pkt *p = malloc(sizeof(Pkt) + len);
     if (!p) return;
@@ -3332,6 +3363,7 @@ static void on_audio(void *ctx, const uint8_t *data, size_t len, int64_t pts)
             t->xcfg_gen = i->audio_cfg_gen;
         }
     }
+    if (pts >= 0 && !t->vod) pts = rc_map(t, pts, 0);       /* 1.2.4g */
     audio_push(t, i->audio_codec, data, len, pts);
 }
 
@@ -4391,6 +4423,7 @@ static void read_http(Tsp *t, uint8_t *buf)
         }
         t->st.reconnects++;
         plog("tsp: reconnecting (%u)", t->st.reconnects);
+        if (!t->vod) t->rc_check_v = t->rc_check_a = 1;     /* 1.2.4g: the times may start again */
         for (int k = 0; k < 10 && !stopping(t); k++) sceKernelDelayThread(100000);   /* 1 s */
         if (stopping(t)) return;
     }
@@ -6274,6 +6307,7 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     t->vod_start_ms = start_ms > 0 ? start_ms : 0;
     t->vod_first_pts = -1;
     t->first_pic_pts = -1;
+    t->rc_last_v = t->rc_last_a = -1;                       /* 1.2.4g */
     t->start_us = now_us();                                 /* (the audio thread may look before the reader starts) */
     if (stream_offset_ms >= 0) {                            /* a film through the transcoding server */
         t->vod_stream = 1;
@@ -6397,6 +6431,9 @@ int tsp_vod_pos(int *pos_ms, int *dur_ms)
     return 1;
 }
 
+static int g_leaked;
+int tsp_leaked(void) { return g_leaked; }
+
 void tsp_stop(void)
 {
     Tsp *t = g_tsp;
@@ -6415,6 +6452,7 @@ void tsp_stop(void)
         int r = sceKernelWaitThreadEnd(ths[k], NULL, &timeout);
         if (r < 0) {                   /* a thread is stuck: leak rather than free memory it may still use */
             plog("tsp: thread did not stop (0x%08X), leaking the player", (unsigned)r);
+            g_leaked++;                                     /* 1.2.4g: the UI says so (its memory stays taken) */
             return;
         }
         sceKernelDeleteThread(ths[k]);
