@@ -143,11 +143,18 @@ static void dl_grp_row(int i, ScrRow *r, void *ctx)
     r->right = cnt;
 }
 
+/* 1.2.4d: the whole size; an HLS download not ended: guessed from the segments on the card */
+static uint64_t dl_est_size(const DlItem *it)
+{
+    if (it->size || !it->hls || it->hls_seg <= 0 || it->hls_nseg <= 0) return it->size;
+    return it->hls_bytes * (uint64_t)it->hls_nseg / (uint64_t)it->hls_seg;
+}
+
 static const char *dl_right_text(const DlItem *it, char *b, size_t cap)
 {
     DlState st;
     int s = dl_state(it->dir, &st);
-    uint64_t have = s == DL_ACTIVE ? st.have : it->have, tot = s == DL_ACTIVE && st.total ? st.total : it->size;
+    uint64_t have = s == DL_ACTIVE ? st.have : it->have, tot = s == DL_ACTIVE && st.total ? st.total : dl_est_size(it);
     int pct = tot ? (int)(have * 100 / tot) : 0;
     if (it->done) {
         dl_size_text(it->size ? it->size : it->have, lang_get() == LANG_TR, b, cap);
@@ -224,8 +231,8 @@ static const DlItem *dl_item_of_path(const char *path)
 static long long dl_growing_have(const char *path, uint64_t *size)
 {
     const DlItem *it = iptv_is_local_path(path) ? dl_item_of_path(path) : NULL;
-    if (!it || it->done || !it->size) return -1;
-    *size = it->size;
+    if (!it || it->done || !dl_est_size(it)) return -1;
+    *size = dl_est_size(it);
     DlState st;
     if (dl_state(it->dir, &st) == DL_ACTIVE && st.have) return (long long)st.have;
     SceIoStat s;
