@@ -20,6 +20,20 @@ static const Pair FIXED[] = {
     { "Sound levelling", "Ses dengeleme" }, { "Between channels", "Kanallar arası" }, { "Night", "Gece" }, { "s", "sn" },   /* 1.2.2 */
     /* 1.5.1 */
     { "The server sent nothing (an empty answer)", "Sunucu bir şey göndermedi (boş cevap)" },
+    /* 1.2.4d: films given as HLS */
+    { "The film's playlist did not come whole", "Filmin oynatma listesi tam gelmedi" },
+    { "The server sent something that is not a film", "Sunucu film olmayan bir şey gönderdi" },
+    { "This film's sound comes apart from the picture (HLS): it cannot be downloaded", "Bu filmin sesi görüntüden ayrı geliyor (HLS): indirilemez" },
+    { "This film has no picture the Vita can play", "Bu filmde Vita'nın oynatabileceği bir görüntü yok" },
+    { "The film's playlist cannot be read", "Filmin oynatma listesi okunamıyor" },
+    { "This film comes in a form that cannot be downloaded (HLS with MP4 parts)", "Bu film indirilemeyen bir biçimde geliyor (MP4 parçalı HLS)" },
+    { "This film is protected (DRM): it cannot be downloaded", "Bu film korumalı (DRM): indirilemez" },
+    { "This is a live stream: it cannot be downloaded", "Bu canlı bir yayın: indirilemez" },
+    { "This film is encrypted and this build cannot decrypt it", "Bu film şifreli ve bu sürüm şifresini çözemiyor" },
+    { "A part of the film is too big", "Filmin bir parçası çok büyük" },
+    { "The film's key cannot be fetched", "Filmin anahtarı alınamıyor" },
+    { "The film's key is wrong", "Filmin anahtarı yanlış" },
+    { "This film's parts are not MPEG-TS: it cannot be downloaded", "Bu filmin parçaları MPEG-TS değil: indirilemez" },
     { "The Vita slept: the stream was stopped", "Vita uykuya geçti: yayın durduruldu" },
     { "Next %d...  (%d of %d shown)", "Sonraki %d...  (%d / %d gösteriliyor)" },
     { "Most watched", "En çok izlenen" }, { "Newest added", "En yeni eklenen" }, { "Year (newest first)", "Yıl (yeniden eskiye)" },

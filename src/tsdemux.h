@@ -48,6 +48,7 @@ typedef struct {
     uint64_t packets, bytes;
     uint32_t sync_losses, cc_errors, tei_errors, scrambled_packets, pes_overflows;
     uint32_t video_aus, keyframes, intra_aus, damaged_aus, audio_frames;
+    uint32_t joined_aus;                /* 1.2.4d: H.264 units with no picture (parameter sets alone) joined to the next */
     int64_t first_video_pts, min_video_pts, max_video_pts, first_audio_pts;
     /* 0.7.0: text subtitle tracks (Matroska S_TEXT/UTF8, S_TEXT/ASS, S_TEXT/SSA), in the file's order */
     int nsubs;

@@ -24,6 +24,9 @@ struct SwVdec {
     AVFrame *frame;
     uint32_t errors;
     int skip;
+    int threads, lowres;                /* 1.2.4e: as opened */
+    int w0, h0;
+    int wait_key;                       /* 1.2.4e: opened again mid-stream: pictures left out up to a keyframe */
 };
 
 static enum AVCodecID codec_id(int codec)
@@ -65,8 +68,40 @@ SwVdec *swv_create(int codec, const uint8_t *extra, size_t elen, int w, int h, i
     }
     d->codec = c;
     d->codec_kind = codec;
+    d->threads = 1;
+    d->w0 = w;
+    d->h0 = h;
     if (avcodec_open2(d->ctx, c, NULL) < 0) { snprintf(err, errsz, "the %s decoder did not open", swv_name(codec)); swv_destroy(d); return NULL; }
     return d;
+}
+
+/* open the decoder again with these threads / this lowres (both are set before opening); 0 = done */
+static int reopen(SwVdec *d, int n, int lowres)
+{
+    int slice = d->codec_kind == TS_CODEC_MPEG2V;
+    AVCodecContext *nc = avcodec_alloc_context3(d->codec);
+    if (!nc) return -1;
+    if (n > 1) {
+        nc->thread_count = n;
+        nc->thread_type = slice ? FF_THREAD_SLICE : FF_THREAD_FRAME;
+    } else nc->thread_count = 1;
+    nc->lowres = lowres;
+    nc->pkt_timebase = d->ctx->pkt_timebase;
+    nc->width = d->w0;                                      /* (the container's size, as at the start) */
+    nc->height = d->h0;
+    nc->flags2 = d->ctx->flags2;
+    nc->err_recognition = d->ctx->err_recognition;
+    if (d->ctx->extradata_size > 0) {
+        nc->extradata = av_mallocz((size_t)d->ctx->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+        if (nc->extradata) { memcpy(nc->extradata, d->ctx->extradata, (size_t)d->ctx->extradata_size); nc->extradata_size = d->ctx->extradata_size; }
+    }
+    if (avcodec_open2(nc, d->codec, NULL) < 0) { avcodec_free_context(&nc); return -1; }
+    avcodec_free_context(&d->ctx);
+    d->ctx = nc;
+    d->threads = nc->active_thread_type ? nc->thread_count : 1;
+    d->lowres = nc->lowres;
+    if (d->skip) d->ctx->skip_frame = d->skip >= 2 ? AVDISCARD_NONKEY : AVDISCARD_NONREF;
+    return 0;
 }
 
 int swv_threads(SwVdec *d, int n)
@@ -75,24 +110,23 @@ int swv_threads(SwVdec *d, int n)
     if (!d || n <= 1) return 1;
     int slice = d->codec_kind == TS_CODEC_MPEG2V;
     if (slice ? !(d->codec->capabilities & AV_CODEC_CAP_SLICE_THREADS) : !(d->codec->capabilities & AV_CODEC_CAP_FRAME_THREADS)) return 1;
-    /* threads are set before opening: open it again with them */
-    AVCodecContext *nc = avcodec_alloc_context3(d->codec);
-    if (!nc) return 1;
-    nc->thread_count = n;
-    nc->thread_type = slice ? FF_THREAD_SLICE : FF_THREAD_FRAME;
-    nc->pkt_timebase = d->ctx->pkt_timebase;
-    nc->width = d->ctx->width;
-    nc->height = d->ctx->height;
-    nc->flags2 = d->ctx->flags2;
-    if (d->ctx->extradata_size > 0) {
-        nc->extradata = av_mallocz((size_t)d->ctx->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
-        if (nc->extradata) { memcpy(nc->extradata, d->ctx->extradata, (size_t)d->ctx->extradata_size); nc->extradata_size = d->ctx->extradata_size; }
+    if (reopen(d, n, d->lowres) < 0) return d->threads ? d->threads : 1;
+    return d->threads;
+}
+
+int swv_lowres(SwVdec *d, int lowres)
+{
+    if (!d) return 0;
+    if (lowres > d->codec->max_lowres) lowres = d->codec->max_lowres;
+    if (lowres < 0) lowres = 0;
+    if (lowres == d->lowres) return d->lowres;
+    if (d->parser) {                                        /* (what the parser held belongs to the old decoder) */
+        av_parser_close(d->parser);
+        d->parser = av_parser_init(d->codec->id);
     }
-    if (avcodec_open2(nc, d->codec, NULL) < 0) { avcodec_free_context(&nc); return 1; }
-    avcodec_free_context(&d->ctx);
-    d->ctx = nc;
-    if (d->skip) d->ctx->skip_frame = d->skip >= 2 ? AVDISCARD_NONKEY : AVDISCARD_NONREF;
-    return nc->active_thread_type ? nc->thread_count : 1;
+    if (reopen(d, d->threads > 1 ? d->threads : 1, lowres) < 0) return d->lowres;
+    d->wait_key = 1;
+    return d->lowres;
 }
 
 void swv_destroy(SwVdec *d)
@@ -112,6 +146,13 @@ static int receive(SwVdec *d, SwvOut out, void *ctx)
         AVFrame *f = d->frame;
         if (f->format != AV_PIX_FMT_YUV420P && f->format != AV_PIX_FMT_YUVJ420P) { d->errors++; av_frame_unref(f); continue; }
         if (f->decode_error_flags) d->errors++;
+#if LIBAVUTIL_VERSION_MAJOR >= 58 && defined(AV_FRAME_FLAG_KEY)
+        int fkey = (f->flags & AV_FRAME_FLAG_KEY) != 0;
+#else
+        int fkey = f->key_frame;
+#endif
+        if (d->wait_key && !fkey) { av_frame_unref(f); continue; }   /* (1.2.4e: no reference yet after opening again) */
+        d->wait_key = 0;
         SwvFrame o;
         o.y = f->data[0]; o.u = f->data[1]; o.v = f->data[2];
         o.ys = f->linesize[0]; o.us = f->linesize[1]; o.vs = f->linesize[2];
@@ -214,6 +255,7 @@ SwVdec *swv_create(int codec, const uint8_t *extra, size_t elen, int w, int h, i
 }
 void    swv_destroy(SwVdec *d) { (void)d; }
 int     swv_threads(SwVdec *d, int n) { (void)d; (void)n; return 1; }
+int     swv_lowres(SwVdec *d, int lowres) { (void)d; (void)lowres; return 0; }
 int     swv_decode(SwVdec *d, const uint8_t *data, size_t len, int64_t pts, int64_t dts, SwvOut out, void *ctx)
 { (void)d; (void)data; (void)len; (void)pts; (void)dts; (void)out; (void)ctx; return 0; }
 void    swv_flush(SwVdec *d, SwvOut out, void *ctx) { (void)d; (void)out; (void)ctx; }

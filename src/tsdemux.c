@@ -20,6 +20,11 @@ struct TsDemux {
     Sect pat, pmt[MAX_PMT];
     int npmt;
     Pes vpes, apes;
+    /* 1.2.4d: H.264 units with no picture in them (a packager put SPS / PPS / SEI in a PES of their own before the
+     * IDR one: the Vita decoder refused both, 0x8062000F, and the picture froze) wait here for the next unit */
+    uint8_t *vhold, *vjoin;
+    size_t vhold_len, vjoin_cap;
+    int vhold_damaged;
     int64_t next_audio_pts;
     int pref_pid;                       /* 0.5.0: the audio stream wanted (-1 = none) and its language */
     char pref_lang[4];
@@ -348,6 +353,19 @@ static int pes_parse(const uint8_t *b, size_t n, int64_t *pts, int64_t *dts, siz
     return 0;
 }
 
+/* any picture (a coded slice: NAL 1-5) in an H.264 unit */
+static int h264_has_slice(const uint8_t *b, size_t n)
+{
+    for (size_t s = find_start(b, 0, n); s < n; s = find_start(b, s + 3, n)) {
+        if (s + 3 >= n) break;
+        int type = b[s + 3] & 0x1F;
+        if (type >= 1 && type <= 5) return 1;
+    }
+    return 0;
+}
+
+#define VHOLD_CAP (64 * 1024)
+
 static void flush_video(TsDemux *d)
 {
     Pes *p = &d->vpes;
@@ -357,7 +375,39 @@ static void flush_video(TsDemux *d)
         const uint8_t *es = p->buf + off;
         size_t en = p->len - off;
         int flags = 0;
-        if (d->info.video_codec == TS_CODEC_H264) flags |= scan_h264(d, es, en);
+        if (d->info.video_codec == TS_CODEC_H264) {          /* 1.2.4d */
+            if (!h264_has_slice(es, en)) {
+                if (d->vhold_len + en <= VHOLD_CAP) {
+                    if (!d->vhold) d->vhold = malloc(VHOLD_CAP);
+                    if (d->vhold) {
+                        memcpy(d->vhold + d->vhold_len, es, en);
+                        d->vhold_len += en;
+                        d->vhold_damaged |= p->damaged;
+                        d->info.joined_aus++;
+                        p->len = 0;
+                        p->damaged = 0;
+                        return;
+                    }
+                }
+                d->vhold_len = 0;                                /* (no room: as it came) */
+            } else if (d->vhold_len) {
+                size_t jn = d->vhold_len + en;
+                if (jn > d->vjoin_cap) {
+                    uint8_t *nb = realloc(d->vjoin, jn);
+                    if (nb) { d->vjoin = nb; d->vjoin_cap = jn; }
+                }
+                if (jn <= d->vjoin_cap) {
+                    memcpy(d->vjoin, d->vhold, d->vhold_len);
+                    memcpy(d->vjoin + d->vhold_len, es, en);
+                    es = d->vjoin;
+                    en = jn;
+                    if (d->vhold_damaged) p->damaged = 1;
+                }
+                d->vhold_len = 0;
+                d->vhold_damaged = 0;
+            }
+            flags |= scan_h264(d, es, en);
+        }
         else if (d->info.video_codec == TS_CODEC_MPEG2V || d->info.video_codec == TS_CODEC_MPEG4V) flags |= scan_mpeg_video(d, es, en);   /* 1.2.2b */
         if (p->damaged) { flags |= TS_FLAG_DAMAGED; d->info.damaged_aus++; }
         d->info.video_aus++;
@@ -515,7 +565,7 @@ static void select_streams(TsDemux *d, int prog, const TsStream *st, int ns)
     if (d->info.program >= 0 && d->info.program != prog) return;      /* keep the first program */
 
     int vpid = vi < 0 ? -1 : st[vi].pid, apid = ai < 0 ? -1 : st[ai].pid;
-    if (vpid != d->info.video_pid) { d->vpes.len = 0; d->vpes.started = 0; d->vpes.damaged = 0; }
+    if (vpid != d->info.video_pid) { d->vpes.len = 0; d->vpes.started = 0; d->vpes.damaged = 0; d->vhold_len = 0; }
     if (apid != d->info.audio_pid) { d->apes.len = 0; d->apes.started = 0; d->apes.damaged = 0; d->next_audio_pts = -1; }
     d->info.program = prog;
     d->info.video_pid = vpid;
@@ -688,6 +738,8 @@ void ts_destroy(TsDemux *d)
     if (!d) return;
     free(d->vpes.buf);
     free(d->apes.buf);
+    free(d->vhold);
+    free(d->vjoin);
     free(d);
 }
 

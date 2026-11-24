@@ -3,6 +3,8 @@
 #include "curlio.h"
 #include "urlhdr.h"
 #include "httpio.h"                     /* plog() */
+#include "hls.h"
+#include "hlsaes.h"
 #include <psp2/kernel/threadmgr.h>
 #ifdef __vita__
 #include <psp2/kernel/processmgr.h>
@@ -26,6 +28,7 @@
 #include <unistd.h>
 #endif
 
+#define PL_CAP      (2 * 1024 * 1024)   /* 1.2.4d: an HLS playlist at most this big */
 #define WBUF        (1024 * 1024)       /* written to the card in pieces this big (1.3.1: 1 MB, two of them) */
 #define SPACE_EVERY (32ull * 1024 * 1024)
 #define QMAX        64
@@ -192,6 +195,7 @@ int dl_info_write(const DlItem *it)
             (unsigned)it->avkey, it->av_series, it->added);
     if (it->err[0] && !it->done) put(f, "error", it->err);  /* 1.4.1 */
     if (it->watched) fprintf(f, "watched=1\n");             /* 1.2.4 */
+    if (it->hls) fprintf(f, "hls=1\nhls_seg=%d\nhls_nseg=%d\nhls_bytes=%llu\n", it->hls_seg, it->hls_nseg, (unsigned long long)it->hls_bytes);   /* 1.2.4d */
     int bad = ferror(f);
     if (fclose(f) != 0 || bad) { remove(tmp); return -1; }
     remove(p);                                               /* (a rename does not replace a file on the Vita) */
@@ -238,6 +242,10 @@ int dl_info_read(DlItem *it, const char *dir)
         else if (!strcmp(k, "added")) it->added = atoll(v);
         else if (!strcmp(k, "error")) cpy(it->err, sizeof it->err, v);
         else if (!strcmp(k, "watched")) it->watched = atoi(v) != 0;
+        else if (!strcmp(k, "hls")) it->hls = atoi(v) != 0;
+        else if (!strcmp(k, "hls_seg")) it->hls_seg = atoi(v);
+        else if (!strcmp(k, "hls_nseg")) it->hls_nseg = atoi(v);
+        else if (!strcmp(k, "hls_bytes")) it->hls_bytes = strtoull(v, NULL, 10);
     }
     fclose(f);
     if (!it->kind) it->kind = 'F';
@@ -353,6 +361,9 @@ typedef struct {
     uint64_t *tot;                      /* (curlio: the whole file's size, known before the first data) */
     DlItem *it;
     int first_seen, size_new, too_big;
+    int hls;                            /* 1.2.4d: the answer is an HLS playlist: kept in pl, not written */
+    uint8_t *pl;
+    size_t pln;
     long long free_at_start;
     unsigned long long t_last;
     uint64_t b_last;
@@ -476,6 +487,14 @@ static int job_data(void *ctx, const uint8_t *d, size_t len)
         j->have = 0;
         j->n = 0;
         plog("dl: the server sent the whole file (no ranges): from the start");
+    }
+    if (j->hls || (!j->first_seen && j->have == 0 && j->n == 0 && hls_is_playlist((const char *)d, len))) {   /* 1.2.4d */
+        if (!j->hls) { j->hls = 1; j->pl = malloc(PL_CAP); j->pln = 0; if (!j->pl) return 1; j->first_seen = 1; }
+        if (j->pln + len + 1 > PL_CAP) return 1;
+        memcpy(j->pl + j->pln, d, len);
+        j->pln += len;
+        j->pl[j->pln] = 0;
+        return 0;
     }
     if (!j->first_seen) {                                    /* the size: now known; does the rest fit? */
         j->first_seen = 1;
@@ -624,6 +643,241 @@ static void get_srt(const DlItem *it, const char *url, const char *ua, const cha
 }
 
 /* one download until it ends, stops or fails */
+
+/* ---------------------------------------------------------------- 1.2.4d: HLS */
+/* The film's address answered with an HLS playlist (Xtream servers that hand out films / episodes as HLS): its
+ * TS segments are fetched one by one and written one after the other into video.ts, which the player plays as
+ * a TS file. A segment is kept in memory until it is whole (a cut one is never on the card), so after a pause it
+ * goes on with the next segment. Not downloaded: fragmented MP4 (CMAF) segments, the sound in a playlist of its
+ * own, DRM, live streams. */
+#define SEG_MAX (32u * 1024 * 1024)
+
+typedef struct { uint8_t *b; size_t n, cap; int over; uint64_t base; } SegBuf;
+
+static int seg_cb(void *ctx, const uint8_t *d, size_t n)
+{
+    SegBuf *sb = ctx;
+    if (g_stop_cur || g_quit) return 1;
+    if (sb->n + n > sb->cap) {
+        size_t nc = sb->cap ? sb->cap : 1024 * 1024;
+        while (nc < sb->n + n) nc *= 2;
+        if (nc > SEG_MAX) { sb->over = 1; return 1; }
+        uint8_t *nb = realloc(sb->b, nc);
+        if (!nb) { sb->over = 1; return 1; }
+        sb->b = nb;
+        sb->cap = nc;
+    }
+    memcpy(sb->b + sb->n, d, n);
+    sb->n += n;
+    lock(); g_cur_st.have = sb->base + sb->n; unlock();
+    return 0;
+}
+
+/* one address into memory (text: NUL after it); 0 = whole, status in *st */
+static int fetch_mem(const char *u, const char *ua, const char *ref, SegBuf *sb, int *st, char *fin, size_t fcap, char *e, size_t ecap)
+{
+    sb->n = 0;
+    sb->over = 0;
+    CioRequest rq = { u, NULL, NULL, 15, 30, seg_cb, job_stop, sb, 0, 0, 0, NULL };
+    rq.ua = ua; rq.referer = ref;
+    if (fin) { fin[0] = 0; rq.final_url = fin; rq.final_cap = fcap; }
+    *st = 0;
+    e[0] = 0;
+    int r = cio_get(&rq, st, e, ecap);
+    if (fin && !fin[0]) snprintf(fin, fcap, "%s", u);
+    if (sb->over) { snprintf(e, ecap, "too big"); return -1; }
+    if (sb->n + 1 > sb->cap) {                               /* (room for the NUL) */
+        uint8_t *nb = realloc(sb->b, sb->n + 1);
+        if (!nb) return -1;
+        sb->b = nb;
+        sb->cap = sb->n + 1;
+    }
+    if (sb->b) sb->b[sb->n] = 0;
+    return r;
+}
+
+typedef struct { uint8_t *b; size_t n; } AesOut;
+static void aes_out(void *ctx, const uint8_t *d, size_t n) { AesOut *o = ctx; memcpy(o->b + o->n, d, n); o->n += n; }
+
+/* waits t tenths of a second (stops early) */
+static void nap(int t) { for (int k = 0; k < t && !g_stop_cur && !g_quit; k++) sceKernelDelayThread(100000); }
+
+static const char *hls_run(DlItem *it, const char *dir, const char *url, const char *ua, const char *ref,
+                           char *pl, const char *pl_url, int *need_mb, int *free_mb)
+{
+    static char eb[128];
+    SegBuf tb = { 0 }, sb = { 0 };
+    char *text = pl, base[DL_URL_MAX], e[96];
+    const char *err = NULL;
+    HlsMedia m;
+    memset(&m, 0, sizeof m);
+    int st = 0;
+    snprintf(base, sizeof base, "%s", pl_url ? pl_url : url);
+    if (!text) {                                             /* (going on: the playlist again, its addresses may have changed) */
+        if (fetch_mem(url, ua, ref, &tb, &st, base, sizeof base, e, sizeof e) != 0 || st >= 400 || !tb.n) {
+            if (st >= 400) snprintf(eb, sizeof eb, "The server does not give this one (HTTP %d)", st);
+            else snprintf(eb, sizeof eb, "Connection lost (%s)", e[0] ? e : "no answer");
+            err = eb;
+            goto out;
+        }
+        text = (char *)tb.b;
+    }
+    if (!hls_is_playlist(text, strlen(text))) { err = "The server sent something that is not a film"; goto out; }
+    if (hls_is_master(text)) {
+        HlsVariant v[16];
+        HlsRendition rr[4];
+        int n = hls_parse_master(text, base, v, 16);
+        if (hls_parse_audio(text, base, rr, 4) > 0) { err = "This film's sound comes apart from the picture (HLS): it cannot be downloaded"; goto out; }
+        int k = hls_pick_variant(v, n, 1080);
+        if (k < 0) { err = "This film has no picture the Vita can play"; goto out; }
+        plog("dl: HLS: %d variants, %dx%d %ld kbit/s taken", n, v[k].width, v[k].height, v[k].bandwidth / 1000);
+        char vu[HLS_URL_MAX];
+        snprintf(vu, sizeof vu, "%s", v[k].uri);
+        SegBuf mb = { 0 };
+        if (fetch_mem(vu, ua, ref, &mb, &st, base, sizeof base, e, sizeof e) != 0 || st >= 400 || !mb.n) {
+            free(mb.b);
+            if (st >= 400) snprintf(eb, sizeof eb, "The server does not give this one (HTTP %d)", st);
+            else snprintf(eb, sizeof eb, "Connection lost (%s)", e[0] ? e : "no answer");
+            err = eb;
+            goto out;
+        }
+        free(tb.b);
+        tb = mb;
+        text = (char *)tb.b;
+    }
+    if (hls_parse_media(text, &m) != 0 || m.nseg <= 0) { err = "The film's playlist cannot be read"; goto out; }
+    if (m.fmp4 || m.byterange) { err = "This film comes in a form that cannot be downloaded (HLS with MP4 parts)"; goto out; }
+    if (m.encrypted) { err = "This film is protected (DRM): it cannot be downloaded"; goto out; }
+    if (!m.endlist) { err = "This is a live stream: it cannot be downloaded"; goto out; }
+    if (m.aes && !hlsaes_available()) { err = "This film is encrypted and this build cannot decrypt it"; goto out; }
+    char vpath[DL_DIR_MAX + 32];
+    if (!it->hls || strcmp(it->video, "video.ts")) {          /* the first time: video.ts in place of the playlist */
+        snprintf(vpath, sizeof vpath, "%s/%s", dir, it->video);
+        f_remove(vpath);
+        snprintf(it->video, sizeof it->video, "video.ts");
+        it->hls = 1;
+        it->hls_seg = 0;
+        it->hls_bytes = 0;
+        it->size = 0;
+        plog("dl: %s: the address gives HLS (%d segments%s): its segments into video.ts", it->title, m.nseg, m.aes ? ", AES-128" : "");
+    }
+    snprintf(vpath, sizeof vpath, "%s/video.ts", dir);
+    long long fs = f_size(vpath);
+    if (fs < 0) fs = 0;
+    if ((uint64_t)fs != it->hls_bytes || it->hls_seg > m.nseg) {   /* (it ended in the middle of writing one: from the start) */
+        if (fs || it->hls_seg) plog("dl: HLS: the file (%lld bytes) is not where it stopped (%llu): from the start", fs, (unsigned long long)it->hls_bytes);
+        f_remove(vpath);
+        it->hls_seg = 0;
+        it->hls_bytes = 0;
+    } else if (it->hls_seg) plog("dl: HLS: on from segment %d of %d", it->hls_seg + 1, m.nseg);
+    it->hls_nseg = m.nseg;
+    dl_info_write(it);
+    HlsAes *aes = m.aes ? hlsaes_create() : NULL;
+    char key_uri[HLS_URL_MAX] = "";
+    uint8_t key[16];
+    uint8_t *plain = NULL;
+    size_t plain_cap = 0;
+    int start = it->hls_seg;
+    for (int k = it->hls_seg; k < m.nseg && !err; k++) {
+        if (g_stop_cur || g_quit) break;
+        long long fr = dl_free_bytes();
+        if (fr >= 0 && (uint64_t)fr < DL_RESERVE) {
+            err = "Not enough free space on the memory card";
+            *need_mb = (int)(DL_RESERVE >> 20); *free_mb = (int)(fr >> 20);
+            break;
+        }
+        const HlsSegment *sg = &m.seg[k];
+        char su[HLS_URL_MAX];
+        hls_resolve(base, sg->uri, sg->uri_len, su, sizeof su);
+        int tries = 0, got = 0;
+        for (;;) {
+            sb.base = it->hls_bytes;
+            int r = fetch_mem(su, ua, ref, &sb, &st, NULL, 0, e, sizeof e);
+            if (g_stop_cur || g_quit) break;
+            if (sb.over) { err = "A part of the film is too big"; break; }
+            if (r == 0 && st > 0 && st < 400 && sb.n) { got = 1; break; }
+            if (net_down()) {
+                lock(); g_cur_st.netwait = 1; g_cur_st.bps = 0; unlock();
+                while (net_down() && !g_stop_cur && !g_quit) sceKernelDelayThread(250000);
+                lock(); g_cur_st.netwait = 0; unlock();
+                continue;
+            }
+            if (++tries > 6) {
+                if (st >= 400 && gone_http(st)) snprintf(eb, sizeof eb, "The server does not give this one (HTTP %d)", st);
+                else if (st >= 400) snprintf(eb, sizeof eb, "Server answered HTTP %d", st);
+                else snprintf(eb, sizeof eb, "Connection lost (%s)", e[0] ? e : "no answer");
+                err = eb;
+                break;
+            }
+            plog("dl: HLS segment %d: %s, again in %d s", k + 1, st >= 400 ? "refused" : "cut", 5 * tries);
+            nap(50 * tries);
+        }
+        if (!got) break;
+        const uint8_t *data = sb.b;
+        size_t dn = sb.n;
+        if (sg->aes) {                                       /* decrypted before it goes on the card */
+            char ku[HLS_URL_MAX];
+            hls_resolve(base, sg->key_uri, sg->key_uri_len, ku, sizeof ku);
+            if (strcmp(ku, key_uri)) {
+                SegBuf kb = { 0 };
+                int kst = 0;
+                if (fetch_mem(ku, ua, ref, &kb, &kst, NULL, 0, e, sizeof e) != 0 || kst >= 400 || kb.n != 16) {
+                    free(kb.b);
+                    err = "The film's key cannot be fetched";
+                    break;
+                }
+                memcpy(key, kb.b, 16);
+                free(kb.b);
+                snprintf(key_uri, sizeof key_uri, "%s", ku);
+            }
+            uint8_t iv[16];
+            if (sg->has_iv) memcpy(iv, sg->iv, 16); else hls_seq_iv(sg->seq, iv);
+            if (dn + 16 > plain_cap) {
+                uint8_t *nb = realloc(plain, dn + 16);
+                if (!nb) { err = "Out of memory"; break; }
+                plain = nb;
+                plain_cap = dn + 16;
+            }
+            AesOut o = { plain, 0 };
+            hlsaes_start(aes, key, iv);
+            hlsaes_feed(aes, data, dn, aes_out, &o);
+            if (hlsaes_end(aes, aes_out, &o) != 0) { err = "The film's key is wrong"; break; }
+            data = plain;
+            dn = o.n;
+        }
+        if (!dn || data[0] != 0x47) { err = "This film's parts are not MPEG-TS: it cannot be downloaded"; break; }
+        int fd = f_open_append(vpath, 0);
+        if (fd < 0) { err = "Cannot write to the memory card"; break; }
+        size_t o = 0;
+        while (o < dn) {
+            int w = f_write(fd, data + o, dn - o);
+            if (w <= 0) break;
+            o += (size_t)w;
+        }
+        f_close(fd);
+        if (o < dn) { err = "Cannot write to the memory card"; break; }
+        it->hls_seg = k + 1;
+        it->hls_bytes += dn;
+        dl_info_write(it);
+        lock();
+        g_cur_st.have = it->hls_bytes;
+        g_cur_st.total = it->hls_bytes * (uint64_t)m.nseg / (uint64_t)(k + 1);
+        unlock();
+    }
+    if (aes) hlsaes_destroy(aes);
+    free(plain);
+    if (!err && it->hls_seg >= m.nseg) {
+        it->size = it->hls_bytes;
+        it->done = 1;
+        plog("dl: HLS: %d segments (%d this time), %llu MB", m.nseg, m.nseg - start, (unsigned long long)(it->hls_bytes >> 20));
+    }
+out:
+    hls_media_free(&m);
+    free(sb.b);
+    free(tb.b);
+    return err;
+}
+
 static void run_one(const char *dir)
 {
     DlItem *it = malloc(sizeof *it);
@@ -654,8 +908,9 @@ static void run_one(const char *dir)
     unsigned long long t0 = now_ms_dl(), tnet = 0;
     uint64_t got = 0;
     if (writer_start() != 0) err = "Cannot write to the memory card";
+    char *hls_text = NULL, hls_url[DL_URL_MAX] = "";       /* 1.2.4d */
     for (;;) {
-        if (err) break;
+        if (err || it->hls) break;
         if (g_stop_cur || g_quit) break;
         long long have = f_size(vpath);
         if (have < 0) have = 0;
@@ -679,6 +934,8 @@ static void run_one(const char *dir)
         j.tot = &tot; j.it = it; j.free_at_start = fr;
         CioRequest rq = { url, NULL, NULL, 15, 30, job_data, job_stop, &j, 1, j.from, 0, &tot };
         rq.ua = ua; rq.referer = ref;
+        char fin[DL_URL_MAX];
+        rq.final_url = fin; rq.final_cap = sizeof fin; fin[0] = 0;
         char e[96] = "";
         status = 0;
         uint64_t before = j.have;
@@ -690,6 +947,14 @@ static void run_one(const char *dir)
         else writer_wait();
         if (j.fd >= 0) f_close(j.fd);
         if (j.restarted) before = 0;
+        if (j.hls) {                                         /* 1.2.4d: a playlist, not the film */
+            if (status > 0 && status < 400 && j.pl && !g_stop_cur && !g_quit) {
+                hls_text = (char *)j.pl;
+                snprintf(hls_url, sizeof hls_url, "%s", fin[0] ? fin : url);
+            } else free(j.pl);
+            if (!hls_text && !g_stop_cur && !g_quit) err = "The film's playlist did not come whole";
+            break;
+        }
         if (j.size_new) dl_info_write(it);                  /* (the size, for the list while it is stopped) */
         if (j.too_big) {
             err = "Not enough free space on the memory card";
@@ -752,6 +1017,9 @@ static void run_one(const char *dir)
         for (int k = 0; k < 20 + fails * 10 && !g_stop_cur && !g_quit; k++) sceKernelDelayThread(100000);
     }
     writer_stop();
+    if (!err && !it->done && (it->hls || hls_text) && !g_stop_cur && !g_quit)   /* 1.2.4d */
+        err = hls_run(it, dir, url, ua, ref, hls_text, hls_text ? hls_url : NULL, &need_mb, &free_mb);
+    free(hls_text);
     {
         unsigned long long ms = now_ms_dl() - t0;
         if (got > 1024 * 1024 && ms > 0)

@@ -17,6 +17,9 @@
 #include "aac51.h"
 #include "hlsaes.h"
 #include "swvdec.h"
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+#include <arm_neon.h>
+#endif
 #include "avidemux.h"
 #include "pgs.h"
 #include <psp2/kernel/threadmgr.h>
@@ -118,7 +121,12 @@ int sceCodecEngineFreeMemoryFromUnmapMemBlock(SceUID uid, SceUIntVAddr addr);
 /* options for the next tsp_start (tsp_set_options) */
 int g_slots_cap = NSLOTS;              /* most picture slots (the PC tests compare with the old four) */
 static int g_pictures_seen;             /* some stream gave a picture since the app started (the decoder works) */
-static int g_no_m4v_hw;                 /* 1.2.3: MPEG-4 Part 2 only in software (tsp_set_m4v_hw) */
+/* 1.2.3: MPEG-4 Part 2 only in software (tsp_set_m4v_hw). 1.2.4d: off by default: none of the ways tried opens the
+ * Vita's decoder (create 0x80620902); VNZBench found Sony's way (the query's third field, decode with a work
+ * picture), to come in 1.2.6 */
+static int g_no_m4v_hw = 1;
+static int g_sw_delay_us;               /* 1.2.4e: tests only (tsp_test_sw_delay) */
+void tsp_test_sw_delay(int us) { g_sw_delay_us = us; }
 static int g_hd1080 = 1;                /* decode above 720p (the HD decoder; always on since v0.2) */
 static int g_hls_want = 720;            /* HLS: the variant to choose (see tsp_set_options) */
 static long g_hls_bw;                   /* ... with exactly this bit rate (0 = any) */
@@ -228,6 +236,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     int no_out, reopen_pending, reopens;  /* decoder that takes units but gives no pictures: restart it */
     int dry_restarts, good_since;       /* restarts that did not bring steady pictures back (each waits longer) */
     int es_full_fails;                  /* HD decoder: "ES buffer full" even after a picture was taken out */
+    int joined_said;                    /* 1.2.4d */
     int force_internal, f_errs, f_errs2;   /* the public decoder refuses the stream (0x8062000F): use the HD one */
     int d_errs, d_units;
     char net_err[96];                   /* the last network failure, for "no picture" (a keyframe was not the problem) */                /* "invalid stream" (0x8062000D) from the public decoder, in a window of units */
@@ -317,6 +326,11 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     int m4v_nhold;
     uint8_t m4v_vol[256];
     uint64_t sw_wait_us;                /* ... time its pictures waited for a free slot (not decoding) */
+    uint64_t sw_copy_us;                /* 1.2.4d: ... time copying (and mixing rows of) its pictures into the slots */
+    uint32_t sw_copies;
+    int sw_lowres, sw_lowres_want;      /* 1.2.4e: decoded at half size (behind, bigger than the screen) */
+    int sw_core3;                       /* 1.2.4e: the reader moved to the 4th core (1 done, -1 not possible) */
+    int sw_blend_seen;
     int frag;                           /* 1.2.2b: HLS fMP4: segments gathered whole for t->mp4 (mp4_frag_segment) */
     uint8_t *fbuf;
     size_t flen, fcap;
@@ -1903,6 +1917,10 @@ static void sw_rows(uint8_t *dst, int dpitch, const uint8_t *src, int spitch, in
         if (!blend || y + 1 >= h) { memcpy(o, a, (size_t)w); continue; }
         const uint8_t *b = a + spitch;
         int x = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        for (; x + 16 <= w; x += 16)                         /* 1.2.4e: 16 at a time (rounded mean, as below) */
+            vst1q_u8(o + x, vrhaddq_u8(vld1q_u8(a + x), vld1q_u8(b + x)));
+#endif
         for (; x + 4 <= w; x += 4) {
             uint32_t u, v;
             memcpy(&u, a + x, 4);
@@ -1932,9 +1950,13 @@ static void sw_frame(void *ctx, const SwvFrame *f)
     Slot *sl = &t->slots[si];
     uint8_t *y = sl->data, *u = y + t->dw * t->dh, *v = u + (t->dw / 2) * (t->dh / 2);
     int blend = f->interlaced;
+    uint64_t c0 = now_us();                                  /* 1.2.4d: the copy (and row mixing) apart from decoding */
     sw_rows(y, t->dw, f->y, f->ys, f->w, f->h, blend);
     sw_rows(u, t->dw / 2, f->u, f->us, (f->w + 1) / 2, (f->h + 1) / 2, blend);
     sw_rows(v, t->dw / 2, f->v, f->vs, (f->w + 1) / 2, (f->h + 1) / 2, blend);
+    t->sw_copy_us += now_us() - c0;
+    t->sw_copies++;
+    if (blend) t->sw_blend_seen = 1;
     if (t->st.decoded == 0) {
         g_pictures_seen = 1;
         t->first_pic_pts = f->pts;
@@ -2367,8 +2389,24 @@ static void sw_video_packet(Tsp *t, Pkt *p)
         int th = i->width * i->height > 1024 * 576 ? swv_threads(t->swv, 3) : 1;
         plog("tsp: %s video %dx%d: decoded in software%s, %d thread%s", swv_name(i->codec), i->width, i->height,
              i->cfg_len ? " (with the container's header)" : "", th, th == 1 ? "" : "s");
-        if (i->width * i->height > 1024 * 576)
+        if (i->width * i->height > 1024 * 576) {
             plog("tsp: %dx%d is above SD: the ARM may not decode it in time (pictures nothing refers to are left out then)", i->width, i->height);
+            /* 1.2.4e: with the 4th core open (a plugin), the reader goes there: the decoder's threads keep three */
+            if (!t->sw_core3 && t->thread > 0) {             /* (0 would be this thread itself) */
+                int r = sceKernelChangeThreadCpuAffinityMask(t->thread, 0x00080000);   /* (SCE_KERNEL_CPU_MASK_SYSTEM) */
+                t->sw_core3 = r >= 0 ? 1 : -1;
+                plog("tsp: 4th core %s (0x%08X)", r >= 0 ? "open: the reader runs there" : "not open to apps", (unsigned)r);
+            }
+        }
+    }
+    /* 1.2.4e: behind with a picture bigger than the screen: half size from the next keyframe on (FFmpeg lowres;
+     * the screen is 960x544, so the picture looks the same; copying and row mixing are a quarter) */
+    if (t->sw_lowres_want && (p->flags & TS_FLAG_KEYFRAME)) {
+        t->sw_lowres_want = 0;
+        int lr = swv_lowres(t->swv, 1);
+        t->sw_lowres = lr;
+        plog("tsp: software decoder behind: %s", lr ? "decoding at half size from this keyframe on" : "half size not possible");
+        if (lr) { t->sw_skip = 0; swv_skip(t->swv, 0); }
     }
     if (p->frame_us) t->frame_us = p->frame_us;
     if (!t->first_unit_us) t->first_unit_us = now_us();
@@ -2378,6 +2416,7 @@ static void sw_video_packet(Tsp *t, Pkt *p)
     if (t->st.av_sync && tp >= 0 && audio_now(t, now_us(), &apts)) {
         int64_t behind = pts_diff(apts, tp);
         int lv = behind > 90000LL * 3 ? 2 : behind > 45000 ? 1 : behind < 9000 ? 0 : t->sw_skip;
+        if (lv >= 1 && !t->sw_lowres && !t->sw_lowres_want && (i->width > 960 || i->height > 544)) t->sw_lowres_want = 1;   /* 1.2.4e */
         if (lv != t->sw_skip) {
             if (lv > t->sw_skip) plog("tsp: software decoder %lld ms behind the sound: %s left out", (long long)(behind / 90),
                                       lv == 2 ? "all but keyframes" : "pictures nothing refers to");
@@ -2388,6 +2427,7 @@ static void sw_video_packet(Tsp *t, Pkt *p)
     uint64_t t0 = now_us(), w0 = t->sw_wait_us;
     uint32_t before = t->st.decoded;
     swv_decode(t->swv, p->data, p->len, p->pts, p->dts, sw_frame, t);
+    if (g_sw_delay_us) sceKernelDelayThread((SceUInt)g_sw_delay_us);   /* (tests: a slow ARM) */
     uint64_t dus = now_us() - t0 - (t->sw_wait_us - w0);
     t->dcalls++;
     t->dus_sum += (uint32_t)dus;
@@ -2398,6 +2438,19 @@ static void sw_video_packet(Tsp *t, Pkt *p)
         if (fps > 5 && fps < 121) t->frame_us = (uint32_t)(1000000.0 / fps);
     }
     t->st.errors = swv_errors(t->swv);
+}
+
+/* 1.2.4d: the NAL types in an H.264 unit, for the log ("9,7,8,5") */
+static void nal_types(const uint8_t *b, size_t n, char *out, size_t cap)
+{
+    size_t o = 0;
+    out[0] = 0;
+    for (size_t k = 0; k + 3 < n && o + 6 < cap; k++)
+        if (b[k] == 0 && b[k + 1] == 0 && b[k + 2] == 1) {
+            o += (size_t)snprintf(out + o, cap - o, "%s%d", o ? "," : "", b[k + 3] & 0x1F);
+            k += 2;
+        }
+    if (!o) snprintf(out, cap, "none");
 }
 
 static void video_packet(Tsp *t, Pkt *p)
@@ -2816,7 +2869,11 @@ static void video_packet(Tsp *t, Pkt *p)
     }
     if (r < 0) {
         t->st.errors++;
-        if (t->st.errors <= 10) plog("tsp: decode error 0x%08X (AU %u bytes, flags %d)", (unsigned)r, (unsigned)n, flags);
+        if (t->st.errors <= 10) {                            /* 1.2.4d: and what the unit held (NAL types) */
+            char nt[64];
+            nal_types(data, len, nt, sizeof nt);
+            plog("tsp: decode error 0x%08X (AU %u bytes, flags %d, NAL %s)", (unsigned)r, (unsigned)n, flags, nt);
+        }
         /* Out of picture memory and no room to grow: skip just this picture rather than
          * freezing until the next keyframe, which on some channels is 10 s away. */
         /* The HD decoder runs out the same way when it wants to give two pictures at once (720p after the
@@ -3087,6 +3144,10 @@ static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, in
 {
     (void)dts;
     Tsp *t = ctx;
+    if (!t->joined_said && t->dmx && ts_info(t->dmx)->joined_aus) {   /* 1.2.4d */
+        t->joined_said = 1;
+        plog("tsp: H.264 units with no picture (parameter sets / SEI in a packet of their own) are joined to the next one");
+    }
     if (stopping(t)) return;
     const TsInfo *i = dmx_info(t);
     Pkt *p = malloc(sizeof(Pkt) + len);
@@ -5643,8 +5704,9 @@ static int video_main(SceSize args, void *argp)
     }
     m4v_hold_free(t);
     if (t->swv) {                                            /* 1.2.2b */
-        plog("tsp: software decoder: %u pictures, %u errors, decoding avg %u us a unit", t->st.decoded, swv_errors(t->swv),
-             t->dcalls ? (unsigned)(t->dus_sum / t->dcalls) : 0);
+        plog("tsp: software decoder: %u pictures, %u errors, decoding avg %u us a unit, of it copying%s avg %u us a picture%s", t->st.decoded,
+             swv_errors(t->swv), t->dcalls ? (unsigned)(t->dus_sum / t->dcalls) : 0, t->sw_blend_seen ? " and mixing rows" : "",
+             t->sw_copies ? (unsigned)(t->sw_copy_us / t->sw_copies) : 0, t->sw_lowres ? " (half size)" : "");
         swv_destroy(t->swv);
         t->swv = NULL;
     }

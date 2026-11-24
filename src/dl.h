@@ -41,6 +41,10 @@ typedef struct {
     long long added;                        /* when (seconds) */
     char err[96];                           /* 1.4.1: why it stopped for good (English, for T_msg; "" = it did not) */
     int watched;                            /* 1.2.4: played to its end from the Downloads (info.txt watched=1) */
+    /* 1.2.4d: the address answered with an HLS playlist: its TS segments one after the other in video.ts;
+     * hls_seg = segments on the card, hls_bytes = the file's size after them (a cut segment is not kept) */
+    int hls, hls_seg, hls_nseg;
+    uint64_t hls_bytes;
 } DlItem;
 
 enum { DL_IDLE = 0, DL_QUEUED, DL_ACTIVE, DL_FAILED, DL_DONE };

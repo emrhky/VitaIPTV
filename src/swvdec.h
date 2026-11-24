@@ -29,6 +29,10 @@ SwVdec     *swv_create(int codec, const uint8_t *extra, size_t elen, int w, int 
 /* 1.2.3: on more cores (call before the first unit): MPEG-2 by slices, MPEG-4 by pictures (a few pictures later
  * out). Only if FFmpeg was built with threads; returns the threads used. */
 int         swv_threads(SwVdec *d, int n);
+/* 1.2.4e: decode at 1/2^lowres of the size (FFmpeg's lowres: MPEG-2, MPEG-4, DivX 3 up to 3): for pictures bigger
+ * than the Vita's screen when the ARM is behind. Opens the decoder again (the next pictures up to a keyframe are
+ * left out); returns the lowres now used. */
+int         swv_lowres(SwVdec *d, int lowres);
 void        swv_destroy(SwVdec *d);
 /* one unit (or piece, with parse): pts / dts 90 kHz (-1 = none). Returns the pictures given out (>= 0). */
 int         swv_decode(SwVdec *d, const uint8_t *data, size_t len, int64_t pts, int64_t dts, SwvOut out, void *ctx);
