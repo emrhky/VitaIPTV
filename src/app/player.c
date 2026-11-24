@@ -427,6 +427,14 @@ static void play_channel_ex(int vi, int use_proxy)
     player_stop();
     probe_cancel();
     tsp_stop();
+    {   /* 1.2.4g: the one before could not be stopped: say it once (its memory stays taken) */
+        static int leaks_said;
+        if (tsp_leaked() > leaks_said) {
+            leaks_said = tsp_leaked();
+            snprintf(film_note, sizeof film_note, "%s", T("An earlier video did not close and still holds memory: restart the app"));
+            film_note_until = now_ms() + 6000;
+        }
+    }
     play_path[0] = 0;
     if (net_playing) { conn_end_ms = now_ms(); net_playing = 0; }   /* 1.5: (the one before has just stopped) */
     if (!arch_on && chans.items[vis[vi]].kind == CH_FILM) {  /* 1.4.1: downloaded: it plays from the memory card */
@@ -1129,7 +1137,10 @@ static void draw_tsp_screen(int osd)
             sp.center_title = "Cannot play this channel";
             sp.center_line = T_msg(st->msg);
             sp.center_col = UI_ERR;
-            if (st->err_kind == TSP_ERRK_NET && dl_active() && !cur_local() && strstr(st->msg, "HTTP")) {
+            if (tsp_leaked() && strstr(st->msg, "Out of memory")) {   /* 1.2.4g */
+                sp.stats1 = T("An earlier video did not close and still holds memory: restart the app");
+                sp.osd = 1;
+            } else if (st->err_kind == TSP_ERRK_NET && dl_active() && !cur_local() && strstr(st->msg, "HTTP")) {
                 sp.stats1 = T("A download is running: an account with one connection cannot play at the same time (stop it in Downloads)");   /* 1.3 */
                 sp.osd = 1;
             } else if (st->err_kind == TSP_ERRK_FORMAT && !srv_here()) {
