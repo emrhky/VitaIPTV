@@ -145,6 +145,7 @@ static const char *map_lookup(const char *u)
     }
     return NULL;
 }
+int mock_http_restart;
 int sceHttpCreateConnectionWithURL(int t, const char *u, int k) { (void)t;(void)u;(void)k; return mock_http_file || mock_http_map[0][0] ? 2 : -1; }
 int sceHttpCreateRequestWithURL(int c, int m, const char *u, unsigned long long cl)
 { (void)c;(void)m;(void)cl;
@@ -154,7 +155,7 @@ int sceHttpCreateRequestWithURL(int c, int m, const char *u, unsigned long long 
   if (mf && mf[0] == '@') { if (http_f) fclose(http_f); http_f = NULL; http_mapped = 1; snprintf(http_loc, sizeof http_loc, "%s", mf + 1); }
   else if (mf) { if (http_f) fclose(http_f); http_f = fopen(mf, "rb"); http_pos = 0; http_mapped = 1; }
   else if (mock_http_map[0][0]) { if (http_f) fclose(http_f); http_f = NULL; http_mapped = 1; }   /* unknown address: 404 */
-  else if (!http_f) { http_f = fopen(mock_http_file, "rb"); http_pos = 0; }
+  else if (!http_f || mock_http_restart) { if (http_f) fclose(http_f); http_f = fopen(mock_http_file, "rb"); http_pos = 0; }   /* (1.2.4g: restart: every connection from the start, as a phone serving a file) */
   http_sess_bytes = 0; http_t0 = mock_now(); mock_http_sessions++; http_range = 0; http_end = -1; return 3; }
 int sceHttpDeleteRequest(int i) { (void)i; return 0; }
 int sceHttpAbortRequest(int i) { (void)i; return 0; }
