@@ -18,6 +18,7 @@ typedef struct { SceSize size; SceUID processId; char name[32]; SceUInt attr, st
 typedef struct { SceSize size; SceUInt activeCpuMask;
                  struct { SceKernelSysClock idleClock; SceUInt comesOutOfIdleCount, threadSwitchCount; } cpuInfo[4]; } SceKernelSystemInfo;
 SceUID sceKernelGetThreadId(void);
+int sceKernelChangeThreadCpuAffinityMask(SceUID thid, int mask);   /* 1.2.4e */
 int sceKernelGetThreadInfo(SceUID thid, SceKernelThreadInfo *info);
 int sceKernelGetSystemInfo(SceKernelSystemInfo *info);
 #endif
