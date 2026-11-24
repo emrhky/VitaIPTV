@@ -36,9 +36,9 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
 - **HTTPS** with a built-in TLS stack (mbedTLS, TLS 1.2 / 1.3), so modern https playlists, short links
   (tinyurl and the like) and https/HLS channels work. The Vita's own TLS is too old for most sites today.
 - **Video:** H.264 up to 1920x1080 through the hardware decoder (details below), audio/video sync to the
-  sound, automatic recovery from decoder errors. MPEG-4 Part 2 (DivX / Xvid) goes to the Vita's own MPEG-4
-  decoder first (the software one takes over if it refuses the stream); MPEG-2 and DivX 3 are decoded in software
-  (on three cores above SD).
+  sound, automatic recovery from decoder errors. MPEG-2, MPEG-4 Part 2 (DivX / Xvid) and DivX 3 are decoded in
+  software (on three cores above SD). When a picture bigger than the screen falls behind the sound, it is decoded
+  at half size from the next keyframe on (the Vita's screen is 960x544, so it looks the same).
 - **1080p:** 1080p channels and films play through the same hardware decoder.
 - **50 / 60 fps:** 720p at 50 / 60 fps plays every picture; 1080p at 50 / 60 fps a steady 25 / 30 pictures a
   second (every second picture, evenly spaced).
@@ -106,7 +106,8 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   each series (by season and episode), the poster and the story, and plays them like any film (jumps, *Continue
   from*, audio tracks, subtitles inside the file). **Triangle** deletes a film, an episode or a whole series. Files
   go to `ux0:data/VitaIPTV/downloads/` (one folder each: the video as the server sends it, its poster and an
-  `info.txt`). Downloads run one at a time while the app is open; a stopped one goes on where it stopped (Square), and
+  `info.txt`). A film the server gives as HLS (a playlist of TS parts) is saved as one `video.ts`; HLS with MP4
+  parts, live streams and DRM cannot be downloaded. Downloads run one at a time while the app is open; a stopped one goes on where it stopped (Square), and
   the free space is checked first (200 MB are always left free). The screen may dim, but sleep or the PS button
   stops a download. A film or an episode that is downloaded plays from the memory card when it is opened in its
   list too (a sign beside it in the lists). While a channel or a film from the same server plays, the download
@@ -187,7 +188,7 @@ Kodi style as `link|User-Agent=...&Referer=...`. The app sends them with every r
 | Works | Does not work (without the transcoding server) |
 |---|---|
 | H.264 up to 1920x1080 (see below), AAC, MP2, MP3 | Above 1080p (4K) |
-| MPEG-2, MPEG-4 Part 2 (DivX / Xvid), DivX 3: SD, in software | MPEG-2 / DivX above SD may stutter |
+| MPEG-2, MPEG-4 Part 2 (DivX / Xvid), DivX 3: in software (above the screen's size at half size when behind) | DivX 3 above SD may stutter |
 | MPEG-TS, HLS, FLV, MKV, MP4, AVI | HEVC / H.265 |
 | Films: MKV, MP4, TS, AVI, FLV files (FLV: from the start, no jumping) | WMV, RealVideo |
 | AC-3 / E-AC-3, DTS, 5.1 / 7.1 AAC, Opus, Vorbis audio (as stereo) | Interlaced broadcasts (576i, 1080i may stutter) |

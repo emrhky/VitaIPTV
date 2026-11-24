@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.4d / 1.2.4e (test)
+- **HLS films could freeze (H.264):** some servers put the picture settings (SPS / PPS / SEI) in a packet of their
+  own before the picture; the Vita decoder refused both and the picture stood still. Such packets are now joined
+  to the next one. The decoder's error line shows what the unit held (NAL types).
+- **Downloads given as HLS:** a film or episode address that answers with an HLS playlist was saved as the
+  playlist and shown as "finished (0 MB)". Now its TS parts are downloaded one by one into `video.ts` (AES-128
+  decrypted, the best picture up to 1080p, after a pause on with the next part, the size guessed from the parts
+  while it downloads). HLS with MP4 parts, the sound in a playlist of its own, DRM and live streams say why they
+  cannot be downloaded.
+- The Vita's MPEG-4 decoder is not tried any more (none of the ways opened it; the right one is known now and
+  comes later). MPEG-4 Part 2 goes to the software decoder at once.
+- **Software video (MPEG-2, MPEG-4, DivX 3):** interlaced row mixing 16 bytes at a time (NEON); behind the sound
+  with a picture bigger than the screen: decoded at half size (FFmpeg lowres) from the next keyframe on; with the
+  4th core open (a plugin) the reader moves there. The log tells decoding apart from copying / row mixing.
+
 ## 1.2.4c (test)
 - Vita's MPEG-4 decoder: the codec memory block now has room beyond the size asked (1.2.4b got no address from
   the codec engine), then smaller alignments; the size asked, the block and the address are in the log.
