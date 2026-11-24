@@ -726,6 +726,7 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slots")) goto slots;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slow")) goto slow;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "live")) goto live;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "restart")) goto restart;   /* 1.2.4g */
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls_slow")) goto hls_slow;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "standby")) goto standby;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "late")) goto late;
@@ -1017,15 +1018,16 @@ sw:
         }
         if (a52_available()) {   /* 1.2.4e: a slow ARM: behind, half size from a keyframe on; the 4th core for the reader */
             extern int mock_core3, mock_core3_moves, mock_core3_self, mock_dma_fail, mock_dma_calls;
-            /* 1.2.4f: k 0: the 4th core closed (as on most Vitas: nothing changes); 1: open, Xvid: the reader goes
-             * there; 2: open, MPEG-2: a slice worker held there, the reader stays; 3: DMA fails: the ARM copies */
-            static const struct { const char *f; int vod, core3, dmafail; } lf[4] = {
-                { "mpeg2hd.ts", 0, 0, 0 }, { "xvidhd.avi", 1, 1, 0 }, { "mpeg2hd.ts", 0, 1, 0 }, { "mpeg2hd.ts", 0, 0, 1 } };
+            /* 1.2.4f/g: k 0: the 4th core closed (as on most Vitas: nothing changes); 1: open, Xvid: the reader goes
+             * there (DMA turned on: it copies); 2: open, MPEG-2: the reader goes there too (1.2.4g: no slice worker
+             * of ours there any more), DMA off as by default; 3: DMA turned on and failing: the ARM copies */
+            static const struct { const char *f; int vod, core3, dma, dmafail; } lf[4] = {
+                { "mpeg2hd.ts", 0, 0, 0, 0 }, { "xvidhd.avi", 1, 1, 1, 0 }, { "mpeg2hd.ts", 0, 1, 0, 0 }, { "mpeg2hd.ts", 0, 0, 1, 1 } };
             for (int k = 0; k < 4; k++) {
                 snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", lf[k].f);
                 mock_core3 = lf[k].core3; mock_core3_moves = mock_core3_self = 0; mock_dma_fail = lf[k].dmafail; mock_dma_calls = 0;
                 tsp_test_core3_unknown();
-                tsp_set_dma(1);
+                tsp_set_dma(lf[k].dma);
                 tsp_test_sw_delay(70000);
                 if (lf[k].vod) { VRun v = play_vod(dp, 0, 25, 0, 0); r = v.r; } else r = play(dp, 22);
                 tsp_test_sw_delay(0);
@@ -1034,14 +1036,14 @@ sw:
                 show(nm, &r);
                 printf("               4th core: reader moves %d, decoder worker %d; DMA calls %d\n", mock_core3_moves, mock_core3_self, mock_dma_calls);
                 assert(r.st.state == TSP_ENDED && r.w == 640 && r.st.decoded >= 30 && r.st.audio_frames > 100);
-                if (k == 0) assert(mock_core3_moves == 0 && mock_core3_self == 0);
-                if (k == 1) assert(mock_core3_moves == 1 && mock_core3_self == 0);
-                if (k == 2) assert(mock_core3_moves == 0 && mock_core3_self == 1);
-                if (k < 3) assert(mock_dma_calls >= 3 * 30);       /* (three planes a picture) */
-                if (k == 3) assert(mock_dma_calls == 1);           /* (the first error: never again) */
+                assert(mock_core3_self == 0);                     /* (1.2.4g: no worker of ours held anywhere) */
+                assert(mock_core3_moves == (lf[k].core3 ? 1 : 0));
+                if (lf[k].dma && !lf[k].dmafail) assert(mock_dma_calls >= 3 * 30);   /* (three planes a picture) */
+                if (!lf[k].dma) assert(mock_dma_calls == 0);
+                if (lf[k].dmafail) assert(mock_dma_calls == 1);   /* (the first error: never again) */
             }
             mock_core3 = 0; mock_dma_fail = 0;
-            tsp_set_dma(1);
+            tsp_set_dma(0);
             tsp_test_core3_unknown();
         }
         if (a52_available()) {   /* 1.2.3: MPEG-4 on the (fake) hardware: it decodes; it refuses (the software takes over) */
@@ -1314,6 +1316,24 @@ slow:
         assert(r.st.decoded >= 140 && !strstr(r.st.msg, "407") && mock_http_sessions >= 5 && r.play_time > 9.0);
         mock_http_busy_n = 0;
         mock_http_reset();
+    }
+restart:
+    {   /* 1.2.4g: a live stream whose server sends a file and then, on the reconnect, the same file from the start
+         * (the user's phone): the times jump back; it must play on, not wait for the video forever */
+        extern int mock_http_restart;
+        mock_http_fail_after = 0;
+        mock_http_file = argv[1];
+        mock_http_restart = 1;
+        r = play("http://example.invalid/live/2.ts", 14);
+        mock_http_restart = 0;
+        show("http restarts", &r);
+        printf("               sessions=%d reconnects=%u longest wait %.1f s, last picture %.1f s after the first\n",
+               mock_http_sessions, r.st.reconnects, r.wait_max, r.play_time);
+        /* (before: waits of up to 8 s on the Vita, here 157 pictures dropped and the picture 2.5 s behind) */
+        assert(r.st.state != TSP_ERROR && r.st.reconnects >= 1 && r.wait_max < 1.0 && r.play_time > 8.0);
+        assert(r.st.dropped < 20 && r.av_bad * 5 <= r.avn);
+        mock_http_reset();
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "restart")) { printf("ONLY restart: done\n"); return 0; }
     }
     mock_http_fail_after = 0;
     {   /* 1.5: a 405 at the start: asked again twice (1.5 and 3 s), then one message. 1.2.2: just after a stream of the
