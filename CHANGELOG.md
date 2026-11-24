@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.4g (test)
+- **MPEG-2 above SD froze and the player could not be closed (1.2.4f):** the 4th slice worker held on the 4th core
+  made each picture wait about 135 ms on the Vita, and a stopped player stayed in memory (three times in one log:
+  up to 95 of 96 MB taken, then films said "Out of memory (MP4 index)", Xvid gave broken pictures and the HD
+  decoder lost its CDRAM). Gone: as in 1.2.4e, FFmpeg's 3 threads and the reader on the 4th core.
+- **Software video copied by the ARM again:** the DMA copied a 1080p picture in 23-26 ms on the Vita, the ARM in
+  15.6 ms. (Posters keep the DMA: about 1 ms either way.)
+- **A player that cannot be stopped is said on the screen:** "an earlier video did not close and still holds
+  memory: restart the app" (once, and with an "Out of memory" error).
+- **Live: a server that starts its times again after a reconnect** (e.g. a phone sending a file from the start):
+  the picture waited for the sound for up to 8 s again and again. The times after the reconnect now follow the
+  ones before (one timeline); the log says so.
+
 ## 1.2.4f (test)
 - **Software video (MPEG-2, MPEG-4, DivX 3) copied by DMA:** the ARM writes the picture memory at only ~200 MB/s
   (1080p: 15 ms a picture, more than decoding it). The slots now take FFmpeg's row length and each colour plane

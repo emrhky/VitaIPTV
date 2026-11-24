@@ -37,10 +37,10 @@ This app was developed with the help of AI (Anthropic's Claude), and tested on a
   (tinyurl and the like) and https/HLS channels work. The Vita's own TLS is too old for most sites today.
 - **Video:** H.264 up to 1920x1080 through the hardware decoder (details below), audio/video sync to the
   sound, automatic recovery from decoder errors. MPEG-2, MPEG-4 Part 2 (DivX / Xvid) and DivX 3 are decoded in
-  software (on three cores above SD; the pictures go to the GPU by DMA, interlaced rows are mixed on the screen).
+  software (on three cores above SD; interlaced rows are mixed on the screen).
   When a picture bigger than the screen falls behind the sound, it is decoded at half size from the next keyframe
-  on (the Vita's screen is 960x544, so it looks the same). With the 4th CPU core opened by a plugin, MPEG-2 uses it
-  and the reader of HTTPS streams runs there; without it nothing changes.
+  on (the Vita's screen is 960x544, so it looks the same). With the 4th CPU core opened by a plugin, the reader of
+  such streams and of HTTPS streams runs there; without it nothing changes.
 - **1080p:** 1080p channels and films play through the same hardware decoder.
 - **50 / 60 fps:** 720p at 50 / 60 fps plays every picture; 1080p at 50 / 60 fps a steady 25 / 30 pictures a
   second (every second picture, evenly spaced).
