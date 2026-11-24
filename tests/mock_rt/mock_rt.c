@@ -32,6 +32,12 @@ int sceKernelWaitThreadEnd(SceUID t, int *stat, SceUInt *timeout)
 { (void)stat;(void)timeout; MT *m = &th[t - 0x40010000]; if (m->started) { pthread_join(m->th, NULL); m->started = 0; } return 0; }
 int sceKernelDeleteThread(SceUID t) { MT *m = &th[t - 0x40010000]; free(m->arg); m->used = 0; return 0; }
 int sceKernelDelayThread(SceUInt us) { usleep(us); return 0; }
+/* 1.2.4e: the 4th core (mask 0x80000) as on a Vita without a plugin: refused; mock_core3 = 1 opens it */
+int mock_core3, mock_core3_moves;
+int sceKernelChangeThreadCpuAffinityMask(SceUID t, int mask)
+{ if (t <= 0x40010000 || t >= 0x40010100) return (int)0x80020001;
+  if (mask == 0x80000 && !mock_core3) return (int)0x80028025;
+  mock_core3_moves++; return 0; }
 /* CPU line: thread run time from the PC's thread clocks, core idle time from /proc/stat */
 #include <time.h>
 #include <stdio.h>
