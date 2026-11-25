@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.4h (test: measurements first)
+- **Copy test (log only):** once a stream, on the 5th software picture, the log shows what each way of getting the
+  picture to the GPU costs on the Vita: writing FFmpeg's picture out of the ARM's cache (what letting the GPU read it
+  directly would need each picture), a DMA from FFmpeg's memory, a DMA from one contiguous block, the slot's sync,
+  and the ARM's own copy of the same picture. The picture is still copied by the ARM; nothing else changes.
+  Whether the GPU reads FFmpeg's pictures directly (no copy) is decided from these numbers.
+- **Posters:** the log names the source picture (JPEG / PNG, size, progressive, how much libjpeg shrank it while
+  decoding) and how long that one took.
+
 ## 1.2.4g (test)
 - **MPEG-2 above SD froze and the player could not be closed (1.2.4f):** the 4th slice worker held on the 4th core
   made each picture wait about 135 ms on the Vita, and a stopped player stayed in memory (three times in one log:
