@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.2.4n (test)
+- **1080p50 channels with every picture a reference:** the share of each group that is decoded no longer goes up
+  and down. On the device it went up to all of each group, the decoder could not keep up (pictures late, the
+  picture 0.4 s behind), down to 33 a second and up again, several times. Trouble right after a step up now
+  makes the level before that step the ceiling; after a minute of good groups it is tried 2% higher.
+- **One-connection accounts, in the middle of a stream:** a busy answer (407) while reconnecting is asked again
+  every 2 s for up to 44 s with the countdown, as at the start since 1.2.4m (it was 3, 6 and 10 s, then the error:
+  a provider on the device held the lost connection longer). Waiting for a busy answer no longer counts as a lost
+  connection (the 6th used to end the stream).
+- **HLS advert breaks:** a wait that comes with an HLS discontinuity (new times, a new SPS, the decoder starting
+  again) is no longer taken for a slow line (on the device a 1080p channel that had played for 25 minutes went to
+  720p after one).
+- **Settings > Log file:** "Errors only" (the default) or "Everything". With errors only, log.txt holds the version
+  line and the error lines, and the memory card is written to only when something went wrong. "Everything" is the
+  log as before, for finding a problem.
+- **Code:** the avcC reading (H.264 header in MP4, MKV and FLV) is one function instead of three copies; the MP4
+  copy took an empty SPS and let an SPS it could not read change the picture information. dl_root (unused)
+  removed. The log's own test (test_applog) and the MPEG audio test (test_mpadec) are run with the others now
+  (they were never run).
+
 ## 1.2.4m (test)
 - **1080p50 channels with every picture a reference:** how much of each group of pictures is decoded now follows
   what the decoder manages, measured as it plays (the first guess was for the heavy streams: on the device the
