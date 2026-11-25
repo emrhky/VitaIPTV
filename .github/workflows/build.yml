@@ -77,7 +77,9 @@ jobs:
 
   # 1.2.2: the PC tests (tests/run_all.py), next to the build: a failing test does not stop the VPK
   tests:
-    runs-on: ubuntu-latest
+    # 1.2.4l: "ubuntu-latest" became Ubuntu 26.04 in November 2026 (FFmpeg 8 without the AAC Main encoder, newer
+    # OpenSSL / gcc): the tests stay on the image they were written and passed on
+    runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
