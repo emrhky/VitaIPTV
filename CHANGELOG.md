@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.4j (test)
+- **Live: after a reconnect whose times start again** (a phone sending a file from the start), 1.2.4g/i moved the
+  times on only from the first unit of each kind; on the Vita that was the old stream's last picture (the
+  demuxer gives it out when the next one begins), so the new start went by unmoved: a moment of buffering, then
+  the software decoder thought it was 60 s behind and went to keyframes only and half size for good. Now the
+  newest time at the reconnect is kept and the next 400 units are compared with it.
+- **Films whose HD decoder needed the header adjusted** (out of memory, no picture: the 1920x1038 film, 49-70
+  pictures dropped each time) are remembered across runs (`hd_adjust.txt`, a hash of the address, the newest 64)
+  and opened adjusted at once.
+- **A software picture of 288 rows or fewer flagged interlaced** (a 320x240 MPEG-4 film) is shown as it is: one
+  field's height has nothing to mix.
+- **Log only:** the 1.2.4i memory test is gone. Once a stream, the 5th software picture is also copied with NEON
+  (and a prefetch) and with 32-byte LDM/STM bursts, timed next to the usual copy, and DMA'd without any cache
+  sync into a block of its own and compared whole ("copy ways" line). Posters: the CPU time of the decoding and
+  the first three decoded a second time.
+
 ## 1.2.4i (test)
 - **Posters decode faster:** VitaSDK's libjpeg-turbo is built without its NEON code. `tools/build_libjpeg_vita.sh`
   builds the same version (3.2.1) with it into `third_party/libjpeg-vita` (GitHub builds it and keeps it); CMake

@@ -116,12 +116,17 @@ void              tsp_set_m4v_hw(int on);
 /* 1.2.3b: a file the player writes the MPEG-4 hardware way into while trying it (a crash in one: it and the
  * later ones are skipped at the next start); "" or NULL = none */
 void              tsp_set_m4v_mark(const char *path);
+/* 1.2.4j: a file keeping the films whose HD decoder header had to be adjusted (opened adjusted next time) */
+void              tsp_set_adj_file(const char *path);
+void              tsp_test_adj_forget(void);
 /* 1.2.4f: software pictures into the slots by DMA (on by default; off: the ARM copies) */
 void              tsp_set_dma(int on);
 /* 1.2.4f: tests only: the 4th core not known again (as at a start) */
 void              tsp_test_core3_unknown(void);
 /* 1.2.4g: players that could not be stopped (a stuck thread): their memory stays taken until the app ends */
 int               tsp_leaked(void);
+/* 1.2.4i test: the times after a reconnect, in the device's order (0 = right) */
+int               tsp_test_rc_seq(void);
 /* 1.2.4e: tests only: each software-decoded unit takes this much longer (a slow ARM) */
 void              tsp_test_sw_delay(int us);
 /* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */

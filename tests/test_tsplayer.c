@@ -1016,6 +1016,17 @@ sw:
             else
                 assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "not supported"));
         }
+        if (a52_available()) {   /* 1.2.4j: interlaced 720x576: rows mixed; flagged interlaced but 240 rows: not */
+            snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "mpeg2.ts");
+            r = play(dp, 8);
+            printf("               mpeg2.ts rows mixed: %d\n", r.st.mix_rows);
+            assert(r.st.mix_rows == 1);
+            snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "ilsmall.avi");
+            VRun v = play_vod(dp, 0, 10, 0, 0); r = v.r;
+            show("ilsmall.avi", &r);
+            printf("               ilsmall.avi rows mixed: %d\n", r.st.mix_rows);
+            assert(r.st.state == TSP_ENDED && r.w == 320 && r.st.decoded >= 140 && r.st.mix_rows == 0);
+        }
         if (a52_available()) {   /* 1.2.4e: a slow ARM: behind, half size from a keyframe on; the 4th core for the reader */
             extern int mock_core3, mock_core3_moves, mock_core3_self, mock_dma_fail, mock_dma_calls, mock_ctest_blocks;
             /* 1.2.4f/g: k 0: the 4th core closed (as on most Vitas: nothing changes); 1: open, Xvid: the reader goes
@@ -1039,10 +1050,12 @@ sw:
                 assert(r.st.state == TSP_ENDED && r.w == 640 && r.st.decoded >= 30 && r.st.audio_frames > 100);
                 assert(mock_core3_self == 0);                     /* (1.2.4g: no worker of ours held anywhere) */
                 assert(mock_core3_moves == (lf[k].core3 ? 1 : 0));
-                assert(mock_ctest_blocks == (lf[k].dma && !lf[k].dmafail ? 0 : 2));   /* (1.2.4i: the memory test, two blocks, once; DMA working: none) */
+                assert(mock_ctest_blocks == (lf[k].dma && !lf[k].dmafail ? 0 : 1));   /* (1.2.4j: the copy test, one block, once; DMA working: none) */
                 if (lf[k].dma && !lf[k].dmafail) assert(mock_dma_calls >= 3 * 30);   /* (three planes a picture) */
-                if (!lf[k].dma) assert(mock_dma_calls == 0);
-                if (lf[k].dmafail) assert(mock_dma_calls == 1);   /* (the first error: never again) */
+                /* (1.2.4j: the copy test on the 5th picture: three DMA calls into a block of its own, once; failing:
+                 * it stops at the first) */
+                if (!lf[k].dma) assert(mock_dma_calls == 3);
+                if (lf[k].dmafail) assert(mock_dma_calls == 1 + 1);   /* (the first error: never again) */
             }
             mock_core3 = 0; mock_dma_fail = 0;
             tsp_set_dma(0);
@@ -1320,6 +1333,11 @@ slow:
         mock_http_reset();
     }
 restart:
+    {   /* 1.2.4i: the device's order after a reconnect (the old last picture first, then the new start) */
+        int rr = tsp_test_rc_seq();
+        printf("reconnect times in the device's order: %d\n", rr);
+        assert(rr == 0);
+    }
     {   /* 1.2.4g: a live stream whose server sends a file and then, on the reconnect, the same file from the start
          * (the user's phone): the times jump back; it must play on, not wait for the video forever */
         extern int mock_http_restart;
@@ -1662,12 +1680,24 @@ limit:
             /* 1.2: 1080p25, 4 references, no bitstream_restriction: the HD decoder gives pictures, then runs out of
              * memory and gives none (the 1920x1038 film): it is opened again with the restriction added, and plays */
             tsp_set_options(1, 720);
+            remove("/tmp/tsp_hd_adjust.txt");
+            tsp_set_adj_file("/tmp/tsp_hd_adjust.txt");      /* 1.2.4j */
             refuse_unr_after = 60; unr_units = 0; sps_norestr = 0; sps_unrestricted = 0; int_creates = 0;
             r = play(argv[35], 14);
             refuse_unr_after = 0; sps_norestr = 0;
             show("1080p no restr", &r);
             printf("               decoder opened %d times, %d SPS without restriction reached it\n", int_creates, sps_unrestricted);
             assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates == 2 && r.st.decoded >= 130);
+            /* 1.2.4j: the next run (the in-memory note forgotten): the file says it, opened adjusted at once */
+            tsp_test_adj_forget();
+            refuse_unr_after = 60; unr_units = 0; sps_norestr = 0; sps_unrestricted = 0; int_creates = 0;
+            r = play(argv[35], 14);
+            refuse_unr_after = 0; sps_norestr = 0;
+            show("1080p no restr, next run", &r);
+            printf("               decoder opened %d times, %d SPS without restriction reached it\n", int_creates, sps_unrestricted);
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && int_creates == 1 && r.st.decoded >= 130);
+            tsp_set_adj_file("");                            /* (the later tests: as before) */
+            tsp_test_adj_forget();
         }
         /* a file from the memory card (1080p25, HD decoder in decode order): plays to the end without the sound
          * waiting for pictures that will not come (0.2.7: 10 s of silence and a still picture at the end) */

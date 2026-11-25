@@ -249,7 +249,8 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     /* 1.2.4g: live, after a reconnect: a server that starts its times again (a phone sending a file from the
      * start) went back seconds; the times after it are moved on to follow the ones before (one timeline) */
     int64_t rc_off, rc_last_v, rc_last_a;
-    int rc_check_v, rc_check_a, rc_moves;
+    int64_t rc_ref;                     /* 1.2.4i: the newest time when the reconnect came */
+    int rc_window, rc_moves;
     int force_internal, f_errs, f_errs2;   /* the public decoder refuses the stream (0x8062000F): use the HD one */
     int d_errs, d_units;
     char net_err[96];                   /* the last network failure, for "no picture" (a keyframe was not the problem) */                /* "invalid stream" (0x8062000D) from the public decoder, in a window of units */
@@ -343,8 +344,9 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     int sw_pitch, sw_pitch_tried;       /* 1.2.4f: the slots' row length as FFmpeg's (one DMA a plane) */
     uint32_t sw_dma, sw_dma_checked;    /* 1.2.4f: pictures copied by DMA; the first ones checked */
     uint32_t sw_copies;
-    int sw_ctest;                       /* 1.2.4h/i: the memory test was done for this stream */
+    int sw_ctest;                       /* 1.2.4h/i/j: the copy test was done for this stream */
     int sw_lowres, sw_lowres_want;      /* 1.2.4e: decoded at half size (behind, bigger than the screen) */
+    int sw_field_said;                  /* 1.2.4j */
     int sw_core3;                       /* 1.2.4e: 1 the reader on the 4th core, -1 not */
     int rd_core3;                       /* 1.2.4f: the reader is on the 4th core now */
     int core3_full, rd_core3_off;       /* (found full: back, and not again for this stream) */
@@ -657,6 +659,57 @@ static int g_yuv_bad_w[8], g_yuv_bad_n;
 /* 1.2: the last stream that needed its header adjusted (no bitstream_restriction, out of memory): a film is opened
  * again at each jump; adjusted from the start then, without the freeze before it */
 static char g_adj_url[512];
+/* 1.2.4j: and from earlier runs: a file of such streams (a hash of each address, not the address: it may hold
+ * the account), the newest ADJ_MAX; the same film failed the same way each time it was opened (the device's
+ * 1920x1038 film: three logs, 49-70 pictures dropped each time) */
+#define ADJ_MAX 64
+static char g_adj_path[128];
+static uint64_t g_adj_h[ADJ_MAX];
+static int g_adj_n, g_adj_loaded;
+static uint64_t adj_hash(const char *s)
+{
+    uint64_t h = 1469598103934665603ULL;                     /* (FNV-1a) */
+    for (; *s; s++) { h ^= (uint8_t)*s; h *= 1099511628211ULL; }
+    return h ? h : 1;
+}
+static void adj_load(void)
+{
+    if (g_adj_loaded) return;
+    g_adj_loaded = 1;
+    g_adj_n = 0;
+    if (!g_adj_path[0]) return;
+    FILE *f = fopen(g_adj_path, "r");
+    if (!f) return;
+    char line[40];
+    while (g_adj_n < ADJ_MAX && fgets(line, sizeof line, f)) {
+        unsigned long long v = strtoull(line, NULL, 16);
+        if (v) g_adj_h[g_adj_n++] = (uint64_t)v;
+    }
+    fclose(f);
+}
+static int adj_known(const char *url)
+{
+    adj_load();
+    uint64_t h = adj_hash(url);
+    for (int i = 0; i < g_adj_n; i++) if (g_adj_h[i] == h) return 1;
+    return 0;
+}
+static void adj_remember(const char *url)
+{
+    if (!g_adj_path[0] || adj_known(url)) return;
+    if (g_adj_n == ADJ_MAX) { memmove(g_adj_h, g_adj_h + 1, sizeof g_adj_h[0] * (ADJ_MAX - 1)); g_adj_n--; }
+    g_adj_h[g_adj_n++] = adj_hash(url);
+    FILE *f = fopen(g_adj_path, "w");
+    if (!f) return;
+    for (int i = 0; i < g_adj_n; i++) fprintf(f, "%016llx\n", (unsigned long long)g_adj_h[i]);
+    fclose(f);
+}
+void tsp_set_adj_file(const char *path)
+{
+    snprintf(g_adj_path, sizeof g_adj_path, "%s", path ? path : "");
+    g_adj_loaded = 0;
+}
+void tsp_test_adj_forget(void) { g_adj_url[0] = 0; g_adj_loaded = 0; }
 static int yuv_bad_width(int w) { for (int i = 0; i < g_yuv_bad_n; i++) if (g_yuv_bad_w[i] == w) return 1; return 0; }
 /* (the width a multiple of 32: the colour planes are half as wide, and their rows start every 16 bytes then; 1488
  * wide, 744 for the colour, was refused - known from the stream's header before the decoder opens) */
@@ -1952,38 +2005,127 @@ static void sw_rows(uint8_t *dst, int dpitch, const uint8_t *src, int spitch, in
     }
 }
 
-/* 1.2.4i: once a stream, on its 5th software picture, after the usual copy into the slot (CDRAM): the same copy
- * into uncached main memory (the GPU can read it too, with no cache to write out) and into uncached contiguous
- * memory, timed, for the log. If one is clearly faster than CDRAM the slots can move there (a later version).
- * (1.2.4h measured the rest: writing FFmpeg's picture out of the cache took 2.5-3 times the copy: no GPU reading
- * it directly, no DMA.) */
-static long mem_test_one(const SwvFrame *f, int dw, int dh, int type, size_t unit)
+/* 1.2.4j: two other ways for the ARM to copy rows into CDRAM, measured once a stream (log only, below).
+ * NEON: 64 bytes a pass with a prefetch 256 bytes ahead (the source is cached memory, the firmware leaves the
+ * hardware prefetch off); LDM/STM: 32-byte bursts (vita-memio measured them much faster than single stores on
+ * uncached memory, which CDRAM is). Both give exactly memcpy's bytes. */
+static void rows_neon(uint8_t *dst, int dpitch, const uint8_t *src, int spitch, int w, int h)
 {
-    size_t tot = (size_t)dw * dh * 3 / 2, bs = (tot + unit - 1) & ~(unit - 1);
-    SceUID b = sceKernelAllocMemBlock("tsp_mtest", type, (SceSize)bs, NULL);
-    if (b < 0) return -1;
-    uint8_t *y = NULL;
-    long us = -1;
-    sceKernelGetMemBlockBase(b, (void **)&y);
-    if (y) {
-        uint8_t *u = y + (size_t)dw * dh, *v = u + (size_t)(dw / 2) * (dh / 2);
-        int ch = (f->h + 1) / 2;
-        uint64_t a = now_us();
-        sw_rows(y, dw, f->y, f->ys, f->w, f->h, 0);
-        sw_rows(u, dw / 2, f->u, f->us, (f->w + 1) / 2, ch, 0);
-        sw_rows(v, dw / 2, f->v, f->vs, (f->w + 1) / 2, ch, 0);
-        us = (long)(now_us() - a);
+    for (int y = 0; y < h; y++) {
+        const uint8_t *a = src + (size_t)y * spitch;
+        uint8_t *o = dst + (size_t)y * dpitch;
+        int x = 0;
+#if defined(__ARM_NEON) || defined(__ARM_NEON__)
+        for (; x + 64 <= w; x += 64) {
+            __builtin_prefetch(a + x + 256);
+            uint8x16_t q0 = vld1q_u8(a + x), q1 = vld1q_u8(a + x + 16), q2 = vld1q_u8(a + x + 32), q3 = vld1q_u8(a + x + 48);
+            vst1q_u8(o + x, q0); vst1q_u8(o + x + 16, q1); vst1q_u8(o + x + 32, q2); vst1q_u8(o + x + 48, q3);
+        }
+#endif
+        if (x < w) memcpy(o + x, a + x, (size_t)(w - x));
     }
-    sceKernelFreeMemBlock(b);
+}
+
+static void rows_ldm(uint8_t *dst, int dpitch, const uint8_t *src, int spitch, int w, int h)
+{
+    for (int y = 0; y < h; y++) {
+        const uint8_t *a = src + (size_t)y * spitch;
+        uint8_t *o = dst + (size_t)y * dpitch;
+        int x = 0;
+#if defined(__arm__)
+        if ((((uintptr_t)a | (uintptr_t)o) & 3u) == 0) {
+            const uint32_t *s32 = (const uint32_t *)a;
+            uint32_t *d32 = (uint32_t *)o;
+            for (; x + 32 <= w; x += 32)
+                __asm__ volatile("ldmia %[s]!, {r3, r4, r5, r6, r8, r9, r10, r12}\n\t"
+                                 "stmia %[d]!, {r3, r4, r5, r6, r8, r9, r10, r12}\n\t"
+                                 : [s] "+r" (s32), [d] "+r" (d32) : : "r3", "r4", "r5", "r6", "r8", "r9", "r10", "r12", "memory");
+        }
+#endif
+        if (x < w) memcpy(o + x, a + x, (size_t)(w - x));
+    }
+}
+
+/* the three planes with one of the ways above; then a few rows read back (CDRAM is slow to read) */
+static long copy_way(Tsp *t, const SwvFrame *f, uint8_t *y, uint8_t *u, uint8_t *v, int way, int *bad)
+{
+    int ch = (f->h + 1) / 2, cw = (f->w + 1) / 2;
+    uint64_t a = now_us();
+    if (way == 1) {
+        rows_neon(y, t->dw, f->y, f->ys, f->w, f->h);
+        rows_neon(u, t->dw / 2, f->u, f->us, cw, ch);
+        rows_neon(v, t->dw / 2, f->v, f->vs, cw, ch);
+    } else {
+        rows_ldm(y, t->dw, f->y, f->ys, f->w, f->h);
+        rows_ldm(u, t->dw / 2, f->u, f->us, cw, ch);
+        rows_ldm(v, t->dw / 2, f->v, f->vs, cw, ch);
+    }
+    long us = (long)(now_us() - a);
+    const int rows[3] = { 0, f->h / 2, f->h - 1 };
+    for (int k = 0; k < 3; k++) if (memcmp(y + (size_t)rows[k] * t->dw, f->y + (size_t)rows[k] * f->ys, (size_t)f->w)) *bad = 1;
+    if (memcmp(v + (size_t)(ch - 1) * (t->dw / 2), f->v + (size_t)(ch - 1) * f->vs, (size_t)cw)) *bad = 1;
     return us;
 }
 
-static void mem_test(Tsp *t, const SwvFrame *f, unsigned cdram_us)
+/* 1.2.4j: once a stream, on its 5th software picture, after the usual copy (log only):
+ * (a) the two copies above into the slot, timed next to the usual one (then the usual copy again);
+ * (b) a DMA of the three planes as they are, without any cache sync, into a CDRAM block of their own, then
+ *     the whole picture read back and compared: does sceDmacMemcpy keep the ARM's cache right by itself?
+ *     (1.2.4h: writing the cache out ourselves cost 33 ms; vita-memio: games use it on cached memory.) */
+static void copy_ways_test(Tsp *t, const SwvFrame *f, Slot *sl, unsigned memcpy_us)
 {
-    long un = mem_test_one(f, t->dw, t->dh, SCE_KERNEL_MEMBLOCK_TYPE_USER_RW_UNCACHE, 4096);
-    long pc = mem_test_one(f, t->dw, t->dh, SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW, 1024 * 1024);
-    plog("tsp: memory test %dx%d (%u KB): the ARM copied the picture into CDRAM in %u us, uncached main memory %ld us, "
-         "uncached contiguous memory %ld us", f->w, f->h, (unsigned)((size_t)t->dw * t->dh * 3 / 2 / 1024), cdram_us, un, pc);
+    uint8_t *y = sl->data, *u = y + t->dw * t->dh, *v = u + (t->dw / 2) * (t->dh / 2);
+    int ch = (f->h + 1) / 2, bad1 = 0, bad2 = 0;
+    long neon = copy_way(t, f, y, u, v, 1, &bad1);
+    long ldm = copy_way(t, f, y, u, v, 2, &bad2);
+    sw_rows(y, t->dw, f->y, f->ys, f->w, f->h, 0);           /* (the usual bytes, whatever happened above) */
+    sw_rows(u, t->dw / 2, f->u, f->us, (f->w + 1) / 2, ch, 0);
+    sw_rows(v, t->dw / 2, f->v, f->vs, (f->w + 1) / 2, ch, 0);
+    size_t ny = (size_t)f->ys * (size_t)f->h, nu = (size_t)f->us * (size_t)ch, nv = (size_t)f->vs * (size_t)ch;
+    size_t tot = ny + nu + nv, bs = (tot + 256 * 1024 - 1) & ~(size_t)(256 * 1024 - 1);
+    long dma = -1, cmp_us = -1;
+    const char *res = "not tried (no CDRAM block)";
+    char rb[64];
+    SceUID b = sceKernelAllocMemBlock("tsp_mtest", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, (SceSize)bs, NULL);
+    if (b >= 0) {
+        uint8_t *d = NULL;
+        sceKernelGetMemBlockBase(b, (void **)&d);
+        if (d) {
+            uint64_t a = now_us();
+            int r = sceDmacMemcpy(d, f->y, (SceSize)ny);
+            if (r >= 0) r = sceDmacMemcpy(d + ny, f->u, (SceSize)nu);
+            if (r >= 0) r = sceDmacMemcpy(d + ny + nu, f->v, (SceSize)nv);
+            dma = (long)(now_us() - a);
+            if (r < 0) { snprintf(rb, sizeof rb, "failed (0x%08X)", (unsigned)r); res = rb; dma = -1; }
+            else {
+                a = now_us();
+                size_t at = 0;
+                int plane = -1;
+                const uint8_t *src[3] = { f->y, f->u, f->v };
+                const size_t len[3] = { ny, nu, nv };
+                size_t off = 0;
+                for (int k = 0; k < 3 && plane < 0; k++) {
+                    for (size_t i = 0; i < len[k]; i += 4096) {
+                        size_t n = len[k] - i < 4096 ? len[k] - i : 4096;
+                        if (memcmp(d + off + i, src[k] + i, n)) {
+                            plane = k;
+                            at = i;
+                            while (d[off + at] == src[k][at]) at++;
+                            break;
+                        }
+                    }
+                    off += len[k];
+                }
+                cmp_us = (long)(now_us() - a);
+                if (plane < 0) res = "the whole picture the same";
+                else { snprintf(rb, sizeof rb, "DIFFERENT (plane %d, byte %u)", plane, (unsigned)at); res = rb; }
+            }
+        }
+        sceKernelFreeMemBlock(b);
+    }
+    plog("tsp: copy ways %dx%d (%u KB): memcpy %u us, NEON+prefetch %ld us%s, LDM/STM %ld us%s; DMA without cache sync %ld us: %s "
+         "(compared in %ld us)", f->w, f->h, (unsigned)(tot / 1024), memcpy_us, neon, bad1 ? " (WRONG rows)" : "", ldm,
+         bad2 ? " (WRONG rows)" : "", dma, res, cmp_us);
 }
 
 static void sw_frame(void *ctx, const SwvFrame *f)
@@ -2009,8 +2151,12 @@ static void sw_frame(void *ctx, const SwvFrame *f)
     uint8_t *y = sl->data, *u = y + t->dw * t->dh, *v = u + (t->dw / 2) * (t->dh / 2);
     /* 1.2.4f: an interlaced picture is copied as it is; the screen mixes each row with the next (GPU, two draws)
      * in place of the ARM */
-    t->st.mix_rows = f->interlaced;
-    if (f->interlaced) t->sw_blend_seen = 1;
+    /* 1.2.4j: a picture of 288 rows or fewer (as coded, before half size) is one field's height: nothing to mix
+     * (a 320x240 MPEG-4 film flagged interlaced had its rows mixed, a little softer for nothing) */
+    int inter = f->interlaced && (t->sw_lowres ? f->h * 2 : f->h) > 288;
+    if (f->interlaced && !inter && !t->sw_field_said) { t->sw_field_said = 1; plog("tsp: flagged interlaced but %d rows high: shown as it is", f->h); }
+    t->st.mix_rows = inter;
+    if (inter) t->sw_blend_seen = 1;
     uint64_t c0 = now_us();                                  /* 1.2.4d: the copy apart from decoding */
     int ch = (f->h + 1) / 2;
     int done = 0;
@@ -2038,15 +2184,15 @@ static void sw_frame(void *ctx, const SwvFrame *f)
         sw_rows(v, t->dw / 2, f->v, f->vs, (f->w + 1) / 2, ch, 0);
     }
     t->sw_copy_us += now_us() - c0;
-    if (!done && !t->sw_ctest && t->sw_copies == 4) {      /* 1.2.4i */
+    if (!done && !t->sw_ctest && t->sw_copies == 4) {      /* 1.2.4j (1.2.4i: the memory test) */
         t->sw_ctest = 1;
-        mem_test(t, f, (unsigned)(now_us() - c0));
+        copy_ways_test(t, f, sl, (unsigned)(now_us() - c0));
     }
     t->sw_copies++;
     if (t->st.decoded == 0) {
         g_pictures_seen = 1;
         t->first_pic_pts = f->pts;
-        plog("tsp: first picture %dx%d (software)%s, pts %lld, copied by %s", f->w, f->h, f->interlaced ? ", interlaced (rows mixed on the screen)" : "", (long long)f->pts, done ? "DMA" : "the ARM");
+        plog("tsp: first picture %dx%d (software)%s, pts %lld, copied by %s", f->w, f->h, inter ? ", interlaced (rows mixed on the screen)" : "", (long long)f->pts, done ? "DMA" : "the ARM");
     }
     if (f->pts >= 0 && t->last_out_pts >= 0 && f->pts < t->last_out_pts && t->last_out_pts - f->pts < 90000LL * 10) t->out_of_order++;
     if (f->pts >= 0) t->last_out_pts = f->pts;
@@ -2867,6 +3013,7 @@ static void video_packet(Tsp *t, Pkt *p)
             plog("tsp: no picture from the HD decoder for %d units after running out of memory (%d times); trying it again with "
                  "the header adjusted (bitstream_restriction, no HRD / SEI timing)", t->no_out, t->oom_errs);
             snprintf(g_adj_url, sizeof g_adj_url, "%s", t->url);
+            adj_remember(t->url);                            /* 1.2.4j: kept for the next runs too */
             restart_without_timing(t);                       /* (opened again at the next keyframe) */
             t->dry_restarts++;
             t->good_since = 0;
@@ -3246,30 +3393,66 @@ int tsp_sub_text(char *out, size_t cap)
     return found;
 }
 
-/* 1.2.4g: the times after a reconnect (see rc_off). The first unit of each kind after it is compared with the
- * newest time before it: more than 2 s back is a new start, moved on to 40 ms after it. Before any reconnect,
- * and for films, the times stay as they are. */
+/* 1.2.4g/i: the times after a reconnect (see rc_off). At the reconnect the newest time so far is kept (rc_ref); the
+ * next units (RC_WINDOW of them, both kinds) are compared with it: more than 2 s back is a new start, moved on to
+ * 40 ms after it (and the window ends). (1.2.4i: 1.2.4g looked only at the first unit of each kind; on the Vita that
+ * was the old stream's last picture, which the demuxer gives out only when the next one begins: the new start went
+ * by unmoved and the player waited, the picture 33 s "behind the sound".) Before any reconnect, and for films, the
+ * times stay as they are. */
 #define PTS_MASK ((1LL << 33) - 1)
+#define RC_WINDOW 400
 static int64_t rc_map(Tsp *t, int64_t pts, int video)
 {
     if (pts < 0) return pts;
     int64_t m = (pts + t->rc_off) & PTS_MASK;
-    int *chk = video ? &t->rc_check_v : &t->rc_check_a;
-    if (*chk) {
-        *chk = 0;
-        int64_t ref = t->rc_last_v;
-        if (t->rc_last_a >= 0 && (ref < 0 || pts_diff(t->rc_last_a, ref) > 0)) ref = t->rc_last_a;
-        int64_t d = ref >= 0 ? pts_diff(m, ref) : 0;
+    if (t->rc_window > 0 && t->rc_ref >= 0) {
+        t->rc_window--;
+        int64_t d = pts_diff(m, t->rc_ref);
         if (d < -90000LL * 2) {
-            int64_t want = (ref + 3600) & PTS_MASK;
+            int64_t want = (t->rc_ref + 3600) & PTS_MASK;
             t->rc_off = (t->rc_off + pts_diff(want, m)) & PTS_MASK;
             m = want;
+            t->rc_window = 0;
             if (t->rc_moves++ < 3)
                 plog("tsp: after the reconnect the stream's times start again (%lld ms back): played on as one", (long long)(-d / 90));
         }
     }
     (video ? &t->rc_last_v : &t->rc_last_a)[0] = m;
     return m;
+}
+
+/* 1.2.4g/i: a reconnect: keep the newest time so far */
+static void rc_reconnect(Tsp *t)
+{
+    int64_t ref = t->rc_last_v;
+    if (t->rc_last_a >= 0 && (ref < 0 || pts_diff(t->rc_last_a, ref) > 0)) ref = t->rc_last_a;
+    t->rc_ref = ref;
+    t->rc_window = RC_WINDOW;
+}
+
+/* 1.2.4i test: the device's order after a reconnect: the old stream's last picture, then the new start (pictures
+ * and sound 60 s back). 0 = every unit after it follows on. */
+int tsp_test_rc_seq(void)
+{
+    Tsp *t = calloc(1, sizeof *t);
+    if (!t) return -1;
+    t->rc_last_v = t->rc_last_a = t->rc_ref = -1;
+    int64_t T = 90000LL * 1000, ok = 0;
+    for (int k = 0; k < 50; k++) { rc_map(t, T + k * 3600, 1); rc_map(t, T + k * 3600 + 1000, 0); }
+    int64_t last = T + 49 * 3600 + 1000;
+    rc_reconnect(t);
+    if (rc_map(t, T + 50 * 3600, 1) != T + 50 * 3600) ok = -2;      /* the old last picture: as it is */
+    int64_t base = 90000LL * 940;                                      /* the new start: 60 s back */
+    int64_t v0 = rc_map(t, base, 1), a0 = rc_map(t, base + 500, 0), v1 = rc_map(t, base + 3600, 1);
+    if (!ok && (pts_diff(v0, T + 50 * 3600) < 0 || pts_diff(v0, last) > 90000 / 5)) ok = -3;
+    if (!ok && (pts_diff(a0, v0) != 500 || pts_diff(v1, v0) != 3600)) ok = -4;
+    /* a plain reconnect that goes on (no jump): nothing moves */
+    rc_reconnect(t);
+    int64_t off = t->rc_off;
+    for (int k = 1; k < 10 && !ok; k++) if (rc_map(t, (v1 - t->rc_off + k * 3600) & PTS_MASK, 1) != ((v1 + k * 3600) & PTS_MASK)) ok = -5;
+    if (!ok && t->rc_off != off) ok = -6;
+    free(t);
+    return (int)ok;
 }
 
 static void on_video(void *ctx, const uint8_t *data, size_t len, int64_t pts, int64_t dts, int flags)
@@ -4462,7 +4645,7 @@ static void read_http(Tsp *t, uint8_t *buf)
         }
         t->st.reconnects++;
         plog("tsp: reconnecting (%u)", t->st.reconnects);
-        if (!t->vod) t->rc_check_v = t->rc_check_a = 1;     /* 1.2.4g: the times may start again */
+        if (!t->vod) rc_reconnect(t);                       /* 1.2.4g/i: the times may start again */
         for (int k = 0; k < 10 && !stopping(t); k++) sceKernelDelayThread(100000);   /* 1 s */
         if (stopping(t)) return;
     }
@@ -6338,15 +6521,16 @@ static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offse
     if (url_split_headers(t->url, t->url, sizeof t->url, t->hdr_ua, sizeof t->hdr_ua, t->hdr_ref, sizeof t->hdr_ref))
         plog("tsp: link headers:%s%s%s%s", t->hdr_ua[0] ? " User-Agent " : "", t->hdr_ua, t->hdr_ref[0] ? " Referer " : "", t->hdr_ref);
     t->vod = vod;
-    if (g_adj_url[0] && !strcmp(g_adj_url, t->url)) {      /* (1.2: as it ended up the last time) */
+    int adj_saved = 0;
+    if ((g_adj_url[0] && !strcmp(g_adj_url, t->url)) || (adj_saved = adj_known(t->url))) {   /* (1.2: as it ended up the last time; 1.2.4j: or in an earlier run) */
         t->timing_tried = 1;
         t->drop_timing = 1;
-        plog("tsp: this stream needed its header adjusted before: adjusted from the start");
+        plog("tsp: this stream needed its header adjusted before%s: adjusted from the start", adj_saved ? " (an earlier run)" : "");
     }
     t->vod_start_ms = start_ms > 0 ? start_ms : 0;
     t->vod_first_pts = -1;
     t->first_pic_pts = -1;
-    t->rc_last_v = t->rc_last_a = -1;                       /* 1.2.4g */
+    t->rc_last_v = t->rc_last_a = t->rc_ref = -1;           /* 1.2.4g/i */
     t->start_us = now_us();                                 /* (the audio thread may look before the reader starts) */
     if (stream_offset_ms >= 0) {                            /* a film through the transcoding server */
         t->vod_stream = 1;

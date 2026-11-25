@@ -715,6 +715,7 @@ int main(void)
     load_settings();
     touch_apply();                                           /* 1.2.3 */
     tsp_set_m4v_mark(DATA_DIR "/m4v_try.txt");              /* 1.2.3b */
+    tsp_set_adj_file(DATA_DIR "/hd_adjust.txt");             /* 1.2.4j */
     load_resume();
     load_watched();                                          /* 0.7.0 */
     apply_language();

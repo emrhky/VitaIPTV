@@ -108,6 +108,8 @@ sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=12)} -c:v mpeg4 -vtag X
 sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=6)} -c:v msmpeg4 -q:v 4 -g 50 -c:a libmp3lame -b:a 128k {T}/divx3.avi")
 sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=6)} -c:v mpeg4 -q:v 4 -g 50 -bf 2 -c:a ac3 {T}/mpeg4.mkv")
 sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=6)} -c:v mpeg4 -q:v 4 -g 50 -bf 2 -c:a aac {T}/mpeg4.mp4")
+# 1.2.4j: a 320x240 MPEG-4 flagged interlaced (one field's height: its rows are not mixed)
+sh(f"ffmpeg -loglevel error -y {SW.format(s='320x240', d=6)} -c:v mpeg4 -flags +ildct+ilme -q:v 4 -g 50 -c:a libmp3lame -b:a 128k {T}/ilsmall.avi")
 # 1.2.3: above SD: on three threads (MPEG-2 by slices, MPEG-4 by pictures)
 sh(f"ffmpeg -loglevel error -y {SW.format(s='1280x720', d=6)} -c:v mpeg2video -b:v 8M -g 12 -bf 2 -c:a mp2 -b:a 192k -f mpegts {T}/mpeg2hd.ts")
 sh(f"ffmpeg -loglevel error -y {SW.format(s='1280x720', d=6)} -c:v mpeg4 -vtag XVID -q:v 4 -g 50 -bf 2 -c:a libmp3lame -b:a 128k {T}/xvidhd.avi")
