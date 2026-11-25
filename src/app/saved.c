@@ -98,6 +98,8 @@ static void load_settings(void)
     if (read_saved(SETTINGS_FILE, &m) == 0) { settings_parse(m.buf, &settings); free(m.buf); }
     else settings_defaults(&settings);
     apply_look();
+    if (!settings.log_all) plog("log: errors only from here (Settings > Log file: Everything for all of it)");
+    plog_set_all(settings.log_all);                          /* 1.2.4n */
 }
 
 static void save_settings(void)

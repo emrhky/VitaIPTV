@@ -260,6 +260,7 @@ static int f_theme;                                      /* 0.8.1: shown at once
 static int f_bg;                                         /* 1.4: the background, the same way */
 static int f_srv, f_boost, f_speech, f_level, f_field;            /* 1.1: server off / when needed / always; the sound */
 static int f_autodl, f_touch;                                   /* 1.2.3 */
+static int f_log;                                               /* 1.2.4n */
 static const char *const AUTODL_NAMES[3] = { "Off", "1 episode", "2 episodes" };
 static int set_scroll, form_about;                       /* 1.1: the settings' first row shown; "About" asked */
 static int form_ask;                                     /* 1.1: O with changes: "Save the settings?" / "Save the playlist?" */
@@ -313,6 +314,7 @@ static void open_settings_form(void)
     f_field = settings.snd_field;                            /* 1.3 */
     f_autodl = settings.auto_dl;                             /* 1.2.3 */
     f_touch = settings.touch;
+    f_log = settings.log_all;
     set_scroll = 0;
     form_about = 0;
 }
@@ -332,7 +334,7 @@ static int source_field_enabled(int i)
 #define SRC_FIELDS 5                                     /* (+1: "Delete playlist" when editing one; 1.1: no Save / Cancel rows) */
 /* 1.1: the settings' rows (the address and the test only while the server is on) */
 enum { SF_LANG, SF_THEME, SF_BG, SF_RES, SF_ADULT, SF_HD, SF_PIN, SF_BOOST, SF_LEVEL, SF_SPEECH, SF_FIELD, SF_AUTODL, SF_TOUCH,
-       SF_SERVER, SF_ADDR, SF_TEST, SF_STORAGE, SF_CLR_RECENT, SF_CLR_WATCHED, SF_ABOUT, SF_N };
+       SF_SERVER, SF_ADDR, SF_TEST, SF_STORAGE, SF_LOG, SF_CLR_RECENT, SF_CLR_WATCHED, SF_ABOUT, SF_N };   /* (1.2.4n: SF_LOG) */
 static int set_rows(int *ids)
 {
     int n = 0;
@@ -472,6 +474,12 @@ static void save_settings_form(void)
     settings.auto_dl = f_autodl;                             /* 1.2.3 */
     settings.touch = f_touch;
     touch_apply();
+    if (settings.log_all != f_log) {                             /* 1.2.4n */
+        settings.log_all = f_log;
+        plog_set_all(1);
+        plog("log: %s", f_log ? "everything from here" : "errors only from here");
+        plog_set_all(f_log);
+    }
     settings.lang = f_lang;
     settings.hide_adult = f_adult;
     settings.hide_4k = f_hd;
@@ -535,6 +543,7 @@ static void set_step(int dir, int cross)
     case SF_FIELD: f_field = (f_field + (dir < 0 ? 3 : 1)) % 4; break;   /* 1.3 (Auto: 3) */
     case SF_AUTODL: f_autodl = (f_autodl + (dir < 0 ? 2 : 1)) % 3; break;   /* 1.2.3 */
     case SF_TOUCH: f_touch = !f_touch; break;
+    case SF_LOG: f_log = !f_log; break;                          /* 1.2.4n */
     case SF_STORAGE: if (cross) storage_open(); break;
     case SF_SERVER: {
         int was = f_srv;
@@ -579,7 +588,7 @@ static int form_changed(void)
         return f_lang != settings.lang || f_adult != settings.hide_adult || f_hd != settings.hide_4k || strcmp(f_pin, settings.pin) ||
                RES_VALUES[f_res] != settings.res_pref || f_theme != settings.theme || f_bg != settings.bg || strcmp(f_proxy, settings.proxy) ||
                f_srv != srv0 || f_boost != (settings.snd_boost & 3) || f_speech != settings.snd_dialog || f_level != settings.snd_level ||
-               f_field != settings.snd_field || f_autodl != settings.auto_dl || f_touch != settings.touch;
+               f_field != settings.snd_field || f_autodl != settings.auto_dl || f_touch != settings.touch || f_log != settings.log_all;
     }
     if (edit_index < 0) return f_name[0] || f_url[0] || f_user[0] || f_pass[0];
     if (edit_index >= nsources) return 0;
@@ -656,6 +665,7 @@ static void draw_form(void)
             "The server's address, e.g. http://192.168.1.20:8090",
             "Checks that the server answers.",
             "What the app keeps on the memory card, and clearing it.",
+            "ux0:data/VitaIPTV/log.txt: only errors (the default), or everything the app does, for finding a problem.",
             "Removes the recently watched channels of every playlist. Favorites stay.",
             "Removes the ticks of watched episodes. Where films stopped is kept.",
             "Version, licence and the project's page.",
@@ -681,6 +691,7 @@ static void draw_form(void)
             case SF_FIELD: *x = (ScrField){ T("Sound field"), field_name(f_field), SCR_F_CHOICE, 1, 0 }; break;
             case SF_AUTODL: *x = (ScrField){ T("Download the next episode"), T(AUTODL_NAMES[f_autodl < 0 || f_autodl > 2 ? 0 : f_autodl]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_TOUCH: *x = (ScrField){ T("Touch screen in the player"), T(f_touch ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
+            case SF_LOG: *x = (ScrField){ T("Log file"), T(f_log ? "Everything" : "Errors only"), SCR_F_TOGGLE, 1, 0 }; break;   /* 1.2.4n */
             case SF_STORAGE: *x = (ScrField){ T("Storage"), NULL, SCR_F_ACTION, 1, 0 }; break;
             case SF_SERVER: *x = (ScrField){ T("Transcoding server"), T(AUTO_NAMES[f_srv]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_ADDR: *x = (ScrField){ T("Server address"), f_proxy, SCR_F_TEXT, 1, 1 }; break;
