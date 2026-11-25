@@ -31,6 +31,10 @@ static unsigned g_log_bytes;                     /* the file's size (as it will 
 static int g_soft_noted, g_hard_noted;
 static SceUID g_mx = -1, g_wmx = -1;             /* the lines; the writing to the file (in order) */
 static unsigned g_last_us;
+/* 1.2.4n: Settings > Log file: everything (1), or only the errors and the version line (0, the default: most people
+ * never read it; the memory card is then written to only when something went wrong) */
+static volatile int g_all = 1;                   /* (1 until the settings are read: the start's lines) */
+void plog_set_all(int all) { g_all = all ? 1 : 0; }
 
 static int log_periodic(const char *fmt)
 {
@@ -86,6 +90,7 @@ static void put(const char *s)
 
 void plog(const char *fmt, ...)
 {
+    if (!g_all && !log_urgent(fmt) && strncmp(fmt, "version ", 8) && strncmp(fmt, "log:", 4)) return;
     lock(g_mx);
     unsigned have = g_log_bytes;
     if (have >= LOG_HARD || (have >= LOG_SOFT && log_periodic(fmt))) { unlock(g_mx); return; }

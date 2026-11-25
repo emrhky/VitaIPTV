@@ -8,6 +8,7 @@ void plog(const char *fmt, ...);
 void plog_flush(void);
 void plog_tick(void);
 void player_log_reset(void);                 /* (the app starts: log.txt anew, the last one as log_prev.txt) */
+void plog_set_all(int all);                  /* 1.2.4n: 1 every line, 0 the errors only (Settings > Log file) */
 
 /* File-reader callbacks for SceAvPlayerFileReplacement, reading over HTTP. */
 void    *httpio_object(void);

@@ -1072,7 +1072,6 @@ void dl_init(const char *root)
     if (g_lock < 0) g_lock = sceKernelCreateMutex("dl", 0, 0, NULL);
 }
 
-const char *dl_root(void) { return g_root; }
 
 static void start_thread(void)
 {

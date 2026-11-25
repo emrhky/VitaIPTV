@@ -70,7 +70,6 @@ void dl_size_text(uint64_t bytes, int comma, char *out, size_t cap);
 
 /* ---- the downloads ---- */
 void dl_init(const char *root);             /* once (the folder is made when the first one starts) */
-const char *dl_root(void);
 /* every download under the root (newest first), up to max; have = the file's size now */
 int  dl_scan(DlItem *out, int max);
 /* makes the folder and info.txt for it (it->url, title... set; dir, video, added are filled) and queues it.

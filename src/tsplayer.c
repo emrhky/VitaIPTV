@@ -244,6 +244,8 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     /* decoder (worker thread) */
     int lib_open, dec_open, use_pts, need_key, need_params, pts_retry_done, nref, nref_cap, grow_pending, ladder, no_two;
     int connect_fails, multi_out, oom_fixed, status_retries;
+    int busy_waited;                    /* 1.2.4n: the last session ended in a busy answer that was waited for */
+    uint64_t disc_us;                   /* 1.2.4n: when the last HLS discontinuity came */
     int busy_retries;                   /* 1.0: "busy" answers while reconnecting a stream that played */
     uint32_t busy_bytes;                /* ... the data received at the last one */
     int cio_http_off;                   /* 0.6.0: plain http:// through our own socket failed: the system HTTP from now on */
@@ -327,6 +329,8 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     uint64_t g_t0, g_slot0;             /* ... at the last group start: time, time waited for the screen */
     uint32_t g_bad0;                    /* ... dropped + late pictures then */
     int g_ups, g_downs, g_logged_budget;
+    double tr_ceil, g_prev_cap;         /* 1.2.4n: the ceiling found (0 none yet); the share before the last step up */
+    int g_last_up, g_good;              /* ... the last change was a step up; ms of good groups at the ceiling */
     uint32_t fr_drop0;                  /* ... pictures dropped / late when the last 3 s window began */
     int fr_set;
     AudioFx afx;                        /* 1.1: volume boost / speaker mode (Select > Audio) */
@@ -1795,12 +1799,32 @@ static void group_measure(Tsp *t, uint64_t now)
      * up to about 150 ms, and catches up while the end is left out) */
     int worse = bad != t->g_bad0 || t->late_ms > 250;
     double was = t->tr_cap;
+    /* 1.2.4n: a ceiling. On the device the share went up to all of each group (50 a second), the decoder could not
+     * (busy 74% of the time), pictures were late and the picture fell 0.4 s behind; down to 33, up again, and so on.
+     * Trouble right after a step up: the level before that step is the ceiling. After a minute of good groups at it,
+     * it is tried 2% higher (a lighter part of the programme may allow more). */
+    double ceil = t->tr_ceil > 0 ? t->tr_ceil : (double)t->tr_fps;
     if (worse) {
+        if (t->g_last_up && t->g_prev_cap > 0 && (t->tr_ceil <= 0 || t->g_prev_cap < t->tr_ceil)) {
+            t->tr_ceil = t->g_prev_cap;
+            plog("tsp: groups: %.1f a second was too many: at most %.1f from now on", was, t->tr_ceil);
+        }
         t->tr_cap *= 0.92;
         if (t->tr_cap < t->tr_cap0 * 0.85) t->tr_cap = t->tr_cap0 * 0.85;
-    } else if (spare > 0.35 && t->tr_cap < t->tr_fps) {
+        t->g_last_up = 0;
+        t->g_good = 0;
+    } else if (spare > 0.35 && t->tr_cap < ceil) {
+        t->g_prev_cap = t->tr_cap;
         t->tr_cap *= spare > 0.5 ? 1.12 : 1.06;
-        if (t->tr_cap > t->tr_fps) t->tr_cap = t->tr_fps;
+        if (t->tr_cap > ceil) t->tr_cap = ceil;
+        t->g_last_up = 1;
+    } else {
+        t->g_last_up = 0;
+        if (t->tr_ceil > 0 && t->tr_cap >= t->tr_ceil && (t->g_good += (int)(dt / 1000)) >= 60000) {   /* (ms at the ceiling) */
+            t->g_good = 0;
+            t->tr_ceil *= 1.02;
+            if (t->tr_ceil > t->tr_fps) t->tr_ceil = t->tr_fps;
+        }
     }
     if (t->tr_cap != was) {
         if (t->tr_cap > was) t->g_ups++; else t->g_downs++;
@@ -4467,6 +4491,7 @@ static int busy_wait(Tsp *t, int status, const char *what)
     }
     t->st.note[0] = 0;
     t->start_us = now_us();                                  /* 1.2.4m: "no picture yet" counts from the answer, not the wait */
+    t->busy_waited = 1;                                      /* 1.2.4n: (not a lost connection: see read_http) */
     return !stopping(t);
 }
 
@@ -4477,14 +4502,25 @@ static int http_refused(Tsp *t, int status)
     /* 1.0: reconnecting a stream that played: a one-connection account is refused while the server still
      * counts the lost connection (seen after 2 hours: "No data for too long", then 407). It lets it go after
      * a few seconds: asked again after 3, 6 and 10 s (again from the start once it has played a while). */
+    /* 1.2.4n: every 2 s for up to 44 s, as at the start (1.2.4m; it was 3, 6 and 10 s, then the error: on the device a
+     * provider held the lost connection for more than 19 s) */
     if (busy && t->st.bytes > 0) {
-        static const int WAIT_S[3] = { 3, 6, 10 };
         if (t->st.bytes > t->busy_bytes + 512 * 1024) t->busy_retries = 0;
-        if (t->busy_retries < 3) {
-            int w = WAIT_S[t->busy_retries++];
+        if (t->busy_retries < BUSY_LONG_TRIES) {
+            t->busy_retries++;
             t->busy_bytes = t->st.bytes;
-            plog("tsp: server answered %d while reconnecting (it may still count the lost connection): again in %d s", status, w);
-            for (int k = 0; k < w * 50 && !stopping(t); k++) sceKernelDelayThread(20000);
+            if (t->busy_retries <= 3 || t->busy_retries % 5 == 0)
+                plog("tsp: server answered %d while reconnecting (it may still count the lost connection): again in %d s (%d)",
+                     status, BUSY_LONG_MS / 1000, t->busy_retries);
+            for (int k = 0; k < BUSY_LONG_MS / 20 && !stopping(t); k++) {
+                if (k % 50 == 0) {
+                    int left = ((BUSY_LONG_TRIES - t->busy_retries) * BUSY_LONG_MS + (BUSY_LONG_MS - k * 20)) / 1000;
+                    snprintf(t->st.note, sizeof t->st.note, "The provider still counts the last stream: %d s", left);
+                }
+                sceKernelDelayThread(20000);
+            }
+            t->st.note[0] = 0;
+            t->busy_waited = 1;
             return !stopping(t);
         }
     }
@@ -4608,12 +4644,22 @@ static void read_http(Tsp *t, uint8_t *buf)
     int fails = 0;
     for (;;) {
         uint32_t got;
+        t->busy_waited = 0;
         int retry = http_session(t, buf, &got);
         if (t->is_hls && !stopping(t)) { read_hls(t, buf); return; }
         if (!retry) return;
         if (t->vod && got > 0) {                            /* a file without ranges: it cannot go on mid-way */
             if (t->mkv) mkv_flush(t->mkv); else if (t->flv) flv_flush(t->flv); else ts_flush(t->dmx);
             return;
+        }
+        /* 1.2.4n: a busy answer waited for is not a lost connection (its own limit: 44 s); before, the 6th such
+         * answer ended the stream as "connection lost" */
+        int busy = t->busy_waited;
+        t->busy_waited = 0;
+        if (busy) {
+            t->st.reconnects++;
+            if (stopping(t)) return;
+            continue;
         }
         fails = got > 64 * 1024 ? 0 : fails + 1;            /* a session that delivered data resets the count */
         if (wait_for_network(t)) fails = 0;                 /* back from standby: the attempts so far do not count */
@@ -5270,7 +5316,7 @@ static void read_hls(Tsp *t, uint8_t *buf)
             HlsSegment *g = &m.seg[i];
             if (g->seq < next) continue;
             hls_resolve(base, g->uri, g->uri_len, seg_url, sizeof seg_url);
-            if (g->discontinuity && fed) plog("tsp: HLS discontinuity at #%lld", (long long)g->seq);
+            if (g->discontinuity && fed) { plog("tsp: HLS discontinuity at #%lld", (long long)g->seq); t->disc_us = now_us(); }
             if (alt && t->alt_on) {                          /* 0.6.0: the sound of this time first */
                 alt_fill(t, alt, v_ms + g->duration_ms, buf);
                 if (stopping(t)) break;
@@ -6334,7 +6380,8 @@ static void buffer_check(Tsp *t, uint64_t now)
     uint64_t max_wait_ms = t->vod ? (uint64_t)leave_ms + 25000 : LIVE_WAIT_MAX;
     int too_long = now - t->buf_since > max_wait_ms * 1000ULL;
     uint32_t came = t->st.bytes - t->buf_bytes0;
-    if (too_long && !t->vod && !t->st.slow_network && came < 64 * 1024) {   /* (before the wait ends: it may not) */
+    if (too_long && !t->vod && !t->st.slow_network && came < 64 * 1024 &&
+        !(t->disc_us && now - t->disc_us < 30000000ULL)) {   /* (before the wait ends: it may not; 1.2.4n: not at a discontinuity) */
         t->st.slow_network = 1;
         plog("tsp: nothing came during the wait (%u KB in %u ms): the line is too slow for this stream",
              (unsigned)(came / 1024), (unsigned)((now - t->buf_since) / 1000));
@@ -6358,7 +6405,12 @@ static void buffer_check(Tsp *t, uint64_t now)
         t->late_ema_us = 0;
         t->late_ms = 0;
         t->grace_until = now + 2000000ULL;
-        if (!t->vod) {                                      /* live waits again and again: the line is too slow */
+        /* 1.2.4n: a wait at an HLS discontinuity (an advert break: new times, a new SPS, the decoder starting again)
+         * says nothing about the line: on the device 1080p went to 720p after one, on a line that carried it for 25
+         * minutes */
+        int disc = t->disc_us && now - t->disc_us < 30000000ULL;
+        if (!t->vod && disc && !t->st.slow_network) plog("tsp: the wait came with an HLS discontinuity: not counted as a slow line");
+        if (!t->vod && !disc) {                             /* live waits again and again: the line is too slow */
             /* 0.2.6 waited for three waits in two minutes and switched to 720p after about 80 s: now two
              * waits within a minute, or one wait in which (almost) nothing came */
             if (!t->st.slow_network && t->rebuf_t[1] && now - t->rebuf_t[1] < 60000000ULL) {

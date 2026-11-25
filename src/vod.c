@@ -795,32 +795,9 @@ static void parse_edits(Mp4Track *t, const Box *trak, uint32_t movie_ts)
 
 static void use_avcc(Mp4Demux *d, const Mp4Track *t)
 {
-    const uint8_t *p = t->cfg;
-    int n = t->cfg_len, pos;
-    if (n < 7 || p[0] != 1) return;
-    d->nal_len = (p[4] & 3) + 1;
-    int nsps = p[5] & 0x1F;
-    pos = 6;
-    for (int i = 0; i < nsps && pos + 2 <= n; i++) {
-        int l = (p[pos] << 8) | p[pos + 1];
-        pos += 2;
-        if (pos + l > n) return;
-        if (i == 0 && l <= (int)sizeof d->info.sps) {
-            memcpy(d->info.sps, p + pos, (size_t)l);
-            d->info.sps_len = l;
-            ts_parse_sps(p + pos, (size_t)l, &d->info);
-        }
-        pos += l;
-    }
-    if (pos >= n) return;
-    int npps = p[pos++];
-    for (int i = 0; i < npps && pos + 2 <= n; i++) {
-        int l = (p[pos] << 8) | p[pos + 1];
-        pos += 2;
-        if (pos + l > n) return;
-        if (i == 0 && l <= (int)sizeof d->info.pps) { memcpy(d->info.pps, p + pos, (size_t)l); d->info.pps_len = l; }
-        pos += l;
-    }
+    /* 1.2.4n: shared with MKV and FLV (this copy took an empty SPS, and an SPS it could not read changed the
+     * picture information) */
+    if (t->cfg_len > 0) ts_parse_avcc(t->cfg, (size_t)t->cfg_len, &d->info, &d->nal_len);
 }
 
 static void use_asc(Mp4Demux *d, const Mp4Track *t)

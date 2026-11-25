@@ -89,6 +89,7 @@ typedef struct {
                                          * headphones when they are plugged in, else speakers) */
     int auto_dl;                        /* 1.2.3: the next episodes downloaded when 40% of one is watched: 0 off, 1, 2 */
     int touch;                          /* 1.2.3: the front touch screen in the player: 0 off (the default), 1 on */
+    int log_all;                        /* 1.2.4n: log.txt: 0 the errors only (the default), 1 everything */
 } Settings;
 
 void channel_list_init(ChannelList *l);

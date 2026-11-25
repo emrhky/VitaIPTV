@@ -47,31 +47,7 @@ static int es_reserve(FlvDemux *d, size_t n)
 /* AVCDecoderConfigurationRecord: NAL length size, SPS and PPS */
 static void use_avcc(FlvDemux *d, const uint8_t *p, size_t n)
 {
-    if (n < 7 || p[0] != 1) return;
-    d->nal_len = (p[4] & 3) + 1;
-    int nsps = p[5] & 0x1F;
-    size_t pos = 6;
-    for (int i = 0; i < nsps && pos + 2 <= n; i++) {
-        size_t l = ((size_t)p[pos] << 8) | p[pos + 1];
-        pos += 2;
-        if (pos + l > n) return;
-        if (i == 0 && l > 0 && l <= sizeof d->info.sps) {
-            TsInfo tmp = d->info;
-            if (ts_parse_sps(p + pos, l, &tmp) == 0) d->info = tmp;
-            memcpy(d->info.sps, p + pos, l);
-            d->info.sps_len = (int)l;
-        }
-        pos += l;
-    }
-    if (pos >= n) return;
-    int npps = p[pos++];
-    for (int i = 0; i < npps && pos + 2 <= n; i++) {
-        size_t l = ((size_t)p[pos] << 8) | p[pos + 1];
-        pos += 2;
-        if (pos + l > n) return;
-        if (i == 0 && l > 0 && l <= sizeof d->info.pps) { memcpy(d->info.pps, p + pos, l); d->info.pps_len = (int)l; }
-        pos += l;
-    }
+    ts_parse_avcc(p, n, &d->info, &d->nal_len);             /* (1.2.4n: shared with MP4 and MKV) */
 }
 
 /* length-prefixed NAL units -> start codes, then to the sink */

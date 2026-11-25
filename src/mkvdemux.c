@@ -205,33 +205,7 @@ static Track *track_by_number(MkvDemux *d, int number)
 /* Reads the SPS/PPS from avcC and parses the SPS. */
 static void use_avcc(MkvDemux *d, const Track *t)
 {
-    const uint8_t *p = t->priv;
-    int n = t->priv_len, pos;
-    if (n < 7 || p[0] != 1) return;
-    d->nal_len = (p[4] & 3) + 1;
-    int nsps = p[5] & 0x1F;
-    pos = 6;
-    for (int i = 0; i < nsps && pos + 2 <= n; i++) {
-        int l = (p[pos] << 8) | p[pos + 1];
-        pos += 2;
-        if (pos + l > n) return;
-        if (i == 0 && l > 0 && l <= (int)sizeof d->info.sps) {
-            TsInfo tmp = d->info;                           /* a SPS it cannot read leaves the info as it was (as in FLV) */
-            if (ts_parse_sps(p + pos, (size_t)l, &tmp) == 0) d->info = tmp;
-            memcpy(d->info.sps, p + pos, (size_t)l);
-            d->info.sps_len = l;
-        }
-        pos += l;
-    }
-    if (pos >= n) return;
-    int npps = p[pos++];
-    for (int i = 0; i < npps && pos + 2 <= n; i++) {
-        int l = (p[pos] << 8) | p[pos + 1];
-        pos += 2;
-        if (pos + l > n) return;
-        if (i == 0 && l <= (int)sizeof d->info.pps) { memcpy(d->info.pps, p + pos, (size_t)l); d->info.pps_len = l; }
-        pos += l;
-    }
+    if (t->priv_len > 0) ts_parse_avcc(t->priv, (size_t)t->priv_len, &d->info, &d->nal_len);   /* (1.2.4n: shared) */
 }
 
 static void use_aac(MkvDemux *d, const Track *t)

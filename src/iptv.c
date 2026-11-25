@@ -1378,6 +1378,7 @@ void settings_parse(const char *text, Settings *st)
             else if (!strcmp(k, "snd_field")) st->snd_field = small_num(v, 3, 3);
             else if (!strcmp(k, "auto_dl")) st->auto_dl = small_num(v, 2, 0);   /* 1.2.3 */
             else if (!strcmp(k, "touch")) st->touch = small_num(v, 1, 0);
+            else if (!strcmp(k, "log")) st->log_all = small_num(v, 1, 0);   /* 1.2.4n */
             else if (!strcmp(k, "adelay_sp") || !strcmp(k, "adelay_hp") || !strcmp(k, "adelay_bt")) {
                 int n = atoi(v);                             /* 1.2.1; 1.2.2: 0..1000 ms (below 0 did nothing), 50 ms steps */
                 if (n < 0) n = 0;
@@ -1422,6 +1423,7 @@ int settings_format(const Settings *st, char *out, size_t outsz)
     if (st->snd_field != 3) e += snprintf(ex + e, sizeof ex - (size_t)e, "snd_field=%d\n", st->snd_field);
     if (st->auto_dl) e += snprintf(ex + e, sizeof ex - (size_t)e, "auto_dl=%d\n", st->auto_dl);   /* 1.2.3 */
     if (st->touch) e += snprintf(ex + e, sizeof ex - (size_t)e, "touch=1\n");
+    if (st->log_all) e += snprintf(ex + e, sizeof ex - (size_t)e, "log=1\n");   /* 1.2.4n */
     if (st->adelay_sp) e += snprintf(ex + e, sizeof ex - (size_t)e, "adelay_sp=%d\n", st->adelay_sp);   /* 1.2.1 */
     if (st->adelay_hp) e += snprintf(ex + e, sizeof ex - (size_t)e, "adelay_hp=%d\n", st->adelay_hp);
     if (st->adelay_bt) e += snprintf(ex + e, sizeof ex - (size_t)e, "adelay_bt=%d\n", st->adelay_bt);   /* 1.2.2 */

@@ -198,6 +198,36 @@ static int parse_sps(const uint8_t *nal, size_t len, TsInfo *inf)
     return 0;
 }
 
+int ts_parse_avcc(const uint8_t *p, size_t n, TsInfo *inf, int *nal_len)
+{
+    if (n < 7 || p[0] != 1) return -1;
+    *nal_len = (p[4] & 3) + 1;
+    int nsps = p[5] & 0x1F;
+    size_t pos = 6;
+    for (int i = 0; i < nsps && pos + 2 <= n; i++) {
+        size_t l = ((size_t)p[pos] << 8) | p[pos + 1];
+        pos += 2;
+        if (pos + l > n) return 0;
+        if (i == 0 && l > 0 && l <= sizeof inf->sps) {
+            TsInfo tmp = *inf;
+            if (ts_parse_sps(p + pos, l, &tmp) == 0) *inf = tmp;
+            memcpy(inf->sps, p + pos, l);
+            inf->sps_len = (int)l;
+        }
+        pos += l;
+    }
+    if (pos >= n) return 0;
+    int npps = p[pos++];
+    for (int i = 0; i < npps && pos + 2 <= n; i++) {
+        size_t l = ((size_t)p[pos] << 8) | p[pos + 1];
+        pos += 2;
+        if (pos + l > n) return 0;
+        if (i == 0 && l > 0 && l <= sizeof inf->pps) { memcpy(inf->pps, p + pos, l); inf->pps_len = (int)l; }
+        pos += l;
+    }
+    return 0;
+}
+
 int ts_parse_sps(const uint8_t *nal, size_t len, TsInfo *inf) { return parse_sps(nal, len, inf); }
 
 /* ------------------------------------------------------------ H.264 scan */

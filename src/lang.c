@@ -373,6 +373,11 @@ static const Pair FIXED[] = {
     { "When 40 percent of an episode is watched, the next ones are downloaded. An account with one connection downloads after you stop watching.",
       "Bölümün yüzde 40'ı izlenince sonraki bölümler indirilir. Tek bağlantılı hesapta indirme, izlemeyi bırakınca başlar." },
     { "Touch screen in the player", "Oynatıcıda dokunmatik" },
+    { "Log file", "Kayıt dosyası (log)" },                      /* 1.2.4n */
+    { "Everything", "Her şey" },
+    { "Errors only", "Yalnız hatalar" },
+    { "ux0:data/VitaIPTV/log.txt: only errors (the default), or everything the app does, for finding a problem.",
+      "ux0:data/VitaIPTV/log.txt: yalnız hatalar (varsayılan) ya da bir sorunu bulmak için uygulamanın yaptığı her şey." },
     { "In the player: a touch shows or hides the bar, drag the time line to jump, two touches pause.",
       "Oynatıcıda: dokununca çubuk açılır/kapanır, zaman çizgisini sürükleyerek sarılır, iki dokunuş duraklatır." },
     { "Storage", "Depolama" }, { "What the app keeps on the memory card, and clearing it.", "Uygulamanın hafıza kartında tuttukları ve temizliği." },

@@ -92,6 +92,9 @@ void          ts_lang3(const char *in, char out[4]);
 void          ts_prefer_audio(TsDemux *d, int pid, const char *lang);
 /* Parses an H.264 SPS NAL unit (nal[0] = NAL header) into the video fields of inf. 0 = ok. */
 int           ts_parse_sps(const uint8_t *nal, size_t len, TsInfo *inf);
+/* 1.2.4n: an avcC record (MP4, MKV, FLV: one copy instead of three): the first SPS and PPS into inf (a SPS it cannot
+ * read leaves the picture information as it was), *nal_len the length field's size. 0 = ok, -1 not avcC */
+int           ts_parse_avcc(const uint8_t *p, size_t n, TsInfo *inf, int *nal_len);
 double        ts_video_fps(const TsInfo *i);        /* 0 if unknown */
 /* 1.2.2b: an AVI / VFW FourCC ("XVID", "DX50", "H264"...): the codec (TS_CODEC_OTHER when none we know) */
 TsCodec       ts_fourcc_codec(const uint8_t *f);
