@@ -1039,11 +1039,10 @@ sw:
                 assert(r.st.state == TSP_ENDED && r.w == 640 && r.st.decoded >= 30 && r.st.audio_frames > 100);
                 assert(mock_core3_self == 0);                     /* (1.2.4g: no worker of ours held anywhere) */
                 assert(mock_core3_moves == (lf[k].core3 ? 1 : 0));
-                assert(mock_ctest_blocks == (lf[k].dma && !lf[k].dmafail ? 0 : 1));   /* (DMA working: no test) */
+                assert(mock_ctest_blocks == (lf[k].dma && !lf[k].dmafail ? 0 : 2));   /* (1.2.4i: the memory test, two blocks, once; DMA working: none) */
                 if (lf[k].dma && !lf[k].dmafail) assert(mock_dma_calls >= 3 * 30);   /* (three planes a picture) */
-                /* (1.2.4h: the copy test on the 5th picture makes two DMA calls, once; it takes and frees one block) */
-                if (!lf[k].dma) assert(mock_dma_calls == 2);
-                if (lf[k].dmafail) assert(mock_dma_calls == 1 + 2);   /* (the first error: never again) */
+                if (!lf[k].dma) assert(mock_dma_calls == 0);
+                if (lf[k].dmafail) assert(mock_dma_calls == 1);   /* (the first error: never again) */
             }
             mock_core3 = 0; mock_dma_fail = 0;
             tsp_set_dma(0);

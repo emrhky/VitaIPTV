@@ -22,7 +22,9 @@ Required statements:
   `third_party/mbedtls_user_config.h`.
 - Portions of this software are copyright © The FreeType Project (www.freetype.org). All rights reserved.
 - This software is based in part on the work of the Independent JPEG Group.
-- libjpeg-turbo: Copyright (C) the libjpeg-turbo Project authors (BSD-3-Clause for its TurboJPEG parts).
+- libjpeg-turbo: Copyright (C) the libjpeg-turbo Project authors (BSD-3-Clause for its TurboJPEG parts). The VPK
+  may use libjpeg-turbo 3.2.1 built with its NEON code by `tools/build_libjpeg_vita.sh` (unmodified source);
+  its LICENSE.md is then in the VPK as `licenses/libjpeg-turbo-LICENSE.txt`.
 - zlib: Copyright (C) Jean-loup Gailly and Mark Adler.
 - libpng: Copyright (c) the PNG Reference Library Authors.
 

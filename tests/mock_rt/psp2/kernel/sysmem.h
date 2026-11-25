@@ -16,6 +16,5 @@ extern int mock_live_blocks;
 typedef struct SceKernelFreeMemorySizeInfo { int size, size_user, size_cdram, size_phycont; } SceKernelFreeMemorySizeInfo;
 int sceKernelGetFreeMemorySize(SceKernelFreeMemorySizeInfo *info);
 int sceKernelSyncVMDomain(SceUID uid, void *data, SceSize size);   /* 1.2.4f */
-SceUID sceKernelFindMemBlockByAddr(const void *addr, SceSize size);   /* 1.2.4h */
-extern int mock_ctest_blocks;               /* 1.2.4h: cached PHYCONT blocks taken (the copy test) */
+extern int mock_ctest_blocks;               /* 1.2.4i: blocks the memory test took (named tsp_mtest) */
 #endif

@@ -19,7 +19,11 @@ const char *poster_jpeg_lib(void)
 #ifdef LIBJPEG_TURBO_VERSION
 #define PJ_STR2(x) #x
 #define PJ_STR(x) PJ_STR2(x)
+#ifdef JPEG_NEON
+    return "libjpeg-turbo " PJ_STR(LIBJPEG_TURBO_VERSION) " NEON";   /* 1.2.4i: tools/build_libjpeg_vita.sh */
+#else
     return "libjpeg-turbo " PJ_STR(LIBJPEG_TURBO_VERSION);
+#endif
 #else
     static char b[24];
     snprintf(b, sizeof b, "libjpeg %d", JPEG_LIB_VERSION);

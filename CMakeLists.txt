@@ -91,6 +91,23 @@ if(VITAIPTV_HTTPS)
   message(STATUS "HTTPS: built-in mbedTLS")
 endif()
 
+# 1.2.4i: libjpeg-turbo with its NEON code (VitaSDK's package is built without it): tools/build_libjpeg_vita.sh into
+# third_party/libjpeg-vita; it serves the posters and vita2d's JPEGs. Without it: the package's libjpeg, as before.
+set(LIBJPEG_VITA ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libjpeg-vita)
+set(JPEG_LIB jpeg)
+set(JPEG_VPK_FILES "")
+if(EXISTS ${LIBJPEG_VITA}/lib/libjpeg.a AND EXISTS ${LIBJPEG_VITA}/include/jpeglib.h)
+  target_include_directories(${PROJECT_NAME}.elf BEFORE PRIVATE ${LIBJPEG_VITA}/include)
+  target_compile_definitions(${PROJECT_NAME}.elf PRIVATE JPEG_NEON)
+  set(JPEG_LIB ${LIBJPEG_VITA}/lib/libjpeg.a)
+  if(EXISTS ${LIBJPEG_VITA}/LICENSE.md)
+    set(JPEG_VPK_FILES FILE third_party/libjpeg-vita/LICENSE.md licenses/libjpeg-turbo-LICENSE.txt)
+  endif()
+  message(STATUS "Posters: libjpeg-turbo with NEON from third_party/libjpeg-vita")
+else()
+  message(STATUS "Posters: VitaSDK's libjpeg (no NEON; tools/build_libjpeg_vita.sh makes them faster)")
+endif()
+
 # 0.5.0: AC-3 / E-AC-3 (Dolby Digital / Dolby Digital Plus) with FFmpeg's decoders, LGPL 2.1+. Built once with
 # tools/build_ffmpeg_vita.sh into third_party/ffmpeg-vita; without it the app builds as before (no AC-3 sound).
 set(FFMPEG_VITA ${CMAKE_CURRENT_SOURCE_DIR}/third_party/ffmpeg-vita)
@@ -156,7 +173,7 @@ message(STATUS "Extra stubs: ${EXTRA_STUBS}")
 target_link_libraries(${PROJECT_NAME}.elf
   ${A52_LIBS}
   vita2d
-  freetype png jpeg z m pthread
+  freetype png ${JPEG_LIB} z m pthread
   SceRtc_stub SceKernelDmacMgr_stub
   SceAvPlayer_stub SceAudio_stub SceVideodec_stub SceCodecEngine_stub SceAudiodec_stub
   SceNet_stub SceNetCtl_stub SceHttp_stub SceSsl_stub
@@ -179,4 +196,5 @@ vita_create_vpk(${PROJECT_NAME}.vpk ${VITA_TITLEID} ${PROJECT_NAME}.self
   FILE THIRD_PARTY_NOTICES.md THIRD_PARTY_NOTICES.txt
   FILE third_party/mbedtls/LICENSE licenses/mbedtls-LICENSE.txt
   ${A52_VPK_FILES}
+  ${JPEG_VPK_FILES}
 )

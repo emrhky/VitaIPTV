@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.4i (test)
+- **Posters decode faster:** VitaSDK's libjpeg-turbo is built without its NEON code. `tools/build_libjpeg_vita.sh`
+  builds the same version (3.2.1) with it into `third_party/libjpeg-vita` (GitHub builds it and keeps it); CMake
+  uses it when it is there, VitaSDK's libjpeg otherwise. The log's poster line says "libjpeg-turbo 3.2.1 NEON".
+- **The copy test of 1.2.4h is gone** (about 70 ms on the 5th picture). It showed that writing FFmpeg's picture out
+  of the ARM's cache costs 2.5-3 times the copy: the GPU will not read FFmpeg's pictures directly, and the
+  software video keeps the ARM's copy.
+- **Memory test (log only):** once a stream, the 5th software picture is also copied into uncached main memory and
+  into uncached contiguous memory, timed next to the usual copy into CDRAM ("memory test" line). The picture
+  shown is the usual one.
+
 ## 1.2.4h (test: measurements first)
 - **Copy test (log only):** once a stream, on the 5th software picture, the log shows what each way of getting the
   picture to the GPU costs on the Vita: writing FFmpeg's picture out of the ARM's cache (what letting the GPU read it
