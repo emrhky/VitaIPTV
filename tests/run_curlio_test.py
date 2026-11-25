@@ -8,8 +8,11 @@ import mbedtls_pc
 MCF, MLIB = mbedtls_pc.build()
 T = tempfile.mkdtemp()
 # 0.6.0: the receive buffer search (a system that refuses sizes above a limit, like the Vita at 1 MB)
-subprocess.run(f"gcc -O1 -g -fsanitize=address,undefined -Wall {MCF} -I{ROOT}/src {ROOT}/tests/test_rcvbuf.c {ROOT}/src/hls.c {MLIB} -o {T}/test_rcvbuf",
-               shell=True, check=True)
+# 1.2.4m: the compilers' warnings kept out of the output (on GitHub they filled the 40 lines shown of a failure)
+def cc(cmd):
+    c = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    if c.returncode: print(c.stdout, c.stderr[-4000:]); sys.exit(1)
+cc(f"gcc -O1 -g -fsanitize=address,undefined -Wall {MCF} -I{ROOT}/src {ROOT}/tests/test_rcvbuf.c {ROOT}/src/hls.c {MLIB} -o {T}/test_rcvbuf")
 r = subprocess.run(f"{T}/test_rcvbuf", shell=True, capture_output=True, text=True)
 print(r.stdout, r.stderr[-2000:])
 if r.returncode: sys.exit(1)
@@ -53,9 +56,8 @@ ctx12 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx12.load_cert_chain(f"{T}/c.p
 ctx12.maximum_version = ssl.TLSVersion.TLSv1_2
 srv12.socket = ctx12.wrap_socket(srv12.socket, server_side=True)
 threading.Thread(target=srv12.serve_forever, daemon=True).start()
-subprocess.run(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra {MCF} -I{ROOT}/src "
-               f"{ROOT}/tests/test_curlio.c {ROOT}/src/curlio.c {ROOT}/src/hls.c {MLIB} -o {T}/test_curlio",
-               shell=True, check=True)
+cc(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra {MCF} -I{ROOT}/src "
+   f"{ROOT}/tests/test_curlio.c {ROOT}/src/curlio.c {ROOT}/src/hls.c {MLIB} -o {T}/test_curlio")
 # 1.5.1: a server that drops the first SYNs (its queue full for 4.6 s): how long one socket alone waits, then the app
 import socket as so
 def busy_server(free_after):
@@ -108,5 +110,6 @@ def tls_flaky(fail_first):
 pf1, pfa = tls_flaky(1), tls_flaky(1000)
 r = subprocess.run([f"{T}/test_curlio", str(port), f"{T}/file.ts", str(srv12.server_address[1]), str(p2), "%.2f" % plain, str(pf1), str(pfa)],
                    capture_output=True, text=True, timeout=120)
-print(r.stdout); print(r.stderr[-3000:])
-sys.exit(r.returncode)
+print(r.stderr[-3000:]); print(r.stdout)                  # (the test's own lines last: they are what a failure shows)
+if r.returncode: print(f"test_curlio ended with {r.returncode}" + (" (a signal)" if r.returncode < 0 else ""))
+sys.exit(1 if r.returncode else 0)

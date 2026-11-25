@@ -15,6 +15,9 @@
 - **One-connection accounts (HTTP 407 / 405 just after another stream):** asked again every 2 s (was 5 s) for up to
   44 s with the countdown: the next channel starts as soon as the server lets the account go. Leaving during the
   wait (another channel) shows no error.
+- **Tests on GitHub (curlio):** the compilers' warnings no longer fill the lines a failure shows (the failing line
+  could not be seen); a runner that cannot reach the "dropped connection" address at once, or that does not drop
+  connections of a full queue, skips those two timing checks instead of failing; SIGPIPE ignored in the test.
 - **Stream test:** AVI files and MPEG program streams / Video CD files are recognised (they were "No video stream
   recognised"). The log says "MPEG-1" for MPEG-1 video (it said MPEG-2: the same decoder).
 
