@@ -26,20 +26,36 @@ jobs:
 
       - uses: actions/checkout@v4
 
-      - name: FFmpeg cache (AC-3 / E-AC-3 / AAC)
+      - name: FFmpeg cache (sound decoders, MPEG-2 / MPEG-4 video)
         id: ffcache
         uses: actions/cache@v4
         with:
           path: third_party/ffmpeg-vita
-          key: ffmpeg-vita-7.1-${{ hashFiles('tools/build_ffmpeg_vita.sh') }}
+          key: ffmpeg-vita-7.1-neon-${{ hashFiles('tools/build_ffmpeg_vita.sh') }}
 
-      - name: Build FFmpeg (AC-3 / E-AC-3 / AAC decoders only)
+      - name: Build FFmpeg (only the decoders the app uses)
         if: steps.ffcache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           export VITASDK=${VITASDK:-/usr/local/vitasdk}
           chmod +x tools/build_ffmpeg_vita.sh
           ./tools/build_ffmpeg_vita.sh
+
+      - name: libjpeg-turbo cache (NEON, posters)
+        id: jpegcache
+        uses: actions/cache@v4
+        with:
+          path: third_party/libjpeg-vita
+          key: libjpeg-vita-3.2.1-neon-${{ hashFiles('tools/build_libjpeg_vita.sh') }}
+
+      - name: Build libjpeg-turbo with NEON (1.2.4i; if it fails the app uses VitaSDK's libjpeg)
+        if: steps.jpegcache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        shell: bash
+        run: |
+          export VITASDK=${VITASDK:-/usr/local/vitasdk}
+          chmod +x tools/build_libjpeg_vita.sh
+          ./tools/build_libjpeg_vita.sh || { rm -rf third_party/libjpeg-vita; exit 1; }
 
       - name: Build the app
         shell: bash
@@ -49,6 +65,9 @@ jobs:
           cmake .. | tee cmake.log
           grep -q "AC-3 / E-AC-3: FFmpeg" cmake.log || { echo "FFmpeg was not found: no AC-3 sound"; exit 1; }
           grep -q "AAC 5.1 / 7.1: FFmpeg" cmake.log || { echo "FFmpeg has no AAC decoder: no 5.1 AAC sound"; exit 1; }
+          grep -q "Opus / Vorbis: FFmpeg" cmake.log || { echo "FFmpeg has no Opus / Vorbis decoders"; exit 1; }
+          grep -q "DTS: FFmpeg" cmake.log || { echo "FFmpeg has no DTS decoder"; exit 1; }
+          grep -q "MPEG-2 / MPEG-4 video: FFmpeg" cmake.log || { echo "FFmpeg has no MPEG-2 / MPEG-4 video decoders"; exit 1; }
           make -j"$(nproc)"
 
       - uses: actions/upload-artifact@v4
@@ -56,8 +75,31 @@ jobs:
           name: VitaIPTV-vpk
           path: build/VitaIPTV.vpk
 
-      # 1.2: the ELF too (with its symbols), to read crash dumps (psp2dmp) against it
-      - uses: actions/upload-artifact@v4
+  # 1.2.2: the PC tests (tests/run_all.py), next to the build: a failing test does not stop the VPK
+  tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc make curl xz-utils ffmpeg openssl \
+            zlib1g-dev libjpeg-dev libpng-dev python3-pil python3-opencv
+
+      - name: FFmpeg cache (PC, for the sound decoding tests)
+        id: ffpc
+        uses: actions/cache@v4
         with:
-          name: VitaIPTV-elf
-          path: build/VitaIPTV.elf
+          path: ~/ffpc
+          key: ffmpeg-pc-${{ hashFiles('tools/build_ffmpeg_pc.sh') }}
+
+      - name: Build FFmpeg (PC)
+        if: steps.ffpc.outputs.cache-hit != 'true'
+        run: |
+          chmod +x tools/build_ffmpeg_pc.sh
+          ./tools/build_ffmpeg_pc.sh "$HOME/ffpc"
+
+      - name: Run the tests
+        run: FFMPEG_PREFIX="$HOME/ffpc" python3 tests/run_all.py
