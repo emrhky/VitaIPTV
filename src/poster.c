@@ -31,26 +31,59 @@ const char *poster_jpeg_lib(void)
 #endif
 }                  /* sides bigger than this are not decoded at all */
 
-/* src (sw x sh, 3 or 4 bytes a pixel) averaged down into dst (dw x dh RGBA) */
+/* src (sw x sh, 3 or 4 bytes a pixel) averaged down into dst (dw x dh RGBA).
+ * 1.2.4k: no division per pixel. The Cortex-A9 has no divide instruction: 1.2.4j's log showed 160 ms of CPU for
+ * one 240x360 poster, decoding again took as long, and NEON in libjpeg had changed nothing - this loop did two
+ * 64-bit and four 32-bit divisions a pixel. The spans are worked out once (columns once, rows once a row) and
+ * a sum is divided by multiplying with a table: (r * ceil(2^24 / n)) >> 24, the same as r / n for every
+ * r <= 255 n and n <= 256 (checked for all of them); bigger n (huge pictures, PNG) divide as before. */
+static uint32_t g_recip[257];
+static void recip_init(void)
+{
+    if (g_recip[1]) return;
+    for (uint32_t n = 1; n <= 256; n++) g_recip[n] = ((1u << 24) + n - 1) / n;
+}
+static inline unsigned avg(unsigned sum, unsigned n)
+{
+    return n <= 256 ? (unsigned)(((uint64_t)sum * g_recip[n]) >> 24) : sum / n;
+}
+
 static void shrink(const uint8_t *src, int sw, int sh, int bpp, size_t stride, uint32_t *dst, int dw, int dh)
 {
+    recip_init();
+    int *xs = malloc(sizeof(int) * 2 * (size_t)dw);
+    if (!xs) {                                               /* (no memory for 2 KB: nearest pixel, no averaging) */
+        for (int y = 0; y < dh; y++)
+            for (int x = 0; x < dw; x++) {
+                const uint8_t *p = src + (size_t)((int64_t)y * sh / dh) * stride + (size_t)((int64_t)x * sw / dw) * bpp;
+                dst[(size_t)y * dw + x] = p[0] | (p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)(bpp == 4 ? p[3] : 255) << 24);
+            }
+        return;
+    }
+    for (int x = 0; x < dw; x++) {
+        int x0 = (int)((int64_t)x * sw / dw), x1 = (int)((int64_t)(x + 1) * sw / dw);
+        if (x1 <= x0) x1 = x0 + 1;
+        xs[2 * x] = x0;
+        xs[2 * x + 1] = x1;
+    }
     for (int y = 0; y < dh; y++) {
         int y0 = (int)((int64_t)y * sh / dh), y1 = (int)((int64_t)(y + 1) * sh / dh);
         if (y1 <= y0) y1 = y0 + 1;
+        uint32_t *o = dst + (size_t)y * dw;
         for (int x = 0; x < dw; x++) {
-            int x0 = (int)((int64_t)x * sw / dw), x1 = (int)((int64_t)(x + 1) * sw / dw);
-            if (x1 <= x0) x1 = x0 + 1;
-            unsigned r = 0, g = 0, b = 0, a = 0, n = 0;
+            int x0 = xs[2 * x], x1 = xs[2 * x + 1];
+            unsigned r = 0, g = 0, b = 0, a = 0;
             for (int yy = y0; yy < y1; yy++) {
-                const uint8_t *row = src + (size_t)yy * stride;
-                for (int xx = x0; xx < x1; xx++) {
-                    const uint8_t *p = row + (size_t)xx * bpp;
-                    r += p[0]; g += p[1]; b += p[2]; a += bpp == 4 ? p[3] : 255; n++;
+                const uint8_t *p = src + (size_t)yy * stride + (size_t)x0 * bpp;
+                for (int xx = x0; xx < x1; xx++, p += bpp) {
+                    r += p[0]; g += p[1]; b += p[2]; a += bpp == 4 ? p[3] : 255;
                 }
             }
-            dst[(size_t)y * dw + x] = (r / n) | ((g / n) << 8) | ((b / n) << 16) | ((a / n) << 24);
+            unsigned n = (unsigned)((y1 - y0) * (x1 - x0));
+            o[x] = avg(r, n) | (avg(g, n) << 8) | (avg(b, n) << 16) | (avg(a, n) << 24);
         }
     }
+    free(xs);
 }
 
 static void fit(int sw, int sh, int max_w, int max_h, int *dw, int *dh)

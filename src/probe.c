@@ -18,6 +18,11 @@
 #include <string.h>
 #include <strings.h>
 
+/* 1.2.4k: what the player can do apart from the hardware (tsplayer.c gives the real answers; these defaults, for a
+ * build without it such as the probe tests: MPEG audio always, the rest not known). 1 yes, 0 no, -1 not known. */
+__attribute__((weak)) int probe_audio_ok(int codec) { return codec == TS_CODEC_MPEG_AUDIO ? 1 : -1; }
+__attribute__((weak)) int probe_video_sw_ok(int codec) { (void)codec; return -1; }
+
 #define PROBE_US    6000000ULL          /* how long to read */
 #define PROBE_MAX   (6u * 1024 * 1024)  /* or how many bytes */
 #define CHUNK       16384
@@ -146,9 +151,14 @@ static void summarize(ProbeResult *r, const TsInfo *i, int http_status, unsigned
     } else if (i->video_codec == TS_CODEC_HEVC) {
         add_line(r, "Video: HEVC (H.265), %u pictures", i->video_aus);
         verdict = "NO: Vita hardware cannot decode HEVC";
+    } else if ((i->video_codec == TS_CODEC_MPEG2V || i->video_codec == TS_CODEC_MPEG4V || i->video_codec == TS_CODEC_DIVX3) &&
+               probe_video_sw_ok(i->video_codec) != 0) {    /* 1.2.4k: the player decodes these on the ARM (1.2.2b) */
+        add_line(r, "Video: %s, %u pictures (decoded by the ARM, in software)", ts_codec_name(i->video_codec), i->video_aus);
+        verdict = probe_video_sw_ok(i->video_codec) > 0 ? "YES: in software (above SD it may fall behind: half size, then keyframes only)"
+                                                         : "MAYBE: in software, if this build has the decoder";
     } else {
         add_line(r, "Video: %s, %u pictures", ts_codec_name(i->video_codec), i->video_aus);
-        verdict = "NO: this video format is not supported yet";
+        verdict = "NO: this video format is not supported";
     }
 
     if (i->audio_pid < 0) add_line(r, "Audio: none");
@@ -158,12 +168,16 @@ static void summarize(ProbeResult *r, const TsInfo *i, int http_status, unsigned
                  i->aac_channels, i->audio_frames,
                  i->aac_object == 1 ? " (Vita: AAC-LC only; tried as LC)"
                  : i->aac_object == 3 ? " (not supported)" : "");
-    else add_line(r, "Audio: %s (not supported yet), %u frames", ts_codec_name(i->audio_codec), i->audio_frames);
+    else if (probe_audio_ok(i->audio_codec) > 0)              /* 1.2.4k: MPEG audio, AC-3, DTS, Opus... in software */
+        add_line(r, "Audio: %s (software), %u frames", ts_codec_name(i->audio_codec), i->audio_frames);
+    else if (probe_audio_ok(i->audio_codec) < 0)
+        add_line(r, "Audio: %s (in software if this build has it), %u frames", ts_codec_name(i->audio_codec), i->audio_frames);
+    else add_line(r, "Audio: %s (not supported), %u frames", ts_codec_name(i->audio_codec), i->audio_frames);
 
     add_line(r, "Packet problems: lost %u, damaged pictures %u, sync lost %u",
              i->cc_errors, i->damaged_aus, i->sync_losses);
     if (i->scrambled_packets) add_line(r, "SCRAMBLED: %u packets are encrypted", i->scrambled_packets);
-    add_line(r, "Playable by hardware: %s", verdict);
+    add_line(r, "Playable: %s", verdict);                 /* (1.2.4k: not only by the hardware any more) */
 }
 
 /* ---- one GET: http through sceHttp, https through the built-in TLS; optionally a byte range ---- */

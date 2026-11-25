@@ -278,7 +278,10 @@ static int seek_by_cues(VodRead rd, void *ctx, const MkvLayout *L, int64_t targe
     uint8_t hb[16];
     uint32_t id; uint64_t sz; int unk;
     int r = rd(ctx, L->cues_pos, hb, sizeof hb);
-    if (r < 4) return -1;
+    if (r < 4) {                                         /* 1.2.4k: said (it was silent), and not guessed over */
+        snprintf(vod_seek_note, sizeof vod_seek_note, "the index could not be read (%s)", r < 0 ? "no answer" : "file ends");
+        return r < 0 ? -2 : -1;
+    }
     int h = ebml_head(hb, (size_t)r, &id, &sz, &unk);
     if (!h || id != ID_CUES || unk || sz > MKV_MAX_CUES) { snprintf(vod_seek_note, sizeof vod_seek_note, "index not usable"); return -1; }
     uint8_t *c = read_all(rd, ctx, L->cues_pos + (uint64_t)h, (size_t)sz);
@@ -346,7 +349,11 @@ int mkv_seek(VodRead rd, void *ctx, uint64_t total, const MkvLayout *L, int64_t 
     *at_ms = 0;
     if (target_ms <= 0) return 0;
     vod_seek_note[0] = 0;
-    if (L->cues_pos && seek_by_cues(rd, ctx, L, target_ms, off, at_ms) == 0) return 0;
+    int cr = L->cues_pos ? seek_by_cues(rd, ctx, L, target_ms, off, at_ms) : -1;
+    if (cr == 0) return 0;
+    /* 1.2.4k: the server did not answer for the index (busy, or the player stopped): a guess from the size would
+     * read from the same server; the caller asks again or starts from the beginning and says why */
+    if (cr == -2) return -2;
     if (!L->cues_pos) snprintf(vod_seek_note, sizeof vod_seek_note, "no index");
     if (!total || L->duration_ms <= 0) return -1;
     /* no index: guess from the bit rate, look at the cluster found there, narrow down */
@@ -356,6 +363,7 @@ int mkv_seek(VodRead rd, void *ctx, uint64_t total, const MkvLayout *L, int64_t 
     int64_t lo_ms = 0, hi_ms = L->duration_ms;
     uint64_t best_off = L->first_cluster;
     int64_t best_ms = 0;
+    int reads = 0, fails = 0;
     for (int it = 0; it < 7 && hi_off > lo_off + PROBE_LEN && hi_ms > lo_ms; it++) {
         int64_t want = target_ms - 2000;                     /* land a little before the time asked */
         if (want < lo_ms) want = lo_ms;
@@ -363,7 +371,8 @@ int mkv_seek(VodRead rd, void *ctx, uint64_t total, const MkvLayout *L, int64_t 
         if (guess <= lo_off) guess = lo_off + 1;
         if (guess + PROBE_LEN > hi_off) guess = hi_off > PROBE_LEN ? hi_off - PROBE_LEN : lo_off + 1;
         int r = rd(ctx, guess, b, PROBE_LEN);
-        if (r <= 0) break;
+        if (r <= 0) { fails += r < 0; break; }
+        reads++;
         size_t at;
         uint64_t tc;
         if (!mkv_find_cluster(b, (size_t)r, &at, &tc)) { hi_off = guess; continue; }
@@ -378,6 +387,11 @@ int mkv_seek(VodRead rd, void *ctx, uint64_t total, const MkvLayout *L, int64_t 
         }
     }
     free(b);
+    if (!reads && fails) {                               /* 1.2.4k: nothing came: not "estimated" from nothing */
+        size_t nl = strlen(vod_seek_note);
+        snprintf(vod_seek_note + nl, sizeof vod_seek_note - nl, "%sthe film could not be read there", nl ? ", " : "");
+        return -2;
+    }
     size_t nl = strlen(vod_seek_note);
     snprintf(vod_seek_note + nl, sizeof vod_seek_note - nl, "%sestimated from the size", nl ? ", " : "");
     *off = best_off;

@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.4k (test)
+- **Software video copied by DMA again, without the cache sync** (the default now). 1.2.4j's test on the Vita
+  compared seven whole pictures DMA'd straight from FFmpeg's cached memory: all correct (the DMA call keeps the
+  cache in step itself). The sync on the uncached slot cost 7 ms and did nothing. The sampled check of the first
+  pictures stays: a wrong one turns DMA off for the stream, as before.
+- **Posters shrink without dividing per pixel** (the Cortex-A9 has no divide instruction: about 160 ms of CPU a
+  poster). The same pixels come out (tested byte for byte); about 18 times faster on an ARM emulator.
+- **The "copy ways" test of 1.2.4j is gone** (log only).
+- **Stream test:** MPEG-2, MPEG-4 (DivX / Xvid) and DivX 3 video now say "Playable: YES: in software" (they were
+  "NO: not supported yet" since 1.2.2b), and MPEG audio, AC-3, DTS, Opus, Vorbis say "(software)". The line is
+  "Playable:" now, not "Playable by hardware:".
+- **"Continue" in a Matroska film started at 0 s:** with the film's header kept from the last open, the index was
+  the first request to the server, while it still counted the last connection; the failed read was silent and
+  logged as "estimated from the size". Now a busy answer is waited for as at the header, no answer is asked once
+  more, and if it still fails the log says it plays from the start and why.
+
 ## 1.2.4j (test)
 - **Live: after a reconnect whose times start again** (a phone sending a file from the start), 1.2.4g/i moved the
   times on only from the first unit of each kind; on the Vita that was the old stream's last picture (the

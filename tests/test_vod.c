@@ -231,6 +231,13 @@ static int mrd(void *ctx, uint64_t off, uint8_t *buf, size_t len)
     memcpy(buf, m->b + off, len);
     return (int)len;
 }
+/* 1.2.4k: the server stops answering after the header (the device: a resume at 18 s whose index read failed
+ * was logged as "estimated from the size" and started at 0) */
+static uint64_t g_fail_from = (uint64_t)-1;
+static int mrd_fail(void *ctx, uint64_t off, uint8_t *buf, size_t len)
+{
+    return off >= g_fail_from ? -1 : mrd(ctx, off, buf, len);
+}
 
 /* An index that arrives damaged part way must not send the film back to the start (seen on the device:
  * asked for 39:56, started at 0:27): the place is then found from the file size instead. */
@@ -248,6 +255,12 @@ static void test_mkv_damaged_cues(const char *path, int64_t len_ms)
     assert(mkv_layout(mrd, &m, m.n, &L) == 0 && L.cues_pos);
     uint64_t off, off_ok; int64_t at, at_ok, target = len_ms - 5000;
     assert(mkv_seek(mrd, &m, m.n, &L, target, &off_ok, &at_ok) == 0 && strstr(vod_seek_note, "index"));
+    g_fail_from = L.first_cluster;                            /* 1.2.4k: no answer for the index nor the film */
+    assert(mkv_seek(mrd_fail, &m, m.n, &L, target, &off, &at) == -2 && off == L.first_cluster && at == 0);
+    printf("  no answer: %s\n", vod_seek_note);
+    assert(strstr(vod_seek_note, "could not be read") && !strstr(vod_seek_note, "estimated"));
+    g_fail_from = (uint64_t)-1;
+    assert(mkv_seek(mrd_fail, &m, m.n, &L, target, &off, &at) == 0 && off == off_ok && at == at_ok);   /* asked again */
     size_t cues = (size_t)L.cues_pos + 12;                    /* a little way into the index: */
     memset(m.b + cues, 0, 6);                                 /* bytes that cannot start an element */
     assert(mkv_seek(mrd, &m, m.n, &L, target, &off, &at) == 0);

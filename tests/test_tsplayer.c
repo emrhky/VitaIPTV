@@ -1029,9 +1029,9 @@ sw:
         }
         if (a52_available()) {   /* 1.2.4e: a slow ARM: behind, half size from a keyframe on; the 4th core for the reader */
             extern int mock_core3, mock_core3_moves, mock_core3_self, mock_dma_fail, mock_dma_calls, mock_ctest_blocks;
-            /* 1.2.4f/g: k 0: the 4th core closed (as on most Vitas: nothing changes); 1: open, Xvid: the reader goes
-             * there (DMA turned on: it copies); 2: open, MPEG-2: the reader goes there too (1.2.4g: no slice worker
-             * of ours there any more), DMA off as by default; 3: DMA turned on and failing: the ARM copies */
+            /* 1.2.4f/g/k: k 0: the 4th core closed (as on most Vitas: nothing changes), DMA off; 1: open, Xvid: the
+             * reader goes there, DMA on (the default since 1.2.4k): it copies; 2: open, MPEG-2: the reader goes there
+             * too (1.2.4g: no slice worker of ours), DMA off; 3: DMA on and failing: the ARM copies */
             static const struct { const char *f; int vod, core3, dma, dmafail; } lf[4] = {
                 { "mpeg2hd.ts", 0, 0, 0, 0 }, { "xvidhd.avi", 1, 1, 1, 0 }, { "mpeg2hd.ts", 0, 1, 0, 0 }, { "mpeg2hd.ts", 0, 0, 1, 1 } };
             for (int k = 0; k < 4; k++) {
@@ -1050,15 +1050,13 @@ sw:
                 assert(r.st.state == TSP_ENDED && r.w == 640 && r.st.decoded >= 30 && r.st.audio_frames > 100);
                 assert(mock_core3_self == 0);                     /* (1.2.4g: no worker of ours held anywhere) */
                 assert(mock_core3_moves == (lf[k].core3 ? 1 : 0));
-                assert(mock_ctest_blocks == (lf[k].dma && !lf[k].dmafail ? 0 : 1));   /* (1.2.4j: the copy test, one block, once; DMA working: none) */
+                assert(mock_ctest_blocks == 0);                  /* (1.2.4k: no copy test any more) */
                 if (lf[k].dma && !lf[k].dmafail) assert(mock_dma_calls >= 3 * 30);   /* (three planes a picture) */
-                /* (1.2.4j: the copy test on the 5th picture: three DMA calls into a block of its own, once; failing:
-                 * it stops at the first) */
-                if (!lf[k].dma) assert(mock_dma_calls == 3);
-                if (lf[k].dmafail) assert(mock_dma_calls == 1 + 1);   /* (the first error: never again) */
+                if (!lf[k].dma) assert(mock_dma_calls == 0);
+                if (lf[k].dmafail) assert(mock_dma_calls == 1);   /* (the first error: never again) */
             }
             mock_core3 = 0; mock_dma_fail = 0;
-            tsp_set_dma(0);
+            tsp_set_dma(1);                                  /* (the default since 1.2.4k) */
             tsp_test_core3_unknown();
         }
         if (a52_available()) {   /* 1.2.3: MPEG-4 on the (fake) hardware: it decodes; it refuses (the software takes over) */
@@ -2253,6 +2251,20 @@ films:
                 }
                 printf("index cache %s: first open %d requests, jumps at most %d\n", names[f], first, worst);
                 assert(worst < first && (f == 2 || worst <= 2));      /* TS: finding the time still reads a little */
+            }
+            {   /* 1.2.4k: the device: a film opened from 0 (only its header kept), then "continue" at a time while
+                 * the server still counts the last connection: the index request is answered 407. It used to start
+                 * at 0 ("estimated from the size"); now it waits like the header does and starts at the time. */
+                extern int mock_http_busy_from, mock_http_busy_n, mock_http_sessions;
+                keep_cache = 0;
+                v = play_vod_url("http://example.invalid/movie/u/p/8.mkv", mkv, 0, 2, 0, 0);
+                keep_cache = 1;
+                mock_http_busy_from = 0; mock_http_busy_n = 1;
+                v = play_vod_url("http://example.invalid/movie/u/p/8.mkv", mkv, 7000, 6, 0, 0);
+                mock_http_busy_n = 0;
+                vshow("mkv continue, index busy once", &v);
+                assert(v.r.st.state != TSP_ERROR && v.r.changes >= 20 && abs(v.first_pos - 7000) <= 2100);
+                tsp_vod_cache_clear();                             /* (keep_cache stays 1 for the next test) */
             }
             /* another file behind the same link: the cached index is not trusted */
             mock_http_range_requests = 0;

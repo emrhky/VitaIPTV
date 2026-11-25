@@ -43,7 +43,8 @@ typedef struct {
 /* Walks the file's top-level elements up to the first Cluster. 0 = ok. */
 int  mkv_layout(VodRead rd, void *ctx, uint64_t total, MkvLayout *L);
 void mkv_layout_free(MkvLayout *L);
-/* The Cluster that starts at or before target_ms (as close as can be found). *at_ms = its time. 0 = ok. */
+/* The Cluster that starts at or before target_ms (as close as can be found). *at_ms = its time. 0 = ok,
+ * -1 = not found, -2 = the reads failed (1.2.4k: the server did not answer; *off is the first cluster). */
 extern char vod_seek_note[96];          /* how the last mkv_seek found its place (for the log) */
 int  mkv_seek(VodRead rd, void *ctx, uint64_t total, const MkvLayout *L, int64_t target_ms,
               uint64_t *off, int64_t *at_ms);

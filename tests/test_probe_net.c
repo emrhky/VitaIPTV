@@ -11,6 +11,10 @@
 
 void plog(const char *fmt, ...) { if (getenv("VERBOSE")) { va_list a; va_start(a, fmt); vprintf(fmt, a); va_end(a); putchar('\n'); } }
 int sceKernelExitDeleteThread(int s) { (void)s; pthread_exit(NULL); return 0; }
+/* 1.2.4k: the player's answers (tsplayer.c in the app; here as a test sets them) */
+static int g_sw_video = -1;
+int probe_video_sw_ok(int codec) { (void)codec; return g_sw_video; }
+int probe_audio_ok(int codec) { return codec == 6 /* TS_CODEC_MPEG_AUDIO */ ? 1 : -1; }
 extern const char *mock_http_map[64][2];
 extern void mock_http_reset(void);
 extern int mock_http_no_ranges;
@@ -37,7 +41,7 @@ int main(int argc, char **argv)
     const char *dir = argv[1];
     static char p[16][512];
     const char *names[] = { "s.ts", "master.m3u8", "media.m3u8", "seg000.ts", "seg001.ts", "seg002.ts", "seg003.ts", "seg004.ts",
-                            "film.mp4", "film.mkv", "page.ts", "live.flv", "fast1080.ts" };
+                            "film.mp4", "film.mkv", "page.ts", "live.flv", "fast1080.ts", "xvid.mkv" };
     int n = (int)(sizeof names / sizeof names[0]);
     mock_http_reset();
     for (int i = 0; i < n; i++) { snprintf(p[i], 512, "%s/%s", dir, names[i]); mock_http_map[i][0] = names[i]; mock_http_map[i][1] = p[i]; }
@@ -69,6 +73,13 @@ int main(int argc, char **argv)
     r = run("http://host/live/s.ts");                           /* 720p 25 fps: no warning */
     assert(has(r, "Non-reference pictures:") && has(r, "YES: H.264 8-bit up to 720p"));
     probe_cancel();
+    for (g_sw_video = 1; g_sw_video >= -1; g_sw_video -= 2) {   /* 1.2.4k: MPEG-4 + MP3 in MKV */
+        r = run("http://host/movie/u/p/xvid.mkv");
+        assert(r->state == PROBE_DONE && has(r, "decoded by the ARM") && has(r, "mpeg_audio (software)") && !has(r, "not supported"));
+        assert(has(r, g_sw_video > 0 ? "Playable: YES: in software" : "Playable: MAYBE: in software"));
+        probe_cancel();
+    }
+    g_sw_video = -1;
     r = run("http://host/page.ts");
     assert(r->state == PROBE_FAILED && strstr(r->error, "web page"));
     probe_cancel();

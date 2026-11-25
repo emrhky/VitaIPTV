@@ -311,9 +311,9 @@ void scr_lines(const char *title, const char *subtitle, const char *const *lines
     if (error && error[0]) y += 26 * ui_text_wrap(40, y, UI_ERR, 1.05f, error, 880, 26, 2, 0) + 12;   /* 0.5.0: wraps */
     for (int i = 0; i < n; i++) {
         unsigned col = UI_TEXT;
-        if (!strncmp(lines[i], "Playable by hardware: YES", 25)) col = UI_OK;
-        else if (!strncmp(lines[i], "Playable by hardware: NO", 24)) col = UI_ERR;
-        else if (!strncmp(lines[i], "Playable by hardware: MAYBE", 27)) col = UI_WARN;
+        if (!strncmp(lines[i], "Playable: YES", 13)) col = UI_OK;   /* (1.2.4k: was "Playable by hardware") */
+        else if (!strncmp(lines[i], "Playable: NO", 12)) col = UI_ERR;
+        else if (!strncmp(lines[i], "Playable: MAYBE", 15)) col = UI_WARN;
         ui_text_fit(40, y, col, 1.0f, lines[i], 880);
         y += n > 11 ? 27 : 30;                              /* many lines: closer, to stay in the panel */
     }

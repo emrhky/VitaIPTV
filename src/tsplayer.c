@@ -129,8 +129,11 @@ static int g_no_m4v_hw = 1;
 static int g_sw_delay_us;               /* 1.2.4e: tests only (tsp_test_sw_delay) */
 /* 1.2.4f: software pictures go into the slots (CDRAM) by DMA: the ARM writes CDRAM at only ~200 MB/s (1080p:
  * 15 ms a picture, more than decoding it). Off for the session after an error or a wrong copy. */
-/* 1.2.4g: off: on the Vita the DMA copied a 1080p picture in 23-26 ms, the ARM in 15.6 (the tests turn it on) */
-static int g_no_dma = 1;
+/* 1.2.4k: on again, without the slot sync. 1.2.4j's test on the Vita: a picture DMA'd straight from FFmpeg's cached
+ * memory (no cache written out) was the same byte for byte 7 times of 7 - sceDmacMemcpy keeps the cache right by
+ * itself; 1080p 10-15 ms against memcpy's 12-19, SD about half. The slot (CDRAM) is not cached: 1.2.4f's sync of it
+ * before each picture (7.4 ms) was the cost. (The tests turn it off where they need the ARM's copy.) */
+static int g_no_dma = 0;
 void tsp_set_dma(int on) { g_no_dma = !on; }
 /* 1.2.4f: the 4th core: -1 not known yet, 0 closed to apps (the Vita's normal state: nothing uses it), 1 open */
 static int g_core3 = -1;
@@ -344,7 +347,6 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     int sw_pitch, sw_pitch_tried;       /* 1.2.4f: the slots' row length as FFmpeg's (one DMA a plane) */
     uint32_t sw_dma, sw_dma_checked;    /* 1.2.4f: pictures copied by DMA; the first ones checked */
     uint32_t sw_copies;
-    int sw_ctest;                       /* 1.2.4h/i/j: the copy test was done for this stream */
     int sw_lowres, sw_lowres_want;      /* 1.2.4e: decoded at half size (behind, bigger than the screen) */
     int sw_field_said;                  /* 1.2.4j */
     int sw_core3;                       /* 1.2.4e: 1 the reader on the 4th core, -1 not */
@@ -2005,129 +2007,6 @@ static void sw_rows(uint8_t *dst, int dpitch, const uint8_t *src, int spitch, in
     }
 }
 
-/* 1.2.4j: two other ways for the ARM to copy rows into CDRAM, measured once a stream (log only, below).
- * NEON: 64 bytes a pass with a prefetch 256 bytes ahead (the source is cached memory, the firmware leaves the
- * hardware prefetch off); LDM/STM: 32-byte bursts (vita-memio measured them much faster than single stores on
- * uncached memory, which CDRAM is). Both give exactly memcpy's bytes. */
-static void rows_neon(uint8_t *dst, int dpitch, const uint8_t *src, int spitch, int w, int h)
-{
-    for (int y = 0; y < h; y++) {
-        const uint8_t *a = src + (size_t)y * spitch;
-        uint8_t *o = dst + (size_t)y * dpitch;
-        int x = 0;
-#if defined(__ARM_NEON) || defined(__ARM_NEON__)
-        for (; x + 64 <= w; x += 64) {
-            __builtin_prefetch(a + x + 256);
-            uint8x16_t q0 = vld1q_u8(a + x), q1 = vld1q_u8(a + x + 16), q2 = vld1q_u8(a + x + 32), q3 = vld1q_u8(a + x + 48);
-            vst1q_u8(o + x, q0); vst1q_u8(o + x + 16, q1); vst1q_u8(o + x + 32, q2); vst1q_u8(o + x + 48, q3);
-        }
-#endif
-        if (x < w) memcpy(o + x, a + x, (size_t)(w - x));
-    }
-}
-
-static void rows_ldm(uint8_t *dst, int dpitch, const uint8_t *src, int spitch, int w, int h)
-{
-    for (int y = 0; y < h; y++) {
-        const uint8_t *a = src + (size_t)y * spitch;
-        uint8_t *o = dst + (size_t)y * dpitch;
-        int x = 0;
-#if defined(__arm__)
-        if ((((uintptr_t)a | (uintptr_t)o) & 3u) == 0) {
-            const uint32_t *s32 = (const uint32_t *)a;
-            uint32_t *d32 = (uint32_t *)o;
-            for (; x + 32 <= w; x += 32)
-                __asm__ volatile("ldmia %[s]!, {r3, r4, r5, r6, r8, r9, r10, r12}\n\t"
-                                 "stmia %[d]!, {r3, r4, r5, r6, r8, r9, r10, r12}\n\t"
-                                 : [s] "+r" (s32), [d] "+r" (d32) : : "r3", "r4", "r5", "r6", "r8", "r9", "r10", "r12", "memory");
-        }
-#endif
-        if (x < w) memcpy(o + x, a + x, (size_t)(w - x));
-    }
-}
-
-/* the three planes with one of the ways above; then a few rows read back (CDRAM is slow to read) */
-static long copy_way(Tsp *t, const SwvFrame *f, uint8_t *y, uint8_t *u, uint8_t *v, int way, int *bad)
-{
-    int ch = (f->h + 1) / 2, cw = (f->w + 1) / 2;
-    uint64_t a = now_us();
-    if (way == 1) {
-        rows_neon(y, t->dw, f->y, f->ys, f->w, f->h);
-        rows_neon(u, t->dw / 2, f->u, f->us, cw, ch);
-        rows_neon(v, t->dw / 2, f->v, f->vs, cw, ch);
-    } else {
-        rows_ldm(y, t->dw, f->y, f->ys, f->w, f->h);
-        rows_ldm(u, t->dw / 2, f->u, f->us, cw, ch);
-        rows_ldm(v, t->dw / 2, f->v, f->vs, cw, ch);
-    }
-    long us = (long)(now_us() - a);
-    const int rows[3] = { 0, f->h / 2, f->h - 1 };
-    for (int k = 0; k < 3; k++) if (memcmp(y + (size_t)rows[k] * t->dw, f->y + (size_t)rows[k] * f->ys, (size_t)f->w)) *bad = 1;
-    if (memcmp(v + (size_t)(ch - 1) * (t->dw / 2), f->v + (size_t)(ch - 1) * f->vs, (size_t)cw)) *bad = 1;
-    return us;
-}
-
-/* 1.2.4j: once a stream, on its 5th software picture, after the usual copy (log only):
- * (a) the two copies above into the slot, timed next to the usual one (then the usual copy again);
- * (b) a DMA of the three planes as they are, without any cache sync, into a CDRAM block of their own, then
- *     the whole picture read back and compared: does sceDmacMemcpy keep the ARM's cache right by itself?
- *     (1.2.4h: writing the cache out ourselves cost 33 ms; vita-memio: games use it on cached memory.) */
-static void copy_ways_test(Tsp *t, const SwvFrame *f, Slot *sl, unsigned memcpy_us)
-{
-    uint8_t *y = sl->data, *u = y + t->dw * t->dh, *v = u + (t->dw / 2) * (t->dh / 2);
-    int ch = (f->h + 1) / 2, bad1 = 0, bad2 = 0;
-    long neon = copy_way(t, f, y, u, v, 1, &bad1);
-    long ldm = copy_way(t, f, y, u, v, 2, &bad2);
-    sw_rows(y, t->dw, f->y, f->ys, f->w, f->h, 0);           /* (the usual bytes, whatever happened above) */
-    sw_rows(u, t->dw / 2, f->u, f->us, (f->w + 1) / 2, ch, 0);
-    sw_rows(v, t->dw / 2, f->v, f->vs, (f->w + 1) / 2, ch, 0);
-    size_t ny = (size_t)f->ys * (size_t)f->h, nu = (size_t)f->us * (size_t)ch, nv = (size_t)f->vs * (size_t)ch;
-    size_t tot = ny + nu + nv, bs = (tot + 256 * 1024 - 1) & ~(size_t)(256 * 1024 - 1);
-    long dma = -1, cmp_us = -1;
-    const char *res = "not tried (no CDRAM block)";
-    char rb[64];
-    SceUID b = sceKernelAllocMemBlock("tsp_mtest", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, (SceSize)bs, NULL);
-    if (b >= 0) {
-        uint8_t *d = NULL;
-        sceKernelGetMemBlockBase(b, (void **)&d);
-        if (d) {
-            uint64_t a = now_us();
-            int r = sceDmacMemcpy(d, f->y, (SceSize)ny);
-            if (r >= 0) r = sceDmacMemcpy(d + ny, f->u, (SceSize)nu);
-            if (r >= 0) r = sceDmacMemcpy(d + ny + nu, f->v, (SceSize)nv);
-            dma = (long)(now_us() - a);
-            if (r < 0) { snprintf(rb, sizeof rb, "failed (0x%08X)", (unsigned)r); res = rb; dma = -1; }
-            else {
-                a = now_us();
-                size_t at = 0;
-                int plane = -1;
-                const uint8_t *src[3] = { f->y, f->u, f->v };
-                const size_t len[3] = { ny, nu, nv };
-                size_t off = 0;
-                for (int k = 0; k < 3 && plane < 0; k++) {
-                    for (size_t i = 0; i < len[k]; i += 4096) {
-                        size_t n = len[k] - i < 4096 ? len[k] - i : 4096;
-                        if (memcmp(d + off + i, src[k] + i, n)) {
-                            plane = k;
-                            at = i;
-                            while (d[off + at] == src[k][at]) at++;
-                            break;
-                        }
-                    }
-                    off += len[k];
-                }
-                cmp_us = (long)(now_us() - a);
-                if (plane < 0) res = "the whole picture the same";
-                else { snprintf(rb, sizeof rb, "DIFFERENT (plane %d, byte %u)", plane, (unsigned)at); res = rb; }
-            }
-        }
-        sceKernelFreeMemBlock(b);
-    }
-    plog("tsp: copy ways %dx%d (%u KB): memcpy %u us, NEON+prefetch %ld us%s, LDM/STM %ld us%s; DMA without cache sync %ld us: %s "
-         "(compared in %ld us)", f->w, f->h, (unsigned)(tot / 1024), memcpy_us, neon, bad1 ? " (WRONG rows)" : "", ldm,
-         bad2 ? " (WRONG rows)" : "", dma, res, cmp_us);
-}
-
 static void sw_frame(void *ctx, const SwvFrame *f)
 {
     Tsp *t = ctx;
@@ -2162,7 +2041,6 @@ static void sw_frame(void *ctx, const SwvFrame *f)
     int done = 0;
     if (!g_no_dma && t->dw == f->ys && t->dw / 2 == f->us && f->us == f->vs) {
         size_t ny = (size_t)f->ys * (size_t)f->h, nc = (size_t)f->us * (size_t)ch;
-        sceKernelSyncVMDomain(sl->uid, sl->data, (SceSize)((size_t)t->dw * t->dh * 3 / 2));
         int r = sceDmacMemcpy(y, f->y, (SceSize)ny);
         if (r >= 0) r = sceDmacMemcpy(u, f->u, (SceSize)nc);
         if (r >= 0) r = sceDmacMemcpy(v, f->v, (SceSize)nc);
@@ -2184,10 +2062,6 @@ static void sw_frame(void *ctx, const SwvFrame *f)
         sw_rows(v, t->dw / 2, f->v, f->vs, (f->w + 1) / 2, ch, 0);
     }
     t->sw_copy_us += now_us() - c0;
-    if (!done && !t->sw_ctest && t->sw_copies == 4) {      /* 1.2.4j (1.2.4i: the memory test) */
-        t->sw_ctest = 1;
-        copy_ways_test(t, f, sl, (unsigned)(now_us() - c0));
-    }
     t->sw_copies++;
     if (t->st.decoded == 0) {
         g_pictures_seen = 1;
@@ -3506,6 +3380,10 @@ static int audio_playable(int c)
            (c == TS_CODEC_DTS && a52_dts_available()) ||   /* 1.2.2 */
            (c == TS_CODEC_OPUS && a52_xiph_available(1)) || (c == TS_CODEC_VORBIS && a52_xiph_available(0));   /* 1.4.2 */
 }
+
+/* 1.2.4k: for the stream test (probe.c): the real answers */
+int probe_audio_ok(int codec) { return audio_playable(codec) ? 1 : 0; }
+int probe_video_sw_ok(int codec) { return swv_available(codec) ? 1 : 0; }
 
 /* the status' list of audio tracks (for the menu), made again when the stream list changes */
 static void update_audio_tracks(Tsp *t, const TsInfo *i)
@@ -5859,7 +5737,27 @@ static void read_vod(Tsp *t, uint8_t *buf)
         }
         t->st.dur_ms = (int)L.duration_ms;
         off = L.first_cluster;
-        if (start > 0 && mkv_seek(vio_read, &io, t->vod_total, &L, start, &off, &at) != 0) { off = L.first_cluster; at = 0; }
+        if (start > 0) {
+            /* 1.2.4k: with the header from memory (a jump, or "continue" in the same film) the index is the first
+             * request to the server, often while the last connection is still counted: a busy answer is waited for
+             * as at the header; no answer is asked once more, then it starts from the beginning and says why. */
+            int sr, again = 0;
+            for (;;) {
+                vod_status = 0;
+                snprintf(t->st.note, sizeof t->st.note, "%s", "Finding the place in the film...");   /* (again after a wait) */
+                sr = mkv_seek(vio_read, &io, t->vod_total, &L, start, &off, &at);
+                if (sr != -2 || stopping(t)) break;
+                plog("tsp: Matroska: finding %d s failed (%s%s%d)", (int)(start / 1000), vod_seek_note,
+                     vod_status ? ", HTTP " : "", vod_status);
+                if (busy_status(vod_status) ? !busy_wait(t, vod_status, "VOD index") : again++) break;
+                if (!busy_status(vod_status)) for (int k = 0; k < 75 && !stopping(t); k++) sceKernelDelayThread(20000);
+            }
+            if (stopping(t)) { mkv_layout_free(&L); free(io.win); return; }
+            if (sr != 0) {
+                off = L.first_cluster; at = 0;
+                if (sr == -2) plog("tsp: Matroska: the place could not be found: playing from the start");
+            }
+        }
         TsSink sink = { on_video, on_audio, t, on_sub, on_bsub };
         t->mkv = mkv_create(&sink);
         if (t->mkv) mkv_prefer_audio(t->mkv, g_aid, g_alang);   /* (0.5.0: the audio track chosen in the menu) */
