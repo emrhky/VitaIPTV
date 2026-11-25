@@ -79,6 +79,7 @@ typedef struct {
     uint32_t *px;                       /* a poster, decoded */
     int pw, ph;
     unsigned dl_us, dec_us;             /* 1.2.4f: how long it took to come / to decode */
+    char src[80];                       /* 1.2.4h: the source picture (size, kind) */
 } QJob;
 static QJob qjob;
 
@@ -120,6 +121,7 @@ static void run_qjob(QJob *j)
     if (j->kind == QJ_POSTER) {
         if (j->ok) j->ok = poster_decode((const uint8_t *)m.buf, m.len, POSTER_BOX_W, POSTER_BOX_H, &j->px, &j->pw, &j->ph) == 0;
         j->dec_us = (unsigned)(sceKernelGetProcessTimeWide() - t1);
+        snprintf(j->src, sizeof j->src, "%s", j->ok ? poster_last_src() : "?");
         free(m.buf);
         memset(&j->m, 0, sizeof j->m);
     } else j->m = m;
@@ -441,8 +443,8 @@ static void poster_take(QJob *j)
         static unsigned cnt, sdl, sdec, scp, sdma;           /* (1.2.4f: the first one and every 20th: the averages) */
         cnt++; sdl += j->dl_us / 1000; sdec += j->dec_us; scp += cp; sdma += done;
         if (cnt == 1 || cnt % 20 == 0)
-            plog("poster: %u opened (%s): avg came in %u ms, decoded in %u us, copied in %u us (%u by DMA); this one %dx%d",
-                 cnt, poster_jpeg_lib(), sdl / cnt, sdec / cnt, scp / cnt, sdma, j->pw, j->ph);
+            plog("poster: %u opened (%s): avg came in %u ms, decoded in %u us, copied in %u us (%u by DMA); this one %dx%d from %s, decoded in %u us",
+                 cnt, poster_jpeg_lib(), sdl / cnt, sdec / cnt, scp / cnt, sdma, j->pw, j->ph, j->src, (unsigned)j->dec_us);
         if (poster_tex) vita2d_free_texture(poster_tex);     /* (the frame before is done: guide_tick runs first in a frame) */
         poster_tex = t;
         snprintf(poster_have, sizeof poster_have, "%s", j->key);
