@@ -1,0 +1,4 @@
+tests/1/
+tests/__pycache__/
+build-libjpeg/
+third_party/libjpeg-vita/
