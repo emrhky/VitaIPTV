@@ -1017,7 +1017,7 @@ sw:
                 assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "not supported"));
         }
         if (a52_available()) {   /* 1.2.4e: a slow ARM: behind, half size from a keyframe on; the 4th core for the reader */
-            extern int mock_core3, mock_core3_moves, mock_core3_self, mock_dma_fail, mock_dma_calls;
+            extern int mock_core3, mock_core3_moves, mock_core3_self, mock_dma_fail, mock_dma_calls, mock_ctest_blocks;
             /* 1.2.4f/g: k 0: the 4th core closed (as on most Vitas: nothing changes); 1: open, Xvid: the reader goes
              * there (DMA turned on: it copies); 2: open, MPEG-2: the reader goes there too (1.2.4g: no slice worker
              * of ours there any more), DMA off as by default; 3: DMA turned on and failing: the ARM copies */
@@ -1028,6 +1028,7 @@ sw:
                 mock_core3 = lf[k].core3; mock_core3_moves = mock_core3_self = 0; mock_dma_fail = lf[k].dmafail; mock_dma_calls = 0;
                 tsp_test_core3_unknown();
                 tsp_set_dma(lf[k].dma);
+                mock_ctest_blocks = 0;
                 tsp_test_sw_delay(70000);
                 if (lf[k].vod) { VRun v = play_vod(dp, 0, 25, 0, 0); r = v.r; } else r = play(dp, 22);
                 tsp_test_sw_delay(0);
@@ -1038,9 +1039,11 @@ sw:
                 assert(r.st.state == TSP_ENDED && r.w == 640 && r.st.decoded >= 30 && r.st.audio_frames > 100);
                 assert(mock_core3_self == 0);                     /* (1.2.4g: no worker of ours held anywhere) */
                 assert(mock_core3_moves == (lf[k].core3 ? 1 : 0));
+                assert(mock_ctest_blocks == (lf[k].dma && !lf[k].dmafail ? 0 : 1));   /* (DMA working: no test) */
                 if (lf[k].dma && !lf[k].dmafail) assert(mock_dma_calls >= 3 * 30);   /* (three planes a picture) */
-                if (!lf[k].dma) assert(mock_dma_calls == 0);
-                if (lf[k].dmafail) assert(mock_dma_calls == 1);   /* (the first error: never again) */
+                /* (1.2.4h: the copy test on the 5th picture makes two DMA calls, once; it takes and frees one block) */
+                if (!lf[k].dma) assert(mock_dma_calls == 2);
+                if (lf[k].dmafail) assert(mock_dma_calls == 1 + 2);   /* (the first error: never again) */
             }
             mock_core3 = 0; mock_dma_fail = 0;
             tsp_set_dma(0);

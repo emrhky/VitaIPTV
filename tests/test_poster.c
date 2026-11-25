@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 static uint8_t *load(const char *path, size_t *n)
 {
@@ -28,7 +29,8 @@ int main(int argc, char **argv)
     uint32_t *px;
     int w, h, r, g, b;
     assert(poster_decode(d, n, 240, 360, &px, &w, &h) == 0);
-    printf("jpeg 2000x3000 -> %dx%d\n", w, h);
+    printf("jpeg 2000x3000 -> %dx%d (%s)\n", w, h, poster_last_src());
+    assert(strstr(poster_last_src(), "JPEG 2000x3000") && strstr(poster_last_src(), "read at 1/8 (250x375)"));   /* 1.2.4h */
     assert(w == 240 && h == 360);
     px_rgb(px[50 * w + 120], &r, &g, &b); assert(r > 200 && g < 60 && b < 60);
     px_rgb(px[300 * w + 120], &r, &g, &b); assert(b > 200 && r < 60);
