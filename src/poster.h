@@ -12,4 +12,6 @@ int poster_decode(const uint8_t *data, size_t n, int max_w, int max_h, uint32_t 
 
 /* 1.2.4f: the JPEG library's name for the log */
 const char *poster_jpeg_lib(void);
+/* 1.2.4h: the last picture's source ("JPEG 1000x1500 progressive, read at 1/2 (500x750)"), for the log */
+const char *poster_last_src(void);
 #endif

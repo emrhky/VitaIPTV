@@ -343,6 +343,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     int sw_pitch, sw_pitch_tried;       /* 1.2.4f: the slots' row length as FFmpeg's (one DMA a plane) */
     uint32_t sw_dma, sw_dma_checked;    /* 1.2.4f: pictures copied by DMA; the first ones checked */
     uint32_t sw_copies;
+    int sw_ctest;                       /* 1.2.4h: the copy test was done for this stream */
     int sw_lowres, sw_lowres_want;      /* 1.2.4e: decoded at half size (behind, bigger than the screen) */
     int sw_core3;                       /* 1.2.4e: 1 the reader on the 4th core, -1 not */
     int rd_core3;                       /* 1.2.4f: the reader is on the 4th core now */
@@ -1951,6 +1952,50 @@ static void sw_rows(uint8_t *dst, int dpitch, const uint8_t *src, int spitch, in
     }
 }
 
+/* 1.2.4h: once a stream, on its 5th software picture: what each way of getting the picture to the GPU costs on
+ * the Vita (log only; the picture itself is then copied by the ARM as always, over whatever was written here).
+ * (a) writing FFmpeg's picture out of the ARM's cache (what the GPU reading it directly would need each picture),
+ * (b) a DMA from FFmpeg's memory, (c) a DMA from one contiguous block (cached PHYCONT) after writing its cache out,
+ * (d) the slot's own sync (1.2.4f did it before each DMA). */
+static void copy_test(Tsp *t, const SwvFrame *f, Slot *sl, uint8_t *dst)
+{
+    size_t ny = (size_t)f->ys * (size_t)f->h, nc = (size_t)f->us * (size_t)((f->h + 1) / 2);
+    size_t room = (size_t)t->dw * t->dh * 3 / 2, tot = ny + 2 * nc, nd = tot < room ? tot : room;
+    long wb = -1, dff = -1, wb2 = -1, dpc = -1, ssync = -1;
+    uint64_t a;
+    SceUID fu = sceKernelFindMemBlockByAddr(f->y, 0);
+    if (fu >= 0) {
+        a = now_us();
+        int r = sceKernelSyncVMDomain(fu, (void *)f->y, (SceSize)ny);
+        if (r >= 0 && sceKernelFindMemBlockByAddr(f->u, 0) == fu) r = sceKernelSyncVMDomain(fu, (void *)f->u, (SceSize)nc);
+        if (r >= 0 && sceKernelFindMemBlockByAddr(f->v, 0) == fu) r = sceKernelSyncVMDomain(fu, (void *)f->v, (SceSize)nc);
+        wb = r >= 0 ? (long)(now_us() - a) : -2;
+    }
+    a = now_us();
+    if (sceDmacMemcpy(dst, f->y, (SceSize)(ny < nd ? ny : nd)) >= 0) dff = (long)(now_us() - a);
+    size_t bs = (tot + 1024 * 1024 - 1) & ~(size_t)(1024 * 1024 - 1);
+    SceUID pu = sceKernelAllocMemBlock("tsp_ctest", SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW, (SceSize)bs, NULL);
+    if (pu >= 0) {
+        uint8_t *pb = NULL;
+        sceKernelGetMemBlockBase(pu, (void **)&pb);
+        if (pb) {
+            memcpy(pb, f->y, ny);
+            memcpy(pb + ny, f->u, nc);
+            memcpy(pb + ny + nc, f->v, nc);
+            a = now_us();
+            if (sceKernelSyncVMDomain(pu, pb, (SceSize)tot) >= 0) wb2 = (long)(now_us() - a);
+            a = now_us();
+            if (sceDmacMemcpy(dst, pb, (SceSize)nd) >= 0) dpc = (long)(now_us() - a);
+        }
+        sceKernelFreeMemBlock(pu);
+    }
+    a = now_us();
+    if (sceKernelSyncVMDomain(sl->uid, sl->data, (SceSize)room) >= 0) ssync = (long)(now_us() - a);
+    plog("tsp: copy test %dx%d (%u KB): FFmpeg's memory (block %s): cache write-out %ld us, DMA %ld us; contiguous block%s: "
+         "cache write-out %ld us, DMA %ld us; slot sync %ld us",
+         f->w, f->h, (unsigned)(tot / 1024), fu >= 0 ? "found" : "not found", wb, dff, pu >= 0 ? "" : " (none)", wb2, dpc, ssync);
+}
+
 static void sw_frame(void *ctx, const SwvFrame *f)
 {
     Tsp *t = ctx;
@@ -1997,12 +2042,15 @@ static void sw_frame(void *ctx, const SwvFrame *f)
             plog("tsp: DMA copy %s (0x%08X): the ARM copies from now on", r == -2 ? "gave a wrong picture" : "failed", (unsigned)r);
         }
     }
+    int ctest = !done && !t->sw_ctest && t->sw_copies == 4;   /* 1.2.4h */
+    if (ctest) { t->sw_ctest = 1; copy_test(t, f, sl, y); c0 = now_us(); }
     if (!done) {
         sw_rows(y, t->dw, f->y, f->ys, f->w, f->h, 0);
         sw_rows(u, t->dw / 2, f->u, f->us, (f->w + 1) / 2, ch, 0);
         sw_rows(v, t->dw / 2, f->v, f->vs, (f->w + 1) / 2, ch, 0);
     }
     t->sw_copy_us += now_us() - c0;
+    if (ctest) plog("tsp: copy test: the ARM copied the same picture in %u us", (unsigned)(now_us() - c0));
     t->sw_copies++;
     if (t->st.decoded == 0) {
         g_pictures_seen = 1;

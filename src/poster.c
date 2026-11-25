@@ -9,6 +9,10 @@
 
 #define POSTER_MAX_SRC 8192
 
+/* 1.2.4h: the last picture's source, for the log (one thread decodes posters) */
+static char g_src[80];
+const char *poster_last_src(void) { return g_src; }
+
 /* 1.2.4f: which JPEG library this build has (libjpeg-turbo decodes with NEON) */
 const char *poster_jpeg_lib(void)
 {
@@ -81,6 +85,8 @@ static int decode_jpeg(const uint8_t *data, size_t n, int max_w, int max_h, uint
            ci.image_height / (ci.scale_denom * 2) >= (unsigned)max_h) ci.scale_denom *= 2;
     jpeg_start_decompress(&ci);
     int sw = (int)ci.output_width, sh = (int)ci.output_height;
+    snprintf(g_src, sizeof g_src, "JPEG %ux%u%s, read at 1/%u (%dx%d)", (unsigned)ci.image_width, (unsigned)ci.image_height,
+             ci.progressive_mode ? " progressive" : "", (unsigned)ci.scale_denom, sw, sh);
     size_t stride = (size_t)sw * 3;
     buf = malloc(stride * (size_t)sh);
     if (!buf) { jpeg_abort_decompress(&ci); jpeg_destroy_decompress(&ci); return -1; }
@@ -126,6 +132,7 @@ static int decode_png(const uint8_t *data, size_t n, int max_w, int max_h, uint3
     png_set_read_fn(p, &src, png_read_mem);
     png_read_info(p, info);
     png_uint_32 sw = png_get_image_width(p, info), sh = png_get_image_height(p, info);
+    snprintf(g_src, sizeof g_src, "PNG %ux%u", (unsigned)sw, (unsigned)sh);
     if (sw > 2048 || sh > 3072) { png_destroy_read_struct(&p, &info, NULL); return -1; }   /* (PNG cannot shrink while decoding) */
     png_set_expand(p);
     png_set_strip_16(p);
