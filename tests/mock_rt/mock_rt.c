@@ -74,7 +74,8 @@ int sceKernelDeleteMutex(SceUID m) { pthread_mutex_destroy(&mx[m]); mx_used[m] =
 
 SceUID sceKernelAllocMemBlock(const char *name, int type, SceSize size, void *opt)
 { (void)name;(void)opt;
-  SceSize unit = type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW ? 1024 * 1024 :
+  if (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW) mock_ctest_blocks++;
+  SceSize unit = type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW || type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_RW ? 1024 * 1024 :
                  type == SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW ? 256 * 1024 : 4096;
   if (size % unit) return (SceUID)0x80020000;                 /* wrong size multiple */
   if (type == SCE_KERNEL_MEMBLOCK_TYPE_USER_MAIN_PHYCONT_NC_RW) {
@@ -89,6 +90,11 @@ int sceKernelFreeMemBlock(SceUID uid)
   free(blocks[uid]); blocks[uid] = NULL; mock_live_blocks--; return 0; }
 int sceKernelGetFreeMemorySize(SceKernelFreeMemorySizeInfo *info)
 { info->size_user = 100 << 20; info->size_cdram = 60 << 20; info->size_phycont = (int)mock_phycont_left; return 0; }
+int mock_ctest_blocks;
+SceUID sceKernelFindMemBlockByAddr(const void *addr, SceSize size)
+{ (void)size;
+  for (int i = 1; i < 1024; i++) if (blocks[i] && (const char *)addr >= (char *)blocks[i] && (const char *)addr < (char *)blocks[i] + block_size[i]) return i;
+  return (SceUID)0x80020000; }
 int mock_mem_type(const void *p)
 { for (int i = 1; i < 1024; i++) if (blocks[i] && (const char *)p >= (char *)blocks[i] && (const char *)p < (char *)blocks[i] + block_size[i]) return block_type[i];
   return 0; }
