@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.4m (test)
+- **1080p50 channels with every picture a reference:** how much of each group of pictures is decoded now follows
+  what the decoder manages, measured as it plays (the first guess was for the heavy streams: on the device the
+  video thread waited for the screen 75% of the time with 67 of each 100 pictures decoded). Time to spare and
+  nothing late: a little more of each next group, up to all of it; a late or dropped picture: less. The picture
+  stands still for a shorter time at the end of each group (the average was 30-37 a second).
+- **Software video without B pictures (DivX 3, many Xvid / MPEG-2 files):** when the ARM falls behind, keyframes
+  only from 1 s behind the sound (it was 3 s: "leave out the pictures nothing refers to" leaves out nothing in
+  such a video, and the device's DivX 3 1080p stayed 1.7-2.9 s behind the sound for 20 s).
+- **HTTPS:** a TLS handshake that fails is tried once more on a new connection (an HLS 1080p variant answered
+  "internal error" once, and was taken for a variant without a picture). If the second fails too, the message
+  says the quality could not be reached, and it is not noted as "no picture" for the next time.
+- **One-connection accounts (HTTP 407 / 405 just after another stream):** asked again every 2 s (was 5 s) for up to
+  44 s with the countdown: the next channel starts as soon as the server lets the account go. Leaving during the
+  wait (another channel) shows no error.
+- **Stream test:** AVI files and MPEG program streams / Video CD files are recognised (they were "No video stream
+  recognised"). The log says "MPEG-1" for MPEG-1 video (it said MPEG-2: the same decoder).
+
 ## 1.2.4l (test)
 - **Trails on software video after "keyframes only"** (seen on a DivX 3 1080p film; MPEG-2 and Xvid did the same
   when they fell 3 s behind): the player went back to every picture as soon as it had caught up, in the middle

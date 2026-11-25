@@ -3,6 +3,8 @@
 #include "spsfix.h"
 #include "tsdemux.h"
 #include "mkvdemux.h"
+#include "avidemux.h"
+#include "psdemux.h"
 #include "flvdemux.h"
 #include "urlhdr.h"
 #include "httpio.h"                     /* plog() */
@@ -31,6 +33,9 @@ typedef struct {
     TsDemux *ts;
     MkvDemux *mkv;
     FlvDemux *flv;
+    AviDemux *avi;                      /* 1.2.4m */
+    PsDemux *ps;                        /* 1.2.4m: program stream / Video CD, into ts */
+    int ps_wait; uint8_t *pend; size_t pend_len;   /* (its first bytes, until the streams are known) */
 } Demux;
 
 /* H.264 pictures that no other picture refers to (nal_ref_idc 0): the player can skip them when the
@@ -56,7 +61,31 @@ static void dmx_feed(Demux *d, const TsSink *sink, const uint8_t *b, size_t n, i
 {
     if (first && mkv_probe(b, n)) d->mkv = mkv_create(sink);
     else if (first && flv_probe(b, n)) d->flv = flv_create(sink);
-    if (d->mkv) mkv_feed(d->mkv, b, n); else if (d->flv) flv_feed(d->flv, b, n); else ts_feed(d->ts, b, n);
+    else if (first && avi_probe(b, n)) d->avi = avi_create_stream(sink);   /* 1.2.4m */
+    else if (first) {                                        /* 1.2.4m: MPEG-PS, Video CD (.dat) */
+        int cdxa;
+        if (ps_probe(b, n, &cdxa)) d->ps_wait = 1;
+    }
+    if (d->ps_wait) {                                        /* (the first sectors of a VCD track are empty: the streams
+                                                              * are told by the first 64 KB) */
+        uint8_t *nb = realloc(d->pend, d->pend_len + n);
+        if (!nb) { d->ps_wait = 0; return; }
+        d->pend = nb;
+        memcpy(d->pend + d->pend_len, b, n);
+        d->pend_len += n;
+        PsLayout L;
+        int ok = ps_layout_head(d->pend, d->pend_len, &L) == 0 && L.video_id && (L.audio_id || d->pend_len >= 64 * 1024);
+        if (!ok && d->pend_len < 256 * 1024) return;
+        d->ps_wait = 0;
+        if (ok || ps_layout_head(d->pend, d->pend_len, &L) == 0) d->ps = ps_create(&L, d->ts);
+        if (d->ps && L.data_off < d->pend_len) ps_feed(d->ps, d->pend + L.data_off, d->pend_len - (size_t)L.data_off);   /* (from the sectors) */
+        free(d->pend);
+        d->pend = NULL;
+        d->pend_len = 0;
+        return;
+    }
+    if (d->mkv) mkv_feed(d->mkv, b, n); else if (d->flv) flv_feed(d->flv, b, n); else if (d->avi) avi_feed(d->avi, b, n);
+    else if (d->ps) ps_feed(d->ps, b, n); else ts_feed(d->ts, b, n);
 }
 
 typedef struct {
@@ -428,12 +457,15 @@ static int probe_main(SceSize args, void *argp)
             ok = read_local(c, d, buf, t0) == 0;
         }
         if (ok && !c->cancel) {
-            if (d->mkv) mkv_flush(d->mkv); else if (d->flv) flv_flush(d->flv); else if (!mp4) ts_flush(d->ts);
-            const TsInfo *info = mp4 ? mp4_info(mp4) : d->mkv ? mkv_info(d->mkv) : d->flv ? flv_info(d->flv) : ts_info(d->ts);
+            if (d->mkv) mkv_flush(d->mkv); else if (d->flv) flv_flush(d->flv); else if (d->ps) { ps_flush(d->ps); ts_flush(d->ts); }
+            else if (!mp4 && !d->avi) ts_flush(d->ts);
+            const TsInfo *info = mp4 ? mp4_info(mp4) : d->mkv ? mkv_info(d->mkv) : d->flv ? flv_info(d->flv) : d->avi ? avi_info(d->avi) : ts_info(d->ts);
             if (d->mkv) plog("probe: Matroska (MKV) container");
             if (d->flv) plog("probe: FLV container");
+            if (d->avi) plog("probe: AVI container");
+            if (d->ps) { uint32_t sc, bd, pe; ps_stats(d->ps, &sc, &bd, &pe); plog("probe: MPEG program stream / Video CD (%u sectors, %u PES)", sc, pe); }
             if (r->bytes == 0) { fail(r, "No data received"); ok = 0; }
-            else if (info->program < 0) { fail(r, "No video stream recognised (not TS, MKV or MP4?)"); ok = 0; }
+            else if (info->program < 0) { fail(r, "No video stream recognised (not TS, MKV, MP4, AVI or MPG?)"); ok = 0; }
             else {
                 summarize(r, info, status, sceKernelGetProcessTimeWide() - t0);
                 if (c->speed[0]) add_line(r, "%s", c->speed);
@@ -444,6 +476,9 @@ static int probe_main(SceSize args, void *argp)
     if (d->ts) ts_destroy(d->ts);
     mkv_destroy(d->mkv);
     flv_destroy(d->flv);
+    avi_destroy(d->avi);
+    ps_destroy(d->ps);
+    free(d->pend);
     free(buf);
     __sync_synchronize();
     r->state = ok && !c->cancel ? PROBE_DONE : PROBE_FAILED;

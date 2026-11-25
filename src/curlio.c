@@ -515,6 +515,18 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
         c.fd = -1;
         c.rq = rq;
         int r = conn_open(&c, host, port, tls, err, errsz);
+        if (r == -1005 && !stopped(rq)) {
+            /* 1.2.4m: a handshake that failed (not timed out) is tried once more on a new connection: a CDN's HLS
+             * 1080p answered "-0x6C00 internal error" once on the device, and the player took it for a variant
+             * without a picture */
+            conn_close(&c);
+            memset(&c, 0, sizeof c);
+            c.fd = -1;
+            c.rq = rq;
+            r = conn_open(&c, host, port, tls, err, errsz);
+            if (r == -1005) { size_t l = strlen(err); snprintf(err + l, errsz - l, " (twice)"); }
+            else if (r >= 0) err[0] = 0;
+        }
         if (r < 0) { conn_close(&c); ret = r; break; }
         int def = (tls && port == 443) || (!tls && port == 80);
         int k = 0;

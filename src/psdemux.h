@@ -30,6 +30,8 @@ typedef struct {
 int  ps_probe(const uint8_t *b, size_t n, int *cdxa);
 /* the layout (streams, length); rd reads the file. 0 = ok */
 int  ps_layout(VodRead rd, void *ctx, uint64_t total, PsLayout *L);
+/* 1.2.4m: the streams from the file's first bytes only (a stream test: no length, no jumping). 0 = ok */
+int  ps_layout_head(const uint8_t *b, size_t n, PsLayout *L);
 /* a byte offset (a sector's start) at or before target_ms; *at_ms its time. 0 = ok */
 int  ps_seek(VodRead rd, void *ctx, uint64_t total, const PsLayout *L, int64_t target_ms, uint64_t *off, int64_t *at_ms);
 

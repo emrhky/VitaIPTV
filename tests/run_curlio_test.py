@@ -83,7 +83,30 @@ def busy_server(free_after):
 p1, keep1 = busy_server(4.6)
 t0 = time.time(); c = so.socket(); c.settimeout(30); c.connect(("127.0.0.1", p1)); plain = time.time() - t0; c.close()
 p2, keep2 = busy_server(4.6)
-r = subprocess.run([f"{T}/test_curlio", str(port), f"{T}/file.ts", str(srv12.server_address[1]), str(p2), "%.2f" % plain],
+# 1.2.4m: TLS servers whose handshake fails (a fatal alert) the first time / every time
+def tls_flaky(fail_first):
+    s = so.socket(); s.setsockopt(so.SOL_SOCKET, so.SO_REUSEADDR, 1); s.bind(("127.0.0.1", 0)); s.listen(8)
+    n = [0]
+    def run():
+        while True:
+            a, _ = s.accept()
+            n[0] += 1
+            def h(a, k):
+                try:
+                    a.settimeout(5)
+                    if k <= fail_first:
+                        a.recv(4096)
+                        a.sendall(b"\x15\x03\x03\x00\x02\x02\x50")   # alert: fatal, internal_error
+                        a.close(); return
+                    t = ctx.wrap_socket(a, server_side=True)
+                    if t.recv(4096): t.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                    t.close()
+                except Exception: pass
+            threading.Thread(target=h, args=(a, n[0]), daemon=True).start()
+    threading.Thread(target=run, daemon=True).start()
+    return s.getsockname()[1]
+pf1, pfa = tls_flaky(1), tls_flaky(1000)
+r = subprocess.run([f"{T}/test_curlio", str(port), f"{T}/file.ts", str(srv12.server_address[1]), str(p2), "%.2f" % plain, str(pf1), str(pfa)],
                    capture_output=True, text=True, timeout=120)
 print(r.stdout); print(r.stderr[-3000:])
 sys.exit(r.returncode)

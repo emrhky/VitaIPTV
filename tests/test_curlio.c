@@ -18,7 +18,7 @@ static int stop_now(void *ctx) { Acc *a = ctx; return ++a->polls > 3 && a->stop_
 
 int main(int argc, char **argv)
 {
-    assert(argc == 4 || argc == 6);
+    assert(argc == 4 || argc == 6 || argc == 8);
     setvbuf(stdout, NULL, _IONBF, 0);
     int port = atoi(argv[1]);
     FILE *f = fopen(argv[2], "rb"); assert(f);
@@ -123,6 +123,20 @@ race:
         double s = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9, plain = atof(argv[5]);
         printf("silent at first: r=%d status %d after %.2f s, %d sockets (one socket alone: %.2f s)\n", r, status, s, cio_last_connect_tries(), plain);
         assert(r == 0 && status == 200 && cio_last_connect_tries() >= 2 && s < plain + 0.5);
+    }
+    if (argc > 7) {   /* 1.2.4m: a handshake that fails once (an alert) is tried again; one that always fails says so */
+        char ru[96];
+        snprintf(ru, sizeof ru, "https://127.0.0.1:%d/ok", atoi(argv[6]));
+        memset(&a, 0, sizeof a);
+        CioRequest rt = { ru, NULL, NULL, 10, 5, on_data, NULL, &a, 0, 0, 0, NULL, NULL, NULL };
+        r = cio_get(&rt, &status, err, sizeof err);
+        printf("TLS failing once: r=%d status %d bytes %zu err='%s'\n", r, status, a.n, err);
+        assert(r == 0 && status == 200 && a.n == 2);
+        snprintf(ru, sizeof ru, "https://127.0.0.1:%d/ok", atoi(argv[7]));
+        memset(&a, 0, sizeof a);
+        r = cio_get(&rt, &status, err, sizeof err);
+        printf("TLS failing always: r=%d err='%s'\n", r, err);
+        assert(r < 0 && strstr(err, "TLS handshake failed") && strstr(err, "(twice)"));
     }
     puts("all curlio tests passed");
     fflush(stdout);

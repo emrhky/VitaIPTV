@@ -60,6 +60,7 @@ typedef struct {
     int hls_vw[TSP_MAX_VARIANTS], hls_vh[TSP_MAX_VARIANTS];   /* height 0 = not given */
     long hls_vbw[TSP_MAX_VARIANTS];     /* bit rate, bit/s (tsp_set_hls_bw picks one exactly) */
     volatile int hls_no_video;          /* the error: this HLS variant carries no picture (another one may) */
+    volatile int hls_tls_fail;          /* 1.2.4m: ... because its connection failed (TLS), not a sound-only variant */
     /* 0.5.0: the audio tracks the player can play (TS / MKV), in the stream's order, and the one playing */
     volatile int audio_ac3;             /* AC-3 (1) / E-AC-3 (2) / DTS (3, 1.2.2) decoded in software, else 0 */
     volatile int audio_xiph;            /* 1.4.2: Opus (1) / Vorbis (2) decoded in software, else 0 */

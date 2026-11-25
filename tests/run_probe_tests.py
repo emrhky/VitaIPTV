@@ -25,10 +25,17 @@ sh_main(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=50 
 # 1.2.4k: MPEG-4 Part 2 + MP3 in MKV (the device's film): decoded in software, not "not supported yet"
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=528x400:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 4 "
    f"-c:v mpeg4 -q:v 4 -c:a libmp3lame -b:a 128k {T}/xvid.mkv")
+# 1.2.4m: the same in AVI, and a Video CD file (MPEG-1 + MP2 in raw CD sectors)
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x352:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 4 "
+   f"-c:v mpeg4 -vtag XVID -q:v 4 -c:a libmp3lame -b:a 128k {T}/xvid.avi")
+sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=352x288:rate=25 -f lavfi -i sine=frequency=440:sample_rate=44100 -t 4 "
+   f"-target pal-vcd {T}/vcd.mpg")
+import cdxa
+open(f"{T}/vcd.dat", "wb").write(cdxa.wrap(open(f"{T}/vcd.mpg", "rb").read()))
 open(f"{T}/page.ts", "w").write("<html><body>blocked</body></html>")
 M = f"{ROOT}/tests/mock_rt"
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -Wno-missing-field-initializers -pthread -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_probe_net.c {ROOT}/src/probe.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/hls.c "
+   f"{ROOT}/tests/test_probe_net.c {ROOT}/src/probe.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/avidemux.c {ROOT}/src/psdemux.c {ROOT}/src/hls.c "
    f"{ROOT}/src/vod.c {ROOT}/src/curlio.c {M}/mock_rt.c -lm -o {T}/test_probe_net")
 r = subprocess.run(f"{T}/test_probe_net {T}", shell=True, capture_output=True, text=True, timeout=300)
 print(r.stdout); print(r.stderr[-4000:])

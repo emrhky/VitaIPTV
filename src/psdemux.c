@@ -198,6 +198,27 @@ int ps_layout(VodRead rd, void *ctx, uint64_t total, PsLayout *L)
     return 0;
 }
 
+int ps_layout_head(const uint8_t *b, size_t n, PsLayout *L)
+{
+    memset(L, 0, sizeof *L);
+    L->first_pts = -1;
+    if (!ps_probe(b, n, &L->cdxa)) return -1;
+    L->data_off = L->cdxa ? cdxa_data(b, n) : 0;
+    if ((L->cdxa && !L->data_off) || L->data_off >= n) return -1;
+    uint8_t *pl = malloc(n);
+    if (!pl) return -1;
+    Scan s = { -1, -1, 0, 0, 0, 0 };
+    scan(pl, unwrap(L, b + L->data_off, n - (size_t)L->data_off, pl), &s, 0);
+    free(pl);
+    if (!s.vid && !s.aid) return -1;
+    L->video_id = s.vid;
+    L->audio_id = s.aid;
+    L->audio_sub = s.asub;
+    L->mpeg2 = s.mpeg2;
+    L->first_pts = s.first;
+    return 0;
+}
+
 int ps_seek(VodRead rd, void *ctx, uint64_t total, const PsLayout *L, int64_t target_ms, uint64_t *off, int64_t *at_ms)
 {
     *off = L->data_off;

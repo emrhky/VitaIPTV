@@ -323,6 +323,10 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     double tr_cap;                      /* reference pictures a second the decoder is given */
     unsigned tr_fps;
     int g_units, g_refs, g_last_units, g_last_refs, g_budget, g_logged;
+    double tr_cap0;                     /* 1.2.4m: the first estimate; tr_cap moves from it as measured */
+    uint64_t g_t0, g_slot0;             /* ... at the last group start: time, time waited for the screen */
+    uint32_t g_bad0;                    /* ... dropped + late pictures then */
+    int g_ups, g_downs, g_logged_budget;
     uint32_t fr_drop0;                  /* ... pictures dropped / late when the last 3 s window began */
     int fr_set;
     AudioFx afx;                        /* 1.1: volume boost / speaker mode (Select > Audio) */
@@ -336,6 +340,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     uint32_t nbcues;
     int swv_failed, sw_w, sw_h, sw_skip, sw_started, sw_wait_units;
     int sw_k2_units;                    /* 1.2.4l: units since "keyframes only" began */
+    int sw_nob, sw_nob_units;           /* 1.2.4m: 1 no B pictures (DivX 3...), -1 some, 0 not known yet */
     int sw_hw;                          /* 1.2.3: the slots are set up for the MPEG-4 hardware (macroblock height) */
     /* 1.2.3: MPEG-4 Part 2 on the Vita's own decoder (sceM4vdec); on trouble the software decoder takes over */
     int m4v_on, m4v_failed, m4v_lib, m4v_dec, m4v_errs, m4v_vol_len, m4v_vol_sent, m4v_packed;
@@ -1771,6 +1776,41 @@ static int even_place(Tsp *t, int64_t pts)
     long long place = llround((double)d / step);
     return (place & 1) == 0;
 }
+/* 1.2.4m: how much of each group the decoder is given, from what the last group showed. The first estimate
+ * (290 000 macroblocks a second with 3-4 references) is for the heavy streams; a 1080p50 channel on the device
+ * left 75-79% of the video thread's time waiting for the screen while only 67 of each 100 pictures were decoded
+ * (the screen then showed 50 a second for 1.3 s and stood for 0.7 s). Time to spare and nothing late: a little
+ * more of the next group (up to all of it); a late or dropped picture, or the video behind the sound: less. */
+static void group_measure(Tsp *t, uint64_t now)
+{
+    uint32_t bad = t->st.dropped + t->st.late;
+    if (!t->g_t0 || t->paused || t->buffering || !t->tr_cap0) {
+        t->g_t0 = now; t->g_slot0 = t->slot_wait_total; t->g_bad0 = bad;
+        return;
+    }
+    double dt = (double)(now - t->g_t0);
+    if (dt < 500000.0) return;                               /* (groups shorter than 0.5 s: measured together) */
+    double spare = (double)(t->slot_wait_total - t->g_slot0) / dt;
+    /* (late_ms only far beyond the usual: the decoded run of a group plays a little behind the sound by design,
+     * up to about 150 ms, and catches up while the end is left out) */
+    int worse = bad != t->g_bad0 || t->late_ms > 250;
+    double was = t->tr_cap;
+    if (worse) {
+        t->tr_cap *= 0.92;
+        if (t->tr_cap < t->tr_cap0 * 0.85) t->tr_cap = t->tr_cap0 * 0.85;
+    } else if (spare > 0.35 && t->tr_cap < t->tr_fps) {
+        t->tr_cap *= spare > 0.5 ? 1.12 : 1.06;
+        if (t->tr_cap > t->tr_fps) t->tr_cap = t->tr_fps;
+    }
+    if (t->tr_cap != was) {
+        if (t->tr_cap > was) t->g_ups++; else t->g_downs++;
+        if (t->g_ups + t->g_downs <= 12 || (t->g_ups + t->g_downs) % 20 == 0)
+            plog("tsp: groups: %.0f%% of the time to spare, %s: %.1f reference pictures a second now (was %.1f, first %.1f)",
+                 spare * 100.0, bad != t->g_bad0 ? "a picture late or dropped" : worse ? "the picture behind the sound" : "nothing late", t->tr_cap, was, t->tr_cap0);
+    }
+    t->g_t0 = now; t->g_slot0 = t->slot_wait_total; t->g_bad0 = bad;
+}
+
 static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int start_ok)
 {
     uint64_t now = now_us();
@@ -1789,6 +1829,7 @@ static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int st
         int nr = au_is_nonref(data, len);
         if (start_ok) {
             if (t->g_units) { t->g_last_units = t->g_units; t->g_last_refs = t->g_refs; }
+            group_measure(t, now);
             t->g_units = t->g_refs = 0;
             t->g_budget = 0;
             if (t->g_last_units > 0 && t->g_last_refs > 0 && t->g_last_units <= (int)t->tr_fps * 4) {
@@ -1796,8 +1837,9 @@ static int catch_up(Tsp *t, const uint8_t *data, size_t len, int64_t pts, int st
                 if (rate > t->tr_cap) t->g_budget = (int)(t->g_last_refs * t->tr_cap / rate);
                 if (t->g_budget < 1 && rate > t->tr_cap) t->g_budget = 1;
             }
-            if (t->g_logged != t->g_last_units && t->g_last_units) {
+            if ((t->g_logged != t->g_last_units || t->g_logged_budget != t->g_budget) && t->g_last_units && t->g_ups + t->g_downs <= 12) {
                 t->g_logged = t->g_last_units;
+                t->g_logged_budget = t->g_budget;
                 if (t->g_budget)
                     plog("tsp: groups of %d pictures (%d reference): the first %d decoded, the rest of each group left out",
                          t->g_last_units, t->g_last_refs, t->g_budget);
@@ -2492,6 +2534,30 @@ static int reader_core3(Tsp *t, int on)
     return 0;
 }
 
+/* 1.2.4m: MPEG-1 video (a sequence header with no sequence extension after it: the MPEG-2 decoder takes both) */
+static int mpeg1_unit(const uint8_t *b, size_t n)
+{
+    int seq = 0;
+    for (size_t k = 0; k + 3 < n; k++) {
+        if (b[k] || b[k + 1] || b[k + 2] != 1) continue;
+        if (b[k + 3] == 0xB3) seq = 1;
+        else if (b[k + 3] == 0xB5) return 0;
+        else if (seq && b[k + 3] == 0x00) return 1;          /* (the picture came first) */
+    }
+    return 0;
+}
+
+/* 1.2.4m: a B picture (MPEG-4 Part 2 VOP type 2, MPEG-2 / MPEG-1 picture type 3) */
+static int sw_unit_is_b(int codec, const uint8_t *b, size_t n)
+{
+    for (size_t k = 0; k + 5 < n; k++) {
+        if (b[k] || b[k + 1] || b[k + 2] != 1) continue;
+        if (codec == TS_CODEC_MPEG4V && b[k + 3] == 0xB6 && (b[k + 4] >> 6) == 2) return 1;   /* (any VOP: packed B too) */
+        if (codec == TS_CODEC_MPEG2V && b[k + 3] == 0x00 && ((b[k + 5] >> 3) & 7) == 3) return 1;
+    }
+    return 0;
+}
+
 static void sw_video_packet(Tsp *t, Pkt *p)
 {
     if (m4v_packet(t, p)) return;                            /* 1.2.3 */
@@ -2517,7 +2583,8 @@ static void sw_video_packet(Tsp *t, Pkt *p)
         }
         /* 1.2.3: above SD on three cores (MPEG-2 by slices, MPEG-4 by pictures); SD stays on one (it keeps up) */
         int th = i->width * i->height > 1024 * 576 ? swv_threads(t->swv, 3) : 1;
-        plog("tsp: %s video %dx%d: decoded in software%s, %d thread%s", swv_name(i->codec), i->width, i->height,
+        plog("tsp: %s video %dx%d: decoded in software%s, %d thread%s",
+             i->codec == TS_CODEC_MPEG2V && mpeg1_unit(p->data, p->len) ? "MPEG-1" : swv_name(i->codec), i->width, i->height,
              i->cfg_len ? " (with the container's header)" : "", th, th == 1 ? "" : "s");
         if (i->width * i->height > 1024 * 576) {
             plog("tsp: %dx%d is above SD: the ARM may not decode it in time (pictures nothing refers to are left out then)", i->width, i->height);
@@ -2542,11 +2609,20 @@ static void sw_video_packet(Tsp *t, Pkt *p)
     if (p->frame_us) t->frame_us = p->frame_us;
     if (!t->first_unit_us) t->first_unit_us = now_us();
     if (t->units_in++ == 0) plog("tsp: first video unit: %u bytes, %s", (unsigned)p->len, (p->flags & TS_FLAG_KEYFRAME) ? "keyframe" : "no keyframe yet");
+    /* 1.2.4m: are there pictures nothing refers to (B pictures)? DivX 3 never; MPEG-4 / MPEG-2 told by the first
+     * 60 units. Without them "leave out pictures nothing refers to" leaves out nothing: the device's DivX 3 1080p
+     * stayed 1.7-2.9 s behind the sound for 20 s, never reaching the 3 s of "keyframes only". */
+    if (t->sw_nob == 0) {
+        if (p->vi.codec == TS_CODEC_DIVX3) t->sw_nob = 1;
+        else if (sw_unit_is_b(p->vi.codec, p->data, p->len)) t->sw_nob = -1;
+        else if (++t->sw_nob_units >= 60) t->sw_nob = 1;
+        if (t->sw_nob == 1) plog("tsp: no pictures that nothing refers to in this video: when behind, keyframes only from 1 s");
+    }
     /* behind the sound: leave out pictures nothing refers to, then all but keyframes, until it is close again */
     int64_t apts, tp = p->pts >= 0 ? p->pts : p->dts;
     if (t->st.av_sync && tp >= 0 && audio_now(t, now_us(), &apts)) {
         int64_t behind = pts_diff(apts, tp);
-        int lv = behind > 90000LL * 3 ? 2 : behind > 45000 ? 1 : behind < 9000 ? 0 : t->sw_skip;
+        int lv = behind > (t->sw_nob == 1 ? 90000LL : 90000LL * 3) ? 2 : behind > 45000 ? 1 : behind < 9000 ? 0 : t->sw_skip;
         /* 1.2.4l: out of "keyframes only" at a keyframe alone. Leaving it in the middle had the next pictures built
          * on a picture left far behind (the ones between never decoded): moving edges left trails that grew until
          * the next keyframe (the device's DivX 3 1080p, ~35 times a minute). If the container marks no keyframes,
@@ -2779,7 +2855,7 @@ static void video_packet(Tsp *t, Pkt *p)
                 double refs = fps * (1.0 - nr);              /* the reference pictures alone */
                 t->pre_skip = need <= can * 0.9 ? 2 : refs <= can * 0.95 ? 1 : 3;
                 t->tr_fps = fps;
-                t->tr_cap = can * 0.95;
+                t->tr_cap = t->tr_cap0 = can * 0.95;
                 if (i->height >= 1000) t->st.decoder_slow = 1;
                 plog("tsp: %dx%d at %u fps (%u macroblocks a second) is more than the Vita decoder manages (about "
                      "%s with %d references): %s (%.0f%% not referenced, needs %.0f pictures a second)", t->dw, t->dh, fps, rate,
@@ -4301,7 +4377,9 @@ static void explain_no_picture(Tsp *t)
     int vcur = t->st.hls_vcur;
     if (t->st.hls_nv > 1 && vcur >= 0 && t->st.hls_vh[vcur] > 0 && i->program >= 0 && (i->video_pid < 0 || !i->video_aus) &&
         !(i->scrambled_packets && !i->video_aus)) {
-        plog("tsp: HLS variant %dp sends no picture", t->st.hls_vh[vcur]);
+        t->st.hls_tls_fail = t->net_err[0] && strstr(t->net_err, "TLS") && !i->video_aus;   /* 1.2.4m */
+        if (t->st.hls_tls_fail) plog("tsp: HLS variant %dp could not be reached (%s)", t->st.hls_vh[vcur], t->net_err);
+        else plog("tsp: HLS variant %dp sends no picture", t->st.hls_vh[vcur]);
         t->st.hls_no_video = 1;
         set_error(t, "No video data received");
         return;
@@ -4367,24 +4445,28 @@ static void check_stall(Tsp *t)
 static volatile int g_recent_use;
 void tsp_set_recent_use(int on) { g_recent_use = on ? 1 : 0; }
 static int busy_status(int s) { return s == 405 || s == 407 || s == 429 || s == 503 || s == 506 || s == 509 || s == 512; }
-#define BUSY_LONG_TRIES 9                                    /* (x 5 s: 45 s) */
+/* (x 2 s: 44 s. 1.2.4m: every 2 s instead of 5: a one-connection account changing channels was let go by the
+ * server a few seconds after the last stream, and the next channel waited up to 5 s more for nothing) */
+#define BUSY_LONG_TRIES 22
+#define BUSY_LONG_MS 2000
 /* a busy answer before anything came: wait and ask again (1); 0 = no more */
 static int busy_wait(Tsp *t, int status, const char *what)
 {
     int long_wait = g_recent_use;
     if (t->status_retries >= (long_wait ? BUSY_LONG_TRIES : 2)) return 0;
-    int ms = long_wait ? 5000 : t->status_retries ? 3000 : 1500;
+    int ms = long_wait ? BUSY_LONG_MS : t->status_retries ? 3000 : 1500;
     t->status_retries++;
     plog("tsp: %s: server answered %d (the account may still be counted on the last stream), asking again in %.1f s (%d)",
          what, status, ms / 1000.0, t->status_retries);
     for (int k = 0; k < ms / 20 && !stopping(t); k++) {
         if (long_wait && k % 50 == 0) {                      /* (once a second: the countdown) */
-            int left = (BUSY_LONG_TRIES - t->status_retries) * 5 + (ms - k * 20) / 1000;
+            int left = ((BUSY_LONG_TRIES - t->status_retries) * BUSY_LONG_MS + (ms - k * 20)) / 1000;
             snprintf(t->st.note, sizeof t->st.note, "The provider still counts the last stream: %d s", left);
         }
         sceKernelDelayThread(20000);
     }
     t->st.note[0] = 0;
+    t->start_us = now_us();                                  /* 1.2.4m: "no picture yet" counts from the answer, not the wait */
     return !stopping(t);
 }
 
@@ -4406,6 +4488,7 @@ static int http_refused(Tsp *t, int status)
             return !stopping(t);
         }
     }
+    if (stopping(t)) return 0;                               /* 1.2.4m: left while waiting (another channel): no error */
     if (status == 407)
         set_error_kind(t, TSP_ERRK_NET, "Server answered HTTP 407 (the provider refuses: account busy or channel not in the package)");
     else if (status == 405)                                  /* 1.2.2: one message (busy or not given: the server does not say) */

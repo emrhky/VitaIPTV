@@ -1800,10 +1800,12 @@ int main(void)
                         char was[24], nm[24];
                         res_name(fs, fs->hls_vcur, was, sizeof was);
                         res_name(fs, nx, nm, sizeof nm);
-                        plog("player: HLS %s has no picture: %s", was, nm);
+                        int tlsf = fs->hls_tls_fail;                 /* 1.2.4m: unreachable, not without a picture */
+                        plog("player: HLS %s %s: %s", was, tlsf ? "could not be reached (TLS)" : "has no picture", nm);
                         res_choose(fs, nx, res_manual);
-                        nopic_remember(cur_channel()->url, res_want, res_bw);
-                        snprintf(film_note, sizeof film_note, T("No picture in %s: switched to %s"), was, nm);
+                        if (!tlsf) nopic_remember(cur_channel()->url, res_want, res_bw);   /* (a TLS failure: next time again) */
+                        snprintf(film_note, sizeof film_note, tlsf ? T("%s could not be reached: switched to %s")
+                                                                   : T("No picture in %s: switched to %s"), was, nm);
                         film_note_until = now_ms() + 5000;
                         osd_until_us = now_ms() + 5000;
                         play_channel_ex(play_vis, 0);

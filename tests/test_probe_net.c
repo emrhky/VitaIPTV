@@ -41,7 +41,8 @@ int main(int argc, char **argv)
     const char *dir = argv[1];
     static char p[16][512];
     const char *names[] = { "s.ts", "master.m3u8", "media.m3u8", "seg000.ts", "seg001.ts", "seg002.ts", "seg003.ts", "seg004.ts",
-                            "film.mp4", "film.mkv", "page.ts", "live.flv", "fast1080.ts", "xvid.mkv" };
+                            "film.mp4", "film.mkv", "page.ts", "live.flv", "fast1080.ts", "xvid.mkv",
+                            "xvid.avi", "vcd.dat" };
     int n = (int)(sizeof names / sizeof names[0]);
     mock_http_reset();
     for (int i = 0; i < n; i++) { snprintf(p[i], 512, "%s/%s", dir, names[i]); mock_http_map[i][0] = names[i]; mock_http_map[i][1] = p[i]; }
@@ -79,6 +80,13 @@ int main(int argc, char **argv)
         assert(has(r, g_sw_video > 0 ? "Playable: YES: in software" : "Playable: MAYBE: in software"));
         probe_cancel();
     }
+    g_sw_video = 1;                                                /* 1.2.4m: AVI and Video CD */
+    r = run("http://host/movie/u/p/xvid.avi");
+    assert(r->state == PROBE_DONE && has(r, "decoded by the ARM") && has(r, "Playable: YES: in software"));
+    probe_cancel();
+    r = run("http://host/movie/u/p/vcd.dat");
+    assert(r->state == PROBE_DONE && has(r, "mpeg2") && has(r, "Playable: YES: in software") && has(r, "mpeg_audio (software)"));
+    probe_cancel();
     g_sw_video = -1;
     r = run("http://host/page.ts");
     assert(r->state == PROBE_FAILED && strstr(r->error, "web page"));

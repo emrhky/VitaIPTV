@@ -453,7 +453,8 @@ static const Pair FIXED[] = {
     { "Cannot play this file", "Bu dosya oynatılamıyor" }, { "No video after 20 s", "20 sn içinde görüntü gelmedi" },
     { "See ux0:data/VitaIPTV/log.txt", "Ayrıntı: ux0:data/VitaIPTV/log.txt" },
     { "Preferred resolution", "Tercih edilen çözünürlük" }, { "Automatic", "Otomatik" }, { "Lowest", "Düşük" },
-    { "Resolution", "Çözünürlük" }, { "No picture in %s: switched to %s", "%s kalitesinde görüntü yok, %s seçildi" }, 
+    { "Resolution", "Çözünürlük" }, { "No picture in %s: switched to %s", "%s kalitesinde görüntü yok, %s seçildi" },
+    { "%s could not be reached: switched to %s", "%s kalitesine bağlanılamadı, %s seçildi" }, 
     { "Tip: a transcoding server on your PC can play this channel (channel list: Select > Settings, see README)",
       "İpucu: bilgisayarınızdaki dönüştürme sunucusu bu kanalı oynatabilir (kanal listesi: Select > Ayarlar, README)" },
     

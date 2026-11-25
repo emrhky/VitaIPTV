@@ -1397,6 +1397,18 @@ restart:
         tsp_set_recent_use(0);
         mock_http_status = 200;
         mock_http_reset();
+        /* 1.2.4m: right after another stream, the server lets the account go after 3 answers (about 6 s): asked every
+         * 2 s, it plays within the 12 s (every 5 s: 15 s of waiting, nothing) */
+        extern int mock_http_busy_from, mock_http_busy_n;
+        tsp_set_recent_use(1);
+        mock_http_file = argv[1];
+        mock_http_busy_from = 0; mock_http_busy_n = 3;
+        r = play("http://example.invalid/live/9.ts", 12);
+        mock_http_busy_n = 0;
+        tsp_set_recent_use(0);
+        show("busy 3 times after a stream", &r);
+        assert(r.st.state != TSP_ERROR && r.st.decoded >= 60);
+        mock_http_reset();
     }
 
 mkv:
@@ -1689,6 +1701,17 @@ limit:
             /* (the decoded run of a group plays a little behind the sound, at most about 150 ms with this decoder, and
              * catches up while the end of the group is left out: no dropped pictures, no jumps) */
             assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 250 && r.st.skipped >= 50);
+            assert(r.st.dropped < 40 && r.av_max < 400);
+            /* 1.2.4m: a decoder with time to spare (the device's 1080p50 channel: 75% of the time waiting for the
+             * screen with 67 of 100 decoded): more of each group is given to it, in time with the sound */
+            unsigned skipped_slow = (unsigned)r.st.skipped;
+            int_out_us = 12000;
+            r = play(argv[34], 12);
+            int_out_us = 0;
+            show("1080p50 all P, fast decoder", &r);
+            printf("               shown %u, decoded %u, left out %u (with the slower one %u), dropped %u, last %d ms from the sound\n",
+                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, skipped_slow, r.st.dropped, r.av_last);
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 300 && r.st.skipped * 2 < skipped_slow);
             assert(r.st.dropped < 40 && r.av_max < 400);
         }
         if (argc > 36) {
