@@ -75,6 +75,17 @@ int main(void)
     assert(strstr(b, "after big 3\n"));
     assert(strstr(b, "big xxxx"));
     free(b);
+    /* 1.2.4n: Settings > Log file "Errors only": the other lines are not kept; an error and the version line are */
+    plog_set_all(0);
+    plog("tsp: stats %d", 7);
+    plog("tsp: ERROR: %s", "kept");
+    plog("version %s", "x");
+    plog_set_all(1);
+    plog("back %d", 4);
+    plog_flush();
+    b = slurp();
+    assert(!strstr(b, "tsp: stats 7") && strstr(b, "tsp: ERROR: kept\n") && strstr(b, "version x\n") && strstr(b, "back 4\n"));
+    free(b);
     printf("applog: all tests passed (%d threads x %d lines whole and in order)\n", NT, NL);
     return 0;
 }

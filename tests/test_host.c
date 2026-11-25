@@ -248,6 +248,9 @@ int main(void)
         settings_defaults(&a); a.adelay_sp = 150; a.adelay_hp = 250; a.adelay_bt = 300; a.snd_level = 2;
         assert(settings_format(&a, t, sizeof t) > 0);
         settings_parse(t, &b); assert(b.adelay_sp == 150 && b.adelay_hp == 250 && b.adelay_bt == 300 && b.snd_level == 2);
+        assert(b.log_all == 0 && !strstr(t, "log="));               /* 1.2.4n: errors only by default, not written */
+        a.log_all = 1; assert(settings_format(&a, t, sizeof t) > 0 && strstr(t, "log=1\n"));
+        settings_parse(t, &b); assert(b.log_all == 1);
         settings_parse("adelay_hp=99999\nadelay_sp=-150\n", &b); assert(b.adelay_hp == 1000 && b.adelay_sp == 0);
         settings_parse("adelay_bt=233\nsnd_level=1\n", &b); assert(b.adelay_bt == 200 && b.adelay_sp == 0 && b.snd_level == 1);
     }

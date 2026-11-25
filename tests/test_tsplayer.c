@@ -725,6 +725,8 @@ int main(int argc, char **argv)
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "fmp4")) goto fmp4;     /* 1.2.2b */
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slots")) goto slots;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "slow")) goto slow;
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "busy")) goto busy;     /* 1.2.4n */
+    if (getenv("ONLY") && !strcmp(getenv("ONLY"), "b405")) goto b405;     /* 1.2.4n */
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "live")) goto live;
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "restart")) goto restart;   /* 1.2.4g */
     if (getenv("ONLY") && !strcmp(getenv("ONLY"), "hls_slow")) goto hls_slow;
@@ -1337,6 +1339,7 @@ slow:
     assert(r.st.state == TSP_ENDED && r.changes >= 140);
 
     /* network stream whose connection drops every ~300 KB: the player reconnects and keeps going */
+busy:                                                     /* (1.2.4n: ONLY=busy) */
     mock_http_file = argv[1];
     mock_http_fail_after = 300 * 1024;
     r = play("http://example.invalid/live/1.ts", 10);
@@ -1355,6 +1358,19 @@ slow:
         assert(r.st.decoded >= 140 && !strstr(r.st.msg, "407") && mock_http_sessions >= 5 && r.play_time > 9.0);
         mock_http_busy_n = 0;
         mock_http_reset();
+        /* 1.2.4n: 8 times (16 s: more than the 5 lost connections allowed, and than 1.2.4m's 3 + 6 + 10 s for 3):
+         * still waits, goes on */
+        mock_http_file = argv[1];
+        mock_http_fail_after = 300 * 1024;
+        mock_http_busy_from = 2; mock_http_busy_n = 8;
+        r = play("http://example.invalid/live/1.ts", 40);
+        show("http drops, then 407 8 times", &r);
+        printf("               sessions=%d reconnects=%u state %d '%s'\n", mock_http_sessions, r.st.reconnects, r.st.state, r.st.msg);
+        /* (the stream ends after the file, as above: "connection lost" then is that end, after the 407s) */
+        assert(r.st.decoded >= 140 && !strstr(r.st.msg, "407") && mock_http_sessions >= 11 && r.play_time > 9.0);
+        mock_http_busy_n = 0;
+        mock_http_reset();
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "busy")) { printf("ONLY busy: done\n"); return 0; }
     }
 restart:
     {   /* 1.2.4i: the device's order after a reconnect (the old last picture first, then the new start) */
@@ -1380,6 +1396,7 @@ restart:
         if (getenv("ONLY") && !strcmp(getenv("ONLY"), "restart")) { printf("ONLY restart: done\n"); return 0; }
     }
     mock_http_fail_after = 0;
+b405:
     {   /* 1.5: a 405 at the start: asked again twice (1.5 and 3 s), then one message. 1.2.2: just after a stream of the
          * same server (the user's episode after a channel): asked again every 5 s for 45 s, counted down */
         extern int mock_http_status;
@@ -1407,8 +1424,11 @@ restart:
         mock_http_busy_n = 0;
         tsp_set_recent_use(0);
         show("busy 3 times after a stream", &r);
-        assert(r.st.state != TSP_ERROR && r.st.decoded >= 60);
+        /* (1.2.4n: the busy answers no longer count as lost connections nor wait 1 s more, so the end of the file -
+         * the mock then answers with 0 KB - can come within the 12 s: "connection lost" is that end, not the 407) */
+        assert(r.st.decoded >= 60 && !strstr(r.st.msg, "407") && !strstr(r.st.msg, "busy"));
         mock_http_reset();
+        if (getenv("ONLY") && !strcmp(getenv("ONLY"), "b405")) { printf("ONLY b405: done\n"); return 0; }
     }
 
 mkv:
@@ -1713,6 +1733,15 @@ limit:
                    r.st.shown, r.st.decoded, (unsigned)r.st.skipped, skipped_slow, r.st.dropped, r.av_last);
             assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 300 && r.st.skipped * 2 < skipped_slow);
             assert(r.st.dropped < 40 && r.av_max < 400);
+            /* 1.2.4n: a decoder at about 45 a second (the device's channel): up to all of each group was too many; it
+             * stays below the level that failed instead of going up and down */
+            int_out_us = 22000;
+            r = play(argv[34], 12);
+            int_out_us = 0;
+            show("1080p50 all P, 45/s decoder", &r);
+            printf("               shown %u, decoded %u, left out %u, dropped %u, last %d ms from the sound\n",
+                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.st.dropped, r.av_last);
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.dropped < 40 && r.av_max < 450);
         }
         if (argc > 36) {
             /* 1.2.1: the picture size changes on the way (720p -> 1024x576 -> 720p): it goes on, the decoder opened
