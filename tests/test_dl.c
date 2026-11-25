@@ -76,6 +76,8 @@ int main(int argc, char **argv)
     dl_video_name("http://h/movie/u/p/12.MP4?token=1", nm, sizeof nm); assert(!strcmp(nm, "video.mp4"));
     dl_video_name("http://h/series/u/p/9.ts|User-Agent=x", nm, sizeof nm); assert(!strcmp(nm, "video.ts"));
     dl_video_name("http://h/x", nm, sizeof nm); assert(!strcmp(nm, "video.mkv"));
+    dl_video_name("http://h/movie/u/p/7.DAT", nm, sizeof nm); assert(!strcmp(nm, "video.dat"));   /* 1.2.4l: Video CD */
+    dl_video_name("http://h/f/a.mpeg", nm, sizeof nm); assert(!strcmp(nm, "video.mpeg"));
     dl_size_text(1503238553ull, 1, nm, sizeof nm); assert(!strcmp(nm, "1,4 GB"));
     dl_size_text(860ull << 20, 0, nm, sizeof nm); assert(!strcmp(nm, "860 MB"));
 

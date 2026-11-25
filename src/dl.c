@@ -284,7 +284,7 @@ void dl_folder_name(char kind, uint32_t key, const char *title, char *out, size_
 
 void dl_video_name(const char *url, char *out, size_t cap)
 {
-    static const char *const EXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".ts", ".m2ts", ".flv", ".webm", ".avi" };
+    static const char *const EXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".ts", ".m2ts", ".flv", ".webm", ".avi", ".mpeg", ".mpg", ".vob", ".dat" };
     size_t n = strcspn(url, "?#|");
     for (size_t i = 0; i < sizeof EXT / sizeof EXT[0]; i++) {
         size_t k = strlen(EXT[i]);

@@ -426,6 +426,8 @@ int main(void)
     }
     assert(iptv_is_film_url("https://example.org/films/Sintel.2010.720p.mkv"));
     assert(iptv_is_film_url("http://h:8080/movie/u/p/123.mp4") && iptv_is_film_url("http://h/series/u/p/9.ts"));
+    assert(iptv_is_film_url("ux0:video/vcd/AVSEQ01.DAT") && iptv_is_film_url("http://h/a/film.mpg"));   /* 1.2.4l */
+    assert(!iptv_is_film_url("http://h/a/data.dat"));                       /* (a .dat link: not taken for a film) */
     assert(iptv_is_film_url("http://h/a.MOV?token=1") && !iptv_is_film_url("http://h/live/u/p/1.ts"));
     assert(!iptv_is_film_url("http://h/index.m3u8"));
     /* 1.3: video files on the memory card are films (the VOD reader reads files too) */

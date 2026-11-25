@@ -156,6 +156,12 @@ static void test_ts(const char *path, int64_t len_ms)
     uint8_t head[1024];
     frd(&c, 0, head, sizeof head);
     assert(vod_container(head, sizeof head) == VOD_TS);
+    {   /* 1.2.4l: Video CD (RIFF CDXA) and program streams; RIFF AVI stays AVI */
+        static const uint8_t vcd[16] = { 'R', 'I', 'F', 'F', 0, 0, 0, 0, 'C', 'D', 'X', 'A' }, mpg[8] = { 0, 0, 1, 0xBA, 0x21 },
+                             avi[16] = { 'R', 'I', 'F', 'F', 0, 0, 0, 0, 'A', 'V', 'I', ' ' };
+        assert(vod_container(vcd, sizeof vcd) == VOD_PS && vod_container(mpg, sizeof mpg) == VOD_PS && vod_container(avi, sizeof avi) == VOD_AVI);
+        assert(!strcmp(vod_container_name(VOD_PS), "MPEG-PS"));
+    }
     TsLayout L;
     assert(ts_layout(frd, &c, total, &L) == 0);
     printf("%s: first pts %lld, %lld ms\n", path, (long long)L.first_pts, (long long)L.duration_ms);

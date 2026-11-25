@@ -157,6 +157,7 @@ static void save_favorites(void);
 static void guide_setup(void);                      /* 0.8.0 */
 static void guide_reset(void);
 static void poster_drop(void);
+static int poster_job_busy(void);                         /* 1.2.4l */
 static char seasons[40][IPTV_GROUP_MAX];            /* 0.8.0: the open series' seasons (episode groups), the one shown */
 static int nseasons, cur_season;
 static VodInfo series_info;                         /* ... and its details (get_series_info) */
@@ -792,7 +793,7 @@ int main(void)
         }
         if (ime_active) p = 0;                               /* the keyboard owns the buttons */
         keep_awake();
-        update_clocks(state == ST_PLAYING || job_active || job_pending || dl_active(),   /* (1.3.2: a download: 444 MHz in the menus) */
+        update_clocks(state == ST_PLAYING || job_active || job_pending || dl_active() || poster_job_busy(),   /* (1.3.2: a download: 444 MHz in the menus) */
                       state == ST_PLAYING && !job_active && !job_pending);
         if (job_pending) {                                   /* load the list now, outside a frame */
             job_pending = 0;

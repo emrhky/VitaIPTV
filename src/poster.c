@@ -203,3 +203,61 @@ int poster_decode(const uint8_t *data, size_t n, int max_w, int max_h, uint32_t 
     if (!memcmp(data, "\x89PNG", 4)) return decode_png(data, n, max_w, max_h, px, w, h);
     return -1;
 }
+
+/* ---- 1.2.4l: the newest decoded posters ---- */
+static struct { char *key; uint32_t *px; int w, h; unsigned used; } g_pc[POSTER_CACHE];
+static unsigned g_pc_tick;
+
+void poster_cache_clear(void)
+{
+    for (int i = 0; i < POSTER_CACHE; i++) { free(g_pc[i].key); free(g_pc[i].px); memset(&g_pc[i], 0, sizeof g_pc[i]); }
+}
+
+int poster_cache_put(const char *key, uint32_t *px, int w, int h)
+{
+    if (!key || !key[0] || !px || w <= 0 || h <= 0) { free(px); return -1; }
+    int slot = -1;
+    for (int i = 0; i < POSTER_CACHE && slot < 0; i++) if (g_pc[i].key && !strcmp(g_pc[i].key, key)) slot = i;
+    if (slot < 0)                                        /* a free one, else the one used longest ago */
+        for (int i = 0; i < POSTER_CACHE; i++)
+            if (slot < 0 || !g_pc[i].key || (g_pc[slot].key && g_pc[i].used < g_pc[slot].used)) { slot = i; if (!g_pc[i].key) break; }
+    size_t kl = strlen(key) + 1;
+    char *k = malloc(kl);
+    if (!k) { free(px); return -1; }
+    memcpy(k, key, kl);
+    free(g_pc[slot].key);
+    free(g_pc[slot].px);
+    g_pc[slot].key = k;
+    g_pc[slot].px = px;
+    g_pc[slot].w = w;
+    g_pc[slot].h = h;
+    g_pc[slot].used = ++g_pc_tick;
+    return 0;
+}
+
+const uint32_t *poster_cache_get(const char *key, int *w, int *h)
+{
+    if (!key || !key[0]) return NULL;
+    for (int i = 0; i < POSTER_CACHE; i++)
+        if (g_pc[i].key && !strcmp(g_pc[i].key, key)) {
+            g_pc[i].used = ++g_pc_tick;
+            *w = g_pc[i].w;
+            *h = g_pc[i].h;
+            return g_pc[i].px;
+        }
+    return NULL;
+}
+
+size_t poster_cache_bytes(void)
+{
+    size_t n = 0;
+    for (int i = 0; i < POSTER_CACHE; i++) if (g_pc[i].px) n += (size_t)g_pc[i].w * (size_t)g_pc[i].h * 4;
+    return n;
+}
+
+int poster_cache_count(void)
+{
+    int n = 0;
+    for (int i = 0; i < POSTER_CACHE; i++) n += g_pc[i].key != NULL;
+    return n;
+}

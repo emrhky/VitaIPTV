@@ -175,7 +175,7 @@ With headers     | stream | https://cdn.example.com/live.flv | https://example.c
 ```
 
 - **Videos on the Vita:** a row of the playlists that opens the memory cards folder by folder (the VitaIPTV
-  folder, the Video app's folder, `ux0:`, `uma0:`, `imc0:`...). MKV, MP4, TS and FLV files play as films (pause,
+  folder, the Video app's folder, `ux0:`, `uma0:`, `imc0:`...). MKV, MP4, TS, AVI, FLV, MPG / VOB and Video CD (`.dat`, the `MPEGAV` folder of a copied VCD) files play as films (pause,
   jumps, *Continue from*, audio tracks, subtitles inside MKV / MP4), also from M3U lists (`ux0:...` lines).
 - **Subtitle files (.srt):** a file beside the film with the same name (`Film.srt`, `Film.tr.srt`,
   `Film.eng.srt`) is offered in **Select** > *Subtitles* as "SRT" (UTF-8 or Turkish Windows-1254; the language from
@@ -191,8 +191,8 @@ Kodi style as `link|User-Agent=...&Referer=...`. The app sends them with every r
 |---|---|
 | H.264 up to 1920x1080 (see below), AAC, MP2, MP3 | Above 1080p (4K) |
 | MPEG-2, MPEG-4 Part 2 (DivX / Xvid), DivX 3: in software (above the screen's size at half size when behind) | DivX 3 above SD may stutter |
-| MPEG-TS, HLS, FLV, MKV, MP4, AVI | HEVC / H.265 |
-| Films: MKV, MP4, TS, AVI, FLV files (FLV: from the start, no jumping) | WMV, RealVideo |
+| MPEG-TS, HLS, FLV, MKV, MP4, AVI, MPEG-PS (.mpg, .vob), Video CD (.dat) | HEVC / H.265 |
+| Films: MKV, MP4, TS, AVI, MPG / VOB, VCD .dat, FLV files (FLV: from the start, no jumping) | WMV, RealVideo |
 | AC-3 / E-AC-3, DTS, 5.1 / 7.1 AAC, Opus, Vorbis audio (as stereo) | Interlaced broadcasts (576i, 1080i may stutter) |
 | http and https | TrueHD audio (DTS-HD: its DTS core plays) |
 | AES-128 HLS, HLS with fMP4 / CMAF segments | SAMPLE-AES / DRM |

@@ -9,6 +9,12 @@ def sh(c):
     r = subprocess.run(c, shell=True, capture_output=True, text=True)
     if r.returncode: print(r.stdout, "\n".join(l for l in r.stderr.splitlines() if "error" in l or "undefined" in l)[-3000:] or r.stderr[-3000:]); sys.exit(1)
     return r
+import aac_main                                            # 1.2.4l: FFmpeg 8 has no AAC Main encoder
+def sh_main(c):
+    if os.environ.get("TSP_DIR") and os.path.exists(c.split()[-1]): return None
+    r = aac_main.make(c)
+    if r: print(r.stdout, r.stderr[-3000:]); sys.exit(1)
+
 SRC = "-f lavfi -i testsrc2=size={s}:rate={r} -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5"
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1280x720', r=30)} -c:v libx264 -profile:v high -bf 3 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/s720.ts")
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1920x1080', r=25)} -c:v libx264 -profile:v main -g 50 -pix_fmt yuv420p -c:a aac -f mpegts {T}/s1080.ts")
@@ -113,6 +119,13 @@ sh(f"ffmpeg -loglevel error -y {SW.format(s='320x240', d=6)} -c:v mpeg4 -flags +
 # 1.2.3: above SD: on three threads (MPEG-2 by slices, MPEG-4 by pictures)
 sh(f"ffmpeg -loglevel error -y {SW.format(s='1280x720', d=6)} -c:v mpeg2video -b:v 8M -g 12 -bf 2 -c:a mp2 -b:a 192k -f mpegts {T}/mpeg2hd.ts")
 sh(f"ffmpeg -loglevel error -y {SW.format(s='1280x720', d=6)} -c:v mpeg4 -vtag XVID -q:v 4 -g 50 -bf 2 -c:a libmp3lame -b:a 128k {T}/xvidhd.avi")
+# 1.2.4l: a Video CD file (MPEG-1 + MP2 in raw CD sectors) and a DVD program stream (MPEG-2 + AC-3), 8 s
+import cdxa
+sh(f"ffmpeg -loglevel error -y {SW.format(s='352x288', d=8)} -target pal-vcd {T}/vcd.mpg")
+if not (os.environ.get("TSP_DIR") and os.path.exists(f"{T}/vcd.dat")): open(f"{T}/vcd.dat", "wb").write(cdxa.wrap(open(f"{T}/vcd.mpg", "rb").read()))
+sh(f"ffmpeg -loglevel error -y {SW.format(s='720x576', d=8)} -c:v mpeg2video -b:v 4M -g 12 -bf 2 -c:a ac3 -b:a 192k -f vob {T}/dvd.vob")
+# 1.2.4l: DivX 3, a keyframe a second, 24 s: a slow ARM falls 3 s behind ("keyframes only"), catches up, goes on
+sh(f"ffmpeg -loglevel error -y {SW.format(s='640x352', d=24)} -c:v msmpeg4 -q:v 6 -g 25 -c:a libmp3lame -b:a 96k {T}/k2.avi")
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1280x720', r=30)} -c:v libx264 -profile:v high -bf 3 -g 60 -pix_fmt yuv420p -c:a aac -ac 2 -f matroska {T}/bframes.mkv")
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 5 "
    f"-c:v libx264 -g 50 -pix_fmt yuv420p -c:a mp2 -b:a 192k -f mpegts {T}/mp2.ts")
@@ -202,7 +215,7 @@ assert hits == 3, hits
 open(f"{T}/glitch.ts", "wb").write(g)
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1920x1080:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 3 "
    f"-c:v libx264 -flags +ilme+ildct -top 1 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/i1080.ts")
-sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=24000 -t 5 "
+sh_main(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=640x360:rate=25 -f lavfi -i sine=frequency=440:sample_rate=24000 -t 5 "
    f"-c:v libx264 -g 25 -pix_fmt yuv420p -c:a aac -profile:a aac_main -ac 2 -f mpegts {T}/aacmain.ts")
 # a live stream whose sound is 3 s ahead of the picture in the file (seen on the device), 12 s
 sh(f"ffmpeg -loglevel error -y -f lavfi -i testsrc2=size=1280x720:rate=25 -f lavfi -i sine=frequency=440:sample_rate=48000 -t 12 "
@@ -350,7 +363,7 @@ A52L = (f"{FP}/lib/libavcodec.a " + (f"{FP}/lib/libswresample.a " if os.path.exi
         f"{FP}/lib/libavutil.a") if A52 else ""
 print("AC-3 decoding:", "with FFmpeg from " + FP if A52 else "not built in")
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1500000ULL {A52} -I{ROOT}/src -I{M} "
-   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c {ROOT}/src/hlsaes.c {ROOT}/src/swvdec.c {ROOT}/src/avidemux.c {ROOT}/src/pgs.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {ROOT}/src/srt.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
+   f"{ROOT}/tests/test_tsplayer.c {ROOT}/src/tsplayer.c {ROOT}/src/spsfix.c {ROOT}/src/tsdemux.c {ROOT}/src/mkvdemux.c {ROOT}/src/flvdemux.c {ROOT}/src/mpadec.c {ROOT}/src/a52dec.c {ROOT}/src/audiofx.c {ROOT}/src/aac51.c {ROOT}/src/vsurr.c {ROOT}/src/hls.c {ROOT}/src/hlsaes.c {ROOT}/src/swvdec.c {ROOT}/src/avidemux.c {ROOT}/src/psdemux.c {ROOT}/src/pgs.c {ROOT}/src/curlio.c {ROOT}/src/vod.c {ROOT}/src/srt.c {M}/mock_rt.c {A52L} -lm -o {T}/test_tsplayer")
 # 1.2.1: a channel whose picture size changes on the way (720p, then 1024x576, then 720p again)
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1024x576', r=30)} -c:v libx264 -profile:v high -bf 3 -g 30 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/s576.ts")
 sh(f"ffmpeg -loglevel error -y -i \"concat:{T}/s720g30.ts|{T}/s576.ts|{T}/s720g30.ts\" -c copy -f mpegts {T}/sizechange.ts")

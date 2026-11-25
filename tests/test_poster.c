@@ -57,6 +57,35 @@ int main(int argc, char **argv)
     uint8_t png_junk[64] = { 0x89, 'P', 'N', 'G', 13, 10, 26, 10, 9, 9 };
     assert(poster_decode(png_junk, sizeof png_junk, 240, 360, &px, &w, &h) != 0);
     assert(poster_decode((const uint8_t *)"GIF89a....", 10, 240, 360, &px, &w, &h) != 0);
+    {   /* 1.2.4l: the newest 8 posters (ASan: nothing leaks, nothing freed twice) */
+        char key[32];
+        int cw, ch;
+        for (int i = 0; i < 20; i++) {                       /* 20 posters in: the newest 8 stay */
+            uint32_t *p = malloc(240 * 360 * 4);
+            assert(p);
+            p[0] = (uint32_t)i;
+            snprintf(key, sizeof key, "http://x/%d.jpg", i);
+            assert(poster_cache_put(key, p, 240, 360) == 0);
+            if (i == 13) assert(poster_cache_get("http://x/5.jpg", &cw, &ch) == NULL && poster_cache_get("http://x/6.jpg", &cw, &ch));
+        }
+        assert(poster_cache_count() == 8 && poster_cache_bytes() == 8u * 240 * 360 * 4);
+        /* 6 was asked for at i == 13 (newest then): it stayed; 7..12 were pushed out by 14..19 */
+        for (int i = 0; i < 13; i++) { snprintf(key, sizeof key, "http://x/%d.jpg", i); if (i != 6) assert(!poster_cache_get(key, &cw, &ch)); }   /* (8 kept: 6 and 13..19) */
+        const uint32_t *g = poster_cache_get("http://x/13.jpg", &cw, &ch);   /* used: newest now */
+        assert(g && g[0] == 13 && cw == 240 && ch == 360);
+        uint32_t *p = malloc(16);
+        assert(poster_cache_put("http://x/new.jpg", p, 2, 2) == 0);          /* pushes out 6 (used longest ago), not 13 */
+        assert(poster_cache_get("http://x/13.jpg", &cw, &ch) && !poster_cache_get("http://x/6.jpg", &cw, &ch));
+        p = malloc(16);                                                       /* the same address again: replaced */
+        p[0] = 99;
+        assert(poster_cache_put("http://x/new.jpg", p, 2, 2) == 0 && poster_cache_count() == 8);
+        assert(poster_cache_get("http://x/new.jpg", &cw, &ch)[0] == 99);
+        assert(poster_cache_put("", malloc(16), 2, 2) == -1 && poster_cache_put("k", NULL, 2, 2) == -1);   /* (px freed) */
+        poster_cache_clear();
+        assert(poster_cache_count() == 0 && poster_cache_bytes() == 0 && !poster_cache_get("http://x/13.jpg", &cw, &ch));
+        poster_cache_clear();                                                  /* (twice: nothing) */
+        printf("poster cache: 8 kept of 20, the used one stays, cleared\n");
+    }
     puts("poster tests passed");
     return 0;
 }

@@ -81,6 +81,7 @@ typedef struct {
     unsigned dl_us, dec_us;             /* 1.2.4f: how long it took to come / to decode */
     char src[80];                       /* 1.2.4h: the source picture (size, kind) */
     unsigned cpu_us, again_us;          /* 1.2.4i: the thread's CPU time in it; a second decoding of it */
+    unsigned copy_us; int copy_dma;     /* 1.2.4l: the copy to the texture (main thread) */
 } QJob;
 static QJob qjob;
 
@@ -439,27 +440,46 @@ static const VodInfo *vodinfo_get(const char *id)
     return NULL;
 }
 
-static void poster_take(QJob *j)
+/* 1.2.4l: a texture with these pixels (the copy's time and how; NULL = no memory for it) */
+static vita2d_texture *poster_texture(const uint32_t *px, int pw, int ph, unsigned *copy_us, int *by_dma)
 {
-    if (!j->ok || !j->px) { snprintf(poster_failed, sizeof poster_failed, "%s", j->key); free(j->px); j->px = NULL; return; }
-    if (strcmp(j->key, poster_want)) { free(j->px); j->px = NULL; return; }   /* (the screen moved on) */
-    vita2d_texture *t = vita2d_create_empty_texture((unsigned)j->pw, (unsigned)j->ph);
+    vita2d_texture *t = vita2d_create_empty_texture((unsigned)pw, (unsigned)ph);
+    *copy_us = 0;
+    *by_dma = 0;
     if (t) {
         uint8_t *dst = vita2d_texture_get_datap(t);
         unsigned stride = vita2d_texture_get_stride(t);
         uint64_t c0 = sceKernelGetProcessTimeWide();
         /* 1.2.4f: rows end to end: one DMA (the texture is in CDRAM, slow for the ARM); off after a fault */
         static int no_dma, checked;
-        size_t n = (size_t)j->pw * 4 * (size_t)j->ph;
+        size_t n = (size_t)pw * 4 * (size_t)ph;
         int done = 0;
-        if (!no_dma && stride == (unsigned)j->pw * 4) {
-            int r = sceDmacMemcpy(dst, j->px, (SceSize)n);
-            if (r >= 0 && checked < 3) { checked++; if (memcmp(dst + n - 64, (const uint8_t *)j->px + n - 64, 64) || memcmp(dst, j->px, 64)) r = -2; }
+        if (!no_dma && stride == (unsigned)pw * 4) {
+            int r = sceDmacMemcpy(dst, px, (SceSize)n);
+            if (r >= 0 && checked < 3) { checked++; if (memcmp(dst + n - 64, (const uint8_t *)px + n - 64, 64) || memcmp(dst, px, 64)) r = -2; }
             if (r >= 0) done = 1;
             else { no_dma = 1; plog("poster: DMA copy %s (0x%08X): the ARM copies", r == -2 ? "wrong" : "failed", (unsigned)r); }
         }
-        if (!done) for (int y = 0; y < j->ph; y++) memcpy(dst + (size_t)y * stride, j->px + (size_t)y * j->pw, (size_t)j->pw * 4);
-        unsigned cp = (unsigned)(sceKernelGetProcessTimeWide() - c0);
+        if (!done) for (int y = 0; y < ph; y++) memcpy(dst + (size_t)y * stride, px + (size_t)y * pw, (size_t)pw * 4);
+        *copy_us = (unsigned)(sceKernelGetProcessTimeWide() - c0);
+        *by_dma = done;
+    }
+    return t;
+}
+
+static int cache_said;
+static void poster_take(QJob *j)
+{
+    if (!j->ok || !j->px) { snprintf(poster_failed, sizeof poster_failed, "%s", j->key); free(j->px); j->px = NULL; return; }
+    if (strcmp(j->key, poster_want)) {                       /* (the screen moved on: kept for coming back, 1.2.4l) */
+        poster_cache_put(j->key, j->px, j->pw, j->ph);
+        j->px = NULL;
+        return;
+    }
+    vita2d_texture *t = poster_texture(j->px, j->pw, j->ph, &j->copy_us, &j->copy_dma);
+    if (t) {
+        unsigned cp = j->copy_us;
+        int done = j->copy_dma;
         static unsigned cnt, sdl, sdec, scp, sdma;           /* (1.2.4f: the first one and every 20th: the averages) */
         cnt++; sdl += j->dl_us / 1000; sdec += j->dec_us; scp += cp; sdma += done;
         if (cnt == 1 || cnt % 20 == 0)
@@ -472,20 +492,46 @@ static void poster_take(QJob *j)
         poster_tex = t;
         snprintf(poster_have, sizeof poster_have, "%s", j->key);
     } else snprintf(poster_failed, sizeof poster_failed, "%s", j->key);
-    free(j->px);
-    j->px = NULL;
+    if (poster_cache_put(j->key, j->px, j->pw, j->ph) == 0 && poster_cache_count() == POSTER_CACHE && !cache_said) {
+        cache_said = 1;                                      /* 1.2.4l (once): what the kept posters hold */
+        plog("poster: %d kept for coming back (%u KB)", POSTER_CACHE, (unsigned)(poster_cache_bytes() / 1024));
+    }
+    j->px = NULL;                                            /* (the cache's now, or freed by it) */
+}
+
+/* 1.2.4l: a poster from the kept ones on the screen at once (no download, no decoding) */
+static int poster_from_cache(void)
+{
+    int w, h;
+    const uint32_t *px = poster_cache_get(poster_want, &w, &h);
+    if (!px) return 0;
+    unsigned cp;
+    int dma;
+    vita2d_texture *t = poster_texture(px, w, h, &cp, &dma);
+    if (!t) return 0;
+    if (poster_tex) vita2d_free_texture(poster_tex);
+    poster_tex = t;
+    snprintf(poster_have, sizeof poster_have, "%s", poster_want);
+    static unsigned hits;
+    if (++hits == 1 || hits % 20 == 0) plog("poster: %u shown from the kept ones (copied in %u us)", hits, cp);
+    return 1;
 }
 
 static void poster_drop(void)
 {
     if (poster_tex) { vita2d_wait_rendering_done(); vita2d_free_texture(poster_tex); poster_tex = NULL; }
     poster_have[0] = poster_want[0] = 0;
+    poster_cache_clear();                                    /* 1.2.4l (another list) */
 }
+
+/* 1.2.4l: a poster is being fetched / decoded (the clocks: 444 MHz for the decoding) */
+static int poster_job_busy(void) { return qjob.state == 1 && qjob.kind == QJ_POSTER; }
 
 /* every frame, before drawing: answers taken over, the next request started */
 static void guide_tick(int playing)
 {
     int64_t now = now_unix();
+    if (playing && poster_cache_count()) poster_cache_clear();   /* 1.2.4l: the player gets the memory (~2.7 MB) */
     if (qjob.state == 2) {
         if (qjob.kind == QJ_XT_TABLE) {
             int c = qjob.ch;
@@ -508,7 +554,9 @@ static void guide_tick(int playing)
     }
     if (qjob.state == 0 && epg_tid >= 0 && cur_src >= 0 && cur_src < nsources) {   /* the next request */
         unsigned nm = now_ms();
-        if (poster_loading() && nm - poster_want_ms > 300) {
+        if (poster_loading() && poster_from_cache()) {
+            /* 1.2.4l: shown from the kept ones (nothing to ask for) */
+        } else if (poster_loading() && nm - poster_want_ms > 150) {   /* (1.2.4l: was 300 ms) */
             qjob.kind = QJ_POSTER;
             snprintf(qjob.key, sizeof qjob.key, "%s", poster_want);
             snprintf(qjob.url, sizeof qjob.url, "%s", poster_want);

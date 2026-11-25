@@ -21,6 +21,7 @@
 #include <arm_neon.h>
 #endif
 #include "avidemux.h"
+#include "psdemux.h"
 #include "pgs.h"
 #include <psp2/kernel/threadmgr.h>
 #include <psp2/kernel/processmgr.h>
@@ -127,6 +128,10 @@ static int g_pictures_seen;             /* some stream gave a picture since the 
  * picture), to come in 1.2.6 */
 static int g_no_m4v_hw = 1;
 static int g_sw_delay_us;               /* 1.2.4e: tests only (tsp_test_sw_delay) */
+static int g_test_k2_exits, g_test_k2_late;  /* 1.2.4l: tests: out of "keyframes only" (at no keyframe) */
+static int g_sw_delay_pic_us;           /* 1.2.4l: tests: the slow ARM's cost for decoded pictures only */
+void tsp_test_sw_delay_pic(int us) { g_sw_delay_pic_us = us; }
+void tsp_test_k2(int *exits, int *late) { *exits = g_test_k2_exits; *late = g_test_k2_late; g_test_k2_exits = g_test_k2_late = 0; }
 /* 1.2.4f: software pictures go into the slots (CDRAM) by DMA: the ARM writes CDRAM at only ~200 MB/s (1080p:
  * 15 ms a picture, more than decoding it). Off for the session after an error or a wrong copy. */
 /* 1.2.4k: on again, without the slot sync. 1.2.4j's test on the Vita: a picture DMA'd straight from FFmpeg's cached
@@ -217,6 +222,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     FlvDemux *flv;                      /* ... or FLV (HTTP-FLV live streams, .flv files) */
     Mp4Demux *mp4;                      /* film or episode in an MP4 file */
     AviDemux *avi;                      /* 1.2.2b: ... or an AVI file */
+    PsDemux *ps;                        /* 1.2.4l: ... or an MPEG program stream / Video CD file (into dmx as TS) */
     /* films and episodes (files that can be paused and searched) */
     int vod, vod_start_ms, vod_norange, vod_last_status;
     int vod_file;                       /* 1.3: a film on the memory card (vod_get reads the file, a range = a seek) */
@@ -329,6 +335,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     struct BCue *bcues;                 /* ... their pictures (a ring of BCUES, under qlock) */
     uint32_t nbcues;
     int swv_failed, sw_w, sw_h, sw_skip, sw_started, sw_wait_units;
+    int sw_k2_units;                    /* 1.2.4l: units since "keyframes only" began */
     int sw_hw;                          /* 1.2.3: the slots are set up for the MPEG-4 hardware (macroblock height) */
     /* 1.2.3: MPEG-4 Part 2 on the Vita's own decoder (sceM4vdec); on trouble the software decoder takes over */
     int m4v_on, m4v_failed, m4v_lib, m4v_dec, m4v_errs, m4v_vol_len, m4v_vol_sent, m4v_packed;
@@ -2540,6 +2547,15 @@ static void sw_video_packet(Tsp *t, Pkt *p)
     if (t->st.av_sync && tp >= 0 && audio_now(t, now_us(), &apts)) {
         int64_t behind = pts_diff(apts, tp);
         int lv = behind > 90000LL * 3 ? 2 : behind > 45000 ? 1 : behind < 9000 ? 0 : t->sw_skip;
+        /* 1.2.4l: out of "keyframes only" at a keyframe alone. Leaving it in the middle had the next pictures built
+         * on a picture left far behind (the ones between never decoded): moving edges left trails that grew until
+         * the next keyframe (the device's DivX 3 1080p, ~35 times a minute). If the container marks no keyframes,
+         * out after 300 units anyway. */
+        if (t->sw_skip == 2 && lv < 2) {
+            if (!(p->flags & TS_FLAG_KEYFRAME) && t->sw_k2_units < 300) lv = 2;
+            else { g_test_k2_exits++; if (!(p->flags & TS_FLAG_KEYFRAME)) g_test_k2_late++; }
+        }
+        t->sw_k2_units = lv == 2 ? t->sw_k2_units + 1 : 0;
         if (lv >= 1 && !t->sw_lowres && !t->sw_lowres_want && (i->width > 960 || i->height > 544)) t->sw_lowres_want = 1;   /* 1.2.4e */
         if (lv != t->sw_skip) {
             if (lv > t->sw_skip) plog("tsp: software decoder %lld ms behind the sound: %s left out", (long long)(behind / 90),
@@ -2552,6 +2568,7 @@ static void sw_video_packet(Tsp *t, Pkt *p)
     uint32_t before = t->st.decoded;
     swv_decode(t->swv, p->data, p->len, p->pts, p->dts, sw_frame, t);
     if (g_sw_delay_us) sceKernelDelayThread((SceUInt)g_sw_delay_us);   /* (tests: a slow ARM) */
+    if (g_sw_delay_pic_us && t->st.decoded > before) sceKernelDelayThread((SceUInt)g_sw_delay_pic_us);
     uint64_t dus = now_us() - t0 - (t->sw_wait_us - w0);
     t->dcalls++;
     t->dus_sum += (uint32_t)dus;
@@ -5637,6 +5654,7 @@ static int vod_feed_cb(Tsp *t, void *c, const uint8_t *d, size_t n)
     else if (t->avi) avi_feed(t->avi, d, n);                 /* 1.2.2b */
     else if (t->mkv) mkv_feed(t->mkv, d, n);
     else if (t->flv) flv_feed(t->flv, d, n);
+    else if (t->ps) ps_feed(t->ps, d, n);                    /* 1.2.4l */
     else ts_feed(t->dmx, d, n);
     *pos += n;
     stats_tick(t);
@@ -5804,6 +5822,21 @@ static void read_vod(Tsp *t, uint8_t *buf)
             if (start > 0 && ts_seek(vio_read, &io, t->vod_total, &L, start, &off, &at) != 0) { off = 0; at = 0; }
         }
         plog("tsp: TS file: %d s, start at %d s (byte %llu)", t->st.dur_ms / 1000, (int)(at / 1000), (unsigned long long)off);
+    } else if (kind == VOD_PS) {                            /* 1.2.4l: MPEG program stream (.mpg / .vob), Video CD (.dat) */
+        PsLayout L;
+        snprintf(t->st.note, sizeof t->st.note, "%s", "Finding the length of the film...");
+        if (ps_layout(vio_read, &io, t->vod_total, &L) != 0) {
+            free(io.win);
+            if (!stopping(t)) set_error_kind(t, TSP_ERRK_FORMAT, "%s", "Unknown file type");
+            return;
+        }
+        if (!(t->ps = ps_create(&L, t->dmx))) { free(io.win); set_error(t, "Out of memory"); return; }
+        t->vod_base = L.first_pts >= 0 ? L.first_pts : 0;
+        t->st.dur_ms = (int)L.duration_ms;
+        if (ps_seek(vio_read, &io, t->vod_total, &L, start, &off, &at) != 0) { off = L.data_off; at = 0; }
+        plog("tsp: %s: %d s, video %s, sound %s, start at %d s (byte %llu)", L.cdxa ? "Video CD file (CDXA sectors)" : L.mpeg2 ? "MPEG-2 program stream" : "MPEG-1 program stream",
+             t->st.dur_ms / 1000, L.video_id ? "MPEG-1/2" : "none",
+             L.audio_id == 0xBD ? "AC-3" : L.audio_id ? "MPEG audio" : "none", (int)(at / 1000), (unsigned long long)off);
     } else if (kind == VOD_AVI) {                           /* 1.2.2b */
         TsSink sink = { on_video, on_audio, t, on_sub, on_bsub };
         char err[96];
@@ -5865,6 +5898,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
     if (!stopping(t)) {
         if (t->mkv) mkv_flush(t->mkv);
         else if (t->flv) flv_flush(t->flv);
+        else if (t->ps) { ps_flush(t->ps); ts_flush(t->dmx); }   /* 1.2.4l */
         else if (!t->mp4 && !t->avi) ts_flush(t->dmx);
         plog("tsp: VOD file read to the end (%llu MB)", (unsigned long long)(pos >> 20));
     }
@@ -6586,6 +6620,7 @@ void tsp_stop(void)
     flv_destroy(t->flv);
     mp4_destroy(t->mp4);
     avi_destroy(t->avi);
+    ps_destroy(t->ps);                                      /* 1.2.4l */
     pgs_destroy(t->pgsd);                                   /* 1.2.2b */
     if (t->bcues) for (int k = 0; k < BCUES; k++) free(t->bcues[k].c.pix);
     free(t->bcues);

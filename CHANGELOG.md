@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.2.4l (test)
+- **Trails on software video after "keyframes only"** (seen on a DivX 3 1080p film; MPEG-2 and Xvid did the same
+  when they fell 3 s behind): the player went back to every picture as soon as it had caught up, in the middle
+  of a group of pictures, so the next pictures were built on one far behind and moving edges left trails until
+  the next keyframe (~35 times a minute in the log). Now it goes back at a keyframe only. (The half size was not
+  the cause: it differs from the full picture by about as little as for any film.)
+- **Posters:** the last 8 shown are kept (about 2.7 MB, given back when a film or channel starts playing, and when
+  another list opens): coming back to a film shows its poster at once. A poster is asked for 150 ms after a film
+  is chosen (was 300 ms), and decoded at 444 MHz.
+- **Video CD (.dat) and MPEG program streams (.mpg, .mpeg, .vob):** VCD files (RIFF CDXA, raw CD sectors, MPEG-1
+  video and MP2 sound) and MPEG-1 / MPEG-2 program streams (DVD .vob with AC-3 sound) play as films: from a
+  provider, a download or the memory card ("Videos on the Vita" now lists AVI, MPG, VOB and DAT files too), with
+  the length, jumping and "Continue from". The video is decoded in software (SD: easily).
+- **Tests on GitHub:** the runners' "ubuntu-latest" became Ubuntu 26.04 in November 2026 (FFmpeg 8 cannot encode
+  the AAC Main profile; one more test failed there); the tests run on Ubuntu 24.04 again, and the AAC Main test
+  files are made another way when the encoder refuses.
+
 ## 1.2.4k (test)
 - **Software video copied by DMA again, without the cache sync** (the default now). 1.2.4j's test on the Vita
   compared seven whole pictures DMA'd straight from FFmpeg's cached memory: all correct (the DMA call keeps the

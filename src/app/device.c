@@ -16,7 +16,8 @@ static int dev_nplaces;
 
 static int dev_is_video(const char *name)
 {
-    static const char *const EXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".flv" };
+    static const char *const EXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".flv", ".avi",
+                                       ".mpg", ".mpeg", ".vob", ".dat" };   /* (1.2.4l: AVI was missing; program streams, Video CD) */
     const char *dot = strrchr(name, '.');
     for (size_t i = 0; dot && i < sizeof EXT / sizeof EXT[0]; i++) if (!strcasecmp(dot, EXT[i])) return 1;
     return 0;

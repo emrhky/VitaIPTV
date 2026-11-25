@@ -1002,6 +1002,7 @@ sw:
             { "mpeg4.mkv", 1, 640, 352, 140 }, { "mpeg4.mp4", 1, 640, 352, 140 },
             { "xvid.avi", 0, 640, 352, 290 },                /* (as a stream: no index read, the header from the data) */
             { "mpeg2hd.ts", 0, 1280, 720, 140 }, { "xvidhd.avi", 1, 1280, 720, 140 },   /* 1.2.3: three threads */
+            { "vcd.dat", 1, 352, 288, 140 }, { "dvd.vob", 1, 720, 576, 140 },   /* 1.2.4l: Video CD, DVD program stream */
         };
         for (size_t k = 0; k < sizeof sv / sizeof sv[0]; k++) {
             snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", sv[k].f);
@@ -1015,6 +1016,14 @@ sw:
                        r.st.audio_frames > 100 && r.synced && r.av_bad * 5 <= r.avn + 5);   /* (nonmono: the fake decoder's pts in the picture; not here) */
             else
                 assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "not supported"));
+        }
+        if (a52_available()) {   /* 1.2.4l: a Video CD file from a time on (a jump; "continue") */
+            snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "vcd.dat");
+            VRun v = play_vod(dp, 4000, 6, 0, 0); r = v.r;
+            show("vcd.dat from 4 s", &r);
+            printf("               first picture at %d ms, length %d ms, seekable %d\n", v.first_pos, r.st.dur_ms, r.st.seekable);
+            assert(r.st.state != TSP_ERROR && r.st.decoded >= 40 && r.w == 352 && v.first_pos >= 2500 && v.first_pos <= 4600 &&
+                   r.st.dur_ms > 7000 && r.st.dur_ms < 8600 && r.st.seekable);
         }
         if (a52_available()) {   /* 1.2.4j: interlaced 720x576: rows mixed; flagged interlaced but 240 rows: not */
             snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "mpeg2.ts");
@@ -1054,9 +1063,26 @@ sw:
                 if (lf[k].dma && !lf[k].dmafail) assert(mock_dma_calls >= 3 * 30);   /* (three planes a picture) */
                 if (!lf[k].dma) assert(mock_dma_calls == 0);
                 if (lf[k].dmafail) assert(mock_dma_calls == 1);   /* (the first error: never again) */
+                int k2x, k2late;                                  /* 1.2.4l: out of "keyframes only" at keyframes only */
+                tsp_test_k2(&k2x, &k2late);
+                printf("               keyframes only: left %d times, %d of them not at a keyframe\n", k2x, k2late);
+                assert(k2late == 0);
             }
             mock_core3 = 0; mock_dma_fail = 0;
             tsp_set_dma(1);                                  /* (the default since 1.2.4k) */
+            {   /* 1.2.4l: the device's DivX 3 1080p: 3 s behind, keyframes only, caught up: back to every picture at a
+                 * keyframe only (in the middle the pictures were built on one far behind: trails on the screen) */
+                snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "k2.avi");
+                int k2x, k2late;
+                tsp_test_k2(&k2x, &k2late);
+                tsp_test_sw_delay_pic(75000);                    /* (75 ms a picture against 40: behind) */
+                VRun v = play_vod(dp, 0, 30, 0, 0); r = v.r;
+                tsp_test_sw_delay_pic(0);
+                tsp_test_k2(&k2x, &k2late);
+                show("k2.avi slow ARM", &r);
+                printf("               keyframes only: left %d times, %d of them not at a keyframe\n", k2x, k2late);
+                assert(r.st.state == TSP_ENDED && k2x >= 1 && k2late == 0);
+            }
             tsp_test_core3_unknown();
         }
         if (a52_available()) {   /* 1.2.3: MPEG-4 on the (fake) hardware: it decodes; it refuses (the software takes over) */

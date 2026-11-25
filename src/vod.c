@@ -17,6 +17,8 @@ int vod_container(const uint8_t *b, size_t n)
     if (n >= 9 && b[0] == 'F' && b[1] == 'L' && b[2] == 'V' && b[3] == 1) return VOD_FLV;
     if (n >= 8 && (!memcmp(b + 4, "ftyp", 4) || !memcmp(b + 4, "moov", 4) || !memcmp(b + 4, "mdat", 4) ||
                    !memcmp(b + 4, "free", 4) || !memcmp(b + 4, "wide", 4) || !memcmp(b + 4, "skip", 4))) return VOD_MP4;
+    if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "CDXA", 4)) return VOD_PS;   /* 1.2.4l: Video CD (.dat) */
+    if (n >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 1 && b[3] == 0xBA) return VOD_PS;     /* 1.2.4l: .mpg / .vob */
     for (size_t k = 0; k < 188 && k + 2 * 188 < n; k++)
         if (b[k] == 0x47 && b[k + 188] == 0x47 && b[k + 376] == 0x47) return VOD_TS;
     return VOD_UNKNOWN;
@@ -30,6 +32,7 @@ const char *vod_container_name(int c)
     case VOD_FLV: return "FLV";
     case VOD_TS:  return "MPEG-TS";
     case VOD_AVI: return "AVI";
+    case VOD_PS:  return "MPEG-PS";
     default:      return "unknown";
     }
 }

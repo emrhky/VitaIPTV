@@ -167,7 +167,8 @@ int iptv_is_local_path(const char *url)
 int iptv_is_film_url(const char *url)
 {
     if (iptv_is_local_path(url)) {                           /* 1.3: a video file on the memory card: a film too */
-        static const char *const LEXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".flv", ".avi" };
+        static const char *const LEXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".webm", ".ts", ".m2ts", ".mts", ".flv", ".avi",
+                                             ".mpg", ".mpeg", ".vob", ".dat" };   /* (1.2.4l: program streams, Video CD) */
         size_t n = strlen(url);
         for (size_t i = 0; i < sizeof LEXT / sizeof LEXT[0]; i++) {
             size_t k = strlen(LEXT[i]);
@@ -178,7 +179,7 @@ int iptv_is_film_url(const char *url)
     if (strncasecmp(url, "http://", 7) && strncasecmp(url, "https://", 8)) return 0;
     if (strstr(url, "/movie/") || strstr(url, "/series/")) return 1;   /* Xtream links in an M3U list */
     size_t n = strcspn(url, "?#|");                         /* (| starts headers: link|User-Agent=...) */
-    static const char *const EXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm" };
+    static const char *const EXT[] = { ".mkv", ".mp4", ".m4v", ".mov", ".avi", ".webm", ".mpg", ".mpeg", ".vob" };   /* (1.2.4l: +mpg) */
     for (size_t i = 0; i < sizeof EXT / sizeof EXT[0]; i++) {
         size_t k = strlen(EXT[i]);
         if (n > k && !strncasecmp(url + n - k, EXT[i], k)) return 1;

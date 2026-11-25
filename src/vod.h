@@ -19,7 +19,7 @@
 #include <stdint.h>
 #include "tsdemux.h"
 
-enum { VOD_UNKNOWN = 0, VOD_MKV, VOD_MP4, VOD_TS, VOD_AVI, VOD_FLV };
+enum { VOD_UNKNOWN = 0, VOD_MKV, VOD_MP4, VOD_TS, VOD_AVI, VOD_FLV, VOD_PS };   /* (1.2.4l: PS: MPEG program stream, VCD .dat) */
 
 /* Returns the number of bytes read at off (fewer at the end of the file), or < 0 on error. */
 typedef int (*VodRead)(void *ctx, uint64_t off, uint8_t *buf, size_t len);

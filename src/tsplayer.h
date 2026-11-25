@@ -129,6 +129,8 @@ int               tsp_leaked(void);
 int               tsp_test_rc_seq(void);
 /* 1.2.4e: tests only: each software-decoded unit takes this much longer (a slow ARM) */
 void              tsp_test_sw_delay(int us);
+void              tsp_test_k2(int *exits, int *late);   /* 1.2.4l: tests */
+void              tsp_test_sw_delay_pic(int us);
 /* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */
 void              tsp_set_via_server(int on);
 /* 0.5.0 test builds: AC-3 / E-AC-3 stutter on the HD decoder. 0 normal, 1 decoded but not played (the picture runs

@@ -39,6 +39,7 @@ add_executable(${PROJECT_NAME}.elf
   src/applog.c
   src/httpio.c
   src/tsdemux.c
+  src/psdemux.c
   src/mkvdemux.c
   src/flvdemux.c
   src/probe.c

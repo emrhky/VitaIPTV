@@ -14,4 +14,15 @@ int poster_decode(const uint8_t *data, size_t n, int max_w, int max_h, uint32_t 
 const char *poster_jpeg_lib(void);
 /* 1.2.4h: the last picture's source ("JPEG 1000x1500 progressive, read at 1/2 (500x750)"), for the log */
 const char *poster_last_src(void);
+
+/* 1.2.4l: the newest POSTER_CACHE decoded posters, by their address: coming back to a film shows its poster at once.
+ * One thread only (the app's main loop). poster_cache_put takes px over (freed when it is pushed out or cleared;
+ * the same key again: the old one freed); -1 = refused (px freed). poster_cache_get: NULL if not there (else the
+ * newest now; the pixels stay the cache's). Clear it before playing: the player gets the memory back. */
+#define POSTER_CACHE 8
+int             poster_cache_put(const char *key, uint32_t *px, int w, int h);
+const uint32_t *poster_cache_get(const char *key, int *w, int *h);
+void            poster_cache_clear(void);
+size_t          poster_cache_bytes(void);
+int             poster_cache_count(void);
 #endif

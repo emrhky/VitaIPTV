@@ -16,7 +16,7 @@ UNIT = [   # name, sources (after tests/test_<name>.c), extra flags
     ("mylist", "src/mylist.c src/fav.c src/iptv.c", ""), ("srt", "src/srt.c", ""), ("websrc", "src/websrc.c src/iptv.c", ""),
     ("hls", "src/hls.c", ""), ("guide", "src/guide.c src/epg.c src/iptv.c src/catchup.c -lz", "-DGUIDE_ZLIB"),
 ]
-SCRIPTS = ["check_lang.py", "run_hlsaes_test.py", "run_ts_tests.py", "run_mkv_tests.py", "run_flv_tests.py", "run_vod_tests.py",
+SCRIPTS = ["check_lang.py", "run_hlsaes_test.py", "run_ts_tests.py", "run_mkv_tests.py", "run_flv_tests.py", "run_vod_tests.py", "run_ps_tests.py",
            "run_spsfix_test.py", "run_a52_test.py", "run_probe_tests.py", "run_curlio_test.py", "run_dl_test.py",
            "run_poster_test.py", "run_qr_test.py", "run_https_tests.py", "run_player_tests.py"]
 QUICK = {"check_lang.py", "run_hlsaes_test.py"}
