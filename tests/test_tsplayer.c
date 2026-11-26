@@ -1618,7 +1618,9 @@ limit:
             show("1080p50 all P, fast decoder", &r);
             printf("               shown %u, decoded %u, left out %u (with the slower one %u), dropped %u, last %d ms from the sound\n",
                    r.st.shown, r.st.decoded, (unsigned)r.st.skipped, skipped_slow, r.st.dropped, r.av_last);
-            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 300 && r.st.skipped * 2 < skipped_slow);
+            /* (1.2.4p: up to the HD decoder's measured limit at first, 43.5 a second: less than half of what was left out
+             * before is not reached in 8 s any more) */
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 300 && r.st.skipped * 5 < skipped_slow * 4);
             assert(r.st.dropped < 40 && r.av_max < 400);
             /* 1.2.4n: a decoder at about 45 a second (the device's channel): up to all of each group was too many; it
              * stays below the level that failed instead of going up and down */
@@ -1634,13 +1636,19 @@ limit:
              * at most 45.2 a second; 1.2.4n's ceiling missed it and the share went up to 50 every 15 s (the ceiling is
              * tried 2% higher after each good minute: a little above 45.2 at times) */
             double go[4];
-            assert(tsp_test_group_seq(45.2, 90, go) == 0);
+            assert(tsp_test_group_seq(45.2, 90, 0, go) == 0);
             printf("               device's numbers, 3 min: share %.1f, ceiling %.1f, %d steps up after it, at most %.0f ms behind\n",
                    go[0], go[1], (int)go[2], go[3]);
             assert(go[1] >= 42.0 && go[1] <= 46.5 && go[0] >= 38.0 && go[0] <= 46.5 && go[2] <= 4 && go[3] < 400);
-            assert(tsp_test_group_seq(60.0, 60, go) == 0);  /* a decoder with room: all of each group, no ceiling */
+            assert(tsp_test_group_seq(60.0, 60, 0, go) == 0);  /* a decoder with room: all of each group, no ceiling */
             printf("               a decoder that can do 60: share %.1f, ceiling %.1f\n", go[0], go[1]);
             assert(go[0] >= 49.9 && go[1] == 0);
+            /* 1.2.4p: with the hardware's figure as the first ceiling (as the player starts now): it never goes up to 50,
+             * the picture stays near the sound, and the probes stay below what was measured */
+            assert(tsp_test_group_seq(45.2, 90, 1, go) == 0);
+            printf("               with the first ceiling: share %.1f, ceiling %.1f, %d steps up at it, at most %.0f ms behind\n",
+                   go[0], go[1], (int)go[2], go[3]);
+            assert(go[0] >= 42.0 && go[0] <= 46.0 && go[1] <= 46.0 && go[3] < 150);   /* (a probe a little past 45.2 is too small to show here) */
         }
         if (argc > 37) {
             /* 1.2.4o: 1920x1080 whose SPS says level 1.3 (two channels on the device; the HD decoder refused the

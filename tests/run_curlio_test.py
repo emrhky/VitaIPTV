@@ -21,11 +21,31 @@ subprocess.run(f"openssl req -x509 -newkey rsa:2048 -nodes -keyout {T}/k.pem -ou
 data = os.urandom(300000)
 open(f"{T}/file.ts", "wb").write(data)
 
+CONNS = [0]
+small = os.urandom(5000)
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def log_message(self, *a): pass
+    def setup(self):
+        CONNS[0] += 1                                       # 1.2.4p: connections made (kept ones are not new)
+        super().setup()
     def do_GET(self):
-        if self.path == "/file.ts":
+        if self.path == "/conns":
+            b = str(CONNS[0]).encode()
+            self.send_response(200); self.send_header("Content-Length", str(len(b))); self.end_headers(); self.wfile.write(b)
+        elif self.path == "/small":
+            self.send_response(200); self.send_header("Content-Length", str(len(small))); self.end_headers(); self.wfile.write(small)
+        elif self.path == "/chk":                           # a body in chunks, then the end
+            self.send_response(200); self.send_header("Transfer-Encoding", "chunked"); self.end_headers()
+            for k in range(0, len(small), 2000):
+                blk = small[k:k + 2000]; self.wfile.write(b"%x\r\n" % len(blk) + blk + b"\r\n")
+            self.wfile.write(b"0\r\n\r\n")
+        elif self.path == "/close":                         # says so: not kept
+            self.send_response(200); self.send_header("Content-Length", "2"); self.send_header("Connection", "close"); self.end_headers(); self.wfile.write(b"ok")
+        elif self.path == "/bye":                           # closes without saying so (a server's idle limit)
+            self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
+            self.close_connection = True
+        elif self.path == "/file.ts":
             self.send_response(200); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
         elif self.path == "/redirect":
             self.send_response(302); self.send_header("Location", "/file.ts"); self.send_header("Content-Length", "0"); self.end_headers()

@@ -92,7 +92,11 @@ static void fmt_clock(char *b, size_t n, int ms)
     else snprintf(b, n, "%d:%02d", sec / 60, sec % 60);
 }
 
-/* films: position, length and a bar; a jump being chosen shows where it goes */
+int scr_tl_x0 = 120, scr_tl_x1 = 850, scr_tl_y;
+
+/* films: position, length and a bar; a jump being chosen shows where it goes. 1.2.4p: a knob at the place (to
+ * take with a finger: the bar alone did not say it could be dragged), bigger and in the jump's colour while a
+ * jump is chosen; dragged by a finger, the time over it (the finger covers the one on the left) */
 static int time_line(const ScrPlayer *p, int y)
 {
     int notes = (p->time_note_l && p->time_note_l[0]) || (p->time_note_r && p->time_note_r[0]);
@@ -115,17 +119,27 @@ static int time_line(const ScrPlayer *p, int y)
     ui_text(942 - bw, y + 27, UI_DIM, 1.0f, b);
     int x0 = 120, x1 = 942 - bw - 24;
     if (x1 > x0 + 40) {
-        vita2d_draw_rectangle(x0, y + 17, x1 - x0, 6, UI_LINE);
+        scr_tl_x0 = x0; scr_tl_x1 = x1; scr_tl_y = y + 20;
+        vita2d_draw_rectangle(x0, y + 16, x1 - x0, 8, UI_LINE);
         if (p->dur_ms > 0) {
             float f = (float)p->pos_ms / (float)p->dur_ms;
             if (f < 0) f = 0;
             if (f > 1) f = 1;
-            vita2d_draw_rectangle(x0, y + 17, (x1 - x0) * f, 6, UI_ACCENT);
-            if (p->seek_ms >= 0) {
-                float g = (float)p->seek_ms / (float)p->dur_ms;
-                if (g < 0) g = 0;
-                if (g > 1) g = 1;
-                vita2d_draw_rectangle(x0 + (x1 - x0) * g - 2, y + 10, 4, 20, UI_WARN);
+            vita2d_draw_rectangle(x0, y + 16, (x1 - x0) * f, 8, UI_ACCENT);
+            int seeking = p->seek_ms >= 0;
+            float g = seeking ? (float)p->seek_ms / (float)p->dur_ms : f;
+            if (g < 0) g = 0;
+            if (g > 1) g = 1;
+            float kx = x0 + (x1 - x0) * g;
+            ui_circle(kx, (float)(y + 20), seeking ? 12.0f : 9.0f, seeking ? UI_WARN : UI_TEXT);
+            if (seeking && p->seek_touch) {                  /* (over the knob, in a box of its own) */
+                char t[16];
+                fmt_clock(t, sizeof t, p->seek_ms);
+                int tw = ui_text_w(1.0f, t), bx = (int)kx - tw / 2 - 10;
+                if (bx < 4) bx = 4;
+                if (bx + tw + 20 > 956) bx = 956 - tw - 20;
+                vita2d_draw_rectangle(bx, y - 40, tw + 20, 32, UI_SHADE);
+                ui_text(bx + 10, y - 16, UI_WARN, 1.0f, t);
             }
         }
     }
@@ -234,6 +248,7 @@ static void corner_note(const char *line, const char *line2, int osd)
 
 void scr_player(const ScrPlayer *p)
 {
+    scr_tl_y = 0;                                            /* (1.2.4p: set again if the time line is drawn) */
     if (p->backdrop) scr_backdrop();
     if (p->center_title) ui_message(p->center_title, p->center_line, p->center_col, p->spinner, p->t_ms);
     if (p->paused && !p->center_title) {                    /* the pause sign */

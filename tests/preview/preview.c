@@ -220,6 +220,10 @@ int main(int argc, char **argv)
     pf.name = "Film A (2020)"; pf.group = "Aksiyon"; pf.info = "1920x1080  H.264  AAC"; pf.osd = 1; pf.hints = hfilm; pf.nhints = 6;
     pf.film = 1; pf.pos_ms = 2470000; pf.dur_ms = 6312000; pf.seek_ms = 3070000; pf.paused = 1;
     preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pf); shot("5b_film");
+    pf.seek_touch = 1;                                        /* 1.2.4p: a finger drags the time line */
+    preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pf); shot("5e_film_touch");
+    pf.seek_touch = 0; pf.seek_ms = -1; pf.paused = 0;        /* (playing: the knob at the place) */
+    preview_clear(0); vita2d_draw_texture_part_scale(&tex, 0, 0, 0, 0, 1280, 720, 0.75f, 0.7555f); scr_player(&pf); shot("5f_film_knob");
     const char *rm[2] = { "Continue from 41:10", "Start from the beginning" };
     preview_clear(UI_BG); scr_menu("Film A (2020)", rm, 2, 0); shot("5c_resume");
 

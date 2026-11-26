@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.4p (test)
+- **1080p50 channels with every picture a reference** start at the HD decoder's own limit (measured twice on the
+  device: 44.8 and 44.9 a second; 97% of it is the first ceiling). 1.2.4o went up to 50 first, the picture fell
+  0.44 s behind, and the share was cut four times in a row (down to 35.8: the end of each group stood for 0.6 s)
+  before it settled at 43.4 after about 40 s. Now: no climb past the limit; while the picture is already catching
+  up, no further cut; the once-a-minute probe stays below what was measured.
+- **Touch screen in films:** the time line has a knob at the place (bigger, in the jump's colour, while a jump is
+  chosen), so it shows it can be dragged; while a finger drags it, the time shows over the knob; a short touch on
+  the line jumps there at once; the touch goes by where the line really is (its end moves with the length).
+- **Settings:** Log file also changes with left / right (only X worked).
+- **Footer:** the circle symbol 20 px across instead of 18 (it looked smaller than the others); colours as before.
+- **Posters:**
+  - one connection kept open for them (with https one TLS handshake for many pictures; a new one when the
+    server closed it);
+  - TMDB addresses (image.tmdb.org/t/p/<size>/...) asked for at w342, the size the 240x360 box needs (the
+    device's were 600x900 progressive JPEG: 613 ms to come, 120 ms to decode); the address as given if that
+    size does not come;
+  - the next, the previous and the one after next in the list fetched ahead while nothing else is asked for
+    (not while playing);
+  - the log says which site the posters come from (once a site);
+  - 1.2.4i's second decoding of the first three posters (a measurement) is gone.
+
 ## 1.2.4o (test)
 - **1080p channels whose header says a far too small H.264 level** (on the device: 1920x1080 at level 1.3 and
   2.1, "This video uses an H.264 feature the Vita decoder refuses (0x8062000F)" after a few pictures): the

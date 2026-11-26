@@ -8,6 +8,13 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* 1.2.4p: a connection kept open between requests to the same server (posters: one connection, and with https one
+ * TLS handshake, for many pictures). Owned by one thread at a time. */
+typedef struct CioKeep CioKeep;
+CioKeep *cio_keep_new(void);
+void     cio_keep_free(CioKeep *k);          /* (closes what it holds; NULL is fine) */
+int      cio_keep_reused(const CioKeep *k);  /* the last request went over the kept connection */
+
 /* called with every piece of the body; return non-zero to stop the transfer */
 typedef int (*CioData)(void *ctx, const uint8_t *data, size_t len);
 /* polled while waiting; return non-zero to abort (e.g. the player is stopping) */
@@ -27,6 +34,7 @@ typedef struct {
     const char *ua, *referer;           /* User-Agent / Referer to send (NULL or "" = the app's own / none) */
     char *final_url;                    /* out, may be NULL: the address that answered, after redirects */
     size_t final_cap;
+    CioKeep *keep;                      /* 1.2.4p: NULL = one connection a request ("Connection: close") as before */
 } CioRequest;
 
 int  cio_available(void);

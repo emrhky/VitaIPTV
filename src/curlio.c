@@ -59,6 +59,14 @@ typedef struct {
     int idle_ms;                        /* time without data so far */
 } Conn;
 
+struct CioKeep {
+    Conn *c;                            /* the open connection (NULL none) */
+    char host[256];
+    int port, tls;
+    uint64_t last_ms;                   /* when it was last used */
+    int reused;                         /* the last request went over it */
+};
+
 #define TICK_MS 500
 
 #ifdef __vita__
@@ -496,6 +504,18 @@ void cio_init(void)
     psa_crypto_init();                  /* TLS 1.3 uses PSA */
 }
 
+/* 1.2.4p: kept connections */
+static int has_close(const char *v)                         /* "close" in a Connection header, any case */
+{
+    for (; *v; v++) if (!strncasecmp(v, "close", 5)) return 1;
+    return 0;
+}
+static void conn_drop(Conn *c) { if (c) { conn_close(c); free(c); } }
+CioKeep *cio_keep_new(void) { return calloc(1, sizeof(CioKeep)); }
+void cio_keep_free(CioKeep *k) { if (k) { conn_drop(k->c); free(k); } }
+int cio_keep_reused(const CioKeep *k) { return k ? k->reused : 0; }
+#define KEEP_IDLE_MS 8000               /* (servers close idle ones after 5-15 s; an older one is not tried) */
+
 int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 {
     char url[HLS_URL_MAX], host[256], req[4096], auth[400], enc[560], val[HLS_URL_MAX];
@@ -506,34 +526,48 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
     err[0] = 0;
     *status = 0;
     snprintf(url, sizeof url, "%s", rq->url);
+    CioKeep *kp = rq->keep;
+    if (kp) kp->reused = 0;
+    int no_reuse = 0;
     uint8_t *hb = malloc(16384 + 1), *buf = malloc(16384);
     if (!hb || !buf) { free(hb); free(buf); snprintf(err, errsz, "Out of memory"); return -1; }
     for (int redirect = 0; redirect < 8; redirect++) {
         if (parse_url(url, &tls, host, sizeof host, &port, &path) < 0) { snprintf(err, errsz, "Bad address"); ret = -1; break; }
-        Conn c;
-        memset(&c, 0, sizeof c);
-        c.fd = -1;
-        c.rq = rq;
-        int r = conn_open(&c, host, port, tls, err, errsz);
-        if (r == -1005 && !stopped(rq)) {
-            /* 1.2.4m: a handshake that failed (not timed out) is tried once more on a new connection: a CDN's HLS
-             * 1080p answered "-0x6C00 internal error" once on the device, and the player took it for a variant
-             * without a picture */
-            conn_close(&c);
-            memset(&c, 0, sizeof c);
-            c.fd = -1;
-            c.rq = rq;
-            r = conn_open(&c, host, port, tls, err, errsz);
-            if (r == -1005) { size_t l = strlen(err); snprintf(err + l, errsz - l, " (twice)"); }
-            else if (r >= 0) err[0] = 0;
+        Conn *cp = NULL;
+        int reused = 0, r = 0;
+        if (kp && kp->c) {                                   /* 1.2.4p: the kept one, if it is to this server and fresh */
+            if (!no_reuse && redirect == 0 && kp->tls == tls && kp->port == port && !strcmp(kp->host, host) &&
+                now_ms64() - kp->last_ms < KEEP_IDLE_MS) { cp = kp->c; reused = 1; }
+            else conn_drop(kp->c);
+            kp->c = NULL;
         }
-        if (r < 0) { conn_close(&c); ret = r; break; }
+        if (cp) { cp->rq = rq; cp->idle_ms = 0; }
+        else {
+            cp = calloc(1, sizeof *cp);
+            if (!cp) { snprintf(err, errsz, "Out of memory"); ret = -1; break; }
+            cp->fd = -1;
+            cp->rq = rq;
+            r = conn_open(cp, host, port, tls, err, errsz);
+            if (r == -1005 && !stopped(rq)) {
+                /* 1.2.4m: a handshake that failed (not timed out) is tried once more on a new connection: a CDN's HLS
+                 * 1080p answered "-0x6C00 internal error" once on the device, and the player took it for a variant
+                 * without a picture */
+                conn_close(cp);
+                memset(cp, 0, sizeof *cp);
+                cp->fd = -1;
+                cp->rq = rq;
+                r = conn_open(cp, host, port, tls, err, errsz);
+                if (r == -1005) { size_t l = strlen(err); snprintf(err + l, errsz - l, " (twice)"); }
+                else if (r >= 0) err[0] = 0;
+            }
+            if (r < 0) { conn_drop(cp); ret = r; break; }
+        }
         int def = (tls && port == 443) || (!tls && port == 80);
         int k = 0;
         rq_add(req, sizeof req, &k, "GET %s HTTP/1.1\r\nHost: %s", path, host);
         if (!def) rq_add(req, sizeof req, &k, ":%d", port);
-        rq_add(req, sizeof req, &k, "\r\nUser-Agent: %s\r\nAccept: */*\r\nConnection: close\r\n",
-                      rq->ua && rq->ua[0] ? rq->ua : NET_UA);
+        rq_add(req, sizeof req, &k, "\r\nUser-Agent: %s\r\nAccept: */*\r\nConnection: %s\r\n",
+                      rq->ua && rq->ua[0] ? rq->ua : NET_UA, kp ? "keep-alive" : "close");
         if (rq->referer && rq->referer[0]) rq_add(req, sizeof req, &k, "Referer: %s\r\n", rq->referer);
         if (rq->user && rq->user[0] && redirect == 0) {
             snprintf(auth, sizeof auth, "%s:%s", rq->user, rq->pass ? rq->pass : "");
@@ -546,27 +580,33 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
             else rq_add(req, sizeof req, &k, "Range: bytes=%llu-\r\n", (unsigned long long)rq->range_from);
         }
         rq_add(req, sizeof req, &k, "\r\n");
-        if (k >= (int)sizeof req - 1) { conn_close(&c); snprintf(err, errsz, "Request too long"); ret = -1008; break; }
-        if (conn_write(&c, req, (size_t)k) < 0) { conn_close(&c); snprintf(err, errsz, "Could not send the request"); ret = -1007; break; }
+        if (k >= (int)sizeof req - 1) { conn_drop(cp); snprintf(err, errsz, "Request too long"); ret = -1008; break; }
+        if (conn_write(cp, req, (size_t)k) < 0) {
+            conn_drop(cp);
+            if (reused) { no_reuse = 1; redirect--; continue; }   /* (the server closed the kept one: a new one) */
+            snprintf(err, errsz, "Could not send the request"); ret = -1007; break;
+        }
         /* headers */
         size_t hl = 0;
         char *eoh = NULL;
         while (!eoh && hl < 16384) {
-            int n = conn_read(&c, hb + hl, 16384 - hl);
+            int n = conn_read(cp, hb + hl, 16384 - hl);
             if (n <= 0) { r = n; break; }
             hl += (size_t)n;
             hb[hl] = 0;
             eoh = strstr((char *)hb, "\r\n\r\n");
         }
         if (!eoh) {
-            conn_close(&c);
+            conn_drop(cp);
             if (r == -2) { ret = -2; break; }
+            if (reused && hl == 0) { no_reuse = 1; redirect--; continue; }   /* (closed meanwhile: a new one) */
             if (r == -1006) snprintf(err, errsz, "The server did not answer");
             else if (hl == 0) snprintf(err, errsz, "The server closed the connection without an answer (%d)", r);
             else snprintf(err, errsz, "Bad answer from the server (%u bytes)", (unsigned)hl);
             ret = r == -1006 ? -1006 : -1008;
             break;
         }
+        if (kp) kp->reused = reused;
         *eoh = 0;
         int code = 0;
         if (sscanf((char *)hb, "HTTP/%*d.%*d %d", &code) != 1 &&
@@ -575,7 +615,7 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
             size_t k = 0;
             for (; k < sizeof head - 1 && hb[k]; k++) head[k] = hb[k] >= 32 && hb[k] < 127 ? (char)hb[k] : '.';
             head[k] = 0;
-            conn_close(&c);
+            conn_drop(cp);
             snprintf(err, errsz, "Bad answer from the server: %s", head);
             ret = -1008;
             break;
@@ -585,20 +625,23 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
             char next[HLS_URL_MAX];
             hls_resolve(url, val, -1, next, sizeof next);
             snprintf(url, sizeof url, "%s", next);
-            conn_close(&c);
+            conn_drop(cp);
             continue;
         }
         if (rq->final_url && rq->final_cap) snprintf(rq->final_url, rq->final_cap, "%s", url);
-        if (code >= 400) { conn_close(&c); ret = 0; break; }   /* the caller looks at the status */
+        if (code >= 400) { conn_drop(cp); ret = 0; break; }   /* the caller looks at the status */
         Body b;
         memset(&b, 0, sizeof b);
-        b.c = &c;
+        b.c = cp;
         b.pend = (uint8_t *)eoh + 4;
         b.npend = hl - (size_t)(b.pend - hb);
         b.left = -1;
         if (header((char *)hb, "Transfer-Encoding", val, sizeof val) && strstr(val, "chunked")) { b.chunked = 1; b.left = -1; }
         else if (header((char *)hb, "Content-Length", val, sizeof val)) b.left = atoll(val);
         if (b.chunked) b.left = -1;
+        /* 1.2.4p: kept afterwards only with a known end (length or chunks), HTTP/1.1 and no "Connection: close" */
+        int keepable = kp && (b.chunked || b.left >= 0) && !strncmp((char *)hb, "HTTP/1.1", 8) &&
+                       !(header((char *)hb, "Connection", val, sizeof val) && has_close(val));
         if (rq->total) {
             uint64_t tot = 0;
             if (header((char *)hb, "Content-Range", val, sizeof val)) {
@@ -608,9 +651,10 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
             *rq->total = tot;
         }
         ret = 0;
+        int ended = 0;
         for (;;) {
             int n = body_read(&b, buf, 16384);
-            if (n == 0) break;
+            if (n == 0) { ended = b.done || (!b.chunked && b.left == 0); break; }
             if (n < 0) {
                 if (n == -2) ret = -2;
                 else { ret = n; snprintf(err, errsz, n == -1006 ? "No data for too long" : "Connection lost"); }
@@ -618,7 +662,21 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
             }
             if (rq->data && rq->data(rq->ctx, buf, (size_t)n)) break;
         }
-        conn_close(&c);
+        if (keepable && ended && b.chunked) {               /* (the trailer: lines up to an empty one) */
+            int ch, len = 0, ok = 0;
+            while ((ch = raw_byte(&b)) >= 0) {
+                if (ch == '\n') { if (len == 0) { ok = 1; break; } len = 0; }
+                else if (ch != '\r') len++;
+            }
+            if (!ok) ended = 0;
+        }
+        if (keepable && ended && ret == 0 && b.npend == 0) {
+            kp->c = cp;
+            snprintf(kp->host, sizeof kp->host, "%s", host);
+            kp->port = port;
+            kp->tls = tls;
+            kp->last_ms = now_ms64();
+        } else conn_drop(cp);
         break;
     }
     if (ret == -1 && !err[0]) snprintf(err, errsz, "Too many redirects");
@@ -635,6 +693,9 @@ int cio_last_connect_ms(void) { return 0; }
 int cio_last_connect_tries(void) { return 0; }
 const char *cio_rcvbuf_note(void) { return ""; }
 const char *cio_last_suite(void) { return ""; }
+CioKeep *cio_keep_new(void) { return NULL; }
+void cio_keep_free(CioKeep *k) { (void)k; }
+int cio_keep_reused(const CioKeep *k) { (void)k; return 0; }
 void cio_init(void) {}
 int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 {

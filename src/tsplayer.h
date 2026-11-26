@@ -123,7 +123,7 @@ void              tsp_test_core3_unknown(void);
 int               tsp_leaked(void);
 /* 1.2.4i test: the times after a reconnect, in the device's order (0 = right) */
 int               tsp_test_rc_seq(void);
-int               tsp_test_group_seq(double max, int groups, double out[4]);   /* 1.2.4o */
+int               tsp_test_group_seq(double max, int groups, int start_ceil, double out[4]);   /* 1.2.4o; 1.2.4p: start_ceil */
 /* 1.2.4e: tests only: each software-decoded unit takes this much longer (a slow ARM) */
 void              tsp_test_sw_delay(int us);
 void              tsp_test_k2(int *exits, int *late);   /* 1.2.4l: tests */

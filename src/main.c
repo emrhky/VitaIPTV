@@ -930,7 +930,7 @@ int main(void)
                 set_form_type((f_type + ((p & SCE_CTRL_LEFT) ? NTYPES - 1 : 1)) % NTYPES);
             if (form_kind == FORM_SETTINGS && (p & (SCE_CTRL_LEFT | SCE_CTRL_RIGHT))) {   /* 1.1: by the row's setting */
                 int id = set_id();
-                if (id != SF_PIN && id != SF_ADDR && id < SF_TEST) set_step((p & SCE_CTRL_LEFT) ? -1 : 1, 0);
+                if ((id != SF_PIN && id != SF_ADDR && id < SF_TEST) || id == SF_LOG) set_step((p & SCE_CTRL_LEFT) ? -1 : 1, 0);   /* (1.2.4p: + Log file) */
             }
             if (p & SCE_CTRL_START) {                        /* START saves (like the Save button) */
                 if (form_kind == FORM_SOURCE) save_source_form(); else save_settings_form();
@@ -1645,13 +1645,13 @@ int main(void)
                     int g = touch_gesture(bar, can_jump, dur);
                     if (g == TG_TAP) osd_until_us = bar ? now : now + 4000;
                     else if (g == TG_DOUBLE && fs) { tsp_pause(!fs->paused); osd_until_us = now + 4000; }
-                    else if (g == TG_DRAG) {
+                    else if (g == TG_DRAG || g == TG_JUMP) {          /* (1.2.4p: JUMP: a short touch on the line) */
                         seek_target = touch_seek_ms;
                         if (dur > 0 && seek_target > dur - 3000) seek_target = dur - 3000;
                         int lim = dl_growing_limit_ms(cur_play_url(), dur);   /* (a film being downloaded: not past what has come) */
                         if (lim >= 0 && seek_target > lim) seek_target = lim;
                         if (seek_target < 0) seek_target = 0;
-                        seek_due = now + 3600000;
+                        seek_due = g == TG_JUMP ? now + 50 : now + 3600000;
                         osd_until_us = now + 4000;
                     } else if (g == TG_DROP && seek_target >= 0) seek_due = now + 50;
                 }

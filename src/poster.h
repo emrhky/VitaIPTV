@@ -25,4 +25,8 @@ const uint32_t *poster_cache_get(const char *key, int *w, int *h);
 void            poster_cache_clear(void);
 size_t          poster_cache_bytes(void);
 int             poster_cache_count(void);
+/* 1.2.4p: a TMDB poster address (image.tmdb.org/t/p/<size>/...) at w342, the size the 240x360 box needs: 1 = out
+ * has it; 0 = not TMDB, or small already */
+int poster_tmdb_small(const char *url, char *out, size_t cap);
+
 #endif

@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <unistd.h>
 
 typedef struct { size_t n; unsigned long sum; int stop_after; int polls; } Acc;
 static int on_data(void *ctx, const uint8_t *d, size_t n)
@@ -140,6 +141,43 @@ race:
         r = cio_get(&rt, &status, err, sizeof err);
         printf("TLS failing always: r=%d err='%s'\n", r, err);
         assert(r < 0 && strstr(err, "TLS handshake failed") && strstr(err, "(twice)"));
+    }
+    {   /* 1.2.4p: a kept connection: the same server's next requests go over it (posters), in length and in chunks;
+         * one whose server said "close", or closed it without saying so, is not used again */
+        CioKeep *kp = cio_keep_new();
+        assert(kp);
+        char ku[128];
+        static const char *const paths[] = { "/conns", "/small", "/chk", "/small", "/chk", "/conns" };
+        for (int k = 0; k < 6; k++) {
+            snprintf(ku, sizeof ku, "https://127.0.0.1:%d%s", port, paths[k]);
+            memset(&a, 0, sizeof a);
+            CioRequest rk = { ku, NULL, NULL, 10, 5, on_data, NULL, &a, 0, 0, 0, NULL, NULL, NULL, NULL, 0, kp };
+            if (k == 0 || k == 5) rk.data = NULL;
+            r = cio_get(&rk, &status, err, sizeof err);
+            printf("kept %d %s: r=%d status %d bytes %zu reused %d err='%s'\n", k, paths[k], r, status, a.n, cio_keep_reused(kp), err);
+            assert(r == 0 && status == 200);
+            if (k > 0) assert(cio_keep_reused(kp));
+            if (k == 1 || k == 2 || k == 3 || k == 4) assert(a.n == 5000);
+        }
+        snprintf(ku, sizeof ku, "https://127.0.0.1:%d/close", port);
+        memset(&a, 0, sizeof a);
+        CioRequest rc = { ku, NULL, NULL, 10, 5, on_data, NULL, &a, 0, 0, 0, NULL, NULL, NULL, NULL, 0, kp };
+        r = cio_get(&rc, &status, err, sizeof err);
+        assert(r == 0 && status == 200 && cio_keep_reused(kp));
+        snprintf(ku, sizeof ku, "https://127.0.0.1:%d/small", port);
+        r = cio_get(&rc, &status, err, sizeof err);
+        printf("after \"close\": reused %d\n", cio_keep_reused(kp));
+        assert(r == 0 && status == 200 && !cio_keep_reused(kp));
+        snprintf(ku, sizeof ku, "https://127.0.0.1:%d/bye", port);
+        r = cio_get(&rc, &status, err, sizeof err);
+        assert(r == 0 && status == 200);
+        usleep(200000);                                      /* (the server's close arrives) */
+        snprintf(ku, sizeof ku, "https://127.0.0.1:%d/small", port);
+        memset(&a, 0, sizeof a);
+        r = cio_get(&rc, &status, err, sizeof err);
+        printf("after a silent close: r=%d status %d bytes %zu err='%s'\n", r, status, a.n, err);
+        assert(r == 0 && status == 200 && a.n == 5000 && !cio_keep_reused(kp));
+        cio_keep_free(kp);
     }
     puts("all curlio tests passed");
     fflush(stdout);

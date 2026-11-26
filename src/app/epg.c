@@ -80,7 +80,8 @@ typedef struct {
     int pw, ph;
     unsigned dl_us, dec_us;             /* 1.2.4f: how long it took to come / to decode */
     char src[80];                       /* 1.2.4h: the source picture (size, kind) */
-    unsigned cpu_us, again_us;          /* 1.2.4i: the thread's CPU time in it; a second decoding of it */
+    unsigned cpu_us;                    /* 1.2.4i: the thread's CPU time in it */
+    int reused, small, pre;             /* 1.2.4p: over the kept connection; TMDB's smaller size; asked ahead */
     unsigned copy_us; int copy_dma;     /* 1.2.4l: the copy to the texture (main thread) */
 } QJob;
 static QJob qjob;
@@ -105,18 +106,58 @@ static XJob xjob;
 static volatile int xmltv_quit;
 static SceUID xmltv_tid = -1;
 
+/* 1.2.4p: where the posters come from (once a site): the log tells which sizes a provider might give */
+static void poster_host_note(const char *url)
+{
+    static char seen[4][64];
+    const char *h = strstr(url, "://");
+    if (!h) return;
+    h += 3;
+    size_t n = strcspn(h, "/:?#");
+    if (n == 0 || n >= sizeof seen[0]) return;
+    for (int k = 0; k < 4; k++) {
+        if (!seen[k][0]) {
+            memcpy(seen[k], h, n);
+            seen[k][n] = 0;
+            plog("poster: pictures from %s (%s)", seen[k], !strncmp(url, "https:", 6) ? "https" : "http");
+            return;
+        }
+        if (strlen(seen[k]) == n && !strncmp(seen[k], h, n)) return;
+    }
+}
+
+static CioKeep *poster_keep;            /* 1.2.4p: one connection for the posters (the epg thread's alone) */
+
 static void run_qjob(QJob *j)
 {
     Mem m = {0};
-    CioRequest rq = { j->url, NULL, NULL, 8, 15, mem_data, epg_stop_cb, &m };
+    int poster = j->kind == QJ_POSTER;
+    if (poster && !poster_keep) poster_keep = cio_keep_new();
+    char small[IPTV_URL_MAX + 200];
+    int is_small = poster && !iptv_is_local_path(j->url) && poster_tmdb_small(j->url, small, sizeof small);
+    CioRequest rq = { is_small ? small : j->url, NULL, NULL, 8, 15, mem_data, epg_stop_cb, &m };
+    if (poster) rq.keep = poster_keep;
     int st = 0;
     char e[96] = "";
     int r;
     uint64_t t0 = sceKernelGetProcessTimeWide();
+    if (poster && !iptv_is_local_path(j->url)) poster_host_note(j->url);
     if (iptv_is_local_path(j->url)) r = read_file(j->url, &m) == 0 ? 0 : -1;   /* 1.3: a download's poster */
     else r = cio_get(&rq, &st, e, sizeof e);
+    if (is_small && (r < 0 || st >= 400 || !m.buf) && !epg_quit) {   /* (no such size there: the address as given) */
+        static int said;
+        if (!said++) plog("poster: the smaller TMDB size did not come (HTTP %d): the address as given", st);
+        free(m.buf);
+        memset(&m, 0, sizeof m);
+        is_small = 0;
+        rq.url = j->url;
+        st = 0;
+        r = cio_get(&rq, &st, e, sizeof e);
+    }
     uint64_t t1 = sceKernelGetProcessTimeWide();
     j->dl_us = (unsigned)(t1 - t0);
+    j->reused = poster && cio_keep_reused(poster_keep);
+    j->small = is_small;
     j->http = st;
     j->ok = r >= 0 && st < 400 && m.buf != NULL;
     j->px = NULL;
@@ -130,18 +171,8 @@ static void run_qjob(QJob *j)
         memset(&ti, 0, sizeof ti);
         ti.size = sizeof ti;
         j->cpu_us = run0 && sceKernelGetThreadInfo(sceKernelGetThreadId(), &ti) >= 0 ? (unsigned)(ti.runClocks - run0) : 0;
-        /* 1.2.4i: the first posters decoded once more (is the first decoding slow, or every one?) */
-        static int again_n;
-        j->again_us = 0;
-        if (j->ok && again_n < 3) {
-            again_n++;
-            uint32_t *px2 = NULL;
-            int w2, h2;
-            uint64_t t2 = sceKernelGetProcessTimeWide();
-            if (poster_decode((const uint8_t *)m.buf, m.len, POSTER_BOX_W, POSTER_BOX_H, &px2, &w2, &h2) == 0)
-                j->again_us = (unsigned)(sceKernelGetProcessTimeWide() - t2);
-            free(px2);
-        }
+        /* (1.2.4p: 1.2.4i's second decoding of the first 3 posters is gone: it answered its question - every
+         * decoding is as slow as the first - and cost the time of one each) */
         snprintf(j->src, sizeof j->src, "%s", j->ok ? poster_last_src() : "?");
         free(m.buf);
         memset(&j->m, 0, sizeof j->m);
@@ -428,6 +459,15 @@ static void poster_request(const char *url)
     if (strcmp(url, poster_want)) { snprintf(poster_want, sizeof poster_want, "%s", url); poster_want_ms = now_ms(); }
 }
 
+/* 1.2.4p: the posters next to the chosen one in the list, fetched while nothing else is asked for (a step down the
+ * list then shows the next one from the kept ones at once) */
+#define PF_N 3
+static char pf_url[PF_N][IPTV_URL_MAX];
+static char pf_tried[8][IPTV_URL_MAX];  /* (asked ahead already: not again, also when it failed) */
+static int pf_ring;
+static void poster_ahead(int k, const char *url) { if (k >= 0 && k < PF_N) snprintf(pf_url[k], sizeof pf_url[k], "%s", url ? url : ""); }
+static void poster_ahead_clear(void) { for (int k = 0; k < PF_N; k++) pf_url[k][0] = 0; }
+
 static int poster_loading(void) { return poster_want[0] && strcmp(poster_want, poster_have) && strcmp(poster_want, poster_failed); }
 static const vita2d_texture *poster_now(void) { return poster_want[0] && !strcmp(poster_want, poster_have) ? poster_tex : NULL; }
 
@@ -470,7 +510,14 @@ static vita2d_texture *poster_texture(const uint32_t *px, int pw, int ph, unsign
 static int cache_said;
 static void poster_take(QJob *j)
 {
-    if (!j->ok || !j->px) { snprintf(poster_failed, sizeof poster_failed, "%s", j->key); free(j->px); j->px = NULL; return; }
+    if (j->pre && j->ok && j->px) {                          /* 1.2.4p: (counted: how many of the next ones were ready) */
+        static unsigned n;
+        if (++n == 1 || n % 20 == 0) plog("poster: %u fetched ahead (this one came in %u ms%s)", n, j->dl_us / 1000, j->reused ? ", kept connection" : "");
+    }
+    if (!j->ok || !j->px) {
+        if (!j->pre || !strcmp(j->key, poster_want)) snprintf(poster_failed, sizeof poster_failed, "%s", j->key);
+        free(j->px); j->px = NULL; return;
+    }
     if (strcmp(j->key, poster_want)) {                       /* (the screen moved on: kept for coming back, 1.2.4l) */
         poster_cache_put(j->key, j->px, j->pw, j->ph);
         j->px = NULL;
@@ -480,14 +527,13 @@ static void poster_take(QJob *j)
     if (t) {
         unsigned cp = j->copy_us;
         int done = j->copy_dma;
-        static unsigned cnt, sdl, sdec, scp, sdma;           /* (1.2.4f: the first one and every 20th: the averages) */
-        cnt++; sdl += j->dl_us / 1000; sdec += j->dec_us; scp += cp; sdma += done;
-        if (cnt == 1 || cnt % 20 == 0)
-            plog("poster: %u opened (%s): avg came in %u ms, decoded in %u us, copied in %u us (%u by DMA); this one %dx%d from %s, "
-                 "decoded in %u us (%u us of it on the CPU)",
-                 cnt, poster_jpeg_lib(), sdl / cnt, sdec / cnt, scp / cnt, sdma, j->pw, j->ph, j->src, (unsigned)j->dec_us,
-                 j->cpu_us);
-        if (j->again_us) plog("poster: %ux%u decoded again in %u us (first time %u us)", j->pw, j->ph, j->again_us, (unsigned)j->dec_us);
+        static unsigned cnt, sdl, sdec, scp, sdma, sre, ssm;  /* (1.2.4f: the first one and every 20th: the averages) */
+        cnt++; sdl += j->dl_us / 1000; sdec += j->dec_us; scp += cp; sdma += done; sre += j->reused; ssm += j->small;
+        if (cnt <= 3 || cnt % 20 == 0)                       /* (1.2.4p: the first three: the kept connection's effect) */
+            plog("poster: %u opened (%s): avg came in %u ms, decoded in %u us, copied in %u us (%u by DMA; %u over the kept "
+                 "connection, %u at TMDB's smaller size); this one %dx%d from %s, came in %u ms%s, decoded in %u us (%u us of it on the CPU)",
+                 cnt, poster_jpeg_lib(), sdl / cnt, sdec / cnt, scp / cnt, sdma, sre, ssm, j->pw, j->ph, j->src, j->dl_us / 1000,
+                 j->reused ? " (kept connection)" : "", (unsigned)j->dec_us, j->cpu_us);
         if (poster_tex) vita2d_free_texture(poster_tex);     /* (the frame before is done: guide_tick runs first in a frame) */
         poster_tex = t;
         snprintf(poster_have, sizeof poster_have, "%s", j->key);
@@ -558,6 +604,7 @@ static void guide_tick(int playing)
             /* 1.2.4l: shown from the kept ones (nothing to ask for) */
         } else if (poster_loading() && nm - poster_want_ms > 150) {   /* (1.2.4l: was 300 ms) */
             qjob.kind = QJ_POSTER;
+            qjob.pre = 0;
             snprintf(qjob.key, sizeof qjob.key, "%s", poster_want);
             snprintf(qjob.url, sizeof qjob.url, "%s", poster_want);
             qjob.state = 1;
@@ -596,6 +643,22 @@ static void guide_tick(int playing)
                     qjob.state = 1;
                 }
             } else if (c >= 0 && c < guide.nch) guide.ch[c].state = GC_EMPTY;
+        } else if (state != ST_PLAYING && !poster_loading() && nm - poster_want_ms > 400) {   /* 1.2.4p: the neighbours' posters, last of all */
+            for (int k = 0; k < PF_N; k++) {
+                const char *u = pf_url[k];
+                int w, h, tried = 0;
+                if (!u[0] || !strcmp(u, poster_want) || !strcmp(u, poster_have) || poster_cache_get(u, &w, &h)) continue;
+                for (int i = 0; i < 8 && !tried; i++) tried = !strcmp(pf_tried[i], u);
+                if (tried) continue;
+                snprintf(pf_tried[pf_ring], sizeof pf_tried[0], "%s", u);
+                pf_ring = (pf_ring + 1) % 8;
+                qjob.kind = QJ_POSTER;
+                qjob.pre = 1;
+                snprintf(qjob.key, sizeof qjob.key, "%s", u);
+                snprintf(qjob.url, sizeof qjob.url, "%s", u);
+                qjob.state = 1;
+                break;
+            }
         }
     }
     ngwant = 0;                                               /* (the screen says again what it wants) */

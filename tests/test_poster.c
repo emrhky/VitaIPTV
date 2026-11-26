@@ -24,6 +24,20 @@ static void px_rgb(uint32_t p, int *r, int *g, int *b) { *r = p & 255; *g = p >>
 int main(int argc, char **argv)
 {
     assert(argc == 4);
+    {   /* 1.2.4p: TMDB addresses at the box's size; other sites and small ones as they are */
+        char o[512];
+        assert(poster_tmdb_small("https://image.tmdb.org/t/p/w600_and_h900_bestv2/abc.jpg", o, sizeof o) &&
+               !strcmp(o, "https://image.tmdb.org/t/p/w342/abc.jpg"));
+        assert(poster_tmdb_small("http://image.tmdb.org/t/p/original/x/y.jpg?a=1", o, sizeof o) &&
+               !strcmp(o, "http://image.tmdb.org/t/p/w342/x/y.jpg?a=1"));
+        assert(!poster_tmdb_small("https://image.tmdb.org/t/p/w342/abc.jpg", o, sizeof o));
+        assert(!poster_tmdb_small("https://image.tmdb.org/t/p/w185/abc.jpg", o, sizeof o));
+        assert(!poster_tmdb_small("http://provider.example/images/abc.jpg", o, sizeof o));
+        assert(!poster_tmdb_small("https://image.tmdb.org/t/p/", o, sizeof o));
+        char tiny[20];
+        assert(!poster_tmdb_small("https://image.tmdb.org/t/p/w500/abc.jpg", tiny, sizeof tiny));
+        puts("tmdb sizes ok");
+    }
     size_t n;
     uint8_t *d = load(argv[1], &n);                          /* 2000x3000: top half red, bottom half blue */
     uint32_t *px;

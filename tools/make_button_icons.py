@@ -75,8 +75,8 @@ def glyph(kind):
     if kind == "cross":                 # 1.3.1: 18 px high like the others (ends +-7.5, line 3, round ends)
         h = 7.5
         return stroke([(C - h, C - h, C + h, C + h), (C + h, C - h, C - h, C + h)]), BLUE
-    if kind == "circle":                # 1.3.1: 18 px across (the line's outside)
-        return ring(C, C, 7.5), RED
+    if kind == "circle":                # 1.3.1: 18 px across (the line's outside); 1.2.4p: 20 (it looked smaller than the others)
+        return ring(C, C, 8.5), RED
     if kind == "square":                # 1.3.1: 18 px, lines on whole pixels: 6..9, 21..24
         a = 7.5
         return stroke(poly_segs([(C - a, C - a), (C + a, C - a), (C + a, C + a), (C - a, C + a)])), PINK

@@ -864,9 +864,12 @@ static void touch_apply(void)
 
 /* What a touch did this frame. A touch: the bar shows / hides (after a short wait: a second touch makes it a
  * double touch, which pauses). With the bar shown, a touch on the time line drags the place to jump to;
- * letting go jumps. Coordinates: the panel's 1920x1088 halved to the screen's 960x544. */
-enum { TG_NONE, TG_TAP, TG_DOUBLE, TG_DRAG, TG_DROP };
+ * letting go jumps. Coordinates: the panel's 1920x1088 halved to the screen's 960x544.
+ * 1.2.4p: the time line where screens.c drew it (it was taken as 120..850 always; its end moves with the length's
+ * width), and a short touch on it jumps there at once (TG_JUMP). */
+enum { TG_NONE, TG_TAP, TG_DOUBLE, TG_DRAG, TG_DROP, TG_JUMP };
 static int touch_seek_ms = -1;                   /* while dragging: where the jump goes */
+static int touch_dragging;                       /* 1.2.4p: a finger drags the time line (its time shown over the knob) */
 static int touch_gesture(int bar_shown, int can_jump, int dur_ms)
 {
     static int down, dragging, x0, y0, xl, on_bar;
@@ -878,7 +881,7 @@ static int touch_gesture(int bar_shown, int can_jump, int dur_ms)
     unsigned now = now_ms();
     int x = touching ? td.report[0].x / 2 : xl, y = touching ? td.report[0].y / 2 : 0;
     /* the time line: the bottom of the screen, between the times (see time_line in screens.c) */
-    const int bx0 = 120, bx1 = 850;
+    const int bx0 = scr_tl_x0, bx1 = scr_tl_x1 > scr_tl_x0 + 40 ? scr_tl_x1 : scr_tl_x0 + 40;
     if (touching && !down) {
         down = 1; dragging = 0; x0 = xl = x; y0 = y; t_down = now;
         on_bar = bar_shown && can_jump && dur_ms > 0 && y >= 544 - 140;
@@ -887,6 +890,7 @@ static int touch_gesture(int bar_shown, int can_jump, int dur_ms)
         xl = x;
         if (on_bar && (dragging || abs(x - x0) > 12)) {
             dragging = 1;
+            touch_dragging = 1;
             float f = (float)(x - bx0) / (float)(bx1 - bx0);
             if (f < 0) f = 0;
             if (f > 1) f = 1;
@@ -898,7 +902,18 @@ static int touch_gesture(int bar_shown, int can_jump, int dur_ms)
     }
     if (!touching && down) {                         /* let go */
         down = 0;
+        touch_dragging = 0;
         if (dragging) { dragging = 0; return TG_DROP; }
+        /* 1.2.4p: a short touch on the line itself (its height, a little beside its ends): there at once */
+        if (on_bar && scr_tl_y && now - t_down < 400 && abs(xl - x0) < 30 && abs(y0 - scr_tl_y) <= 36 &&
+            x0 >= bx0 - 20 && x0 <= bx1 + 20) {
+            float f = (float)(x0 - bx0) / (float)(bx1 - bx0);
+            if (f < 0) f = 0;
+            if (f > 1) f = 1;
+            touch_seek_ms = (int)(f * (float)dur_ms);
+            t_last_tap = 0; tap_pending_at = 0;
+            return TG_JUMP;
+        }
         if (now - t_down < 400 && abs(xl - x0) < 30) {
             if (t_last_tap && now - t_last_tap < 400) { t_last_tap = 0; tap_pending_at = 0; return TG_DOUBLE; }
             t_last_tap = now;
@@ -1051,6 +1066,7 @@ static void draw_tsp_screen(int osd)
         sp.pos_ms = pos;
         sp.dur_ms = dur;
         sp.seek_ms = seek_target;
+        sp.seek_touch = touch_dragging;                      /* 1.2.4p */
         sp.paused = st->paused;
         if (st->paused || seek_target >= 0) osd = 1;
         if (arch_on) {                                       /* 0.8.0: catch-up: clock times, the programme's name */

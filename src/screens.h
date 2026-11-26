@@ -83,6 +83,7 @@ typedef struct {
     int backdrop;                       /* no picture yet: draw the waiting background */
     /* films: time line (pos/dur in ms; seek_ms >= 0 = a jump being chosen) and the pause sign */
     int film, pos_ms, dur_ms, seek_ms, paused;
+    int seek_touch;                     /* 1.2.4p: a finger drags the time line: its time over the knob */
     const char *stats3;                 /* third line (table mode) */
     int stats_table;                    /* stats1-3 are rows of cells "label\vvalue" separated by tabs, in fixed columns */
     const char *stats_note;             /* table mode: a plain line above the table (may be NULL) */
@@ -223,5 +224,9 @@ typedef struct {
 } ScrSeries;
 #define SCR_EP_ROWS 5
 void scr_series(const ScrSeries *s);
+
+/* 1.2.4p: where the last drawn time line is (the touch screen goes by it): its ends and the middle of its line;
+ * scr_tl_y 0 = none drawn in the last frame */
+extern int scr_tl_x0, scr_tl_x1, scr_tl_y;
 
 #endif

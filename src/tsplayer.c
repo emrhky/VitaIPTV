@@ -317,6 +317,8 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     int g_good;                         /* ... ms of good groups at the ceiling */
     uint32_t g_dec0;                    /* 1.2.4o: pictures decoded at the group's start */
     int g_late0;                        /* ... how late the picture was then (ms) */
+    double tr_max;                      /* 1.2.4p: what the decoder makes at most (the hardware's figure, then measured) */
+    int tr_max_measured;                /* ... measured on this stream */
     uint32_t fr_drop0;                  /* ... pictures dropped / late when the last 3 s window began */
     int fr_set;
     AudioFx afx;                        /* 1.1: volume boost / speaker mode (Select > Audio) */
@@ -1787,6 +1789,11 @@ static void group_measure(Tsp *t, uint64_t now)
      * never a late picture, and nothing was counted until it was far behind) */
     int creep = t->late_ms > 150 && t->late_ms > t->g_late0 + 50;
     int worse = bad != t->g_bad0 || t->late_ms > 250 || creep;
+    /* 1.2.4p: behind, but less than at the last group's start: catching up already. On the device the share went
+     * 46 -> 42.3 -> 38.9 -> 35.8 while the picture came back from 0.44 s behind (each group 0.92 less, until the
+     * end of each group stood for 0.6 s): held where it is instead */
+    int recovering = worse && bad == t->g_bad0 && t->late_ms + 30 < t->g_late0;
+    if (recovering) worse = 0;
     double was = t->tr_cap;
     /* 1.2.4n: a ceiling. 1.2.4o: from what the decoder did while it was the limit. 1.2.4n took the share before
      * the last step up, only when the trouble came right after it; on the device it came a group later, no ceiling
@@ -1796,19 +1803,27 @@ static void group_measure(Tsp *t, uint64_t now)
     double ceil = t->tr_ceil > 0 ? t->tr_ceil : (double)t->tr_fps;
     if (worse) {
         double c = rate * 0.97;
-        if (spare < 0.10 && rate > 1.0 && c < ceil && c >= t->tr_cap0 * 0.85) {
-            t->tr_ceil = c;
-            plog("tsp: groups: the decoder makes %.1f a second at most here: at most %.1f from now on", rate, c);
+        if (spare < 0.10 && rate > 1.0 && c >= t->tr_cap0 * 0.85) {
+            t->tr_max = rate;                                /* (1.2.4p: the probes stay below it) */
+            t->tr_max_measured = 1;
+            if (c < ceil) {
+                t->tr_ceil = c;
+                plog("tsp: groups: the decoder makes %.1f a second at most here: at most %.1f from now on", rate, c);
+            }
         }
         t->tr_cap *= 0.92;
         if (t->tr_cap < t->tr_cap0 * 0.85) t->tr_cap = t->tr_cap0 * 0.85;
         t->g_good = 0;
+    } else if (recovering) {
+        /* (nothing: neither less nor more while it catches up) */
     } else if (spare > 0.35 && t->tr_cap < ceil) {
         t->tr_cap *= spare > 0.5 ? 1.12 : 1.06;
         if (t->tr_cap > ceil) t->tr_cap = ceil;
     } else if (t->tr_ceil > 0 && t->tr_cap >= t->tr_ceil && (t->g_good += (int)(dt / 1000)) >= 60000) {   /* (ms at the ceiling) */
         t->g_good = 0;
-        t->tr_ceil *= 1.02;
+        double top = t->tr_max_measured ? t->tr_max * 0.99 : (double)t->tr_fps;   /* 1.2.4p: not past what was measured */
+        if (t->tr_ceil * 1.02 <= top) t->tr_ceil *= 1.02;
+        else if (t->tr_ceil < top) t->tr_ceil = top;
         if (t->tr_ceil > t->tr_fps) t->tr_ceil = t->tr_fps;
     }
     if (t->tr_cap != was) {
@@ -1824,11 +1839,12 @@ static void group_measure(Tsp *t, uint64_t now)
  * `max` a second; below it the video thread waits for the screen (60-78% of the time on the device), above it
  * nothing is late but the picture falls behind the sound. out: [0] the share at the end, [1] the ceiling,
  * [2] steps up after the ceiling was found, [3] the most the picture was behind (ms). 0 = done. */
-int tsp_test_group_seq(double max, int groups, double out[4])
+int tsp_test_group_seq(double max, int groups, int start_ceil, double out[4])
 {
     Tsp *t = calloc(1, sizeof *t);
     if (!t) return -1;
     t->tr_fps = 50; t->tr_cap0 = t->tr_cap = 33.8;
+    if (start_ceil) { t->tr_max = 366000.0 / 8160; t->tr_ceil = t->tr_max * 0.97; }   /* (as the player sets it) */
     uint64_t now = 1000000;
     double late = 0, dec = 0, wait = 0, most = 0;
     int ups_after = 0;
@@ -2509,6 +2525,12 @@ static void video_packet(Tsp *t, Pkt *p)
                 t->pre_skip = need <= can * 0.9 ? 2 : refs <= can * 0.95 ? 1 : 3;
                 t->tr_fps = fps;
                 t->tr_cap = t->tr_cap0 = can * 0.95;
+                /* 1.2.4p: the HD decoder's own limit as the first ceiling: every picture of a 1080p50 channel with all
+                 * pictures referenced, on the device twice: 44.8 and 44.9 a second (366 000 macroblocks); 1.2.4o went
+                 * up to 50 first, fell 0.44 s behind and stood for 0.6 s in each group until it had settled */
+                t->tr_max = 366000.0 / mbs;
+                t->tr_max_measured = 0;
+                t->tr_ceil = t->tr_max * 0.97 > t->tr_cap ? t->tr_max * 0.97 : 0;
                 if (i->height >= 1000) t->st.decoder_slow = 1;
                 plog("tsp: %dx%d at %u fps (%u macroblocks a second) is more than the Vita decoder manages (about "
                      "%s with %d references): %s (%.0f%% not referenced, needs %.0f pictures a second)", t->dw, t->dh, fps, rate,

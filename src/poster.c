@@ -261,3 +261,21 @@ int poster_cache_count(void)
     for (int i = 0; i < POSTER_CACHE; i++) n += g_pc[i].key != NULL;
     return n;
 }
+
+/* 1.2.4p: a TMDB poster address asked for at the size the screen needs: image.tmdb.org/t/p/<size>/<file> gives the
+ * same picture at w92 ... w780 too. The device's posters came as 600x900 progressive JPEG (TMDB's w600_and_h900
+ * size) for a 240x360 box: 613 ms to come and 120 ms to decode; w342 (342x513) is about a third of the bytes.
+ * 1 = out has the smaller one's address. */
+int poster_tmdb_small(const char *url, char *out, size_t cap)
+{
+    const char *p = strstr(url, "image.tmdb.org/t/p/");
+    if (!p) return 0;
+    const char *seg = p + 19, *end = strchr(seg, '/');
+    if (!end || end == seg) return 0;
+    size_t n = (size_t)(end - seg);
+    static const char *const SMALL[] = { "w92", "w154", "w185", "w342" };
+    for (size_t k = 0; k < sizeof SMALL / sizeof SMALL[0]; k++) if (n == strlen(SMALL[k]) && !strncmp(seg, SMALL[k], n)) return 0;
+    if ((size_t)(seg - url) + 4 + strlen(end) + 1 > cap) return 0;
+    snprintf(out, cap, "%.*sw342%s", (int)(seg - url), url, end);
+    return 1;
+}

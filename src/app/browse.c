@@ -183,6 +183,13 @@ static void draw_channels(void)
         vod_card_of(&chans, &chans.items[vis[sel]], &card, section == SEC_FILMS);
         d.preview = &card;
     }
+    if (d.preview) {                                         /* 1.2.4p: the next, the one before and the one after next */
+        static const int step[3] = { 1, -1, 2 };
+        for (int k = 0; k < 3; k++) {
+            int j = sel + step[k];
+            poster_ahead(k, j >= 0 && j < nvis ? channel_extra(&chans, &chans.items[vis[j]], CX_POSTER) : NULL);
+        }
+    } else poster_ahead_clear();
     {   /* 0.4.5: the selected channel's now / next on the status line, after half a second on it */
         static int last_ci = -1;
         static unsigned since;
