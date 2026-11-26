@@ -367,8 +367,10 @@ sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread -DSTALL_US=1
 # 1.2.1: a channel whose picture size changes on the way (720p, then 1024x576, then 720p again)
 sh(f"ffmpeg -loglevel error -y {SRC.format(s='1024x576', r=30)} -c:v libx264 -profile:v high -bf 3 -g 30 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/s576.ts")
 sh(f"ffmpeg -loglevel error -y -i \"concat:{T}/s720g30.ts|{T}/s576.ts|{T}/s720g30.ts\" -c copy -f mpegts {T}/sizechange.ts")
+# 1.2.4o: 1080p with a level far too small in its SPS (two channels on the device)
+sh(f"ffmpeg -loglevel error -y {SRC.format(s='1920x1080', r=25)} -t 4 -c:v libx264 -profile:v high -level 1.3 -refs 1 -g 25 -pix_fmt yuv420p -c:a aac -ac 2 -f mpegts {T}/lv13.ts")
 r = subprocess.run(f"{T}/test_tsplayer {T}/s720.ts {T}/s1080.ts {T}/hevc.ts {T}/midgop.ts {T}/dropped.ts "
-                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4 {T}/f1080_60.ts {T}/wrap.ts {T}/f1080_50.ts {T}/f1080_50p.ts {T}/nv1080.ts {T}/sizechange.ts",
+                   f"{T}/opengop_mid.ts {T}/audio.ts {T}/scrambled.ts {T}/alate.ts {T}/aearly.ts {T}/mono441.ts {T}/ac3.ts {T}/bframes.mkv {T}/s1080.ts {T}/mp2.ts {T}/hls {T}/film.mp4 {T}/film.mkv {T}/film.ts {T}/film.flv {T}/s720.flv {T}/i1080.ts {T}/glitch.ts {T}/aacmain.ts {T}/fast60.ts {T}/fast60_ac3.ts {T}/aahead.ts {T}/hls2 {T}/hls3 {T}/hls4 {T}/f1080_60.ts {T}/wrap.ts {T}/f1080_50.ts {T}/f1080_50p.ts {T}/nv1080.ts {T}/sizechange.ts {T}/lv13.ts",
                    shell=True, capture_output=True, text=True)
 print(r.stdout); print(r.stderr[-4000:])
 sys.exit(r.returncode)

@@ -46,6 +46,9 @@ static int log_periodic(const char *fmt)
 /* a line that may be the last before a crash: written at once */
 static int log_urgent(const char *fmt)
 {
+    /* 1.2.4o: not the statistics and the end lines: "errors %u" in them made each one an error line (with
+     * "Errors only" the log got the statistics every 5 s, and each was written to the card at once) */
+    if (log_periodic(fmt) || !strncmp(fmt, "tsp: video end", 14) || !strncmp(fmt, "tsp: audio end", 14)) return 0;
     return strstr(fmt, "ERROR") || strstr(fmt, "error") || strstr(fmt, "failed") || strstr(fmt, "FAILED") ||
            strstr(fmt, "could not") || !strncmp(fmt, "exit:", 5) || !strncmp(fmt, "power:", 6);
 }

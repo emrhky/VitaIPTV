@@ -46,8 +46,7 @@ static void keep_awake(void)
     int radio = radio_playing();
     if (state != ST_PLAYING) return;
     int video = 0, audio = radio;
-    if (play_mode == 0) video = 1;
-    else if (play_mode == 2) {
+    if (play_mode == 2) {
         const TspStatus *st = tsp_status();
         if (st && st->state < TSP_ENDED && !st->audio_only) video = 1;
     }
@@ -138,7 +137,6 @@ static void move_sel(unsigned p, int count)
 
 static void stop_all(void)
 {
-    player_stop();
     next_ep_at = 0;                                          /* 0.7.0 */
     probe_cancel();
     tsp_stop();

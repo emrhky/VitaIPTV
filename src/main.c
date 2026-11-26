@@ -23,7 +23,6 @@
 #include "curlio.h"
 #include "iptv.h"
 #include "urlhdr.h"
-#include "player.h"
 #include "probe.h"
 #include "tsplayer.h"
 #include "tsdemux.h"
@@ -499,7 +498,7 @@ static int read_file(const char *path, Mem *m)
 /* what is on the screen when an overlay closes */
 static void draw_current(void)
 {
-    if (state == ST_PLAYING) { if (play_mode == 0) draw_mp4_screen(1); else if (play_mode == 1) draw_probe_screen(); else draw_tsp_screen(1); }
+    if (state == ST_PLAYING) { if (play_mode == 1) draw_probe_screen(); else draw_tsp_screen(1); }
     else if (state == ST_CHANNELS) draw_channels();
     else draw_sources();
 }
@@ -509,7 +508,6 @@ static void player_keep_going(void)
 {
     if (state != ST_PLAYING) return;
     if (play_mode == 2) { int w, h; tsp_frame(&w, &h); }
-    else if (play_mode == 0) player_poll();
 }
 
 /* ---- start-up -------------------------------------------------------------- */
@@ -715,7 +713,6 @@ int main(void)
     sceAppUtilSystemParamGetInt(SCE_SYSTEM_PARAM_ID_LANG, &system_lang);
     load_settings();
     touch_apply();                                           /* 1.2.3 */
-    tsp_set_m4v_mark(DATA_DIR "/m4v_try.txt");              /* 1.2.3b */
     tsp_set_adj_file(DATA_DIR "/hd_adjust.txt");             /* 1.2.4j */
     load_resume();
     load_watched();                                          /* 0.7.0 */
@@ -1104,7 +1101,6 @@ int main(void)
             else draw_current();
         }
         else if (guide_open) {                               /* 0.8.0: the guide (over the list or the player) */
-            if (state == ST_PLAYING && play_mode == 0) player_poll();
             guide_input(p);
             if (cg_open) draw_chan_guide();
             else if (guide_open) draw_guide();
@@ -1549,7 +1545,7 @@ int main(void)
                 }
                 if (play_mode == 1) draw_probe_screen();
                 else {
-                    if (play_mode == 0) draw_mp4_screen(1); else draw_tsp_screen(1);
+                    draw_tsp_screen(1);
                     if (res_menu) {
                         on_sync = act[res_menu_sel] == MA_SUB_SYNC;
                         on_sleep = act[res_menu_sel] == MA_SLEEP;
@@ -1879,8 +1875,7 @@ int main(void)
                     auto_proxy_check();
                 }
                 int osd = now_ms() < osd_until_us;
-                if (play_mode == 0) draw_mp4_screen(osd);
-                else if (play_mode == 1) draw_probe_screen();
+                if (play_mode == 1) draw_probe_screen();
                 else draw_tsp_screen(osd);
             }
         }
@@ -1900,7 +1895,6 @@ int main(void)
     epg_stop();
     plog("exit: the players are stopped");
     ui_shutdown();
-    player_shutdown();
     channel_list_free(&chans);
     free(vis);
     vita2d_fini();

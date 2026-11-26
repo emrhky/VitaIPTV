@@ -7,7 +7,7 @@ static unsigned play_started_us, osd_until_us;
 static int play_hot;                        /* 1.2: a core was 65% busy on this channel: full speed for it */
 static int got_frame;
 static char play_err[128];
-static int play_mode;               /* 0 = SceAvPlayer (MP4), 1 = stream analysis, 2 = live TS player */
+static int play_mode;               /* 1 = stream analysis, 2 = our player (1.2.4o: 0, SceAvPlayer for .mp4 links, gone) */
 
 static int show_info;                /* X in the player: detailed statistics */
 static int film_start_ms;            /* where the next film starts (resume, jump) */
@@ -424,7 +424,6 @@ static void play_channel_ex(int vi, int use_proxy)
     osd_until_us = play_started_us + 5000;
     play_err[0] = 0;
     const char *url = chans.items[vis[vi]].url;
-    player_stop();
     probe_cancel();
     tsp_stop();
     {   /* 1.2.4g: the one before could not be stopped: say it once (its memory stays taken) */
@@ -524,11 +523,9 @@ static void play_channel_ex(int vi, int use_proxy)
         }
         if (tsp_start_vod(url, film_start_ms) != 0) snprintf(play_err, sizeof play_err, "Cannot start the TS player");
         film_start_ms = 0;
-    } else if (is_mp4_url(url)) {
-        play_mode = 0;
-        int rc = player_start(url);
-        if (rc != 0)
-            snprintf(play_err, sizeof play_err, "Player error 0x%08X (see ux0:data/VitaIPTV/log.txt)", (unsigned)rc);
+    } else if (is_mp4_url(url)) {                            /* 1.2.4o: an MP4 / MOV link: a file, as films (was SceAvPlayer) */
+        play_mode = 2;
+        if (tsp_start_vod(url, 0) != 0) snprintf(play_err, sizeof play_err, "Cannot start the TS player");
     } else {
         play_mode = 2;
         if (tsp_start(url) != 0) snprintf(play_err, sizeof play_err, "Cannot start the TS player");
@@ -589,7 +586,6 @@ static void play_channel(int vi)
 
 static void start_probe(void)
 {
-    player_stop();
     tsp_stop();
     probe_cancel();
     play_err[0] = 0;
@@ -1216,29 +1212,3 @@ static void draw_tsp_screen(int osd)
     if (info_ovl) draw_info_overlay();                       /* 0.8.0 */
 }
 
-static void draw_mp4_screen(int osd)
-{
-    const Channel *c = cur_channel();
-    vita2d_texture *t = player_poll();
-    if (t) { got_frame = 1; draw_video_texture(t, vita2d_texture_get_width(t), vita2d_texture_get_height(t), 0, 0); }
-    ScrPlayer sp;
-    memset(&sp, 0, sizeof sp);
-    sp.backdrop = !got_frame;
-    sp.clock = clock_text();                                 /* 0.7.0 */
-    next_ep_note(&sp);
-    sp.name = c->name;
-    sp.group = c->group;
-    sp.fav = player_fav();
-    static UiHint mh[10];
-    sp.nhints = play_hints(mh, 0, 0, 0, srv_on() ? "Server" : NULL);
-    sp.hints = mh;
-    sp.t_ms = now_ms();
-    sp.osd = osd || !got_frame;
-    if (!got_frame) {
-        unsigned waited = now_ms() - play_started_us;
-        if (play_err[0]) { sp.center_title = "Cannot play this file"; sp.center_line = T_msg(play_err); sp.center_col = UI_ERR; }
-        else if (waited > 20000) { sp.center_title = "No video after 20 s"; sp.center_line = "See ux0:data/VitaIPTV/log.txt"; sp.center_col = UI_ERR; }
-        else { sp.center_title = "Connecting..."; sp.center_col = UI_TEXT; sp.spinner = 1; }
-    }
-    scr_player(&sp);
-}

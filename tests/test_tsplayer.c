@@ -23,6 +23,8 @@ static int g_own_http;                      /* 0.6.0: "own socket (http)" was lo
 static int g_net_slow, g_net_fast;          /* 0.6.0: "the network is slower than the film" / "the network is fast" */
 static int g_asked_again;                   /* 0.6.0: "the film does not come ...: asking the server again" */
 static int g51_direct;                      /* 1.2: the 5.1 AAC decoder (0x1008) opened */
+static int g_ceil_n, g_ups_n;               /* 1.2.4o: "at most ... from now on" lines; group steps up */
+static int g_level_fix;                     /* 1.2.4o: "level ... given to the decoder" */
 void plog(const char *fmt, ...)
 {
     char line[1024];
@@ -35,6 +37,9 @@ void plog(const char *fmt, ...)
     if (strstr(line, "network is fast")) g_net_fast = 1;
     if (strstr(line, "asking the server again")) g_asked_again = 1;
     if (strstr(line, "5.1: the Vita's decoder (0x1008)")) g51_direct = 1;
+    if (strstr(line, "a second at most here: at most")) g_ceil_n++;
+    if (strstr(line, "nothing late:") && strstr(line, "reference pictures a second now")) g_ups_n++;
+    if (strstr(line, "given to the decoder") && strstr(line, "too small for its picture")) g_level_fix++;
     if (getenv("VERBOSE")) puts(line);
     if (getenv("PLOGFILE")) {                                /* (1.2.2: the log without slowing the threads much) */
         static FILE *lf;
@@ -103,15 +108,13 @@ static void check_sps(const uint8_t *b, size_t n)
     }
 }
 
-static int m4v_init(int pub, const SceVideodecQueryInitInfoHwAvcdec *i);
 int sceVideodecInitLibrary(SceVideodecType c, const SceVideodecQueryInitInfoHwAvcdec *i)
-{ if (c == SCE_VIDEODEC_TYPE_HW_M4VDEC) return m4v_init(0, i);
+{ (void)c;
   if (lib_open) return (int)0x80620808; if (i->size != sizeof *i || i->horizontal % 16 || i->vertical % 16 || i->numOfStreams != 1) return (int)0x80620802;
   if (lib_max_refs && (int)i->numOfRefFrames > lib_max_refs) return (int)0x80620802;   /* like the real library */
   unsigned mbs = (i->horizontal / 16) * (i->vertical / 16);
   if (lib_l31 && (mbs > 3600 || mbs * i->numOfRefFrames > 18000)) return (int)0x80620802;   /* level 3.1, as on the Vita */
   lib_open = 1; lib_w = i->horizontal; lib_h = i->vertical; return 0; }
-int sceVideodecTermLibrary(SceVideodecType c);
 int sceAvcdecQueryDecoderMemSize(SceVideodecType c, const SceAvcdecQueryDecoderInfo *q, SceAvcdecDecoderInfo *d)
 { (void)c; if (!lib_open) return (int)0x8062000C; d->frameMemSize = q->horizontal * q->vertical * 3 / 2 * (q->numOfRefFrames + 2); return 0; }
 int sceAvcdecCreateDecoder(SceVideodecType c, SceAvcdecCtrl *d, const SceAvcdecQueryDecoderInfo *q)
@@ -119,63 +122,7 @@ int sceAvcdecCreateDecoder(SceVideodecType c, SceAvcdecCtrl *d, const SceAvcdecQ
   created_refs = (int)q->numOfRefFrames; creates++; wedged = 0; refused_pts = -2;
   d->handle = 1; dec_open = 1; sps_seen = 0; npend = 0; return 0; }
 int sceAvcdecDeleteDecoder(SceAvcdecCtrl *d) { (void)d; dec_open = 0; return 0; }
-/* 1.2.3: the MPEG-4 hardware. m4v_mode 0: its library refuses (as if the Vita had none: software), 1: it decodes
- * (a picture per VOP, the VOL needed first), 2: it refuses the units (the software takes over).
- * 1.2.3b: m4v_create_ok: which library + decoder pairs create a decoder (bit lib*2+dec, lib 0 public, 1 internal,
- * 2 internal with codec memory; dec 0 public, 1 internal); the others 0x80620902 */
-static int m4v_mode, m4v_lib, m4v_vol_seen, m4v_units, m4v_pics, m4v_bad_es;
-static int m4v_lib_kind, m4v_create_ok = 63, m4v_inits, m4v_creates;
-/* kind: 0 public (refused for 0x1002, as on the Vita), 1 internal, 2 internal with a codec context */
-static int m4v_init(int kind, const SceVideodecQueryInitInfoHwAvcdec *i)
-{ m4v_inits++;
-  if (!m4v_mode) return (int)0x80620801;
-  if (kind == 0) return (int)0x80620802;
-  if (m4v_lib || i->size != sizeof *i || i->horizontal % 16 || i->vertical % 16 || i->numOfStreams != 1) return (int)0x80620802;
-  m4v_lib = 1; m4v_lib_kind = kind; m4v_vol_seen = 0; return 0; }
-int sceVideodecInitLibraryInternal(SceVideodecType c, const SceVideodecQueryInitInfoHwAvcdec *i)
-{ if (c != SCE_VIDEODEC_TYPE_HW_M4VDEC) return (int)0x80620801; return m4v_init(1, i); }
-int sceVideodecTermLibrary(SceVideodecType c)
-{ if (c == SCE_VIDEODEC_TYPE_HW_M4VDEC) { m4v_lib = 0; return 0; } lib_open = 0; int_lib = 0; return 0; }
-int sceM4vdecQueryDecoderMemSize(SceVideodecType c, const SceAvcdecQueryDecoderInfo *q, SceAvcdecDecoderInfo *d)
-{ (void)c; if (!m4v_lib) return (int)0x8062000C; d->frameMemSize = q->horizontal * q->vertical * 3 / 2 * (q->numOfRefFrames + 2); return 0; }
-int sceM4vdecQueryDecoderMemSizeInternal(SceVideodecType c, SceAvcdecQueryDecoderInfo *q, SceAvcdecDecoderInfo *d)
-{ return sceM4vdecQueryDecoderMemSize(c, q, d); }
-static int m4v_create(int dec, SceAvcdecCtrl *d)
-{ m4v_creates++;
-  if (!m4v_lib) return (int)0x8062000C;
-  if (!d->frameBuf.pBuf) return (int)0x80620009;
-  if (!(m4v_create_ok & (1 << (m4v_lib_kind * 2 + dec)))) return (int)0x80620902;
-  d->handle = 2; return 0; }
-int sceM4vdecCreateDecoder(SceVideodecType c, SceAvcdecCtrl *d, const SceAvcdecQueryDecoderInfo *q)
-{ (void)c; (void)q; return m4v_create(0, d); }
-int sceM4vdecCreateDecoderInternal(SceVideodecType c, SceAvcdecCtrl *d, SceAvcdecQueryDecoderInfo *q)
-{ (void)c; (void)q; return m4v_create(1, d); }
-int sceM4vdecDeleteDecoder(SceAvcdecCtrl *d) { (void)d; m4v_lib = 0; return 0; }
-int sceM4vdecDecode(const SceAvcdecCtrl *d, const SceAvcdecAu *au, SceAvcdecArrayPicture *arr)
-{
-    (void)d;
-    const uint8_t *b = au->es.pBuf;
-    size_t n = au->es.size;
-    m4v_units++;
-    if (m4v_mode == 2) return (int)0x8062000D;
-    if (!(kind_bit(au->es.pBuf) & es_ok)) m4v_bad_es++;
-    int vops = 0;
-    for (size_t k = 0; k + 3 < n; k++) {
-        if (b[k] || b[k + 1] || b[k + 2] != 1) continue;
-        if (b[k + 3] >= 0x20 && b[k + 3] <= 0x2F) m4v_vol_seen = 1;
-        if (b[k + 3] == 0xB6) vops++;
-    }
-    if (!m4v_vol_seen || vops != 1) return (int)0x8062000D;  /* (no header yet, or a packed unit: refused) */
-    SceAvcdecPicture *p = arr->pPicture[0];
-    if (arr->numOfElm < 1 || !p || p->size != sizeof *p || p->frame.pixelType != SCE_AVCDEC_PIXELFORMAT_YUV420_RASTER ||
-        p->frame.frameHeight % 16 || !p->frame.pPicture[0]) return (int)0x80620002;
-    ((uint8_t *)p->frame.pPicture[0])[(size_t)p->frame.framePitch * p->frame.frameHeight * 3 / 2 - 1] = 0x80;   /* (touches the last byte) */
-    p->info.pts = au->pts;
-    arr->numOfOutput = 1;
-    m4v_pics++;
-    return 0;
-}
-int sceM4vdecDecodeStop(const SceAvcdecCtrl *d, SceAvcdecArrayPicture *arr) { (void)d; arr->numOfOutput = 0; return 0; }
+int sceVideodecTermLibrary(SceVideodecType c) { (void)c; lib_open = 0; int_lib = 0; return 0; }
 static int au_nonref(const uint8_t *d, size_t n)
 {
     int slices = 0;
@@ -274,9 +221,8 @@ SceUID sceCodecEngineOpenUnmapMemBlock(void *b, SceSize n)
 int sceCodecEngineCloseUnmapMemBlock(SceUID u) { assert(u == 0x40010133); unmaps_open--; return 0; }
 SceUIntVAddr sceCodecEngineAllocMemoryFromUnmapMemBlock(SceUID u, SceUInt32 n, SceUInt32 a) { (void)n; (void)a; return u == 0x40010133 ? 0x62740000 : 0; }
 int sceCodecEngineFreeMemoryFromUnmapMemBlock(SceUID u, SceUIntVAddr v) { (void)u; assert(v == 0x62740000); return 0; }
-static int m4v_init(int kind, const SceVideodecQueryInitInfoHwAvcdec *i);
 int sceVideodecInitLibraryWithUnmapMemInternal(SceVideodecType c, MockVdCtrl *vc, SceVideodecQueryInitInfo *q)
-{ if (c == SCE_VIDEODEC_TYPE_HW_M4VDEC) { if (!vc->vaContext || !vc->contextSize) return (int)0x80620002; return m4v_init(2, &q->hwAvc); }
+{ (void)c;
   if (lib_open) return (int)0x80620808; if (!vc->vaContext || !vc->contextSize || int_cfg != 2) return (int)0x80620002;
   lib_open = 1; int_lib = 1; lib_w = q->hwAvc.horizontal; lib_h = q->hwAvc.vertical; return 0; }
 int sceAvcdecCreateDecoderInternal(SceVideodecType c, SceAvcdecCtrl *d, SceAvcdecQueryDecoderInfo *q)
@@ -713,7 +659,7 @@ int main(int argc, char **argv)
     /* argv: s720.ts (150 pictures, 30 fps, B-frames)  s1080.ts  hevc.ts  midgop.ts  dropped.ts
      *       opengop_mid.ts (I-pictures without IDR or SEI, starts mid-GOP)  audio.ts  scrambled.ts
      *       alate.ts aearly.ts mono441.ts ac3.ts  bframes.mkv  s1080.ts */
-    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33 || argc == 34 || argc == 35 || argc == 36 || argc == 37);
+    assert(argc == 17 || argc == 20 || argc == 22 || argc == 23 || argc == 24 || argc == 25 || argc == 27 || argc == 28 || argc == 29 || argc == 31 || argc == 32 || argc == 33 || argc == 34 || argc == 35 || argc == 36 || argc == 37 || argc == 38);
     setvbuf(stdout, NULL, _IONBF, 0);
 
     Run r;
@@ -1086,65 +1032,6 @@ sw:
                 assert(r.st.state == TSP_ENDED && k2x >= 1 && k2late == 0);
             }
             tsp_test_core3_unknown();
-        }
-        if (a52_available()) {   /* 1.2.3: MPEG-4 on the (fake) hardware: it decodes; it refuses (the software takes over) */
-            static const char *const hf[3] = { "xvid.avi", "mpeg4.mkv", "mpeg4.mp4" };
-            tsp_set_m4v_hw(1);                               /* (the software tests before: the library refused, none worked) */
-            for (int mode = 1; mode <= 2; mode++)
-                for (int k = 0; k < 3; k++) {
-                    snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", hf[k]);
-                    m4v_mode = mode; m4v_units = m4v_pics = m4v_bad_es = 0;
-                    VRun v = play_vod(dp, 0, 20, 0, 0);
-                    char nm[48];
-                    snprintf(nm, sizeof nm, "%s hw%s", hf[k], mode == 1 ? "" : " refused");
-                    show(nm, &v.r);
-                    printf("               hardware: %d units, %d pictures\n", m4v_units, m4v_pics);
-                    int frames = k ? 140 : 290;
-                    assert(v.r.st.state == TSP_ENDED && v.r.st.decoded >= (uint32_t)frames && v.r.changes >= frames - 10 && v.r.st.audio_frames > 100 && !m4v_lib);
-                    if (mode == 1) assert(m4v_pics >= frames && m4v_bad_es == 0);
-                    else assert(m4v_pics == 0 && m4v_units == 3);
-                }
-            /* 1.2.3b / 1.2.4b: the ways. Only codec memory + internal decoder creates: found (way 4), then used at
-             * once for the next file */
-            for (int k = 0; k < 4; k++) {
-                static const int ok[4] = { 32, 32, 0, 0 };
-                if (k == 0 || k == 2) tsp_set_m4v_hw(1);
-                snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", hf[k & 1]);
-                m4v_mode = 1; m4v_create_ok = ok[k]; m4v_units = m4v_pics = m4v_inits = m4v_creates = 0;
-                VRun v = play_vod(dp, 0, 20, 0, 0);
-                char nm[48];
-                snprintf(nm, sizeof nm, "%s ways %d", hf[k & 1], k);
-                show(nm, &v.r);
-                printf("               hardware: %d inits, %d creates, %d pictures\n", m4v_inits, m4v_creates, m4v_pics);
-                int frames = (k & 1) ? 140 : 290;
-                assert(v.r.st.state == TSP_ENDED && v.r.st.decoded >= (uint32_t)frames && v.r.st.audio_frames > 100 && !m4v_lib);
-                if (k == 0) assert(m4v_pics >= frames && m4v_inits == 4 && !unmaps_open);   /* ways 1-3 refused, way 4 worked */
-                if (k == 1) assert(m4v_pics >= frames && m4v_inits == 1 && m4v_creates == 1);
-                if (k == 2) assert(m4v_pics == 0 && m4v_inits == 7);               /* all 7 tried: software */
-                if (k == 3) assert(m4v_pics == 0 && m4v_inits == 0);               /* not again this session */
-            }
-            {   /* a way that did not come back (the mark file left): it and the later ones are skipped */
-                char mk[600];
-                snprintf(mk, sizeof mk, "%s", dp);
-                char *ms = strrchr(mk, '/');
-                snprintf(ms ? ms + 1 : mk, sizeof mk - (size_t)(ms ? ms + 1 - mk : 0), "%s", "m4v_try.txt");
-                FILE *f = fopen(mk, "w");
-                assert(f);
-                fputs("1\n", f);
-                fclose(f);
-                tsp_set_m4v_hw(1);
-                tsp_set_m4v_mark(mk);
-                m4v_mode = 1; m4v_create_ok = 32; m4v_units = m4v_pics = m4v_inits = m4v_creates = 0;
-                snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "mpeg4.mkv");
-                VRun v = play_vod(dp, 0, 20, 0, 0);
-                show("mpeg4.mkv mark 1", &v.r);
-                struct stat stt;
-                assert(v.r.st.state == TSP_ENDED && v.r.st.decoded >= 140 && m4v_pics == 0 && m4v_inits == 1 && stat(mk, &stt) != 0);
-                tsp_set_m4v_mark(NULL);
-                tsp_set_m4v_hw(1);
-            }
-            m4v_create_ok = 63;
-            m4v_mode = 0;
         }
         if (a52_available()) {   /* AVI: jumping through its index */
             snprintf(sl ? sl + 1 : dp, sizeof dp - (size_t)(sl ? sl + 1 - dp : 0), "%s", "xvid.avi");
@@ -1736,12 +1623,36 @@ limit:
             /* 1.2.4n: a decoder at about 45 a second (the device's channel): up to all of each group was too many; it
              * stays below the level that failed instead of going up and down */
             int_out_us = 22000;
+            g_ceil_n = g_ups_n = 0;
             r = play(argv[34], 12);
             int_out_us = 0;
             show("1080p50 all P, 45/s decoder", &r);
-            printf("               shown %u, decoded %u, left out %u, dropped %u, last %d ms from the sound\n",
-                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.st.dropped, r.av_last);
+            printf("               shown %u, decoded %u, left out %u, dropped %u, last %d ms from the sound; ceiling set %d times, %d steps up\n",
+                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.st.dropped, r.av_last, g_ceil_n, g_ups_n);
             assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.dropped < 40 && r.av_max < 450);
+            /* 1.2.4o: the device's channel as numbers (the HD decoder works on its own, so the mock cannot show it):
+             * at most 45.2 a second; 1.2.4n's ceiling missed it and the share went up to 50 every 15 s (the ceiling is
+             * tried 2% higher after each good minute: a little above 45.2 at times) */
+            double go[4];
+            assert(tsp_test_group_seq(45.2, 90, go) == 0);
+            printf("               device's numbers, 3 min: share %.1f, ceiling %.1f, %d steps up after it, at most %.0f ms behind\n",
+                   go[0], go[1], (int)go[2], go[3]);
+            assert(go[1] >= 42.0 && go[1] <= 46.5 && go[0] >= 38.0 && go[0] <= 46.5 && go[2] <= 4 && go[3] < 400);
+            assert(tsp_test_group_seq(60.0, 60, go) == 0);  /* a decoder with room: all of each group, no ceiling */
+            printf("               a decoder that can do 60: share %.1f, ceiling %.1f\n", go[0], go[1]);
+            assert(go[0] >= 49.9 && go[1] == 0);
+        }
+        if (argc > 37) {
+            /* 1.2.4o: 1920x1080 whose SPS says level 1.3 (two channels on the device; the HD decoder refused the
+             * pictures, 0x8062000F): the decoder gets level 4.1, the stream plays */
+            g_level_fix = 0;
+            r = play(argv[37], 6);
+            show("1080p level 1.3", &r);
+            printf("               level fixed for the decoder: %d\n", g_level_fix);
+            assert(r.st.state == TSP_ENDED && r.st.decoded >= 60 && g_level_fix >= 1);
+            g_level_fix = 0;                                 /* a right level: nothing changed */
+            r = play(argv[2], 6);
+            assert(r.st.decoded >= 60 && g_level_fix == 0);
         }
         if (argc > 36) {
             /* 1.2.1: the picture size changes on the way (720p -> 1024x576 -> 720p): it goes on, the decoder opened

@@ -78,12 +78,16 @@ int main(void)
     /* 1.2.4n: Settings > Log file "Errors only": the other lines are not kept; an error and the version line are */
     plog_set_all(0);
     plog("tsp: stats %d", 7);
+    plog("tsp: stats %u KB, decoded %u, errors %u", 1u, 2u, 0u);   /* 1.2.4o: "errors" in it: still not an error line */
+    plog("tsp: video end: decoded %u, errors %u", 3u, 0u);
+    plog("tsp: decode error 0x%08X", 0x8062000Fu);
     plog("tsp: ERROR: %s", "kept");
     plog("version %s", "x");
     plog_set_all(1);
     plog("back %d", 4);
     plog_flush();
     b = slurp();
+    assert(!strstr(b, "tsp: stats") && !strstr(b, "video end") && strstr(b, "tsp: decode error 0x8062000F\n"));
     assert(!strstr(b, "tsp: stats 7") && strstr(b, "tsp: ERROR: kept\n") && strstr(b, "version x\n") && strstr(b, "back 4\n"));
     free(b);
     printf("applog: all tests passed (%d threads x %d lines whole and in order)\n", NT, NL);

@@ -112,11 +112,6 @@ int               tsp_sub_text(char *out, size_t cap);
  * (stride in pixels): 0 if that one is gone meanwhile. */
 int               tsp_sub_bitmap(uint32_t *id, int *x, int *y, int *w, int *h, int *cw, int *ch);
 int               tsp_sub_bitmap_copy(uint32_t id, uint32_t *dst, int stride);
-/* 1.2.3: MPEG-4 Part 2 (DivX / Xvid) on the Vita's own decoder first (default 1); 0 = only in software */
-void              tsp_set_m4v_hw(int on);
-/* 1.2.3b: a file the player writes the MPEG-4 hardware way into while trying it (a crash in one: it and the
- * later ones are skipped at the next start); "" or NULL = none */
-void              tsp_set_m4v_mark(const char *path);
 /* 1.2.4j: a file keeping the films whose HD decoder header had to be adjusted (opened adjusted next time) */
 void              tsp_set_adj_file(const char *path);
 void              tsp_test_adj_forget(void);
@@ -128,6 +123,7 @@ void              tsp_test_core3_unknown(void);
 int               tsp_leaked(void);
 /* 1.2.4i test: the times after a reconnect, in the device's order (0 = right) */
 int               tsp_test_rc_seq(void);
+int               tsp_test_group_seq(double max, int groups, double out[4]);   /* 1.2.4o */
 /* 1.2.4e: tests only: each software-decoded unit takes this much longer (a slow ARM) */
 void              tsp_test_sw_delay(int us);
 void              tsp_test_k2(int *exits, int *late);   /* 1.2.4l: tests */

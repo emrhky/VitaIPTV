@@ -15,7 +15,15 @@ size_t sps_add_restriction(const uint8_t *nal, size_t len, uint8_t *out, size_t 
 size_t sps_rewrite(const uint8_t *nal, size_t len, uint8_t *out, size_t cap, int drop_timing, int *reorder);
 
 /* What an SPS says about timing (for the log and the stream analysis). Returns -1 if it cannot be read. */
-typedef struct { int refs, vui, timing, nal_hrd, vcl_hrd, pic_struct, restriction; } SpsInfo;
+typedef struct { int refs, vui, timing, nal_hrd, vcl_hrd, pic_struct, restriction, level, mb_w, mb_h; } SpsInfo;
 int sps_info(const uint8_t *nal, size_t len, SpsInfo *info);
+
+/* 1.2.4o: an SPS whose level is too low for its picture size (on the device: 1920x1080 at level 1.3 and 2.1;
+ * the HD decoder refused every picture after the first ones, 0x8062000F). sps_level_needed: the level that
+ * holds the picture (table A-1, MaxFS), 0 when the given one does. sps_fix_level writes it into the SPS
+ * (level_idc, one byte; nal[0] = the NAL header) and returns it, 0 when nothing was changed; *was (may be
+ * NULL) gets the level it had. */
+int sps_level_needed(int level, int mb_w, int mb_h);
+int sps_fix_level(uint8_t *nal, size_t len, int *was);
 
 #endif

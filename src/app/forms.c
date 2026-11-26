@@ -691,7 +691,7 @@ static void draw_form(void)
             case SF_FIELD: *x = (ScrField){ T("Sound field"), field_name(f_field), SCR_F_CHOICE, 1, 0 }; break;
             case SF_AUTODL: *x = (ScrField){ T("Download the next episode"), T(AUTODL_NAMES[f_autodl < 0 || f_autodl > 2 ? 0 : f_autodl]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_TOUCH: *x = (ScrField){ T("Touch screen in the player"), T(f_touch ? "On" : "Off"), SCR_F_TOGGLE, 1, 0 }; break;
-            case SF_LOG: *x = (ScrField){ T("Log file"), T(f_log ? "Everything" : "Errors only"), SCR_F_TOGGLE, 1, 0 }; break;   /* 1.2.4n */
+            case SF_LOG: *x = (ScrField){ T("Log file"), T(f_log ? "Everything" : "Errors only"), SCR_F_CHOICE, 1, 0 }; break;   /* 1.2.4n (1.2.4o: a choice: the switch shows "On" only) */
             case SF_STORAGE: *x = (ScrField){ T("Storage"), NULL, SCR_F_ACTION, 1, 0 }; break;
             case SF_SERVER: *x = (ScrField){ T("Transcoding server"), T(AUTO_NAMES[f_srv]), SCR_F_CHOICE, 1, 0 }; break;
             case SF_ADDR: *x = (ScrField){ T("Server address"), f_proxy, SCR_F_TEXT, 1, 1 }; break;

@@ -104,7 +104,8 @@ static int parse(const uint8_t *nal, size_t len, Parsed *ps)
 
     Rd b = { ps->rbsp, ps->payload_bits, 0, 0 };
     int profile = (int)rd_u(&b, 8);
-    rd_u(&b, 16);                                           /* constraint flags, level */
+    rd_u(&b, 8);                                            /* constraint flags */
+    ps->info.level = (int)rd_u(&b, 8);
     rd_ue(&b);                                              /* sps id */
     switch (profile) {
     case 100: case 110: case 122: case 244: case 44: case 83: case 86: case 118:
@@ -129,8 +130,9 @@ static int parse(const uint8_t *nal, size_t len, Parsed *ps)
     }
     uint32_t refs = rd_ue(&b);
     rd_u(&b, 1);                                            /* gaps_in_frame_num_allowed */
-    rd_ue(&b); rd_ue(&b);                                   /* size in macroblocks */
-    if (!rd_u(&b, 1)) rd_u(&b, 1);                          /* frame_mbs_only, mb_adaptive */
+    ps->info.mb_w = (int)rd_ue(&b) + 1;                     /* size in macroblocks */
+    ps->info.mb_h = (int)rd_ue(&b) + 1;
+    if (!rd_u(&b, 1)) { rd_u(&b, 1); ps->info.mb_h *= 2; }  /* frame_mbs_only (else map units are pairs), mb_adaptive */
     rd_u(&b, 1);                                            /* direct_8x8_inference */
     if (rd_u(&b, 1)) { rd_ue(&b); rd_ue(&b); rd_ue(&b); rd_ue(&b); }
     if (b.err || refs > 16) return -1;
@@ -156,6 +158,49 @@ static int parse(const uint8_t *nal, size_t len, Parsed *ps)
     ps->info.restriction = (int)rd_u(&b, 1);
     if (b.err) return -1;
     return 0;
+}
+
+/* 1.2.4o: the smallest level whose largest picture (MaxFS, table A-1) holds w x h macroblocks; 0 = none does */
+static int level_for_mbs(int mbs)
+{
+    static const struct { int level, maxfs; } L[] = {
+        { 10, 99 }, { 20, 396 }, { 21, 792 }, { 30, 1620 }, { 31, 3600 }, { 32, 5120 }, { 41, 8192 },
+        { 50, 22080 }, { 51, 36864 }, { 60, 139264 } };
+    for (size_t i = 0; i < sizeof L / sizeof L[0]; i++) if (mbs <= L[i].maxfs) return L[i].level;
+    return 0;
+}
+
+static int maxfs_of(int level)
+{
+    if (level <= 11) return level == 11 ? 396 : 99;         /* (11 is 1b with constraint_set3 in Baseline: 99 then; 396 is safe) */
+    if (level <= 20) return 396;
+    if (level == 21) return 792;
+    if (level <= 30) return 1620;
+    if (level == 31) return 3600;
+    if (level == 32) return 5120;
+    if (level <= 42) return 8192;
+    if (level == 50) return 22080;
+    if (level <= 52) return 36864;
+    return 139264;
+}
+
+int sps_level_needed(int level, int mb_w, int mb_h)
+{
+    int mbs = mb_w * mb_h;
+    if (mbs <= 0 || level <= 0 || mbs <= maxfs_of(level)) return 0;
+    return level_for_mbs(mbs);
+}
+
+int sps_fix_level(uint8_t *nal, size_t len, int *was)
+{
+    SpsInfo in;
+    if (len < 4 || (nal[0] & 0x1F) != 7 || sps_info(nal, len, &in) < 0) return 0;
+    int lv = sps_level_needed(in.level, in.mb_w, in.mb_h);
+    if (!lv) return 0;
+    if (was) *was = in.level;
+    nal[3] = (uint8_t)lv;                                   /* level_idc: a whole byte after profile and flags (never 0: no
+                                                               emulation prevention byte comes or goes) */
+    return lv;
 }
 
 int sps_info(const uint8_t *nal, size_t len, SpsInfo *info)

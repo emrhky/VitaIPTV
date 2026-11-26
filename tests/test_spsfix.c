@@ -1,7 +1,8 @@
 /* PC test: adds bitstream_restriction to every SPS of an Annex B H.264 file (tests/run_spsfix_test.py
  * checks the result with ffmpeg: same pictures, restriction present). With -t also what the player does on
  * its second try: the HRD / pic_struct out of the SPS and the SEI units left out.
- * Usage: test_spsfix in.h264 out.h264 [-t] */
+ * 1.2.4o: with -l only the level, raised when it is too small for the picture (sps_fix_level).
+ * Usage: test_spsfix in.h264 out.h264 [-t | -l] */
 #include "spsfix.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -11,6 +12,7 @@ int main(int argc, char **argv)
 {
     if (argc < 3) return 2;
     int drop = argc > 3 && !strcmp(argv[3], "-t");
+    int lvl = argc > 3 && !strcmp(argv[3], "-l");
     long sei_left = 0;
     FILE *f = fopen(argv[1], "rb");
     if (!f) return 2;
@@ -35,8 +37,18 @@ int main(int argc, char **argv)
             if (!sps++) {
                 SpsInfo in;
                 if (sps_info(d + p, (size_t)(e - p), &in) == 0)
-                    printf("info refs %d vui %d timing %d nal_hrd %d vcl_hrd %d pic_struct %d restriction %d\n",
-                           in.refs, in.vui, in.timing, in.nal_hrd, in.vcl_hrd, in.pic_struct, in.restriction);
+                    printf("info refs %d vui %d timing %d nal_hrd %d vcl_hrd %d pic_struct %d restriction %d level %d mbs %dx%d\n",
+                           in.refs, in.vui, in.timing, in.nal_hrd, in.vcl_hrd, in.pic_struct, in.restriction, in.level, in.mb_w, in.mb_h);
+            }
+            if (lvl) {
+                size_t k = (size_t)(e - p);
+                if (k > sizeof out) return 3;
+                memcpy(out, d + p, k);
+                int was = 0, nl = sps_fix_level(out, k, &was);
+                if (nl) { changed++; reorder = nl; if (changed == 1) printf("level %d -> %d\n", was, nl); }
+                fwrite(out, 1, k, o);
+                i = e;
+                continue;
             }
             size_t k = sps_rewrite(d + p, (size_t)(e - p), out, sizeof out, drop, &r);
             if (k) { fwrite(out, 1, k, o); changed++; reorder = r; i = e; continue; }

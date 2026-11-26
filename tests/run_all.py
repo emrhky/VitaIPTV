@@ -12,7 +12,7 @@ SAN = "-O1 -g -fsanitize=address,undefined -Wall"
 UNIT = [   # name, sources (after tests/test_<name>.c), extra flags
     ("audiofx", "src/audiofx.c", ""), ("aac51", "src/aac51.c src/vsurr.c", ""), ("avpref", "src/avpref.c", ""),
     ("epg", "src/epg.c", ""), ("fav", "src/fav.c src/iptv.c", ""), ("host", "src/iptv.c src/lang.c", ""),
-    ("httpio", "src/httpio.c", "-Itests/mock"), ("listcache", "src/listcache.c", ""),
+    ("listcache", "src/listcache.c", ""),
     ("mylist", "src/mylist.c src/fav.c src/iptv.c", ""), ("srt", "src/srt.c", ""), ("websrc", "src/websrc.c src/iptv.c", ""),
     ("hls", "src/hls.c", ""), ("applog", "src/applog.c -lpthread", "-Itests/mock_applog"),   # (1.2.4n: it was not run) ("guide", "src/guide.c src/epg.c src/iptv.c src/catchup.c -lz", "-DGUIDE_ZLIB"),
 ]

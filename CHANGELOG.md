@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.2.4o (test)
+- **1080p channels whose header says a far too small H.264 level** (on the device: 1920x1080 at level 1.3 and
+  2.1, "This video uses an H.264 feature the Vita decoder refuses (0x8062000F)" after a few pictures): the
+  decoder now gets the level that holds the picture (4.1 for 1080p); nothing else in the stream changes.
+- **1080p50 channels with every picture a reference:** the ceiling now comes from what the decoder made while
+  it was the limit (on the device about 45 a second; 97% of it is the ceiling). 1.2.4n's rule only counted
+  trouble right after a step up; on the device it came a group later, so the share still went up to all of each
+  group every 15 s and the picture fell 0.6 s behind, then jumped. The picture falling further behind from
+  group to group now counts as trouble too, not only a late picture. The "every second picture nothing refers
+  to is left out" steps no longer run on these streams (there are no such pictures; they only filled the log).
+- **Settings > Log file** is a choice now (< Errors only / Everything >): the switch looked off for both.
+  "Errors only" no longer lets the statistics and the end lines through ("errors 0" in them looked like an error),
+  so the card is not written every 5 s while watching; with "Everything" those lines no longer force a write at
+  once either.
+- **MP4 / M4V / MOV links in a list** play in our own player, as films do (they were given to the Vita's
+  system player, SceAvPlayer). src/player.c and its HTTP reader (src/httpio.c) are gone.
+- **Removed:** the MPEG-4 Part 2 hardware decoder attempt (off since 1.2.4d: the Vita's decoder never opened
+  for it; DivX / Xvid stay on the software decoder as before) and tests/test_plain.c (never built).
+
 ## 1.2.4n (test)
 - **1080p50 channels with every picture a reference:** the share of each group that is decoded no longer goes up
   and down. On the device it went up to all of each group, the decoder could not keep up (pictures late, the
