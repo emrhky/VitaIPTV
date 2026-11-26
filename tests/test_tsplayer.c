@@ -25,6 +25,7 @@ static int g_asked_again;                   /* 0.6.0: "the film does not come ..
 static int g51_direct;                      /* 1.2: the 5.1 AAC decoder (0x1008) opened */
 static int g_ceil_n, g_ups_n;               /* 1.2.4o: "at most ... from now on" lines; group steps up */
 static int g_level_fix;                     /* 1.2.4o: "level ... given to the decoder" */
+static int g_opened;                        /* 1.2.4q: "opened in N ms: ..." lines */
 void plog(const char *fmt, ...)
 {
     char line[1024];
@@ -40,6 +41,7 @@ void plog(const char *fmt, ...)
     if (strstr(line, "a second at most here: at most")) g_ceil_n++;
     if (strstr(line, "nothing late:") && strstr(line, "reference pictures a second now")) g_ups_n++;
     if (strstr(line, "given to the decoder") && strstr(line, "too small for its picture")) g_level_fix++;
+    if (!strncmp(line, "tsp: opened in ", 15) && strstr(line, "first bytes at ") && strstr(line, "first picture ")) g_opened++;
     if (getenv("VERBOSE")) puts(line);
     if (getenv("PLOGFILE")) {                                /* (1.2.2: the log without slowing the threads much) */
         static FILE *lf;
@@ -1654,8 +1656,10 @@ limit:
             /* 1.2.4o: 1920x1080 whose SPS says level 1.3 (two channels on the device; the HD decoder refused the
              * pictures, 0x8062000F): the decoder gets level 4.1, the stream plays */
             g_level_fix = 0;
+            g_opened = 0;
             r = play(argv[37], 6);
             show("1080p level 1.3", &r);
+            assert(g_opened == 1);                           /* 1.2.4q: the opening's steps, once */
             printf("               level fixed for the decoder: %d\n", g_level_fix);
             assert(r.st.state == TSP_ENDED && r.st.decoded >= 60 && g_level_fix >= 1);
             g_level_fix = 0;                                 /* a right level: nothing changed */

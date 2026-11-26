@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.2.4q (test)
+- **Posters on a thread of their own:** they no longer wait behind a film's details or the guide. On the device one
+  provider's server took 1.6-4.5 s to accept a connection, its film-details requests held the one queue, and a list
+  showed no poster (or only some) for as long as it was open.
+- **Film details:** a request still running after 1 s while the screen is already on another film is stopped (asked
+  again when the film is chosen again); it gives up connecting after 5 s (was 8). Slow ones (2 s or more) are logged.
+- **Posters kept on the memory card** (cache/posters, at most 40 MB, the oldest go first): a list seen before shows
+  its posters without the network. Settings > Storage has a "Posters" row to clear them.
+- **Lists and the account's requests over one kept connection** (categories, a category's films, a series'
+  episodes): one connect for them instead of one each. Kept connections are closed when a video starts (accounts
+  with one connection).
+- **A silent first socket costs less:** the second socket now starts after 5 round trips of the last connects
+  (at least 0.5 s, at most 1.5 s as before), the third 2.5 s after it.
+- **The log says how long a channel or film took to open**, step by step (first bytes, first video unit, first
+  picture, on the screen, the sound): for making the opening faster next.
+- **A series the server has no episodes of** (an empty answer: two favourite series on the device) says so: "The
+  server has no episodes of this series (it may have been removed)".
+
 ## 1.2.4p (test)
 - **1080p50 channels with every picture a reference** start at the HD decoder's own limit (measured twice on the
   device: 44.8 and 44.9 a second; 97% of it is the first ceiling). 1.2.4o went up to 50 first, the picture fell

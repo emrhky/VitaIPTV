@@ -416,6 +416,7 @@ static void ext_subs_load(const char *url, int film)
 
 static void play_channel_ex(int vi, int use_proxy)
 {
+    net_keeps_close();                                       /* 1.2.4q */
     play_vis = vi;
     got_frame = 0;
     play_hot = 0;

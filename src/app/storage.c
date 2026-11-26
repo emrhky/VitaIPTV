@@ -4,7 +4,7 @@
  * searches, the last web page check); then "Clear all of these". Finished downloads are only shown: they are
  * deleted in Downloads. Each clearing asks first. */
 
-enum { STO_LISTS, STO_GUIDES, STO_PARTIAL, STO_LOGS, STO_OTHER, STO_ALL, STO_DONE, STO_N };
+enum { STO_LISTS, STO_GUIDES, STO_POSTERS, STO_PARTIAL, STO_LOGS, STO_OTHER, STO_ALL, STO_DONE, STO_N };   /* (1.2.4q: posters) */
 static int sto_on, sto_sel, sto_scroll, sto_ask;
 static long long sto_size[STO_N];
 static int sto_count[STO_N];
@@ -48,6 +48,7 @@ static void sto_measure(void)
     memset(sto_count, 0, sizeof sto_count);
     sto_count[STO_LISTS] = sto_scan_dir(CACHE_DIR, "live_", ".bin", &sto_size[STO_LISTS], 0);
     sto_count[STO_GUIDES] = sto_scan_dir(DATA_DIR, "epg_", ".bin", &sto_size[STO_GUIDES], 0);
+    sto_count[STO_POSTERS] = sto_scan_dir(POSTER_DIR, "", "", &sto_size[STO_POSTERS], 0);
     dl_refresh();
     for (int k = 0; k < dln; k++) {
         int i = dlv[k].done ? STO_DONE : STO_PARTIAL;
@@ -75,8 +76,8 @@ static void storage_open(void)
     sto_ask = 0;
     sto_msg[0] = 0;
     sto_measure();
-    plog("storage: lists %lld KB, guides %lld KB, unfinished downloads %lld KB (%d), logs %lld KB, other %lld KB, downloads %lld MB (%d)",
-         sto_size[STO_LISTS] >> 10, sto_size[STO_GUIDES] >> 10, sto_size[STO_PARTIAL] >> 10, sto_count[STO_PARTIAL],
+    plog("storage: lists %lld KB, guides %lld KB, posters %lld KB (%d), unfinished downloads %lld KB (%d), logs %lld KB, other %lld KB, downloads %lld MB (%d)",
+         sto_size[STO_LISTS] >> 10, sto_size[STO_GUIDES] >> 10, sto_size[STO_POSTERS] >> 10, sto_count[STO_POSTERS], sto_size[STO_PARTIAL] >> 10, sto_count[STO_PARTIAL],
          sto_size[STO_LOGS] >> 10, sto_size[STO_OTHER] >> 10, sto_size[STO_DONE] >> 20, sto_count[STO_DONE]);
 }
 
@@ -86,6 +87,14 @@ static long long sto_clear(int i)
     long long freed = 0, b;
     if (i == STO_LISTS || i == STO_ALL) { sto_scan_dir(CACHE_DIR, "live_", ".bin", &b, 1); freed += b; }
     if (i == STO_GUIDES || i == STO_ALL) { sto_scan_dir(DATA_DIR, "epg_", ".bin", &b, 1); freed += b; }
+    if (i == STO_POSTERS || i == STO_ALL) {                  /* (32 a pass: hundreds of them) */
+        long long all = 0;
+        sto_scan_dir(POSTER_DIR, "", "", &all, 0);
+        for (int pass = 0; pass < 200 && sto_scan_dir(POSTER_DIR, "", "", &b, 1) > 0; pass++) {}
+        sto_scan_dir(POSTER_DIR, "", "", &b, 0);
+        freed += all - b;
+        pd_bytes = -1;                                       /* (the poster thread counts again) */
+    }
     if (i == STO_PARTIAL || i == STO_ALL) {
         for (int k = 0; k < dln; k++)
             if (!dlv[k].done && dl_delete(dlv[k].dir) == 0) freed += (long long)dlv[k].have;
@@ -108,11 +117,12 @@ static long long sto_clear(int i)
     return freed;
 }
 
-static const char *const STO_NAMES[STO_N] = { "Saved copies of the playlists", "Saved copies of the guides", "Unfinished downloads",
+static const char *const STO_NAMES[STO_N] = { "Saved copies of the playlists", "Saved copies of the guides", "Posters", "Unfinished downloads",
                                               "Logs", "Archive and search records", "Clear all of these", "Finished downloads" };
 static const char *const STO_INFO[STO_N] = {
     "They let the lists open at once. Cleared: each list loads from the server the next time.",
     "The programme guides. Cleared: they load again when the guide opens.",
+    "Film and series posters seen before (at most 40 MB, the oldest go first). Cleared: they load from the server again.",
     "Downloads that did not finish (stopped or failed). Cleared: they are deleted.",
     "The previous run's log (log_prev.txt). This run's log stays.",
     "The archive's chosen files, the last searches, the last web page check.",

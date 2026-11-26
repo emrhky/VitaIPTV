@@ -82,9 +82,16 @@ typedef struct {
     char src[80];                       /* 1.2.4h: the source picture (size, kind) */
     unsigned cpu_us;                    /* 1.2.4i: the thread's CPU time in it */
     int reused, small, pre;             /* 1.2.4p: over the kept connection; TMDB's smaller size; asked ahead */
+    int disk;                           /* 1.2.4q: from the memory card */
+    volatile int cancel;                /* 1.2.4q: no longer wanted (film info: the screen moved on) */
+    int cancelled;
+    unsigned t_start;                   /* ... when it was given to the thread (now_ms) */
     unsigned copy_us; int copy_dma;     /* 1.2.4l: the copy to the texture (main thread) */
 } QJob;
 static QJob qjob;
+static QJob pjob;                       /* 1.2.4q: the posters, on a thread of their own (film info from a slow server held
+                                           them back: on the device a list showed no poster for as long as it was open) */
+static SceUID poster_tid = -1;
 
 typedef struct {
     volatile int state;                 /* 0 free, 1 asked, 2 done */
@@ -126,7 +133,89 @@ static void poster_host_note(const char *url)
     }
 }
 
-static CioKeep *poster_keep;            /* 1.2.4p: one connection for the posters (the epg thread's alone) */
+static CioKeep *poster_keep;            /* 1.2.4p: one connection for the posters (the poster thread's alone) */
+
+/* ---- 1.2.4q: posters kept on the memory card (cache/posters/<hash>.img, the bytes as they came): a list seen
+ * before shows them without the network. At most POSTER_DISK_MAX; past it the oldest go (down to 3/4). The
+ * poster thread alone writes; Settings > Storage clears them. ---- */
+#define POSTER_DIR CACHE_DIR "/posters"
+#define POSTER_DISK_MAX (40LL * 1024 * 1024)
+#define POSTER_FILE_MAX (512 * 1024)
+static long long pd_bytes = -1;         /* what the folder holds (-1 not counted yet) */
+static int pd_files;
+static void poster_disk_name(const char *url, char *out, size_t cap)
+{
+    uint64_t h = 1469598103934665603ULL;                     /* FNV-1a 64 of the address */
+    for (const unsigned char *p = (const unsigned char *)url; *p; p++) { h ^= *p; h *= 1099511628211ULL; }
+    snprintf(out, cap, "%s/%016llx.img", POSTER_DIR, (unsigned long long)h);
+}
+static int dt_older(const SceDateTime *a, const SceDateTime *b)
+{
+    int x[6] = { a->year, a->month, a->day, a->hour, a->minute, a->second }, y[6] = { b->year, b->month, b->day, b->hour, b->minute, b->second };
+    for (int k = 0; k < 6; k++) if (x[k] != y[k]) return x[k] < y[k];
+    return a->microsecond < b->microsecond;
+}
+/* counts the folder; trim: the oldest go until 3/4 of the most is left */
+static void poster_disk_scan(int trim)
+{
+    enum { NMAX = 1500 };
+    typedef struct { char name[24]; SceDateTime t; unsigned sz; } PdEnt;
+    PdEnt *v = trim ? malloc(sizeof(PdEnt) * NMAX) : NULL;
+    int n = 0;
+    pd_bytes = 0; pd_files = 0;
+    SceUID d = sceIoDopen(POSTER_DIR);
+    if (d < 0) { free(v); return; }
+    SceIoDirent e;
+    while (sceIoDread(d, &e) > 0) {
+        if (SCE_S_ISDIR(e.d_stat.st_mode)) continue;
+        pd_bytes += (long long)e.d_stat.st_size;
+        pd_files++;
+        if (v && n < NMAX && strlen(e.d_name) < sizeof v[0].name) {
+            snprintf(v[n].name, sizeof v[n].name, "%s", e.d_name);
+            v[n].t = e.d_stat.st_mtime;
+            v[n].sz = (unsigned)e.d_stat.st_size;
+            n++;
+        }
+    }
+    sceIoDclose(d);
+    if (!v) return;
+    int gone = 0;
+    while (pd_bytes > POSTER_DISK_MAX * 3 / 4 && n > 0) {    /* (the oldest each time: a few hundred files) */
+        int o = 0;
+        for (int k = 1; k < n; k++) if (dt_older(&v[k].t, &v[o].t)) o = k;
+        char p[160];
+        snprintf(p, sizeof p, "%s/%s", POSTER_DIR, v[o].name);
+        if (sceIoRemove(p) >= 0) { pd_bytes -= v[o].sz; pd_files--; gone++; }
+        v[o] = v[--n];
+    }
+    free(v);
+    plog("poster: %d kept on the memory card had to go (%lld KB, %d left)", gone, pd_bytes >> 10, pd_files);
+}
+static int poster_disk_read(const char *url, Mem *m)
+{
+    char p[160];
+    poster_disk_name(url, p, sizeof p);
+    return read_file(p, m);
+}
+static void poster_disk_write(const char *url, const Mem *m)
+{
+    if (!m->buf || !m->len || m->len > POSTER_FILE_MAX) return;
+    if (pd_bytes < 0) { sceIoMkdir(CACHE_DIR, 0777); sceIoMkdir(POSTER_DIR, 0777); poster_disk_scan(0); }
+    char p[160], tmp[168];
+    poster_disk_name(url, p, sizeof p);
+    snprintf(tmp, sizeof tmp, "%s.part", p);
+    SceUID f = sceIoOpen(tmp, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0666);
+    if (f < 0) return;
+    int ok = sceIoWrite(f, m->buf, (SceSize)m->len) == (int)m->len;
+    sceIoClose(f);
+    if (!ok || sceIoRename(tmp, p) < 0) { sceIoRemove(tmp); return; }
+    pd_bytes += (long long)m->len;
+    pd_files++;
+    if (pd_bytes > POSTER_DISK_MAX) poster_disk_scan(1);
+}
+
+/* 1.2.4q: the film info request stops when the screen moved on (see guide_tick); the others only when the app ends */
+static int qjob_stop_cb(void *ctx) { (void)ctx; return epg_quit || qjob.cancel; }
 
 static void run_qjob(QJob *j)
 {
@@ -134,17 +223,25 @@ static void run_qjob(QJob *j)
     int poster = j->kind == QJ_POSTER;
     if (poster && !poster_keep) poster_keep = cio_keep_new();
     char small[IPTV_URL_MAX + 200];
-    int is_small = poster && !iptv_is_local_path(j->url) && poster_tmdb_small(j->url, small, sizeof small);
-    CioRequest rq = { is_small ? small : j->url, NULL, NULL, 8, 15, mem_data, epg_stop_cb, &m };
+    int local = iptv_is_local_path(j->url);
+    int is_small = poster && !local && poster_tmdb_small(j->url, small, sizeof small);
+    /* (1.2.4q: film info gives up connecting after 5 s, was 8: a server that does not answer held the queue) */
+    CioRequest rq = { is_small ? small : j->url, NULL, NULL, j->kind == QJ_VODINFO ? 5 : 8, 15, mem_data,
+                      poster ? epg_stop_cb : qjob_stop_cb, &m };
     if (poster) rq.keep = poster_keep;
     int st = 0;
     char e[96] = "";
     int r;
+    j->disk = 0;
+    j->cancelled = 0;
     uint64_t t0 = sceKernelGetProcessTimeWide();
-    if (poster && !iptv_is_local_path(j->url)) poster_host_note(j->url);
-    if (iptv_is_local_path(j->url)) r = read_file(j->url, &m) == 0 ? 0 : -1;   /* 1.3: a download's poster */
-    else r = cio_get(&rq, &st, e, sizeof e);
-    if (is_small && (r < 0 || st >= 400 || !m.buf) && !epg_quit) {   /* (no such size there: the address as given) */
+    if (poster && !local && poster_disk_read(j->url, &m) == 0 && m.buf) { r = 0; st = 200; j->disk = 1; }   /* 1.2.4q */
+    else {
+        if (poster && !local) poster_host_note(j->url);
+        if (local) r = read_file(j->url, &m) == 0 ? 0 : -1;  /* 1.3: a download's poster */
+        else r = cio_get(&rq, &st, e, sizeof e);
+    }
+    if (!j->disk && is_small && (r < 0 || st >= 400 || !m.buf) && !epg_quit) {   /* (no such size there: the address as given) */
         static int said;
         if (!said++) plog("poster: the smaller TMDB size did not come (HTTP %d): the address as given", st);
         free(m.buf);
@@ -156,7 +253,14 @@ static void run_qjob(QJob *j)
     }
     uint64_t t1 = sceKernelGetProcessTimeWide();
     j->dl_us = (unsigned)(t1 - t0);
-    j->reused = poster && cio_keep_reused(poster_keep);
+    j->reused = poster && !j->disk && cio_keep_reused(poster_keep);
+    j->cancelled = j->kind == QJ_VODINFO && qjob.cancel;
+    if (j->kind == QJ_VODINFO && j->dl_us >= 2000000) {      /* 1.2.4q: a slow server (once in a while) */
+        static unsigned slow;
+        if (slow++ < 3 || slow % 20 == 0)
+            plog("film info: %u ms (connect %d ms, %d socket%s)%s%s%s", j->dl_us / 1000, cio_last_connect_ms(), cio_last_connect_tries(),
+                 cio_last_connect_tries() == 1 ? "" : "s", j->cancelled ? ", stopped: the screen moved on" : "", r < 0 ? ", " : "", r < 0 ? e : "");
+    }
     j->small = is_small;
     j->http = st;
     j->ok = r >= 0 && st < 400 && m.buf != NULL;
@@ -167,6 +271,11 @@ static void run_qjob(QJob *j)
         ti.size = sizeof ti;
         uint64_t run0 = sceKernelGetThreadInfo(sceKernelGetThreadId(), &ti) >= 0 ? ti.runClocks : 0;
         if (j->ok) j->ok = poster_decode((const uint8_t *)m.buf, m.len, POSTER_BOX_W, POSTER_BOX_H, &j->px, &j->pw, &j->ph) == 0;
+        if (j->disk && !j->ok) {                             /* (a bad copy on the card: gone, fetched again next time) */
+            char p[160];
+            poster_disk_name(j->url, p, sizeof p);
+            sceIoRemove(p);
+        } else if (j->ok && !j->disk && !local) poster_disk_write(j->url, &m);   /* 1.2.4q */
         j->dec_us = (unsigned)(sceKernelGetProcessTimeWide() - t1);
         memset(&ti, 0, sizeof ti);
         ti.size = sizeof ti;
@@ -178,7 +287,7 @@ static void run_qjob(QJob *j)
         memset(&j->m, 0, sizeof j->m);
     } else j->m = m;
     static int logged;
-    if (!j->ok && logged++ < 8) plog("%s: HTTP %d%s%s (%.60s)", j->kind == QJ_POSTER ? "picture" : j->kind == QJ_VODINFO ? "film info" : j->kind == QJ_XT_TABLE ? "guide" : "job",
+    if (!j->ok && !j->cancelled && logged++ < 8) plog("%s: HTTP %d%s%s (%.60s)", j->kind == QJ_POSTER ? "picture" : j->kind == QJ_VODINFO ? "film info" : j->kind == QJ_XT_TABLE ? "guide" : "job",
                                      st, r < 0 ? ", " : "", r < 0 ? e : "", j->url);   /* (1.5.1: what it was for) */
 }
 
@@ -220,6 +329,24 @@ static int xmltv_thread(SceSize args, void *argp)
     return 0;
 }
 
+/* 1.2.4q: the posters' thread (pjob) */
+static int poster_thread(SceSize args, void *argp)
+{
+    (void)args; (void)argp;
+    while (!epg_quit) {
+        if (poster_keep_drop) { poster_keep_drop = 0; cio_keep_close(poster_keep); }   /* (a video starts) */
+        if (pjob.state == 1) {
+            run_qjob(&pjob);
+            __sync_synchronize();
+            pjob.state = 2;
+        }
+        sceKernelDelayThread(10000);
+    }
+    cio_keep_free(poster_keep);
+    poster_keep = NULL;
+    return 0;
+}
+
 static int epg_thread(SceSize args, void *argp)
 {
     (void)args; (void)argp;
@@ -257,7 +384,9 @@ static void epg_start(void)
     if (epg_tid >= 0) sceKernelStartThread(epg_tid, 0, NULL);
     xmltv_tid = sceKernelCreateThread("xmltv", xmltv_thread, 0x10000118, 256 * 1024, 0, 0, NULL);   /* 0.8.0 (lower) */
     if (xmltv_tid >= 0) sceKernelStartThread(xmltv_tid, 0, NULL);
-    plog("epg: thread 0x%08X, xmltv 0x%08X, time zone %+d min", (unsigned)epg_tid, (unsigned)xmltv_tid, tz_min);
+    poster_tid = sceKernelCreateThread("poster", poster_thread, 0x10000110, 256 * 1024, 0, 0, NULL);   /* 1.2.4q */
+    if (poster_tid >= 0) sceKernelStartThread(poster_tid, 0, NULL);
+    plog("epg: thread 0x%08X, xmltv 0x%08X, posters 0x%08X, time zone %+d min", (unsigned)epg_tid, (unsigned)xmltv_tid, (unsigned)poster_tid, tz_min);
 }
 
 static void epg_stop(void)
@@ -276,6 +405,12 @@ static void epg_stop(void)
     sceKernelWaitThreadEnd(epg_tid, NULL, &to);
     sceKernelDeleteThread(epg_tid);
     epg_tid = -1;
+    if (poster_tid >= 0) {                                   /* 1.2.4q */
+        to = 3000000;
+        sceKernelWaitThreadEnd(poster_tid, NULL, &to);
+        sceKernelDeleteThread(poster_tid);
+        poster_tid = -1;
+    }
 }
 
 static EpgSlot *epg_slot(int src, const char *id)
@@ -512,7 +647,7 @@ static void poster_take(QJob *j)
 {
     if (j->pre && j->ok && j->px) {                          /* 1.2.4p: (counted: how many of the next ones were ready) */
         static unsigned n;
-        if (++n == 1 || n % 20 == 0) plog("poster: %u fetched ahead (this one came in %u ms%s)", n, j->dl_us / 1000, j->reused ? ", kept connection" : "");
+        if (++n == 1 || n % 20 == 0) plog("poster: %u fetched ahead (this one came in %u ms%s)", n, j->dl_us / 1000, j->disk ? ", memory card" : j->reused ? ", kept connection" : "");
     }
     if (!j->ok || !j->px) {
         if (!j->pre || !strcmp(j->key, poster_want)) snprintf(poster_failed, sizeof poster_failed, "%s", j->key);
@@ -527,13 +662,13 @@ static void poster_take(QJob *j)
     if (t) {
         unsigned cp = j->copy_us;
         int done = j->copy_dma;
-        static unsigned cnt, sdl, sdec, scp, sdma, sre, ssm;  /* (1.2.4f: the first one and every 20th: the averages) */
-        cnt++; sdl += j->dl_us / 1000; sdec += j->dec_us; scp += cp; sdma += done; sre += j->reused; ssm += j->small;
+        static unsigned cnt, sdl, sdec, scp, sdma, sre, ssm, sdk;  /* (1.2.4f: the first one and every 20th: the averages) */
+        cnt++; sdl += j->dl_us / 1000; sdec += j->dec_us; scp += cp; sdma += done; sre += j->reused; ssm += j->small; sdk += j->disk;
         if (cnt <= 3 || cnt % 20 == 0)                       /* (1.2.4p: the first three: the kept connection's effect) */
             plog("poster: %u opened (%s): avg came in %u ms, decoded in %u us, copied in %u us (%u by DMA; %u over the kept "
-                 "connection, %u at TMDB's smaller size); this one %dx%d from %s, came in %u ms%s, decoded in %u us (%u us of it on the CPU)",
-                 cnt, poster_jpeg_lib(), sdl / cnt, sdec / cnt, scp / cnt, sdma, sre, ssm, j->pw, j->ph, j->src, j->dl_us / 1000,
-                 j->reused ? " (kept connection)" : "", (unsigned)j->dec_us, j->cpu_us);
+                 "connection, %u at TMDB's smaller size, %u from the memory card); this one %dx%d from %s, came in %u ms%s, decoded in %u us (%u us of it on the CPU)",
+                 cnt, poster_jpeg_lib(), sdl / cnt, sdec / cnt, scp / cnt, sdma, sre, ssm, sdk, j->pw, j->ph, j->src, j->dl_us / 1000,
+                 j->disk ? " (memory card)" : j->reused ? " (kept connection)" : "", (unsigned)j->dec_us, j->cpu_us);
         if (poster_tex) vita2d_free_texture(poster_tex);     /* (the frame before is done: guide_tick runs first in a frame) */
         poster_tex = t;
         snprintf(poster_have, sizeof poster_have, "%s", j->key);
@@ -571,7 +706,7 @@ static void poster_drop(void)
 }
 
 /* 1.2.4l: a poster is being fetched / decoded (the clocks: 444 MHz for the decoding) */
-static int poster_job_busy(void) { return qjob.state == 1 && qjob.kind == QJ_POSTER; }
+static int poster_job_busy(void) { return pjob.state == 1; }
 
 /* every frame, before drawing: answers taken over, the next request started */
 static void guide_tick(int playing)
@@ -591,24 +726,59 @@ static void guide_tick(int playing)
         } else if (qjob.kind == QJ_VODINFO) {
             int i = 0;
             while (i < VI_CACHE && strcmp(vicache[i].id, qjob.key)) i++;
-            if (i < VI_CACHE) vicache[i].state = qjob.ok && xtream_parse_vodinfo(qjob.m.buf, qjob.m.len, &vicache[i].vi) == 0 ? 2 : 3;
-        } else if (qjob.kind == QJ_POSTER) poster_take(&qjob);
+            if (i < VI_CACHE) {
+                if (qjob.cancelled) vicache[i].id[0] = 0;    /* (1.2.4q: stopped, not "none": asked again on coming back) */
+                else vicache[i].state = qjob.ok && xtream_parse_vodinfo(qjob.m.buf, qjob.m.len, &vicache[i].vi) == 0 ? 2 : 3;
+            }
+        }
         free(qjob.m.buf);
         memset(&qjob.m, 0, sizeof qjob.m);
+        qjob.cancel = 0;
         __sync_synchronize();
         qjob.state = 0;
     }
-    if (qjob.state == 0 && epg_tid >= 0 && cur_src >= 0 && cur_src < nsources) {   /* the next request */
+    /* 1.2.4q: a film's info still coming after 1 s while the screen is on another film: stopped */
+    if (qjob.state == 1 && qjob.kind == QJ_VODINFO && !qjob.cancel && vi_want[0] && strcmp(vi_want, qjob.key) &&
+        now_ms() - qjob.t_start > 1000)
+        qjob.cancel = 1;
+    if (pjob.state == 2) {                                   /* 1.2.4q: the posters' own queue */
+        poster_take(&pjob);
+        free(pjob.m.buf);
+        memset(&pjob.m, 0, sizeof pjob.m);
+        __sync_synchronize();
+        pjob.state = 0;
+    }
+    if (pjob.state == 0 && poster_tid >= 0 && cur_src >= 0 && cur_src < nsources) {
         unsigned nm = now_ms();
         if (poster_loading() && poster_from_cache()) {
             /* 1.2.4l: shown from the kept ones (nothing to ask for) */
         } else if (poster_loading() && nm - poster_want_ms > 150) {   /* (1.2.4l: was 300 ms) */
-            qjob.kind = QJ_POSTER;
-            qjob.pre = 0;
-            snprintf(qjob.key, sizeof qjob.key, "%s", poster_want);
-            snprintf(qjob.url, sizeof qjob.url, "%s", poster_want);
-            qjob.state = 1;
-        } else if (vi_want[0] && nm - vi_want_ms > 300 && sources[cur_src].type == SRC_XTREAM) {
+            pjob.kind = QJ_POSTER;
+            pjob.pre = 0;
+            snprintf(pjob.key, sizeof pjob.key, "%s", poster_want);
+            snprintf(pjob.url, sizeof pjob.url, "%s", poster_want);
+            pjob.state = 1;
+        } else if (state != ST_PLAYING && !poster_loading() && nm - poster_want_ms > 400) {   /* 1.2.4p: the neighbours' posters */
+            for (int k = 0; k < PF_N; k++) {
+                const char *u = pf_url[k];
+                int w, h, tried = 0;
+                if (!u[0] || !strcmp(u, poster_want) || !strcmp(u, poster_have) || poster_cache_get(u, &w, &h)) continue;
+                for (int i = 0; i < 8 && !tried; i++) tried = !strcmp(pf_tried[i], u);
+                if (tried) continue;
+                snprintf(pf_tried[pf_ring], sizeof pf_tried[0], "%s", u);
+                pf_ring = (pf_ring + 1) % 8;
+                pjob.kind = QJ_POSTER;
+                pjob.pre = 1;
+                snprintf(pjob.key, sizeof pjob.key, "%s", u);
+                snprintf(pjob.url, sizeof pjob.url, "%s", u);
+                pjob.state = 1;
+                break;
+            }
+        }
+    }
+    if (qjob.state == 0 && epg_tid >= 0 && cur_src >= 0 && cur_src < nsources) {   /* the next request */
+        unsigned nm = now_ms();
+        if (vi_want[0] && nm - vi_want_ms > 300 && sources[cur_src].type == SRC_XTREAM) {
             char action[64];
             snprintf(action, sizeof action, "get_vod_info&vod_id=%s", vi_want);
             int i = 0;
@@ -618,6 +788,8 @@ static void guide_tick(int playing)
             if (xtream_api_url(&sources[cur_src], action, qjob.url, sizeof qjob.url) == 0) {
                 qjob.kind = QJ_VODINFO;
                 snprintf(qjob.key, sizeof qjob.key, "%s", vi_want);
+                qjob.cancel = 0;
+                qjob.t_start = nm;
                 qjob.state = 1;
             } else vicache[i].state = 3;
             vi_want[0] = 0;
@@ -643,22 +815,6 @@ static void guide_tick(int playing)
                     qjob.state = 1;
                 }
             } else if (c >= 0 && c < guide.nch) guide.ch[c].state = GC_EMPTY;
-        } else if (state != ST_PLAYING && !poster_loading() && nm - poster_want_ms > 400) {   /* 1.2.4p: the neighbours' posters, last of all */
-            for (int k = 0; k < PF_N; k++) {
-                const char *u = pf_url[k];
-                int w, h, tried = 0;
-                if (!u[0] || !strcmp(u, poster_want) || !strcmp(u, poster_have) || poster_cache_get(u, &w, &h)) continue;
-                for (int i = 0; i < 8 && !tried; i++) tried = !strcmp(pf_tried[i], u);
-                if (tried) continue;
-                snprintf(pf_tried[pf_ring], sizeof pf_tried[0], "%s", u);
-                pf_ring = (pf_ring + 1) % 8;
-                qjob.kind = QJ_POSTER;
-                qjob.pre = 1;
-                snprintf(qjob.key, sizeof qjob.key, "%s", u);
-                snprintf(qjob.url, sizeof qjob.url, "%s", u);
-                qjob.state = 1;
-                break;
-            }
         }
     }
     ngwant = 0;                                               /* (the screen says again what it wants) */

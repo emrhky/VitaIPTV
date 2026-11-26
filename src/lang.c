@@ -130,6 +130,10 @@ static const Pair FIXED[] = {
     { "Delete series", "Diziyi sil" }, { "Continue", "Devam" },
     { "No downloaded films: Select > Download on a film", "İndirilmiş film yok: bir filmde Select > İndir" },
     { "No episodes", "Bölüm yok" },
+    { "Posters", "Afişler" },   /* 1.2.4q */
+    { "The server has no episodes of this series (it may have been removed)", "Sunucuda bu dizinin bölümü yok (kaldırılmış olabilir)" },
+    { "Film and series posters seen before (at most 40 MB, the oldest go first). Cleared: they load from the server again.",
+      "Daha önce görülen film ve dizi afişleri (en fazla 40 MB, önce en eskiler gider). Silinirse sunucudan yeniden yüklenir." },
     { "Not enough free space: %d MB needed, %d MB free", "Yetersiz alan: %d MB gerekli, %d MB boş" },
     { "Not enough free space on the memory card", "Hafıza kartında yeterli boş alan yok" },
     { "Cannot write to the memory card", "Hafıza kartına yazılamıyor" },

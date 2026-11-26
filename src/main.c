@@ -331,17 +331,38 @@ static int net_stop_cb(void *ctx) { (void)ctx; poll_cancel(); return net_cancel;
 static const char *http_ua;                 /* 1.5.1 (http_get: this User-Agent instead of the app's; NULL = the app's) */
 static char *http_final;                    /* 1.2.1 (http_get: the address that answered, after redirects; NULL = not asked) */
 static size_t http_final_cap;
+/* 1.2.4q: one connection kept for the lists and the account's requests (categories, then a category's films, then
+ * a series' episodes: one connect for them, not one each; on the device one provider's connects took 1.6-4.5 s).
+ * Taken by the request that runs (any thread), given back after it. */
+static CioKeep *volatile api_keep;
+static volatile int poster_keep_drop;       /* (1.2.4q: the poster thread closes its kept connection) */
+/* a video starts: no connection of ours stays open beside it (an account allowing one connection) */
+static void net_keeps_close(void)
+{
+    CioKeep *k = __sync_lock_test_and_set(&api_keep, NULL);
+    if (k) { cio_keep_close(k); CioKeep *o = __sync_lock_test_and_set(&api_keep, k); if (o) cio_keep_free(o); }
+    poster_keep_drop = 1;
+}
 static int http_get_curl(const char *url, const char *user, const char *pass, Mem *m, char *err, size_t errsz)
 {
     CioRequest rq = { url, user, pass, 10, 20, mem_data, net_stop_cb, m };
     rq.ua = http_ua;                                         /* 1.5.1 (web pages: a browser's) */
+    CioKeep *kp = __sync_lock_test_and_set(&api_keep, NULL);
+    if (!kp) kp = cio_keep_new();
+    rq.keep = kp;
     if (http_final) { http_final[0] = 0; rq.final_url = http_final; rq.final_cap = http_final_cap; }
     int hstatus = 0;
     char e[96];
     unsigned t0 = now_ms();
     int r = cio_get(&rq, &hstatus, e, sizeof e);
     unsigned ms = now_ms() - t0;
-    int tries = cio_last_connect_tries();
+    int tries = cio_last_connect_tries(), reused = cio_keep_reused(kp);
+    CioKeep *old = __sync_lock_test_and_set(&api_keep, kp);  /* (another request's one meanwhile: let go) */
+    if (old) cio_keep_free(old);
+    if (reused)
+        plog("http: GET %.5s -> status %d, %u KB in %u.%u s, over the kept connection%s%s", url, hstatus,
+             (unsigned)(m->len / 1024), ms / 1000, ms % 1000 / 100, r < 0 ? ", " : "", r < 0 ? e : "");
+    else
     plog("http: GET %.5s -> status %d, %u KB in %u.%u s, connect %d ms%s%s%s", url, hstatus,
          (unsigned)(m->len / 1024), ms / 1000, ms % 1000 / 100, cio_last_connect_ms(),
          tries > 1 ? (tries == 2 ? " (2nd socket: the first stayed silent)" : " (3rd socket: the first ones stayed silent)") : "",

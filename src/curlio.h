@@ -14,6 +14,7 @@ typedef struct CioKeep CioKeep;
 CioKeep *cio_keep_new(void);
 void     cio_keep_free(CioKeep *k);          /* (closes what it holds; NULL is fine) */
 int      cio_keep_reused(const CioKeep *k);  /* the last request went over the kept connection */
+void     cio_keep_close(CioKeep *k);         /* 1.2.4q: closes what it holds, keeps the holder (NULL is fine) */
 
 /* called with every piece of the body; return non-zero to stop the transfer */
 typedef int (*CioData)(void *ctx, const uint8_t *data, size_t len);

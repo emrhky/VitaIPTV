@@ -158,9 +158,16 @@ static int bio_recv_timeout(void *ctx, unsigned char *buf, size_t len, uint32_t 
  * 1.5 s (and 4 s) one more socket tries too; the first that connects is used, the others are closed before
  * anything is sent on them. Returns the connected socket, -2 stopped, -1 failed (*why as connect_wait). */
 #define RACE_N 3
+/* 1.2.4q: the second socket after 5 round trips of the last plain connects (at least 0.5 s, at most 1.5 s as
+ * before), the third 2.5 s after it. On the device a provider's server let the first socket stay silent on most
+ * requests ("connect 1611 / 2110 / 3613 ms, 2nd socket") while a connect took 70-130 ms: 1 s or more each time. */
+static volatile int g_rtt_ms;            /* (a running average of connects the first socket made; 0 none yet) */
 static int connect_race(const struct addrinfo *a, const CioRequest *rq, int *why, int *tries)
 {
-    static const int START_MS[RACE_N] = { 0, 1500, 4000 };
+    int s1 = g_rtt_ms ? g_rtt_ms * 5 : 1500;
+    if (s1 < 500) s1 = 500;
+    if (s1 > 1500) s1 = 1500;
+    const int START_MS[RACE_N] = { 0, s1, s1 + 2500 };
     int fds[RACE_N], fls[RACE_N], n = 0, alive = 0, win = -1;
     int limit_ms = (rq && rq->connect_timeout_s > 0 ? rq->connect_timeout_s : 15) * 1000;
     uint64_t t0 = now_ms64();
@@ -212,6 +219,10 @@ static int connect_race(const struct addrinfo *a, const CioRequest *rq, int *why
     }
     for (int k = 0; k < n; k++) if (k != win && fds[k] >= 0) close(fds[k]);
     if (win < 0) return rq && stopped(rq) ? -2 : -1;
+    if (win == 0) {                                         /* (1.2.4q: the first one answered: its time) */
+        int el = (int)(now_ms64() - t0);
+        if (el < 1500) g_rtt_ms = g_rtt_ms ? (g_rtt_ms * 3 + el + 2) / 4 : (el > 0 ? el : 1);
+    }
     if (fls[win] >= 0) fcntl(fds[win], F_SETFL, fls[win]);   /* (blocking again: the rest of the code expects that) */
     *why = 0;
     return fds[win];
@@ -514,6 +525,7 @@ static void conn_drop(Conn *c) { if (c) { conn_close(c); free(c); } }
 CioKeep *cio_keep_new(void) { return calloc(1, sizeof(CioKeep)); }
 void cio_keep_free(CioKeep *k) { if (k) { conn_drop(k->c); free(k); } }
 int cio_keep_reused(const CioKeep *k) { return k ? k->reused : 0; }
+void cio_keep_close(CioKeep *k) { if (k) { conn_drop(k->c); k->c = NULL; } }
 #define KEEP_IDLE_MS 8000               /* (servers close idle ones after 5-15 s; an older one is not tried) */
 
 int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
@@ -696,6 +708,7 @@ const char *cio_last_suite(void) { return ""; }
 CioKeep *cio_keep_new(void) { return NULL; }
 void cio_keep_free(CioKeep *k) { (void)k; }
 int cio_keep_reused(const CioKeep *k) { (void)k; return 0; }
+void cio_keep_close(CioKeep *k) { (void)k; }
 void cio_init(void) {}
 int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
 {

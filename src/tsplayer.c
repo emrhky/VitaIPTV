@@ -363,6 +363,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     uint32_t hd_resyncs;                /* ... times the count was put right (units that give no picture) */
     uint32_t units_in;                  /* video units that reached the video thread */
     volatile uint64_t first_unit_us, first_audio_us;   /* when the first video unit / audio packet came */
+    uint64_t open_us, data_us, pic_us;  /* 1.2.4q: the start, the first bytes, the first picture decoded (the opening's steps) */
     uint64_t first_show_us;             /* when the first picture went on screen */
     uint32_t pub_fed, pub_nopic, pub_nopic_nonref;     /* public decoder: units given, of them without a picture */
     int hd60, hd60_pending;             /* 720p above 30 fps through the HD decoder (0.2.10 experiment) */
@@ -1403,6 +1404,7 @@ static void take_picture(Tsp *t, SceAvcdecPicture *p, int si)
         if (t->st.decoded == 0) t->first_pic_pts = opts;
         if (t->st.decoded == 0) {
             g_pictures_seen = 1;
+            t->pic_us = now_us();                            /* 1.2.4q */
             plog("tsp: first picture %ux%u (crop L%u R%u T%u B%u), pts %lld",
                  (unsigned)p->frame.horizontalSize, (unsigned)p->frame.verticalSize,
                  (unsigned)p->frame.frameCropLeftOffset, (unsigned)p->frame.frameCropRightOffset,
@@ -2173,7 +2175,8 @@ static void sw_frame(void *ctx, const SwvFrame *f)
     if (t->st.decoded == 0) {
         g_pictures_seen = 1;
         t->first_pic_pts = f->pts;
-        plog("tsp: first picture %dx%d (software)%s, pts %lld, copied by %s", f->w, f->h, inter ? ", interlaced (rows mixed on the screen)" : "", (long long)f->pts, done ? "DMA" : "the ARM");
+        if (!t->pic_us) t->pic_us = now_us();                    /* 1.2.4q */
+    plog("tsp: first picture %dx%d (software)%s, pts %lld, copied by %s", f->w, f->h, inter ? ", interlaced (rows mixed on the screen)" : "", (long long)f->pts, done ? "DMA" : "the ARM");
     }
     if (f->pts >= 0 && t->last_out_pts >= 0 && f->pts < t->last_out_pts && t->last_out_pts - f->pts < 90000LL * 10) t->out_of_order++;
     if (f->pts >= 0) t->last_out_pts = f->pts;
@@ -4329,6 +4332,7 @@ static void read_http(Tsp *t, uint8_t *buf)
 /* The first bytes tell the container: Matroska (EBML), FLV or MPEG-TS. */
 static void dmx_feed(Tsp *t, const uint8_t *b, size_t n)
 {
+    if (!t->data_us && n) t->data_us = now_us();             /* 1.2.4q */
     if (t->net_err[0] && n) t->net_err[0] = 0;              /* data comes: an earlier failure is not the story any more */
     if (t->frag) {                                           /* 1.2.2b: an fMP4 segment: kept whole (see hls_get_seg) */
         if (t->flen + n > t->fcap) {
@@ -5691,6 +5695,7 @@ static int worker(SceSize args, void *argp)
     uint8_t *buf = malloc(CHUNK);
     plog("tsp: start");
     t->last_stats = t->start_us = now_us();
+    t->open_us = t->start_us;                                /* 1.2.4q */
     cpu_line(t, t->start_us, 0);                               /* the starting point of the first CPU line */
     if (!buf) set_error(t, "Out of memory");
     else if (!strncasecmp(t->url, "http://", 7) || !strncasecmp(t->url, "https://", 8)) {
@@ -6141,7 +6146,17 @@ vita2d_texture *tsp_frame(int *w, int *h)
         t->shown = n;
         t->shown_pts = sp;
         if (t->vod_first_pts < 0) t->vod_first_pts = sp;
-        if (t->st.shown++ == 0) { t->grace_until = now + 1000000ULL; t->first_show_us = now; }   /* the first pictures come late anyway */
+        if (t->st.shown++ == 0) {
+            t->grace_until = now + 1000000ULL; t->first_show_us = now;   /* the first pictures come late anyway */
+            /* 1.2.4q: how long the opening took, step by step (what to make faster: the connect, the server's first
+             * bytes, the first keyframe, the decoder, or the wait for the screen / the sound) */
+            if (t->open_us) {
+                #define MS_FROM(x) ((x) && (x) >= t->open_us ? (long)(((x) - t->open_us) / 1000) : -1L)
+                plog("tsp: opened in %ld ms: first bytes at %ld, first video unit %ld, first picture %ld, on the screen %ld (sound came at %ld)",
+                     MS_FROM(now), MS_FROM(t->data_us), MS_FROM(t->first_unit_us), MS_FROM(t->pic_us), MS_FROM(now), MS_FROM(t->first_audio_us));
+                #undef MS_FROM
+            }
+        }
         {
             int64_t late = (int64_t)now - (int64_t)due;
             if (late < 0) late = 0;

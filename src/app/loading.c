@@ -738,7 +738,8 @@ static int load_vod(LoadJob *j)
         if (n <= 0) { n = 0; snprintf(j->err, sizeof j->err, "Nothing found"); }
     } else if (j->what == LOAD_EPISODES) {
         n = xtream_parse_episodes(m.buf, m.len, s, &j->list);
-        if (!n) snprintf(j->err, sizeof j->err, "No episodes found");
+        /* 1.2.4q: an empty answer ("[]", "{}", nothing: two favourite series on the device): the server has none of it */
+        if (!n) snprintf(j->err, sizeof j->err, "%s", m.len < 64 ? "The server has no episodes of this series (it may have been removed)" : "No episodes found");
         j->vi_ok = xtream_parse_vodinfo(m.buf, m.len, &j->vi) == 0;   /* 0.8.0 */
     } else {
         n = films ? xtream_parse_vod(m.buf, m.len, s, vcats, nvcats, &j->list)
