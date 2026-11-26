@@ -1,0 +1,628 @@
+# Changelog
+
+## 1.2.4o (test)
+- **1080p channels whose header says a far too small H.264 level** (on the device: 1920x1080 at level 1.3 and
+  2.1, "This video uses an H.264 feature the Vita decoder refuses (0x8062000F)" after a few pictures): the
+  decoder now gets the level that holds the picture (4.1 for 1080p); nothing else in the stream changes.
+- **1080p50 channels with every picture a reference:** the ceiling now comes from what the decoder made while
+  it was the limit (on the device about 45 a second; 97% of it is the ceiling). 1.2.4n's rule only counted
+  trouble right after a step up; on the device it came a group later, so the share still went up to all of each
+  group every 15 s and the picture fell 0.6 s behind, then jumped. The picture falling further behind from
+  group to group now counts as trouble too, not only a late picture. The "every second picture nothing refers
+  to is left out" steps no longer run on these streams (there are no such pictures; they only filled the log).
+- **Settings > Log file** is a choice now (< Errors only / Everything >): the switch looked off for both.
+  "Errors only" no longer lets the statistics and the end lines through ("errors 0" in them looked like an error),
+  so the card is not written every 5 s while watching; with "Everything" those lines no longer force a write at
+  once either.
+- **MP4 / M4V / MOV links in a list** play in our own player, as films do (they were given to the Vita's
+  system player, SceAvPlayer). src/player.c and its HTTP reader (src/httpio.c) are gone.
+- **Removed:** the MPEG-4 Part 2 hardware decoder attempt (off since 1.2.4d: the Vita's decoder never opened
+  for it; DivX / Xvid stay on the software decoder as before) and tests/test_plain.c (never built).
+
+## 1.2.4n (test)
+- **1080p50 channels with every picture a reference:** the share of each group that is decoded no longer goes up
+  and down. On the device it went up to all of each group, the decoder could not keep up (pictures late, the
+  picture 0.4 s behind), down to 33 a second and up again, several times. Trouble right after a step up now
+  makes the level before that step the ceiling; after a minute of good groups it is tried 2% higher.
+- **One-connection accounts, in the middle of a stream:** a busy answer (407) while reconnecting is asked again
+  every 2 s for up to 44 s with the countdown, as at the start since 1.2.4m (it was 3, 6 and 10 s, then the error:
+  a provider on the device held the lost connection longer). Waiting for a busy answer no longer counts as a lost
+  connection (the 6th used to end the stream).
+- **HLS advert breaks:** a wait that comes with an HLS discontinuity (new times, a new SPS, the decoder starting
+  again) is no longer taken for a slow line (on the device a 1080p channel that had played for 25 minutes went to
+  720p after one).
+- **Settings > Log file:** "Errors only" (the default) or "Everything". With errors only, log.txt holds the version
+  line and the error lines, and the memory card is written to only when something went wrong. "Everything" is the
+  log as before, for finding a problem.
+- **Code:** the avcC reading (H.264 header in MP4, MKV and FLV) is one function instead of three copies; the MP4
+  copy took an empty SPS and let an SPS it could not read change the picture information. dl_root (unused)
+  removed. The log's own test (test_applog) and the MPEG audio test (test_mpadec) are run with the others now
+  (they were never run).
+
+## 1.2.4m (test)
+- **1080p50 channels with every picture a reference:** how much of each group of pictures is decoded now follows
+  what the decoder manages, measured as it plays (the first guess was for the heavy streams: on the device the
+  video thread waited for the screen 75% of the time with 67 of each 100 pictures decoded). Time to spare and
+  nothing late: a little more of each next group, up to all of it; a late or dropped picture: less. The picture
+  stands still for a shorter time at the end of each group (the average was 30-37 a second).
+- **Software video without B pictures (DivX 3, many Xvid / MPEG-2 files):** when the ARM falls behind, keyframes
+  only from 1 s behind the sound (it was 3 s: "leave out the pictures nothing refers to" leaves out nothing in
+  such a video, and the device's DivX 3 1080p stayed 1.7-2.9 s behind the sound for 20 s).
+- **HTTPS:** a TLS handshake that fails is tried once more on a new connection (an HLS 1080p variant answered
+  "internal error" once, and was taken for a variant without a picture). If the second fails too, the message
+  says the quality could not be reached, and it is not noted as "no picture" for the next time.
+- **One-connection accounts (HTTP 407 / 405 just after another stream):** asked again every 2 s (was 5 s) for up to
+  44 s with the countdown: the next channel starts as soon as the server lets the account go. Leaving during the
+  wait (another channel) shows no error.
+- **Tests on GitHub (curlio):** the compilers' warnings no longer fill the lines a failure shows (the failing line
+  could not be seen); a runner that cannot reach the "dropped connection" address at once, or that does not drop
+  connections of a full queue, skips those two timing checks instead of failing; SIGPIPE ignored in the test.
+- **Stream test:** AVI files and MPEG program streams / Video CD files are recognised (they were "No video stream
+  recognised"). The log says "MPEG-1" for MPEG-1 video (it said MPEG-2: the same decoder).
+
+## 1.2.4l (test)
+- **Trails on software video after "keyframes only"** (seen on a DivX 3 1080p film; MPEG-2 and Xvid did the same
+  when they fell 3 s behind): the player went back to every picture as soon as it had caught up, in the middle
+  of a group of pictures, so the next pictures were built on one far behind and moving edges left trails until
+  the next keyframe (~35 times a minute in the log). Now it goes back at a keyframe only. (The half size was not
+  the cause: it differs from the full picture by about as little as for any film.)
+- **Posters:** the last 8 shown are kept (about 2.7 MB, given back when a film or channel starts playing, and when
+  another list opens): coming back to a film shows its poster at once. A poster is asked for 150 ms after a film
+  is chosen (was 300 ms), and decoded at 444 MHz.
+- **Video CD (.dat) and MPEG program streams (.mpg, .mpeg, .vob):** VCD files (RIFF CDXA, raw CD sectors, MPEG-1
+  video and MP2 sound) and MPEG-1 / MPEG-2 program streams (DVD .vob with AC-3 sound) play as films: from a
+  provider, a download or the memory card ("Videos on the Vita" now lists AVI, MPG, VOB and DAT files too), with
+  the length, jumping and "Continue from". The video is decoded in software (SD: easily).
+- **Tests on GitHub:** the runners' "ubuntu-latest" became Ubuntu 26.04 in November 2026 (FFmpeg 8 cannot encode
+  the AAC Main profile; one more test failed there); the tests run on Ubuntu 24.04 again, and the AAC Main test
+  files are made another way when the encoder refuses.
+
+## 1.2.4k (test)
+- **Software video copied by DMA again, without the cache sync** (the default now). 1.2.4j's test on the Vita
+  compared seven whole pictures DMA'd straight from FFmpeg's cached memory: all correct (the DMA call keeps the
+  cache in step itself). The sync on the uncached slot cost 7 ms and did nothing. The sampled check of the first
+  pictures stays: a wrong one turns DMA off for the stream, as before.
+- **Posters shrink without dividing per pixel** (the Cortex-A9 has no divide instruction: about 160 ms of CPU a
+  poster). The same pixels come out (tested byte for byte); about 18 times faster on an ARM emulator.
+- **The "copy ways" test of 1.2.4j is gone** (log only).
+- **Stream test:** MPEG-2, MPEG-4 (DivX / Xvid) and DivX 3 video now say "Playable: YES: in software" (they were
+  "NO: not supported yet" since 1.2.2b), and MPEG audio, AC-3, DTS, Opus, Vorbis say "(software)". The line is
+  "Playable:" now, not "Playable by hardware:".
+- **"Continue" in a Matroska film started at 0 s:** with the film's header kept from the last open, the index was
+  the first request to the server, while it still counted the last connection; the failed read was silent and
+  logged as "estimated from the size". Now a busy answer is waited for as at the header, no answer is asked once
+  more, and if it still fails the log says it plays from the start and why.
+
+## 1.2.4j (test)
+- **Live: after a reconnect whose times start again** (a phone sending a file from the start), 1.2.4g/i moved the
+  times on only from the first unit of each kind; on the Vita that was the old stream's last picture (the
+  demuxer gives it out when the next one begins), so the new start went by unmoved: a moment of buffering, then
+  the software decoder thought it was 60 s behind and went to keyframes only and half size for good. Now the
+  newest time at the reconnect is kept and the next 400 units are compared with it.
+- **Films whose HD decoder needed the header adjusted** (out of memory, no picture: the 1920x1038 film, 49-70
+  pictures dropped each time) are remembered across runs (`hd_adjust.txt`, a hash of the address, the newest 64)
+  and opened adjusted at once.
+- **A software picture of 288 rows or fewer flagged interlaced** (a 320x240 MPEG-4 film) is shown as it is: one
+  field's height has nothing to mix.
+- **Log only:** the 1.2.4i memory test is gone. Once a stream, the 5th software picture is also copied with NEON
+  (and a prefetch) and with 32-byte LDM/STM bursts, timed next to the usual copy, and DMA'd without any cache
+  sync into a block of its own and compared whole ("copy ways" line). Posters: the CPU time of the decoding and
+  the first three decoded a second time.
+
+## 1.2.4i (test)
+- **Posters decode faster:** VitaSDK's libjpeg-turbo is built without its NEON code. `tools/build_libjpeg_vita.sh`
+  builds the same version (3.2.1) with it into `third_party/libjpeg-vita` (GitHub builds it and keeps it); CMake
+  uses it when it is there, VitaSDK's libjpeg otherwise. The log's poster line says "libjpeg-turbo 3.2.1 NEON".
+- **The copy test of 1.2.4h is gone** (about 70 ms on the 5th picture). It showed that writing FFmpeg's picture out
+  of the ARM's cache costs 2.5-3 times the copy: the GPU will not read FFmpeg's pictures directly, and the
+  software video keeps the ARM's copy.
+- **Memory test (log only):** once a stream, the 5th software picture is also copied into uncached main memory and
+  into uncached contiguous memory, timed next to the usual copy into CDRAM ("memory test" line). The picture
+  shown is the usual one.
+
+## 1.2.4h (test: measurements first)
+- **Copy test (log only):** once a stream, on the 5th software picture, the log shows what each way of getting the
+  picture to the GPU costs on the Vita: writing FFmpeg's picture out of the ARM's cache (what letting the GPU read it
+  directly would need each picture), a DMA from FFmpeg's memory, a DMA from one contiguous block, the slot's sync,
+  and the ARM's own copy of the same picture. The picture is still copied by the ARM; nothing else changes.
+  Whether the GPU reads FFmpeg's pictures directly (no copy) is decided from these numbers.
+- **Posters:** the log names the source picture (JPEG / PNG, size, progressive, how much libjpeg shrank it while
+  decoding) and how long that one took.
+
+## 1.2.4g (test)
+- **MPEG-2 above SD froze and the player could not be closed (1.2.4f):** the 4th slice worker held on the 4th core
+  made each picture wait about 135 ms on the Vita, and a stopped player stayed in memory (three times in one log:
+  up to 95 of 96 MB taken, then films said "Out of memory (MP4 index)", Xvid gave broken pictures and the HD
+  decoder lost its CDRAM). Gone: as in 1.2.4e, FFmpeg's 3 threads and the reader on the 4th core.
+- **Software video copied by the ARM again:** the DMA copied a 1080p picture in 23-26 ms on the Vita, the ARM in
+  15.6 ms. (Posters keep the DMA: about 1 ms either way.)
+- **A player that cannot be stopped is said on the screen:** "an earlier video did not close and still holds
+  memory: restart the app" (once, and with an "Out of memory" error).
+- **Live: a server that starts its times again after a reconnect** (e.g. a phone sending a file from the start):
+  the picture waited for the sound for up to 8 s again and again. The times after the reconnect now follow the
+  ones before (one timeline); the log says so.
+
+## 1.2.4f (test)
+- **Software video (MPEG-2, MPEG-4, DivX 3) copied by DMA:** the ARM writes the picture memory at only ~200 MB/s
+  (1080p: 15 ms a picture, more than decoding it). The slots now take FFmpeg's row length and each colour plane
+  goes over in one DMA; the first pictures are checked, and after an error the ARM copies as before.
+- **Interlaced software pictures are mixed on the screen:** the GPU draws the picture a second time one row higher
+  at half strength (each row the mean of two), in place of the ARM.
+- **The 4th core** (open only with a plugin; closed: everything as before, 3 threads): MPEG-2 gets a 4th slice
+  worker held there (the reader stays); other software video moves the reader there; HTTPS streams move the reader
+  there (TLS decryption took up to 80% of a core). A reader that finds that core full twice goes back.
+- **HTTPS:** ChaCha20-Poly1305 is offered first (no AES instructions on the Vita's ARM: about twice as fast in
+  software); the suite in use is in the log.
+- **Posters:** copied into their texture by DMA; the log shows how long they take to come, to decode and to copy,
+  and which JPEG library the build has.
+
+## 1.2.4d / 1.2.4e (test)
+- **HLS films could freeze (H.264):** some servers put the picture settings (SPS / PPS / SEI) in a packet of their
+  own before the picture; the Vita decoder refused both and the picture stood still. Such packets are now joined
+  to the next one. The decoder's error line shows what the unit held (NAL types).
+- **Downloads given as HLS:** a film or episode address that answers with an HLS playlist was saved as the
+  playlist and shown as "finished (0 MB)". Now its TS parts are downloaded one by one into `video.ts` (AES-128
+  decrypted, the best picture up to 1080p, after a pause on with the next part, the size guessed from the parts
+  while it downloads). HLS with MP4 parts, the sound in a playlist of its own, DRM and live streams say why they
+  cannot be downloaded.
+- The Vita's MPEG-4 decoder is not tried any more (none of the ways opened it; the right one is known now and
+  comes later). MPEG-4 Part 2 goes to the software decoder at once.
+- **Software video (MPEG-2, MPEG-4, DivX 3):** interlaced row mixing 16 bytes at a time (NEON); behind the sound
+  with a picture bigger than the screen: decoded at half size (FFmpeg lowres) from the next keyframe on; with the
+  4th core open (a plugin) the reader moves there. The log tells decoding apart from copying / row mixing.
+
+## 1.2.4c (test)
+- Vita's MPEG-4 decoder: the codec memory block now has room beyond the size asked (1.2.4b got no address from
+  the codec engine), then smaller alignments; the size asked, the block and the address are in the log.
+- The MPEG-4 profile line comes first, also when the hardware is not tried (an MP4 / MKV header; an AVI has it
+  in the stream).
+
+## 1.2.4b (test)
+- **Vita's MPEG-4 decoder, new ways:** on the Vita the public library takes only H.264, and the internal library
+  with the internal decoder was refused (0x80620902): left out. Tried now: the internal library with the public
+  decoder in the variants 1.2.4 did not reach (frame memory as asked, one reference), then the library with a
+  codec context in CDRAM, as the HD H.264 decoder works. The video's MPEG-4 profile is in the log (the Vita
+  plays Simple Profile).
+- Above 1280x720 (the Vita's own MPEG-4 limit) the hardware is not tried: 1.2.4 took the refusal at 1080p for
+  "none works" and left SD films to the software for the session too.
+
+## 1.2.4 (test)
+- **Order of the downloads:** a waiting one shows its place ("Waiting (2)"); *Select > Download it next / Move it
+  up one / Download it last* on the Downloads screen.
+- **Delete the watched downloads:** a film or an episode played to its end from the Downloads (or an episode
+  watched to its end online) says "Watched, 1.2 GB"; *Select > Delete the watched episodes of this series* /
+  *Delete all watched downloads* (it asks first, with the count).
+- **Vita's MPEG-4 decoder:** 1.2.3's way was refused on the Vita (0x80620902). Now the library and the decoder
+  are opened in up to seven ways (public / internal pairs, one or two references, the frame memory as asked), each
+  in the log; the one that works is used for the rest of the session, none = software as before. If a way should
+  crash the app, it and the later ones are left out at the next start (`m4v_try.txt`).
+- HLS: addresses with "../" or "./" in a playlist are resolved (RFC 3986). A channel whose server does not do it
+  itself answered HTTP 400.
+
+## 1.2.3 (test)
+- **DivX / Xvid on the Vita's own MPEG-4 decoder** (sceM4vdec): less work for the ARM, HD DivX possible. If it
+  refuses a stream, the software decoder takes over from its first unit (nothing is lost).
+- **Software video faster:** FFmpeg with the ARM's NEON code; above SD on three cores (MPEG-2 by slices, MPEG-4 by
+  pictures). If this VitaSDK does not build it so, it is built without them (the log's "ffmpeg:" line says).
+- **Download the next episode** (Settings: off / 1 / 2): at 40 percent of an episode the next ones (not watched,
+  not downloaded yet) are queued. An account with room for two connections downloads while you watch; with one,
+  the download starts when you stop watching (as before).
+- **Storage** (Settings): the playlists' and guides' saved copies, unfinished downloads, logs, archive and
+  search records: sizes, each cleared on its own or all at once; finished downloads and free space shown.
+- **Touch screen in the player** (Settings, off by default, not on a Vita TV): touch shows / hides the bar,
+  drag the time line to jump, two touches pause.
+- AVI: the sound waited (up to 4 s) at the start and after jumps; now it starts with the picture.
+- A stream that gave a few KB and then nothing ("No video data received", seen after the Vita woke) is tried once
+  more by itself.
+
+## 1.2.2b (test)
+- **MPEG-2 video** (SD TV channels, DVD copies) and **AVI films with DivX / Xvid / DivX 3** play: decoded on the
+  ARM (the Vita's decoder takes only H.264). Also MPEG-4 Part 2 in MKV, MP4 and TS. Interlaced pictures are
+  smoothed (no combs). Above SD the ARM may not keep up: it then leaves out pictures nothing refers to.
+- **AVI files:** jumping through their index, MP3 / MP2 / AC-3 / DTS / AAC sound; from a server without ranges
+  from the start.
+- **PGS subtitles** (Blu-ray copies in MKV): shown as pictures where the film puts them; "PGS" in the menu.
+- **HLS with fMP4 / CMAF segments** plays (before: "not supported"), also from web pages.
+- AES-128 HLS: no false "decrypted end is wrong" in the log when a stream is stopped.
+
+## 1.2.2 (test)
+- **Sound menu: five rows.** *Clear sound* (the speakers' sound: less deep bass, clearer voices) is now part of
+  *Sound field: Speakers*, so it goes off by itself with headphones on Auto. *Same volume on every channel* became
+  **Sound levelling: Off / Between channels / Night**; Night also turns loud scenes down at once and brings quiet
+  speech up (an explosion about 5 dB over the speech instead of 16-22 dB).
+- **Sound delay** is kept with the film, the series or the channel it was set on and comes back only there; anything
+  else starts at 0. Shown as "+0.20 s" (no output name), 0 to +1 s (values below 0 did nothing).
+- **Bluetooth headphones** are recognised: Sound field Auto uses the headphones' sound with them.
+- **Downloads wait when the account's connections are all in use** (its check said so) instead of failing with
+  "The server does not give this one (HTTP 405)".
+- **DTS sound** plays (films whose only sound was DTS were silent): in MKV, TS / M2TS and MP4, 5.1 mixed to stereo.
+- **AES-128 encrypted HLS** plays (the standard HLS encryption whose key the playlist names), also from web pages.
+  SAMPLE-AES and DRM stay unsupported.
+- **Player, "HTTP 405" right after another stream:** when a stream of the same server ended less than a minute ago,
+  the player tries again every 5 s for up to 45 s with a countdown ("The provider still counts the last stream"),
+  O stops it; then one message. The "account free means 405 for good" guess is gone.
+- Tests: the PC tests run on GitHub with every build (`tests/run_all.py`); a check that the Turkish strings use the
+  same `%d` / `%s` as the English ones; two old player tests brought up to date.
+
+## 1.2.1 (test)
+- **Internet Archive items with many videos** (archive.org/details/ID): every video is a film of its own in the
+  list (where you stopped, favourite, download each), instead of one film with one of the videos.
+- **A channel whose picture size changes** (HD to SD for adverts) goes on; it stopped with "Picture size changed".
+- **Sound delay** (Select > Audio): for Bluetooth headphones, where the sound comes late; kept separately for the
+  speakers and for headphones / other outputs.
+- **Films a server sends as an HLS playlist** play; one that sends a web page or a message instead of the film says
+  so (and the log shows what came) instead of "Unknown file type".
+- Web page playlists: up to 300 videos (24 before); a folder's list without its last "/" works; archive.org's
+  `.ia.mp4` copy and its original are one row.
+- The log is written once a second (errors at once) instead of opening the file for every line.
+- Saved copies of playlists that are gone are deleted at the start; `archive_files.txt` no longer only grows.
+- Code: `main.c` (8400 lines) is split into 12 parts in `src/app/` by subject.
+
+## 1.2.0
+
+All changes since 1.1.0.
+
+### Downloads (watch without the internet)
+- **Select > Download** on a film or an episode (*Download this season* / *every episode* on a series, or a single
+  film link). A *Downloads* row shows among the playlists while there is one; it opens without a connection.
+  Files go to `ux0:data/VitaIPTV/downloads/` (the video as sent, `poster.jpg`, `info.txt`, a `.srt` beside it).
+- **Watch while it downloads** (from about 2 %). A downloaded film opened in its list plays from the memory card
+  (a sign in the lists); where you stopped is shared online and offline.
+- **Goes on by itself:** after a lost connection (from where it stopped), after the Vita slept or the Wi-Fi
+  dropped (it waits for the network), and after a stream from the same server ended (one-connection accounts:
+  it waits while you watch).
+- A file the server does not give (403 / 404 / 405 / 410) or an empty answer fails at once and stays in the list
+  with the reason (Square tries again). Free space is checked before and during it.
+- The bottom line shows the running download (progress, speed, waiting ones); a note at the top when one ends.
+  *Black screen while it downloads* saves power on the OLED Vita.
+
+### New kinds of playlist
+- **Internet Archive (archive.org):** a collection, a film or a search. Square searches the film titles (by word
+  beginnings; the descriptions only when no title matches), inside the list or in the whole archive; *Next 500...*, Select > Order, the last five searches. The playable H.264 file is chosen and kept.
+- **Web page:** the videos written in a page (`<video>`, og:video, JSON-LD, links to video files, iframes; HLS
+  checked). When nothing plays, the reason is said ("made with JavaScript", "DRM"...) and `webcheck.txt` lists
+  what was found.
+- **Videos on the Vita:** a row that browses the memory cards; MKV / MP4 / TS / FLV files play as films (pause,
+  jump, continue), `.srt` files beside them are shown (UTF-8 or Turkish Windows-1254), Triangle deletes.
+
+### Picture
+- Films with heights between 720 and 1088 (1920x1038...) and 4-reference streams no longer fail or freeze;
+  small (SD) films get enough decoder memory from the start.
+- HD pictures as YUV (the GPU converts them): half the decoder time a picture and a third of the video memory.
+- 1080i shows both fields (50 movements a second) and uses the decoder's interlaced mode.
+
+### Sound
+- **5.1 AAC on the Vita's own decoder** (about 5 % CPU instead of FFmpeg on the ARM); AC-3 / E-AC-3 5.1 mixed down
+  with the surrounds kept; **Opus and Vorbis** (MKV / WebM).
+- **Same volume on every channel** and **Sound field** (wider stereo on the speakers, crossfeed and light virtual
+  surround on headphones; *Auto* follows the headphone jack). All in Settings and Select > Audio.
+- The audio track and subtitles chosen are remembered per channel / film / series; without a choice the app's
+  language is preferred.
+
+### Network and lists
+- Faster connections (a second socket after 1.5 s when the first stays silent); the account check and the
+  film / series categories are kept for a while; a search copy of all films / series is kept for the session.
+- "Account busy" answers are asked again; a stream or film the server refuses says so at once.
+- A stream that was playing when the Vita slept is stopped on waking.
+
+### Look and controls
+- **6 colours × 4 backgrounds**, with pure black for OLED; sharper text and button symbols; notes in amber.
+- Notes at the bottom go away after 4 s (errors 6 s) instead of staying until a button is pressed.
+- The left stick moves through lists and menus (right: open, left: back); menus centred.
+- Lower clock speeds (333 MHz) for streams the hardware plays alone: less battery.
+- A shorter log.
+
+## 1.1.0
+
+### Highlights
+- **Smoother 50 / 60 fps channels:** 720p at 50 / 60 fps now plays every picture (it was 25-30 a second). 1080p at
+  50 / 60 fps plays a steady 25 / 30 pictures a second, evenly spaced, instead of 10-20 unevenly spaced ones; 1080p50
+  channels without B-pictures no longer jump and freeze. (The Vita's decoder manages about 320 000 macroblocks a
+  second: 720p about 90 pictures, 1080p about 40; measured with `tools/hwbench`.)
+- **My List:** one list of your own from the live channels of any of your playlists. *Select > Add to My List* in a
+  channel list or while watching; it shows as the first row of the playlists, grouped by playlist. Xtream channels
+  open with their playlist's current username and password and keep their programme guide.
+- **Fast list opening:** Xtream and M3U-link playlists open at once from the copy saved last time, also without a
+  connection. The list is downloaded again in the background and replaced at a quiet moment when it changed.
+- **Sound** (*Select > Audio* and the settings, all off by default): *Volume boost* (+3 / +6 / +9 dB with a
+  limiter), *Clear sound* for the Vita's small speakers, *Clear speech* for 5.1 films (the voices louder in the
+  stereo mix).
+
+### Reordering
+- *Reorder favourites*, *Reorder My List* and the new *Reorder playlists* (Select): X picks an item up and puts it
+  down, any number of them, START saves; O asks "Save the new order?" when something moved.
+- START no longer makes a playlist a favourite; the order of the playlists is kept in `order.txt` (the first time,
+  the favourite playlists keep their places on top). My List stays on top while it has channels.
+
+### A new look
+- The settings and the playlist form are cards like the playlists, with larger, lighter letters, switches for on /
+  off and arrows for choices; the line at the bottom says what the selected setting does. *Save* / *Cancel* rows are
+  gone (START / O); O with something changed asks whether to save. *About* moved into the settings.
+- The transcoding server is one row (off / when needed / always); its address and the test show while it is on.
+- Rounded shapes are drawn with smooth edges, all button symbols are the same size, and the button bar has the same
+  order on every screen (up / down, X, Square, Triangle, O on the left; L, R, Select, START on the right).
+- The Select menu fits the screen: on the playlists Add, Reorder, Reload, Settings, Quit; on the channels Reorder,
+  My List, Settings, Quit. O on the playlists asks "Quit Vita IPTV?".
+
+## 1.0.0
+
+### Highlights
+- **Much faster streaming:** the network receive buffer was stuck at 63 KB; it is now 512 KB, and plain http streams use the app's own connection too.. On a fast line a film buffers about a minute (40 MB) ahead, so playback is smoother and jumps start sooner.
+- **Programme guide (EPG):** Triangle opens a full guide with channels and a timeline; while watching, the channel keeps playing in a small picture. Works with Xtream and with M3U lists that have an XMLTV guide (`url-tvg`, also `.gz`).
+- **Catch-up:** watch past programmes from the start on channels with an archive (Xtream `tv_archive`, M3U `catchup=`). Pick them from the guide or from a channel's day-by-day schedule.
+- **Film and series details:** posters, year, rating, genre, cast and story next to the list and on a details screen. Series open on their own screen with seasons as tabs.
+- **Subtitles:** text subtitles in MKV (SRT, ASS/SSA) and MP4 films, with sync, size, colour, position and background settings.
+- **Series:** watched episodes get a tick, the series opens on the right episode, and the next episode starts after a countdown.
+- **Search every film / series** of the account, not only the open category.
+
+### Player
+- The Select menu is now in tabs: Picture, Audio, Subtitles, More.
+- R shows the information table; the time of day is in the top bar.
+- Sleep timer and jump to a channel number.
+- 5.1 / 7.1 AAC audio plays (as stereo).
+- HLS channels with separate audio playlists play with sound, and their languages can be chosen.
+
+### Favourites and lists
+- Films and series can be favourites, and they have a *Recently Watched* category.
+- Favourite channels stay in their place in their category; they are reordered from Select > *Reorder favourites*.
+
+### Settings
+- Parental lock (PIN) for adult content.
+- Themes: blue, green, purple, orange.
+
+### Stability
+- Playlists, favourites, settings and resume points are saved safely: a crash or an empty battery while saving can't wipe them.
+
+  
+## 0.5.0
+
+0.4.1 and 0.4.5 were test builds and were not released; their changes are part of 0.5.0 and are listed here.
+
+**Audio**
+- **AC-3 and E-AC-3 ** play, on channels (TS, HLS) and in films (MKV, MP4, TS),
+  decoded in software with FFmpeg's decoder (LGPL, only the AC-3 / E-AC-3 decoders are built in). 5.1 and 7.1
+  sound comes out as stereo. When a stream has AAC as well, AAC is chosen (the hardware decodes it).
+  Until now these films played without sound and these channels needed the transcoding server.
+- **Choosing the audio track:** a channel or film with more than one sound (TS: several audio streams, MKV: several
+  audio tracks) lists them in the **Select** menu under the picture sizes, with the language when the stream says
+  it (*Audio: Turkish (AAC)*, *Audio: English (E-AC-3)*). A film keeps its position when you change the track. The
+  choice stays for the next channels in that language while the app runs. Without a choice the stream's default
+  track plays (MKV), else the best one the Vita can play.
+- The information screen (Triangle) and the radio screen show AC-3 / E-AC-3.
+- 1080p films with AC-3 / E-AC-3 sound stuttered in the test builds (a third or more of the pictures dropped). The
+  cause: Matroska keeps several sound frames in one block (8 frames, 256 ms) and every frame got the block's time,
+  so the sound clock stood still, then jumped 256 ms, and the picture that follows it was dropped as late. Now each
+  frame gets its own time. (The same could happen on TS channels with several AC-3 frames in one packet.)
+- `ac3_test=1`, `2` or `3` in `settings.txt` stay as test modes for AC-3 (see the log); they also log the first 300
+  sound frames.
+
+**Transcoding server**
+- *Use automatically* has three choices: *Off*, *When needed* (as before: channels the Vita cannot play) and
+  *Always* (every channel through the server; files on the memory card play directly).
+- **Select while watching** has a *Through the Server* line under the picture sizes (*Direct* when the stream comes
+  from the server): the channel or film you are watching moves to the server, a film from where it was. Shown
+  only when a server is set. Square still switches too.
+- *Test Server* in the settings no longer closes the app.
+- Films through the server show where they are: the server sends the film's length (with `ffprobe`, which
+  comes with ffmpeg), so the time line and the jump marker work. Update `vita_iptv_proxy.py` on the PC / phone.
+- Through the server, films and channels get 30 s instead of 10 s for their first picture (the server first
+  finds the place in a film and starts converting; on a phone that took longer than 10 s).
+- The server also runs on an Android phone with Termux (see the README).
+
+**Favourites (START)**
+- **Playlists:** START marks a playlist; favourite playlists are at the top with a star.
+- **Live channels:** START on the channel list or while watching adds or removes the channel (a short note says
+  which). Favourites have a star, come first in their category and in *All* (in the order you added them), and a
+  *Favorites* category at the top of the list holds them all. A single stream link that is playing: START marks
+  its playlist.
+- Saved in `ux0:data/VitaIPTV/favorites.txt`: Xtream channels by their id (they stay favourites when the password
+  changes), M3U channels by their link. Editing a playlist's address keeps its favourites.
+- **Reordering:** in the *Favorites* category Triangle picks the channel up, Up / Down moves it, Triangle again
+  saves the order (O leaves it as it was). The new order is also the order at the top of *All* and the categories.
+- Films and series cannot be favourites.
+
+**Recently watched**
+- **Recently Watched:** a category with the last 20 channels watched in that playlist, newest first.
+- *Clear Recently Watched* in the settings (with a question first) empties it for every playlist; favourites stay.
+
+**Xtream EPG (now / next)**
+- While a live channel plays, the second line of the top bar shows what is on now and next, with the times in the
+  Vita's time zone. In the channel list the same line appears for the selected channel after half a second.
+- Asked for one channel at a time in the background and kept for 5 minutes. Channels without a programme guide
+  show nothing.
+
+**Turkish letters**
+- ğ ş ı İ ç ö ü are drawn as they are, with the Latin system font the Vita's own menus use (until now they were
+  drawn as g s i I c o u). Cyrillic, Greek and other names still come from the default font. If the letters look
+  wrong on a console, `plain_letters=1` in `ux0:data/VitaIPTV/settings.txt` brings back the plain ones.
+
+**Channels that did not play well**
+- **720p at 50 fps with timing information in the stream** (HRD, picture timing): the player takes the HD decoder
+  for these because of the frame rate, and it gave no picture ("The Vita decoder gives no picture for this
+  stream"). The second try with the H.264 header adjusted, which already helped the normal decoder in 0.4.0,
+  now also happens on the HD decoder; if that still gives nothing, the normal decoder takes the stream.
+- **720p with 4 reference pictures and timing information:** the normal decoder ran out of picture memory after a
+  few pictures and the picture was lost for about 8 seconds until the next keyframe. These channels now open on the
+  HD decoder at once.
+- **720p at 50 fps on the HD decoder:** when the decoder cannot keep up, the pictures no other picture needs are left
+  out from the start (as for 1080p at 50 fps), so the picture stays in time with the sound.
+
+**Screens**
+- Settings and the playlist form: everything at the size of the playlist names; the value column starts after the
+  longest label, so long labels no longer run into their boxes.
+- Labels start every word with a capital (*Add Playlist*, *Liste Ekle*); messages stay as they are.
+- Shorter hints at the bottom: *Fav.*, *Res.* / *Çöz.*, *P. Channel* / *Ö. Kanal*.
+- About shows when the build was made, as the log does.
+- The hints at the bottom are grouped: X, Square, Triangle and O on the left; L/R, L (the channel before), Select
+  and START on the right. Hints for the d-pad are gone (it works as before). Square in the player shows only when
+  it does something (another picture size, the server, 720p for a film).
+- Notes in the player, error boxes, the radio note, the status line and the delete question go on to the next
+  line instead of running off the screen.
+- "The Vita decoder gives no picture for this stream" was always shown in English: now translated.
+- The Select menu fits longer lists (sizes, server, audio tracks, analysis) and longer names.
+- Bigger letters everywhere, at the size of the settings: channel list and categories (11 rows a page instead of
+  12), the Select menus, the questions and About.
+
+**Log**
+- The second line says when the build was made (`version v0.5.0, built 2026-10-19 10:45`).
+- When the H.264 header (SPS) changes in the middle of a stream, the log says what changed (to find out why some
+  HLS channels lose their picture after a few seconds).
+- The audio tracks of a stream and which one plays.
+- A detail line every 5 s: how evenly pictures come out of the decoder, how long the sound output blocks and
+  whether the sound clock keeps real time.
+
+## 0.4.0
+
+**Channels that did not open**
+- **HLS links that redirect to another server** (e.g. `.../startv4puhu?m3u8` → another host with a token): the
+  qualities and segments are now looked up at the address that answered. Before, every one gave *HTTP 404*.
+- **A quality that gives no picture** (an HLS channel whose "480p" sends only sound, or video without a single
+  keyframe): the player switches to another quality by itself and says so. While you zap, that channel then opens
+  on the quality that worked.
+- **720p channels with "Decoder produced no picture":** when the decoder gives nothing from the start, the player
+  tries once more with the H.264 header adjusted for the Vita before going to the HD decoder.
+  - The header gets *bitstream_restriction* (how many pictures to hold) when it has none.
+  - Its timing information (HRD, picture timing messages) is taken out.
+  - The log and the stream analysis show whether a channel carries timing information.
+- When other channels played fine, *no picture* errors no longer tell you to restart the Vita (the stream is the
+  problem, and the transcoding server may play it).
+
+**Picture size**
+- **Select** opens the size menu on every channel, film and radio station: channels and films with one size show
+  it, and the stream analysis is always the last entry. The *Settings* line shows the setting, e.g. *Settings (720p)*.
+- A size chosen from the menu is found again when the server changes its bit rates a little (the nearest one
+  within 25%, not bigger than the chosen size). Qualities wider than 1920 pixels are no longer listed.
+
+**One button layout everywhere**
+- **Select** opens the menu on the playlists and on the channel screen (Add playlist, Settings, Reload, About,
+  Exit). Changing a filter in the settings from the channel screen filters the list at once.
+- **Deleting a playlist** is now the red *Delete playlist* button at the end of its edit form (Triangle), with a
+  question first. Select no longer deletes.
+- **START** saves forms (playlists, settings).
+- Moving through a film: **Left / Right** and the **left stick**. L / R and the right stick no longer do it.
+- The **left stick** moves up and down in the playlists, forms and menus; **L / R** turn pages on the playlists.
+- Stream analysis: **O** goes back to the picture.
+- **L** while watching goes back to the channel you watched before (from another category too: the list goes to
+  *All*).
+- The radio screen showed a wrong hint (*Triangle: Analyze*): it is *Select*. Square on the radio no longer
+  tries to turn the screen off (it never worked on the Vita).
+- Film hints: *◀▶ Seek* and *Select: Resolution*.
+
+**The Vita hung after closing the app during radio** (every version with radio): the app no longer takes the
+system's "no standby" lock for the radio, which stayed behind when the app was closed with the PS button while a
+station was playing. The radio still keeps the Vita awake while it plays.
+
+**Look**
+- Bigger, clearer button symbols in the hint bar (lighter circles, thicker lines).
+- The Yes / No buttons of a question are inside its box.
+- **New About screen:** version, what the app plays, the GitHub address with a QR code to open it on a phone.
+- **No internet connection** is said at once (loading a list, opening a channel), instead of a vague error after
+  a time-out.
+
+**Settings**
+- *Hide 1080p channels* is now **Hide channels named 4K / UHD** (4K, UHD, Ultra HD, 2160p, 8K): the Vita plays
+  1080p, but not 4K. It starts off, also if the old setting was on.
+
+## 0.3.0
+
+The main changes since 0.2.2 (0.2.3 - 0.2.10 were test versions).
+
+**Picture size**
+- HLS channels that offer several qualities open at about 540p (960x540, the Vita's own screen size: sharp,
+  less data, light to decode) if the channel has it, else at 720p.
+- **Settings > Preferred resolution:** Automatic, 1080p, 720p, 540p, 480p or Lowest.
+- **Select** while watching lists the channel's sizes with their bit rates, with *Automatic* at the top and the
+  stream analysis at the end (also on the error screen). The choice is for that channel only.
+- **Square** goes to the next size up; from the biggest it goes back to the smallest.
+- On a connection that cannot keep up, the player steps down to the next smaller size by itself - but not when you
+  chose a size (with Select / Square or in the settings), except 1080p.
+
+**Smoother live TV**
+- On a slow connection live TV waits with *Buffering...* (sound and picture together, at most about 8 s) instead
+  of freezing or losing the sound sync. The number shows the seconds of video collected.
+- The sound starts together with the first picture, and when the picture falls behind the sound, the sound waits
+  briefly until it has caught up.
+- When the decoder itself cannot keep up, pictures that no other picture needs are left out, so the picture stays
+  in time with the sound. A slow network never causes this.
+
+**1080p and 50/60 fps**
+- The Vita decoder manages 1080p up to about 30 pictures a second (Sony's own player stops at H.264 level 4.1).
+  1080p at 50/60 fps plays at a lower frame rate in time with the sound; HLS channels go to their 720p version,
+  other streams say so on screen.
+- **720p at 50/60 fps** now plays through the HD decoder: all pictures (before: about 85% at 720p60).
+- Files no longer freeze in their last seconds with the sound going on.
+- Fewer stalls with the HD decoder (pictures it has ready are taken out at once; no needless restarts).
+
+**Films and series**
+- **Much faster jumping:** the film's index is kept in memory while the film is open (an MP4 index of several MB
+  used to be read again for every jump).
+- The sound starts with the picture, also after jumps and at the start of a film.
+- *Buffering...* shows the connection speed against what the film needs, and waits longer at once (fewer stops).
+- Black bars above and below the picture (it was the menus' dark blue).
+
+**Channels that did not play**
+- Channels with "AAC Main" sound now have sound (most are AAC-LC with another label).
+- Many 720p channels that never showed a picture ("Decoder produced no picture") now switch to the HD decoder.
+- "Invalid stream" errors from the decoder no longer freeze the picture until the next keyframe.
+- A channel whose server stops answering says so.
+
+**Information**
+- **Triangle** shows three rows in fixed columns: picture size, shown / stream frame rate (e.g. 43 / 50 fps),
+  pictures shown and dropped; sound, A/V offset, waits, damaged pictures; connection speed against what the stream
+  needs.
+- Stream analysis warns about 1080p at 50/60 fps and about AAC Main sound.
+- New round logo (LiveArea, start screen, loading screens).
+- Transcoding server (`tools/vita_iptv_proxy.py`): a source that keeps printing errors no longer stops the picture,
+  account details are no longer shown in its window, and a source that stops answering ends after 15 s.
+
+## 0.2.2
+
+- **Films no longer freeze after buffering:** the HD decoder sometimes answered "buffer full" when the film went on
+  after a pause or after *Buffering...*; that was treated as an error and everything up to the next keyframe was
+  thrown away (frozen picture, sound going on). Now the player waits a moment and gives the same picture again.
+- Buffering waits longer each time it happens again (5, 10, 20, up to 30 s): fewer stops on a slow connection.
+- A film's index (MKV) that arrives damaged no longer sends it back to the start: the place is found from the
+  file size instead. The MP4 index shows how far it is read (it can take half a minute on a slow line).
+- **1080i channels showed the picture twice, squashed:** the decoder gives the two fields one above the other;
+  this is now recognised and the top field is shown full screen.
+- The sound no longer switches off for good when a few damaged audio frames arrive (e.g. "7 channels").
+- **Referer / User-Agent for streams that need them:** read from `#EXTVLCOPT`, `#EXTHTTP` and `link|User-Agent=...`
+  in M3U lists, and two optional fields for single streams. Stream analysis and the transcoding server use them too.
+- After standby the app waits for the Wi-Fi to come back instead of ending the channel with an error.
+- Full CPU speed only while playing, loading or analysing; normal speed in the menus (less heat and battery).
+- Stream analysis compares the download speed with what an HLS stream needs.
+- New round LiveArea bubble; the start screen no longer shows an old version number under the new one.
+- Smaller fixes: the old 1080p setting is gone from settings.txt; safer stopping of network requests;
+  FLV films that do not start at 0 show the right position.
+
+## 0.2.1
+
+- **FLV:** HTTP-FLV live streams and .flv films (H.264 with AAC or MP3); stream analysis reads them too.
+- **Films no longer freeze on a slow connection:** the film waits with *Buffering...* until a few seconds are
+  loaded, instead of dropping pictures while the sound goes on.
+- **720p channels that froze** (decoder out of memory, 4 reference pictures with B-frames) switch to the HD
+  decoder with more picture memory instead of restarting and freezing again.
+- https connections to a server that does not answer give up after a time limit and can be cancelled with O.
+- Less data wasted when a film server does not send parts of files.
+- The start screen showed "v0.1": the version is now drawn by the app.
+- Smaller fixes in the player threads (stopping, the first error is the one shown).
+
+## 0.2
+
+- **1080p** is always on (no longer a setting): 1080p channels and films play through the hardware decoder.
+  HLS channels with several qualities still open in 720p; Square switches to 1080p.
+- **Films and series for Xtream accounts:** opening an Xtream playlist asks for Live TV, Films or Series,
+  with categories, seasons and episodes.
+- **Film playback:** MKV, MP4 and TS files, pause, moving through the film with L / R, the D-pad or the sticks,
+  and resume (*Continue from 41:10*). Film links in M3U lists and single stream links play as films too.
+- **Same controls for live TV and films:** X / START pause, Triangle information, Square 720p / 1080p,
+  Select stream analysis, Up / Down previous / next, O back. Live TV can be paused for a short while.
+- **Stream analysis** (Select) now works for HLS, https and MP4 / MKV films, and shows the download speed.
+- Bigger buffers and recovery when an HLS stream stalls; clearer messages for videos the decoder refuses.
+- Fixed a crash (GPU) after a playlist failed to load.
+- `tools/xtream_test_server.py`: serve a folder of your own videos as an Xtream account to try films and series.
+- The transcoding server can start films at a position.
+
+## 0.1
+
+- First public release: M3U / Xtream / single links, MPEG-TS and HLS, HTTPS (mbedTLS), radio, search, English / Turkish.

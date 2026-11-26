@@ -1,0 +1,160 @@
+#ifndef TSPLAYER_H
+#define TSPLAYER_H
+/*
+ * Live MPEG-TS video player (stage 2: video only).
+ * A worker thread reads the stream (HTTP or local file), demuxes it and feeds
+ * H.264 access units to the Vita hardware decoder, which writes RGBA pictures
+ * straight into GPU textures. The UI thread asks for the picture to show now.
+ */
+#include <stddef.h>
+#include <stdint.h>
+#include <vita2d.h>
+
+typedef enum { TSP_IDLE = 0, TSP_CONNECTING, TSP_WAIT_KEY, TSP_PLAYING, TSP_ENDED, TSP_ERROR } TspState;
+typedef enum { TSP_ERRK_NONE = 0, TSP_ERRK_FORMAT, TSP_ERRK_NET, TSP_ERRK_OTHER } TspErrKind;
+
+#define TSP_MAX_VARIANTS 8
+#define TSP_MAX_AUDIO    8
+#define TSP_MAX_SUBS     8              /* 0.7.0 */
+
+typedef struct {
+    volatile int state;                 /* TspState */
+    char msg[100];                      /* error text when state == TSP_ERROR */
+    volatile int err_kind;              /* TspErrKind: FORMAT = a transcoding server could play it */
+    volatile uint32_t reconnects;
+    int width, height;                  /* visible picture size */
+    volatile uint32_t bytes, decoded, shown, dropped, errors, late, damaged;
+    /* audio */
+    int audio_rate, audio_ch;
+    volatile int audio_mpeg;            /* MPEG audio layer (1-3) when not AAC, else 0 */
+    volatile int audio_only;            /* stream has no video (radio) */
+    volatile uint32_t audio_frames, audio_errors;
+    char audio_msg[64];                 /* why audio is off, if it is */
+    volatile int av_sync;               /* video is following the audio clock */
+    volatile int av_late_ms;            /* how late pictures are shown against the audio, on average */
+    volatile int audio_level;           /* loudness of the last audio frame, 0..1000 */
+    volatile int hd;                    /* decoding above 720p through the HD decoder (internal entry points) */
+    volatile int hls_hd;                /* HLS offers a 1080p variant (the player can switch to it) */
+    /* films and episodes */
+    volatile int dur_ms;                /* length (0 = unknown) */
+    volatile int file_wait;             /* 1.3.2: a film still being downloaded waits for its next part */
+    volatile int seekable;              /* tsp_start_vod at another time works */
+    volatile int paused;
+    int fields;                         /* pictures are two fields one above the other: draw the top half */
+    int mix_rows;                       /* 1.2.4f: an interlaced software picture: the screen mixes each row with the next (GPU) */
+    int slots;                          /* decoded pictures held between the decoder and the screen */
+    uint32_t skipped;                   /* pictures left out on purpose (catching up, decoder memory) */
+    volatile int slow_network;          /* live: the line cannot carry this picture size (the UI may pick a smaller one) */
+    int hls_h, hls_lower;               /* HLS: height of the variant playing, a smaller one exists */
+    unsigned net_kbs, need_kbs, seg_kbs;  /* network (last 5 s), what the stream needs, the last HLS segment's speed */
+    int fps10;                          /* pictures per second x10 */
+    volatile int decoder_slow;          /* 1080p: the decoder cannot keep up with the stream's picture rate */
+    unsigned holds;                     /* live: times the sound waited for a picture that came late */
+    volatile int buffering;             /* film: waiting for the network (shown as "Buffering...") */
+    int buf_pct;                        /* ... how far (0-100) */
+    unsigned rebuffers;                 /* how many times */
+    int note_pct;                       /* how far the note's work is (0 = not shown) */
+    char note[64];                      /* what a film is waiting for (reading its index...), "" = nothing */
+    /* HLS: the variants the Vita can play (up to 1080p), smallest first, and the one playing (-1 = none) */
+    int hls_nv, hls_vcur;
+    int hls_vw[TSP_MAX_VARIANTS], hls_vh[TSP_MAX_VARIANTS];   /* height 0 = not given */
+    long hls_vbw[TSP_MAX_VARIANTS];     /* bit rate, bit/s (tsp_set_hls_bw picks one exactly) */
+    volatile int hls_no_video;          /* the error: this HLS variant carries no picture (another one may) */
+    volatile int hls_tls_fail;          /* 1.2.4m: ... because its connection failed (TLS), not a sound-only variant */
+    /* 0.5.0: the audio tracks the player can play (TS / MKV), in the stream's order, and the one playing */
+    volatile int audio_ac3;             /* AC-3 (1) / E-AC-3 (2) / DTS (3, 1.2.2) decoded in software, else 0 */
+    volatile int audio_xiph;            /* 1.4.2: Opus (1) / Vorbis (2) decoded in software, else 0 */
+    volatile unsigned net_read_kbs;     /* 0.6.0: the line's speed, last measured while the reader read most of the time
+                                         * (with full queues net_kbs is what is played), 0 = same as net_kbs */
+    volatile int audio_src_ch;          /* 0.6.0: the stream's channels when more than played (5.1 -> stereo: 6) */
+    volatile int audio_sw;              /* 1.2: AAC decoded by FFmpeg on the ARM (5.1 / 7.1 not on the Vita's decoder) */
+    volatile int core_hot;              /* 1.2: a CPU core was 65% busy or more in the last stats period (5 s) */
+    int a_n, a_cur;                     /* a_cur -1 = none */
+    int a_id[TSP_MAX_AUDIO];            /* PID / MKV track number (tsp_set_audio) */
+    int a_codec[TSP_MAX_AUDIO];         /* TsCodec */
+    char a_lang[TSP_MAX_AUDIO][4];      /* ISO 639-2, "" = not given */
+    /* 0.7.0: the text subtitle tracks (MKV), in the file's order, and the one shown (-1 = off) */
+    int s_n, s_cur;
+    int s_id[TSP_MAX_SUBS];             /* MKV track number (tsp_set_sub) */
+    char s_lang[TSP_MAX_SUBS][4];
+    char s_name[TSP_MAX_SUBS][32];      /* the track's name ("SDH", "Forced"...), "" = none */
+    int s_forced[TSP_MAX_SUBS];
+} TspStatus;
+
+/* For the next tsp_start: hd1080 = decode above 720p; hls_want = the HLS variant to choose: 0 automatic (about
+ * 540 lines if there is one, else 720p), -1 the smallest, else the best up to that many lines (1080, 720, 540,
+ * 480...; above 720 only with hd1080). Clears the bit rate below. */
+void              tsp_set_options(int hd1080, int hls_want);
+/* For the next tsp_start, after tsp_set_options: the HLS variant with exactly this bit rate (from hls_vbw[]). */
+void              tsp_set_hls_bw(long bw);
+/* 0.5.0: for the next tsp_start: the audio track to play (a_id[] of the status; -1 = none), else the best one in
+ * this language ("tur"...; NULL / "" = any), else the best one (AAC first). */
+void              tsp_set_audio(int id, const char *lang);
+/* 0.7.0: subtitles for the next tsp_start: the track id (s_id[] of the status), else the first track in lang
+ * ("tur"...); off = none shown (the choice of the menu stays for the next films) */
+void              tsp_set_sub(int id, const char *lang, int off);   /* off: 1 none, 0 shown, 2 (1.3) lang only if no sound in lang */
+/* 1.3.1: subtitle files for the next films (after the file's own tracks; "SRT" in the menu); NULL = none. The
+ * lists stay the caller's: kept until the next call (made only while nothing plays). */
+/* 1.3.2: the next film on the memory card is still being downloaded to this size (0 = a whole file): it waits
+ * for the part it needs (TspStatus.file_wait), and stops after 30 s without any more of it */
+void              tsp_set_file_total(uint64_t total);
+struct SrtList;
+void              tsp_set_ext_subs(const struct SrtList *subs, int n);
+/* 0.7.0: show subtitle track k of the status now (-1 = off), without starting again */
+void              tsp_sub_choose(int k);
+/* 0.7.0: subtitles shown this many ms later (negative: earlier); stays for the next starts */
+void              tsp_set_sub_delay(int ms);
+void              tsp_set_audio_delay(int ms);   /* 1.2.1: + = the sound is heard later (the picture waits for it) */
+/* 0.7.0: the subtitle for the picture on the screen; 1 = out has text */
+int               tsp_sub_text(char *out, size_t cap);
+/* 1.2.2b: the picture subtitle (PGS) for the picture on screen: 1 and its id (changes with every new one), its
+ * place and size on a canvas of cw x ch (the video's size); 0 = none. tsp_sub_bitmap_copy writes it as RGBA
+ * (stride in pixels): 0 if that one is gone meanwhile. */
+int               tsp_sub_bitmap(uint32_t *id, int *x, int *y, int *w, int *h, int *cw, int *ch);
+int               tsp_sub_bitmap_copy(uint32_t id, uint32_t *dst, int stride);
+/* 1.2.4j: a file keeping the films whose HD decoder header had to be adjusted (opened adjusted next time) */
+void              tsp_set_adj_file(const char *path);
+void              tsp_test_adj_forget(void);
+/* 1.2.4f: software pictures into the slots by DMA (on by default; off: the ARM copies) */
+void              tsp_set_dma(int on);
+/* 1.2.4f: tests only: the 4th core not known again (as at a start) */
+void              tsp_test_core3_unknown(void);
+/* 1.2.4g: players that could not be stopped (a stuck thread): their memory stays taken until the app ends */
+int               tsp_leaked(void);
+/* 1.2.4i test: the times after a reconnect, in the device's order (0 = right) */
+int               tsp_test_rc_seq(void);
+int               tsp_test_group_seq(double max, int groups, double out[4]);   /* 1.2.4o */
+/* 1.2.4e: tests only: each software-decoded unit takes this much longer (a slow ARM) */
+void              tsp_test_sw_delay(int us);
+void              tsp_test_k2(int *exits, int *late);   /* 1.2.4l: tests */
+void              tsp_test_sw_delay_pic(int us);
+/* 0.5.0: the next stream comes through the transcoding server (30 s instead of 10 s for its first picture) */
+void              tsp_set_via_server(int on);
+/* 0.5.0 test builds: AC-3 / E-AC-3 stutter on the HD decoder. 0 normal, 1 decoded but not played (the picture runs
+ * on its own clock), 2 the audio thread at the video thread's priority, 3 the sound output in 768-sample parts. */
+int               tsp_start(const char *url);       /* 0 = started */
+/* A film or episode (a file on a server that sends parts of it): starts at start_ms (the keyframe at or
+ * before it). MKV, MP4 and TS files. */
+int               tsp_start_vod(const char *url, int start_ms);
+/* 1.2.2: a stream or download of the same server was in use a moment ago: a "busy" answer (405, 407...) before
+ * anything came is asked again every 5 s for up to 45 s (st.note counts down); else twice (1.5 and 3 s).
+ * (Replaces 1.5's tsp_set_account_free.) */
+void              tsp_set_recent_use(int on);
+/* A film as a plain stream that starts offset_ms into it (the transcoding server cut it there): pause works,
+ * the position counts from offset_ms, jumping means starting the server again. */
+int               tsp_start_vod_stream(const char *url, int offset_ms);
+void              tsp_pause(int on);
+/* Position of the picture on screen and the length, in ms. Returns 0 if no film is playing. */
+int               tsp_vod_pos(int *pos_ms, int *dur_ms);
+void              tsp_stop(void);                    /* waits for the worker, frees everything */
+void              tsp_vod_cache_clear(void);         /* film closed: forget its index (kept across jumps) */
+/* Picture to draw now (NULL if none yet). *w, *h = visible part of the texture. */
+vita2d_texture   *tsp_frame(int *w, int *h);
+const TspStatus  *tsp_status(void);                  /* NULL if not started */
+/* Shown picture time minus audio time, in ms. Returns 0 if unknown. */
+int               tsp_av_offset(int *ms);
+
+/* 1.2: forget the Vita AAC 5.1 decoder's learnt channel order (PC tests) */
+void tsp_aac51_reset(void);
+
+#endif
