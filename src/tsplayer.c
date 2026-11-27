@@ -416,6 +416,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     uint8_t *mpcm;
     int port_rate, port_ch;
     volatile int is_hls;                /* the address answered with an HLS playlist */
+    int hls_vod;                        /* 1.2.4s: ... a film's, with an end (its time counts from vod_offset_ms) */
     int size_changes;                   /* 1.2.1: the picture size changed on the way (the decoder opened again) */
     int skip_nonref;                    /* decoder too small for this stream: drop pictures nothing refers to */
     SceAvcdecCtrl ctrl;
@@ -3736,7 +3737,10 @@ static int audio_start_check(Tsp *t)
     /* (0.2.8/0.2.9 counted the 4 s from the start of the player: a film reads its index first, longer than
      * that, so its sound started before the picture. Now from the first video unit, or 6 s of sound and no
      * video unit at all.) */
-    int waited_out = (t->first_unit_us && now - t->first_unit_us > 4000000ULL) ||
+    /* 1.2.4s: a film waits longer (10 s) for its picture: after a jump to a place without a keyframe the sound went
+     * on alone, and the picture then waited 7 s for the sound to reach it (the device: 13 s to the picture) */
+    uint64_t pic_wait = t->vod && !t->st.audio_only ? 10000000ULL : 4000000ULL;
+    int waited_out = (t->first_unit_us && now - t->first_unit_us > pic_wait) ||
                      (t->first_audio_us && !t->first_unit_us && now - t->first_audio_us > 6000000ULL);
     /* and a second of video beyond the first picture has come: a live stream arrives at its own pace and
      * the HD decoder gives pictures a few units late; with no margin every picture was late from the start */
@@ -3752,7 +3756,8 @@ static int audio_start_check(Tsp *t)
             cfg = t->aq.head;
             t->aq.head = cfg->next;
         }
-        while (t->aq.head && t->aq.head->pts >= 0 && t->aq.head->pts < fp - 4500 && fp - t->aq.head->pts < 90000LL * 10) {
+        int64_t span = t->vod ? 90000LL * 30 : 90000LL * 10;   /* 1.2.4s: (a film's sound may wait 10 s now) */
+        while (t->aq.head && t->aq.head->pts >= 0 && t->aq.head->pts < fp - 4500 && fp - t->aq.head->pts < span) {
             Pkt *p = t->aq.head;
             t->aq.head = p->next;
             if (!t->aq.head) t->aq.tail = NULL;
@@ -3770,7 +3775,7 @@ static int audio_start_check(Tsp *t)
     }
     t->av_started = 1;
     if (t->st.decoded > 0) plog("tsp: the sound starts with the first picture (%d earlier sound frames left out)", left);
-    else if (waited_out && !t->st.audio_only) plog("tsp: no picture %s: the sound starts", t->first_unit_us ? "4 s after the first video" : "and no video");
+    else if (waited_out && !t->st.audio_only) plog("tsp: no picture %s: the sound starts", t->first_unit_us ? (t->vod ? "10 s after the first video" : "4 s after the first video") : "and no video");
     return 1;
 }
 
@@ -4110,9 +4115,16 @@ static void check_stall(Tsp *t)
  * 4.5 s). Then a "busy" answer is asked again every 5 s for up to 45 s, with a countdown on the screen.
  * (1.5 took a 405 for "not given" when the account looked free: the account check said "0 of 1" while the
  * provider still refused: no longer.) */
-static volatile int g_recent_use;
+static volatile int g_recent_use, g_recent_stop;
 void tsp_set_recent_use(int on) { g_recent_use = on ? 1 : 0; }
-static int busy_status(int s) { return s == 405 || s == 407 || s == 429 || s == 503 || s == 506 || s == 509 || s == 512; }
+void tsp_set_recent_stop(int on) { g_recent_stop = on ? 1 : 0; }
+/* 1.2.4s: 403 counts as busy only right after a stream of the same server (see tsp_set_recent_stop): the second
+ * provider of the user's log (one connection) answered 403, not 407, for the next film or episode */
+static int busy_status(int s)
+{
+    return s == 405 || s == 407 || s == 429 || s == 503 || s == 506 || s == 509 || s == 512 || (s == 403 && g_recent_stop);
+}
+#define BUSY_403_TRIES 10                                     /* (x 2 s: 20 s; a real 403 is said after that) */
 /* (x 2 s: 44 s. 1.2.4m: every 2 s instead of 5: a one-connection account changing channels was let go by the
  * server a few seconds after the last stream, and the next channel waited up to 5 s more for nothing) */
 #define BUSY_LONG_TRIES 22
@@ -4120,15 +4132,16 @@ static int busy_status(int s) { return s == 405 || s == 407 || s == 429 || s == 
 /* a busy answer before anything came: wait and ask again (1); 0 = no more */
 static int busy_wait(Tsp *t, int status, const char *what)
 {
-    int long_wait = g_recent_use;
-    if (t->status_retries >= (long_wait ? BUSY_LONG_TRIES : 2)) return 0;
+    int long_wait = g_recent_use || status == 403;
+    int tries = status == 403 ? BUSY_403_TRIES : long_wait ? BUSY_LONG_TRIES : 2;
+    if (t->status_retries >= tries) return 0;
     int ms = long_wait ? BUSY_LONG_MS : t->status_retries ? 3000 : 1500;
     t->status_retries++;
     plog("tsp: %s: server answered %d (the account may still be counted on the last stream), asking again in %.1f s (%d)",
          what, status, ms / 1000.0, t->status_retries);
     for (int k = 0; k < ms / 20 && !stopping(t); k++) {
         if (long_wait && k % 50 == 0) {                      /* (once a second: the countdown) */
-            int left = ((BUSY_LONG_TRIES - t->status_retries) * BUSY_LONG_MS + (ms - k * 20)) / 1000;
+            int left = ((tries - t->status_retries) * BUSY_LONG_MS + (ms - k * 20)) / 1000;
             snprintf(t->st.note, sizeof t->st.note, "The provider still counts the last stream: %d s", left);
         }
         sceKernelDelayThread(20000);
@@ -4148,7 +4161,7 @@ static int http_refused(Tsp *t, int status)
      * a few seconds: asked again after 3, 6 and 10 s (again from the start once it has played a while). */
     /* 1.2.4n: every 2 s for up to 44 s, as at the start (1.2.4m; it was 3, 6 and 10 s, then the error: on the device a
      * provider held the lost connection for more than 19 s) */
-    if (busy && t->st.bytes > 0) {
+    if (busy && status != 403 && t->st.bytes > 0) {          /* (1.2.4s: a 403 only at the start) */
         if (t->st.bytes > t->busy_bytes + 512 * 1024) t->busy_retries = 0;
         if (t->busy_retries < BUSY_LONG_TRIES) {
             t->busy_retries++;
@@ -4686,6 +4699,8 @@ static int hls_fetch_text(Tsp *t, const char *url, char *text, const char *what,
         char lp[96];
         if (status >= 400) plog("tsp: HLS %s: HTTP %d (%s)", what, status, url_path_for_log(base && base[0] ? base : url, lp, sizeof lp));
         else plog("tsp: HLS %s: %s (0x%08X)", what, n < 0 ? "connection failed" : "empty answer", (unsigned)n);
+        /* 1.2.4s: busy before anything came (a film / episode right after the last one): waited out as for files */
+        if (busy_status(status) && t->st.bytes == 0 && busy_wait(t, status, "HLS")) { attempt--; continue; }
         if (status == 404 || status == 403 || status == 401 || status == 410) break;
         hls_wait(t, 1000);
     }
@@ -4718,6 +4733,7 @@ typedef struct {
     int64_t next;                               /* the next audio segment, -1 = not chosen yet */
     int64_t ms;                                 /* sound fetched so far (ms of segments) */
     int back_ms;                                /* live: where the picture starts, ms before the playlist's end */
+    int seek_ms;                                /* 1.2.4s: a film from a later time: the picture's first segment's time */
     int end, fails;
 } AltAudio;
 
@@ -4782,8 +4798,14 @@ static void alt_fill(Tsp *t, AltAudio *A, int64_t until_ms, uint8_t *buf)
             return;
         }
         if (A->next < 0) {
-            if (am.endlist || am.nseg == 0) A->next = am.first_seq;
-            else {                                           /* live: as far from the end as the picture */
+            if (am.endlist || am.nseg == 0) {
+                A->next = am.first_seq;
+                int64_t acc = 0;                              /* 1.2.4s: a film from a later time: the sound from there too */
+                for (int i = 0; i < am.nseg && A->seek_ms > 0; i++) {
+                    if (acc + am.seg[i].duration_ms > A->seek_ms) { A->next = am.seg[i].seq; break; }
+                    acc += am.seg[i].duration_ms;
+                }
+            } else {                                           /* live: as far from the end as the picture */
                 int i = am.nseg - 1;
                 int64_t acc = am.seg[i].duration_ms;
                 while (i > 0 && acc < A->back_ms) { i--; acc += am.seg[i].duration_ms; }
@@ -4946,6 +4968,25 @@ static void read_hls(Tsp *t, uint8_t *buf)
         if (next < 0) {
             int back = m.target_ms >= 8000 ? 2 : 3;           /* long segments: start closer to live */
             next = m.endlist || m.nseg <= back ? m.first_seq : m.seg[m.nseg - back].seq;
+            if (m.endlist && t->vod && !t->vod_stream && m.nseg) {
+                /* 1.2.4s: a film / episode given as HLS (the second provider: 450-1100 segments of 6 s): its length is
+                 * the segments' sum, and a jump starts at the segment of that time (it had no jumping at all) */
+                int64_t tot = 0, at = -1;
+                for (int i = 0; i < m.nseg; i++) {
+                    if (at < 0 && tot + m.seg[i].duration_ms > t->vod_start_ms) { at = tot; next = m.seg[i].seq; }
+                    tot += m.seg[i].duration_ms;
+                }
+                if (at < 0) { at = 0; next = m.first_seq; }  /* (past the end: from the start) */
+                if (tot > 0 && tot < 0x7fffffff) {
+                    t->hls_vod = 1;
+                    t->vod_offset_ms = (int)at;
+                    t->vod_start_ms = (int)at;                 /* (what the position shows until the first picture) */
+                    t->st.dur_ms = (int)tot;
+                    t->st.seekable = 1;
+                    if (alt) alt->seek_ms = (int)at;
+                    plog("tsp: HLS film: %d s, start at %d s (segment #%lld)", (int)(tot / 1000), (int)(at / 1000), (long long)next);
+                }
+            }
             plog("tsp: HLS %s, %d segments of %d ms, starting at #%lld", m.endlist ? "video" : "live", m.nseg, m.target_ms, (long long)next);
             if (alt) {                                       /* 0.6.0: live: the sound starts as far from the end */
                 int64_t live_ms = 0;
@@ -5498,7 +5539,7 @@ static void read_vod(Tsp *t, uint8_t *buf)
     if (!t->vod_file && hls_is_playlist((const char *)head, (size_t)n)) {   /* 1.2.1: the film's address gave an HLS
                                                               * playlist (some providers send films so): played as one */
         free(io.win);
-        plog("tsp: VOD: the address answered with an HLS playlist: played as HLS%s", t->vod_start_ms > 0 ? " (from the start)" : "");
+        plog("tsp: VOD: the address answered with an HLS playlist: played as HLS%s", t->vod_start_ms > 0 ? " (from the segment of that time)" : "");
         t->is_hls = 1;
         read_hls(t, buf);
         return;
@@ -5640,11 +5681,10 @@ static void read_vod(Tsp *t, uint8_t *buf)
         set_error_kind(t, TSP_ERRK_FORMAT, "Unknown file type");
         return;
     }
-    free(io.win);
     t->vc_rec = 0;                                          /* the film itself is not kept */
     t->st.note[0] = 0;
     t->st.note_pct = 0;
-    if (stopping(t)) return;
+    if (stopping(t)) { free(io.win); return; }
     t->st.seekable = t->st.dur_ms > 0 && !t->flv && (!t->avi || avi_seekable(t->avi));
     if (t->st.dur_ms > 0 && t->vod_total)                   /* what the film needs on average */
         t->st.need_kbs = (unsigned)(t->vod_total * 1000 / (uint64_t)t->st.dur_ms / 1024);
@@ -5655,6 +5695,17 @@ static void read_vod(Tsp *t, uint8_t *buf)
     t->film_bytes0 = t->st.bytes;
     t->film_phase = 1;
     uint64_t pos = off;
+    /* 1.2.4s: the film's start is often in the last block read for its header (a film from the beginning: an MKV's
+     * first cluster at byte 9722 of the 256 KB read): given to the demuxer at once, the next request from its end
+     * (on the device the opening waited for one more answer of the server, 2 s) */
+    if (io.win && pos >= io.woff && pos < io.woff + io.wlen && !stopping(t)) {
+        size_t k = (size_t)(io.woff + io.wlen - pos);
+        plog("tsp: VOD: the film's first %u KB from the header's read", (unsigned)(k / 1024));
+        if (!t->data_us) t->data_us = now_us();
+        vod_feed_cb(t, &pos, io.win + (pos - io.woff), k);
+    }
+    free(io.win);
+    io.win = NULL;
     int fails = 0;
     while (!stopping(t)) {
         if (t->vod_total && pos >= t->vod_total) break;
@@ -6351,7 +6402,7 @@ void tsp_pause(int on)
 /* 1.3.1: the film's time (ms) of a picture's pts, as tsp_vod_pos counts it */
 static int film_ms_at(Tsp *t, int64_t p)
 {
-    if (t->vod_stream) {
+    if (t->vod_stream || t->hls_vod) {
         int64_t d = t->vod_first_pts >= 0 ? p - t->vod_first_pts : 0;
         if (d < -90000LL * 3600) d += 1LL << 33;
         return t->vod_offset_ms + (d < 0 ? 0 : (int)(d / 90));
@@ -6374,7 +6425,7 @@ int tsp_vod_pos(int *pos_ms, int *dur_ms)
     sceKernelUnlockMutex(t->lock, 1);
     if (p < 0 && t->st.audio_only && audio_now(t, now_us(), &a)) p = a;
     if (p < 0) { *pos_ms = t->vod_start_ms; return 1; }
-    if (t->vod_stream) {                                    /* counts from the first picture of the stream */
+    if (t->vod_stream || t->hls_vod) {                      /* counts from the first picture of the stream (1.2.4s: and of an HLS film's jump) */
         int64_t d = t->vod_first_pts >= 0 ? p - t->vod_first_pts : 0;
         if (d < -90000LL * 3600) d += 1LL << 33;
         *pos_ms = t->vod_offset_ms + (d < 0 ? 0 : (int)(d / 90));

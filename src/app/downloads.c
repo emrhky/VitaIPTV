@@ -425,7 +425,7 @@ static void dl_hold_for(const char *url, int kind)
     int had = dl_nheld;
     for (int k = 0; k < dln && dl_nheld < 16; k++) {        /* (the running one first, then the waiting ones in order) */
         DlState st;
-        if (dl_state(dlv[k].dir, &st) == DL_ACTIVE) { snprintf(dl_held[dl_nheld++], DL_DIR_MAX, "%s", dlv[k].dir); conn_end_ms = now_ms(); }
+        if (dl_state(dlv[k].dir, &st) == DL_ACTIVE) { snprintf(dl_held[dl_nheld++], DL_DIR_MAX, "%s", dlv[k].dir); conn_end_ms = now_ms(); conn_host[0] = 0; }
     }
     for (int k = dln - 1; k >= 0 && dl_nheld < 16; k--) {   /* (dlv: newest first; the queue: oldest first) */
         DlState st;
@@ -622,7 +622,7 @@ static void dl_input(unsigned p)
                     if ((dl_ask == 4 || dl_in_group(&dlv[j], dl_gsel)) && dl_is_watched(&dlv[j])) { bad |= dl_delete(dlv[j].dir) != 0; n++; }
                 plog("dl: %d watched downloads deleted%s", n, bad ? " (not all of them)" : "");
             }
-            if (was_active) conn_end_ms = now_ms();          /* 1.5 */
+            if (was_active) { conn_end_ms = now_ms(); conn_host[0] = 0; }   /* 1.5 */
             set_status(bad, bad ? "Could not delete all of it" : was_active ? "Deleted. The provider may count the stopped download as watching for a few minutes" : "Deleted", NULL);
             dl_ask = 0;
             dl_refresh();
@@ -665,7 +665,7 @@ static void dl_input(unsigned p)
         }
     } else if ((p & SCE_CTRL_SQUARE) && !it->done) {
         if (s == DL_ACTIVE || s == DL_QUEUED) {
-            if (s == DL_ACTIVE) conn_end_ms = now_ms();      /* 1.5 */
+            if (s == DL_ACTIVE) { conn_end_ms = now_ms(); conn_host[0] = 0; }   /* 1.5 */
             dl_pause(it->dir);
             dl_refresh();
             /* 1.3.1: the provider may count the closed connection a while longer (the log: 405 / 512 after a stop) */

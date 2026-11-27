@@ -1314,6 +1314,38 @@ b405:
          * the mock then answers with 0 KB - can come within the 12 s: "connection lost" is that end, not the 407) */
         assert(r.st.decoded >= 60 && !strstr(r.st.msg, "407") && !strstr(r.st.msg, "busy"));
         mock_http_reset();
+        {   /* 1.2.4s: a 403 is an error at once, unless a stream of the same server ended a moment ago: then it is asked
+             * again every 2 s (the second provider let the account go after 2 or 3 tries) */
+            extern int mock_http_busy_code;
+            mock_http_busy_code = 403;
+            mock_http_file = argv[1];
+            mock_http_busy_from = 0; mock_http_busy_n = 50;
+            double t0 = now_s();
+            r = play("http://example.invalid/live/9.ts", 4);
+            double took = now_s() - t0;
+            printf("               403, no stream before: state %d, '%s'\n", r.st.state, r.st.msg);
+            assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "HTTP 403") && took < 3.5);
+            mock_http_reset();
+            tsp_set_recent_use(1);
+            tsp_set_recent_stop(1);
+            mock_http_file = argv[1];
+            mock_http_busy_from = 0; mock_http_busy_n = 3;
+            r = play("http://example.invalid/live/9.ts", 12);
+            show("403 three times after a stream", &r);
+            assert(r.st.decoded >= 60 && !strstr(r.st.msg, "403"));
+            mock_http_reset();
+            mock_http_file = argv[1];                      /* (never let go: the error after 20 s, not 44) */
+            mock_http_busy_from = 0; mock_http_busy_n = 50;
+            t0 = now_s();
+            r = play("http://example.invalid/live/9.ts", 26);
+            printf("               403 for good after a stream: state %d after %.1f s, '%s'\n", r.st.state, now_s() - t0, r.st.msg);
+            assert(r.st.state == TSP_ERROR && strstr(r.st.msg, "403"));
+            tsp_set_recent_stop(0);
+            tsp_set_recent_use(0);
+            mock_http_busy_n = 0;
+            mock_http_busy_code = 407;
+            mock_http_reset();
+        }
         if (getenv("ONLY") && !strcmp(getenv("ONLY"), "b405")) { printf("ONLY b405: done\n"); return 0; }
     }
 
@@ -1750,6 +1782,18 @@ late:
         mock_http_rate = 0;
         mock_http_reset();
         tsp_set_options(0, 720);
+        {   /* 1.2.4s: an HLS film right after the last one: its playlist answered 403 twice (the second provider) */
+            extern int mock_http_busy_from, mock_http_busy_n, mock_http_busy_code;
+            for (int i = 0; i < 4; i++) { mock_http_map[i][0] = nm4[i]; mock_http_map[i][1] = pth4[i]; }
+            mock_http_busy_code = 403; mock_http_busy_from = 0; mock_http_busy_n = 2;
+            tsp_set_recent_use(1); tsp_set_recent_stop(1); tsp_set_options(1, 1080);
+            r = play("http://example.invalid/hls4/t.m3u8", 10);
+            tsp_set_recent_use(0); tsp_set_recent_stop(0); tsp_set_options(0, 720);
+            mock_http_busy_n = 0; mock_http_busy_code = 407;
+            show("HLS 403 twice after a stream", &r);
+            assert(r.st.decoded >= 30 && !strstr(r.st.msg, "403"));
+            mock_http_reset();
+        }
 
         /* HLS 1080p whose segments stop answering after one (HTTP 404/400 seen on the device; 720p played): 0.2.6
          * waited 22-33 s each time and asked for 720p only after about 80 s. Now two failed segments in a row say so. */
@@ -2057,6 +2101,23 @@ hls:
 films:
     if (argc > 19) {
         const char *mp4 = argv[17], *mkv = argv[18], *tsf = argv[19];
+        {   /* 1.2.4s: a film whose address gives an HLS playlist with an end (the second provider): its length from the
+             * segments, a jump starts at that time's segment, the position counts from there */
+            static char hn[6][32], hp[6][512];
+            for (int i = 0; i < 6; i++) {
+                if (i) snprintf(hn[i], 32, "seg%03d.ts", i - 1); else snprintf(hn[i], 32, "hv.m3u8");
+                snprintf(hp[i], 512, "%s/%s", argv[16], i ? hn[i] : "index.m3u8");
+                mock_http_map[i][0] = hn[i]; mock_http_map[i][1] = hp[i];
+            }
+            mock_http_reset();
+            for (int i = 0; i < 6; i++) { mock_http_map[i][0] = hn[i]; mock_http_map[i][1] = hp[i]; }
+            VRun hv = play_vod_url("http://example.invalid/movie/u/p/hv.m3u8", NULL, 2500, 10, 0, 0);
+            vshow("hls film from 2.5 s", &hv);
+            assert(hv.r.st.state == TSP_ENDED && abs(hv.dur - 5000) < 100 && hv.first_pos >= 1900 && hv.first_pos <= 2600);
+            assert(hv.last_pos >= 4500 && hv.last_pos <= 5200 && hv.r.changes >= 60 && hv.r.st.seekable);
+            for (int i = 0; i < 6; i++) mock_http_map[i][0] = NULL;
+            mock_http_reset();
+        }
         VRun v = play_vod(mp4, 0, 20, 0, 0);
         vshow("mp4 film", &v);
         assert(v.r.st.state == TSP_ENDED && abs(v.dur - 12000) < 300 && v.r.changes >= 280 && v.r.nonmono == 0);

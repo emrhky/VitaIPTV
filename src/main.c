@@ -195,10 +195,12 @@ static char play_path[IPTV_URL_MAX];        /* 1.4.1: what plays when it is not 
 /* 1.5: is a connection of the account in use? (a 405 is "busy" only then) */
 static unsigned conn_end_ms;                /* when the app's last stream / download of the internet ended (0 = none yet) */
 static int net_playing;                     /* a stream from the internet plays (its end sets conn_end_ms) */
+static char conn_host[96];                  /* 1.2.4s: the server of the last stream (empty: a download, or none) */
 static int acct_active = -1, acct_max;      /* the account check's "connections a of m" (-1 = not known) */
 static unsigned acct_at;
 static int dl_nheld;                        /* (downloads stopped for a list / a stream, see dl_hold_for) */
 static int dl_busy_host(const char *url);
+static void url_host(const char *u, char *h, size_t cap);   /* (app/downloads.c) */
 static int dl_ask, dev_ask;
 static int dl_growing_limit_ms(const char *path, int dur_ms);
 static int dl_open;

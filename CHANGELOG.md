@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.2.4s (test)
+- **A 403 right after the last film or episode is waited out.** The second provider (one connection) answered 403,
+  not 407, for the next film or episode while it still counted the one just closed; it opened on the 3rd or 4th
+  try. Now, within a minute of a stream of the same server, a 403 at the start (the file, or its HLS playlist) is
+  asked again every 2 s for up to 20 s, counted down on the screen; otherwise a 403 is still said at once.
+- **Jumping in films given as HLS.** The second provider's films and episodes are HLS playlists (450-1100 segments of
+  6 s) and had no jumping at all. A playlist with an end now has its length (the segments' sum), a jump starts at the
+  segment of that time (the sound from its playlist too), and the position counts from there.
+- **Matroska jumps:** only the video track's index points are used. A file whose index had points of the sound too
+  jumped to a cluster without a keyframe: 183 pictures dropped and the sound went on alone; a film's sound now waits
+  up to 10 s for the first picture (it was 4), so the picture does not wait for the sound after it (on the device:
+  13 s to the picture).
+- **A film from its start:** the start that came with the header's read (256 KB) goes to the demuxer at once; the
+  next request is from its end.
+- **Posters:** back to reading JPEGs whole or at 1/2, 1/4, 1/8 (1.2.4r's 6/8 has no fast code: 59-70 ms a poster on
+  the device instead of 41-45); the faster IDCT and upsampling stay.
+
 ## 1.2.4r (test)
 - **A player that does not stop in time no longer blocks all later channels.** On the device an HLS reader sat in a
   name lookup while the Wi-Fi came and went; the player was left as it was, and with it the video decoder: every

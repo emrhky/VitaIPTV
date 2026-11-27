@@ -53,11 +53,11 @@ int main(int argc, char **argv)
     assert(poster_decode(d, n / 3, 240, 360, &px, &w, &h) != 0 || px != NULL);   /* cut short: refused or partial, never a crash */
     free(px);
     free(d);
-    if (argc > 4) {                                          /* 1.2.4r: TMDB's w342 (342x513) read at 6/8, not whole */
+    if (argc > 4) {                                          /* TMDB's w342 (342x513): read whole (1.2.4s: no 6/8) */
         d = load(argv[4], &n);
         assert(poster_decode(d, n, 240, 360, &px, &w, &h) == 0);
         fprintf(stderr, "jpeg 342x513 -> %dx%d (%s)\n", w, h, poster_last_src());
-        assert(strstr(poster_last_src(), "read at 6/8 (257x385)") && w == 240 && h == 360);
+        assert(strstr(poster_last_src(), "read at 1/1 (342x513)") && w == 240 && h == 360);
         px_rgb(px[50 * w + 120], &r, &g, &b); assert(r > 200 && g < 60 && b < 60);
         px_rgb(px[300 * w + 120], &r, &g, &b); assert(b > 200 && r < 60);
         free(px);

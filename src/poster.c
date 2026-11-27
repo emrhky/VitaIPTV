@@ -116,23 +116,23 @@ static int decode_jpeg(const uint8_t *data, size_t n, int max_w, int max_h, uint
         return -1;
     }
     ci.out_color_space = JCS_RGB;
-    /* libjpeg-turbo shrinks by M/8 while decoding (1.2.4r: the smallest M that still gives at least the box's
-     * picture; it was 1/2, 1/4 or 1/8 only: TMDB's 342x513 was read whole for a 240x360 box, now at 6/8, 257x385) */
+    /* libjpeg-turbo shrinks while decoding: only 1/2, 1/4 and 1/8 (the largest that still gives at least the box's
+     * picture). 1.2.4s: back from 1.2.4r's any M/8: 6/8 and the like have no NEON code and were slower on the Vita
+     * (59-70 ms against 41-45 ms whole for TMDB's 342x513) */
     int fw, fh;                                              /* (the size it gets: from the whole picture's) */
     fit((int)ci.image_width, (int)ci.image_height, max_w, max_h, &fw, &fh);
-    {
-        unsigned m = 1;
-        while (m < 8 && ((ci.image_width * m + 7) / 8 < (unsigned)fw || (ci.image_height * m + 7) / 8 < (unsigned)fh)) m++;
-        ci.scale_num = m;
-        ci.scale_denom = 8;
-    }
+    ci.scale_num = 1;
+    ci.scale_denom = 1;
+    while (ci.scale_denom < 8 && ci.image_width / (ci.scale_denom * 2) >= (unsigned)fw &&
+           ci.image_height / (ci.scale_denom * 2) >= (unsigned)fh)
+        ci.scale_denom *= 2;
     /* (1.2.4r: the faster ways: the picture is shrunk afterwards anyway, the difference does not show) */
     ci.dct_method = JDCT_IFAST;
     ci.do_fancy_upsampling = FALSE;
     jpeg_start_decompress(&ci);
     int sw = (int)ci.output_width, sh = (int)ci.output_height;
-    snprintf(g_src, sizeof g_src, "JPEG %ux%u%s, read at %u/8 (%dx%d)", (unsigned)ci.image_width, (unsigned)ci.image_height,
-             ci.progressive_mode ? " progressive" : "", (unsigned)ci.scale_num, sw, sh);
+    snprintf(g_src, sizeof g_src, "JPEG %ux%u%s, read at 1/%u (%dx%d)", (unsigned)ci.image_width, (unsigned)ci.image_height,
+             ci.progressive_mode ? " progressive" : "", (unsigned)ci.scale_denom, sw, sh);
     size_t stride = (size_t)sw * 3;
     buf = malloc(stride * (size_t)sh);
     if (!buf) { jpeg_abort_decompress(&ci); jpeg_destroy_decompress(&ci); return -1; }

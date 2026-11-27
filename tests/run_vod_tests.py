@@ -20,8 +20,9 @@ with open(f"{T}/subs.srt", "w", encoding="utf-8") as f:
 SRCI, SRCO = SRC.split(" -c:v ", 1)
 sh(f"ffmpeg -loglevel error -y {SRCI.replace(f' -t {LEN}', '')} -i {T}/subs.srt -t {LEN} -c:v {SRCO} -map 0:v -map 1:a -map 2:s -c:s mov_text -metadata:s:s:0 language=tur "
    f"-movflags +faststart {T}/sub.mp4")
+sh(f"{sys.executable} {ROOT}/tests/mkv_audio_cues.py {T}/film.mkv {T}/acues.mkv")   # 1.2.4s
 sh(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -I{ROOT}/src {ROOT}/tests/test_vod.c {ROOT}/src/vod.c "
    f"{ROOT}/src/mkvdemux.c {ROOT}/src/tsdemux.c -o {T}/test_vod")
-r = subprocess.run(f"{T}/test_vod {LEN * 1000} {T}/end.mp4 {T}/start.mp4 {T}/film.mkv {T}/film.ts {T}/sub.mp4", shell=True, capture_output=True, text=True)
+r = subprocess.run(f"{T}/test_vod {LEN * 1000} {T}/end.mp4 {T}/start.mp4 {T}/film.mkv {T}/film.ts {T}/sub.mp4 {T}/acues.mkv", shell=True, capture_output=True, text=True)
 print(r.stdout); print(r.stderr[-4000:])
 sys.exit(r.returncode)

@@ -141,6 +141,9 @@ int               tsp_start_vod(const char *url, int start_ms);
  * anything came is asked again every 5 s for up to 45 s (st.note counts down); else twice (1.5 and 3 s).
  * (Replaces 1.5's tsp_set_account_free.) */
 void              tsp_set_recent_use(int on);
+/* 1.2.4s: a stream of the same server ended under a minute ago: a 403 at the start is asked again too (every 2 s,
+ * up to 20 s, counted down); otherwise a 403 is an error at once */
+void              tsp_set_recent_stop(int on);
 /* A film as a plain stream that starts offset_ms into it (the transcoding server cut it there): pause works,
  * the position counts from offset_ms, jumping means starting the server again. */
 int               tsp_start_vod_stream(const char *url, int offset_ms);

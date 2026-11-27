@@ -72,6 +72,10 @@ int vod_content_range(const char *h, uint64_t *total)
 #define ID_CUETIME     0xB3u
 #define ID_CUETRACKPOS 0xB7u
 #define ID_CUECLPOS    0xF1u
+#define ID_CUETRACK    0xF7u
+#define ID_TRACKENTRY  0xAEu
+#define ID_TRACKNUM    0xD7u
+#define ID_TRACKTYPE   0x83u
 #define ID_CRC32       0xBFu
 #define ID_VOID        0xECu
 
@@ -165,6 +169,32 @@ static void parse_info(MkvLayout *L, const uint8_t *p, size_t n, double *dur_tic
     }
 }
 
+/* 1.2.4s: the first video track's number (for the index: its points of the sound need not start with a keyframe) */
+static void parse_tracks(MkvLayout *L, const uint8_t *p, size_t n)
+{
+    size_t pos = 0;
+    while (pos < n && !L->video_track) {
+        uint32_t id; uint64_t sz; int unk;
+        int h = ebml_head(p + pos, n - pos, &id, &sz, &unk);
+        if (!h || unk || pos + (size_t)h + sz > n) break;
+        if (id == ID_TRACKENTRY) {
+            const uint8_t *q = p + pos + h;
+            size_t qn = (size_t)sz, k = 0;
+            uint64_t num = 0, type = 0;
+            while (k < qn) {
+                uint32_t cid; uint64_t csz; int cu;
+                int ch = ebml_head(q + k, qn - k, &cid, &csz, &cu);
+                if (!ch || cu || k + (size_t)ch + csz > qn) break;
+                if (cid == ID_TRACKNUM) num = ebml_uint(q + k + ch, (size_t)csz);
+                else if (cid == ID_TRACKTYPE) type = ebml_uint(q + k + ch, (size_t)csz);
+                k += (size_t)ch + (size_t)csz;
+            }
+            if (type == 1 && num) L->video_track = num;
+        }
+        pos += (size_t)h + (size_t)sz;
+    }
+}
+
 static void parse_seekhead(MkvLayout *L, const uint8_t *p, size_t n)
 {
     size_t pos = 0;
@@ -230,6 +260,7 @@ int mkv_layout(VodRead rd, void *ctx, uint64_t total, MkvLayout *L)
             if (!el) return -1;
             if (id == ID_INFO) parse_info(L, el + h, (size_t)sz, &dur_ticks);
             else if (id == ID_SEEKHEAD) parse_seekhead(L, el + h, (size_t)sz);
+            else if (id == ID_TRACKS) parse_tracks(L, el + h, (size_t)sz);
             if ((id == ID_INFO || id == ID_TRACKS) && append(L, el, (size_t)len) < 0) { free(el); return -1; }
             free(el);
         }
@@ -289,7 +320,7 @@ static int seek_by_cues(VodRead rd, void *ctx, const MkvLayout *L, int64_t targe
     if (!h || id != ID_CUES || unk || sz > MKV_MAX_CUES) { snprintf(vod_seek_note, sizeof vod_seek_note, "index not usable"); return -1; }
     uint8_t *c = read_all(rd, ctx, L->cues_pos + (uint64_t)h, (size_t)sz);
     if (!c) { snprintf(vod_seek_note, sizeof vod_seek_note, "index (%u KB) could not be read", (unsigned)(sz / 1024)); return -1; }
-    int found = 0, points = 0, after = 0;
+    int found = 0, points = 0, after = 0, others = 0;
     int64_t best_ms = -1;
     uint64_t best_off = 0;
     size_t pos = 0, n = (size_t)sz;
@@ -301,25 +332,33 @@ static int seek_by_cues(VodRead rd, void *ctx, const MkvLayout *L, int64_t targe
             const uint8_t *q = c + pos + ph;
             size_t qn = (size_t)psz, k = 0;
             uint64_t time = 0, cl = 0;
-            int have_t = 0, have_c = 0;
+            int have_t = 0, have_c = 0, other = 0;
             while (k < qn) {
                 uint32_t cid; uint64_t csz;
                 int ch = ebml_head(q + k, qn - k, &cid, &csz, &unk);
                 if (!ch || unk || k + (size_t)ch + csz > qn) break;
                 if (cid == ID_CUETIME) { time = ebml_uint(q + k + ch, (size_t)csz); have_t = 1; }
                 else if (cid == ID_CUETRACKPOS && !have_c) {
+                    /* 1.2.4s: only the video track's points (when it is known): a point of the sound landed in the
+                     * middle of a group of pictures (on the device: 183 pictures dropped, 7 s to the picture) */
                     const uint8_t *t = q + k + ch;
                     size_t tn = (size_t)csz, j = 0;
+                    uint64_t track = 0, pcl = 0;
+                    int have_pc = 0;
                     while (j < tn) {
                         uint32_t tid; uint64_t tsz;
                         int th = ebml_head(t + j, tn - j, &tid, &tsz, &unk);
                         if (!th || unk || j + (size_t)th + tsz > tn) break;
-                        if (tid == ID_CUECLPOS) { cl = ebml_uint(t + j + th, (size_t)tsz); have_c = 1; }
+                        if (tid == ID_CUECLPOS) { pcl = ebml_uint(t + j + th, (size_t)tsz); have_pc = 1; }
+                        else if (tid == ID_CUETRACK) track = ebml_uint(t + j + th, (size_t)tsz);
                         j += (size_t)th + (size_t)tsz;
                     }
+                    if (have_pc && (!L->video_track || !track || track == L->video_track)) { cl = pcl; have_c = 1; }
+                    else if (have_pc) other = 1;
                 }
                 k += (size_t)ch + (size_t)csz;
             }
+            if (have_t && !have_c && other) others++;
             if (have_t && have_c) {
                 int64_t ms = ticks_ms(L, time);
                 points++;
@@ -338,7 +377,8 @@ static int seek_by_cues(VodRead rd, void *ctx, const MkvLayout *L, int64_t targe
         return -1;
     }
     if (!found) { snprintf(vod_seek_note, sizeof vod_seek_note, "no index entry before that time"); return -1; }
-    snprintf(vod_seek_note, sizeof vod_seek_note, "index, %d entries", points);
+    if (others) snprintf(vod_seek_note, sizeof vod_seek_note, "index, %d entries of the video (%d of other tracks left out)", points, others);
+    else snprintf(vod_seek_note, sizeof vod_seek_note, "index, %d entries", points);
     *off = best_off;
     *at_ms = best_ms;
     return 0;

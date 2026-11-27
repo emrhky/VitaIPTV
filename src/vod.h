@@ -36,6 +36,7 @@ typedef struct {
     uint64_t cues_pos;                  /* offset of the Cues element (0 = unknown) */
     uint64_t scale;                     /* TimecodeScale, ns per tick */
     int64_t  duration_ms;               /* 0 = unknown */
+    uint64_t video_track;               /* 1.2.4s: the first video track's number (0 = not known) */
     uint8_t *head;                      /* EBML + Segment header + Info + Tracks, to feed the demuxer first */
     size_t   head_len;
 } MkvLayout;

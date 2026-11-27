@@ -461,7 +461,13 @@ static void play_channel_ex(int vi, int use_proxy)
         int full = acct_active >= 0 && acct_max > 0 && acct_active >= acct_max && now_ms() - acct_at < 600000;
         int recent = conn_end_ms && now_ms() - conn_end_ms < 60000;
         tsp_set_recent_use(!iptv_is_local_path(url) && (recent || full || dl_nheld || dl_busy_host(url)));
-        if (!iptv_is_local_path(url)) net_playing = 1;
+        /* 1.2.4s: a stream of the same server (or a download) ended under a minute ago: a 403 is waited out too
+         * (20 s): a one-connection provider answered 403 for a film / episode right after the last one, and it
+         * opened on the 3rd or 4th try */
+        char host[96];
+        url_host(url, host, sizeof host);
+        tsp_set_recent_stop(!iptv_is_local_path(url) && recent && (!conn_host[0] || !strcasecmp(conn_host, host)));
+        if (!iptv_is_local_path(url)) { net_playing = 1; snprintf(conn_host, sizeof conn_host, "%s", host); }
     }
     if (net_offline(url)) {                                  /* nothing started: the message stays on the screen */
         play_mode = 2;

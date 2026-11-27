@@ -247,6 +247,38 @@ static int mrd_fail(void *ctx, uint64_t off, uint8_t *buf, size_t len)
 
 /* An index that arrives damaged part way must not send the film back to the start (seen on the device:
  * asked for 39:56, started at 0:27): the place is then found from the file size instead. */
+/* 1.2.4s: an index with points of the sound too (some files): a jump uses only the video's, so the cluster it starts
+ * at begins with a keyframe (on the device a point of the sound gave 183 dropped pictures, 7 s to the picture) */
+static void test_mkv_audio_cues(const char *path, int64_t len_ms)
+{
+    Fctx c = { fopen(path, "rb"), 0 };
+    assert(c.f);
+    uint64_t total = fsize(c.f);
+    MkvLayout L;
+    assert(mkv_layout(frd, &c, total, &L) == 0);
+    assert(L.video_track == 1 && L.cues_pos);
+    int64_t targets[] = { 9500, 31300, 47900, len_ms - 3300 };
+    for (int k = 0; k < 4; k++) {
+        uint64_t off; int64_t at;
+        assert(mkv_seek(frd, &c, total, &L, targets[k], &off, &at) == 0);
+        MCount mc = { 0, 0, 0, -1 };
+        TsSink sink = { mv, ma, &mc };
+        MkvDemux *dm = mkv_create(&sink);
+        mkv_feed(dm, L.head, L.head_len);
+        uint8_t buf[65536];
+        int n = frd(&c, off, buf, sizeof buf);
+        if (n > 0) mkv_feed(dm, buf, (size_t)n);
+        mkv_flush(dm);
+        printf("  sound points too: seek %6lld ms -> %6lld ms (%s): first video key %d\n", (long long)targets[k], (long long)at,
+               vod_seek_note, mc.first_key != 0);
+        assert(at <= targets[k] && targets[k] - at < 2100 && mc.vid > 0 && mc.first_key);
+        assert(strstr(vod_seek_note, "other tracks left out"));
+        mkv_destroy(dm);
+    }
+    mkv_layout_free(&L);
+    fclose(c.f);
+}
+
 static void test_mkv_damaged_cues(const char *path, int64_t len_ms)
 {
     FILE *f = fopen(path, "rb");
@@ -341,6 +373,7 @@ int main(int argc, char **argv)
     test_ts(argv[5], len);
     fuzz(argv[2], argv[4]);
     if (argc >= 7) test_mp4_subs(argv[6]);
+    if (argc >= 8) test_mkv_audio_cues(argv[7], len);   /* 1.2.4s */
     uint64_t tot = 0;
     assert(vod_content_range("HTTP/1.1 206 Partial\r\nContent-Length: 10\r\ncontent-range: bytes 0-9/123456\r\n", &tot) && tot == 123456);
     assert(!vod_content_range("Content-Range: bytes */*\r\n", &tot));
