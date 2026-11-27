@@ -141,6 +141,6 @@ static void stop_all(void)
     probe_cancel();
     tsp_stop();
     play_path[0] = 0;
-    if (net_playing) { conn_end_ms = now_ms(); net_playing = 0; }   /* 1.5 */
+    if (net_playing) { conn_end_ms = now_ms(); net_playing = 0; dl_note_stream_end(); }   /* 1.5; 1.2.4t: downloads know too */
     dl_stream_ended();                                       /* 1.4.1: the downloads it stopped go on (in 3 s) */
 }

@@ -436,7 +436,7 @@ static void play_channel_ex(int vi, int use_proxy)
         }
     }
     play_path[0] = 0;
-    if (net_playing) { conn_end_ms = now_ms(); net_playing = 0; }   /* 1.5: (the one before has just stopped) */
+    if (net_playing) { conn_end_ms = now_ms(); net_playing = 0; dl_note_stream_end(); }   /* 1.5: (the one before has just stopped); 1.2.4t */
     if (!arch_on && chans.items[vis[vi]].kind == CH_FILM) {  /* 1.4.1: downloaded: it plays from the memory card */
         int growing = 0;
         const char *lp = dl_local_for(url, &growing);
