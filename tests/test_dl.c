@@ -267,6 +267,19 @@ int main(int argc, char **argv)
             char old[700]; snprintf(old, sizeof old, "%s/video.mkv", h8.dir);
             assert(fsize(old) < 0);                              /* (the playlist is not kept as the film) */
         }
+        /* 1.2.4t: right after a stream (any, not only one that held the downloads): the film's playlist answered 403
+         * twice (the second provider): asked again, not failed */
+        {
+            dl_note_stream_end();
+            DlItem hb = mk(base, "/hlsbusy/film.mkv", "HLS busy", 'F');
+            assert(dl_add(&hb) == 0);
+            int sb = wait_end(hb.dir, 60);
+            DlItem rb;
+            assert(dl_info_read(&rb, hb.dir) == 0);
+            printf("8 playlist 403 twice after a stream: state %d, segments %d, err '%s'\n", sb, rb.hls_seg, rb.err);
+            assert(sb == DL_IDLE && rb.done && rb.hls_seg == 12);
+            assert(dl_delete(hb.dir) == 0);
+        }
         /* not downloadable: fragmented MP4 parts, a live stream */
         static const char *const bad[2] = { "/hlsfmp4/film.mkv", "/hlslive/film.mkv" };
         for (int k = 0; k < 2; k++) {

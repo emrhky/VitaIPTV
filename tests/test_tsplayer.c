@@ -2115,6 +2115,15 @@ films:
             vshow("hls film from 2.5 s", &hv);
             assert(hv.r.st.state == TSP_ENDED && abs(hv.dur - 5000) < 100 && hv.first_pos >= 1900 && hv.first_pos <= 2600);
             assert(hv.last_pos >= 4500 && hv.last_pos <= 5200 && hv.r.changes >= 60 && hv.r.st.seekable);
+            /* 1.2.4t: the first film after the app started (no stream before): its playlist answered 403 twice */
+            extern int mock_http_busy_from, mock_http_busy_n, mock_http_busy_code;
+            mock_http_reset();
+            for (int i = 0; i < 6; i++) { mock_http_map[i][0] = hn[i]; mock_http_map[i][1] = hp[i]; }
+            mock_http_busy_code = 403; mock_http_busy_from = 2; mock_http_busy_n = 2;   /* (the address itself answers: session 1) */
+            hv = play_vod_url("http://example.invalid/movie/u/q/hv.m3u8", NULL, 0, 16, 0, 0);   /* (another: not from memory) */
+            mock_http_busy_n = 0; mock_http_busy_code = 407;
+            vshow("hls film, 403 twice, no stream before", &hv);
+            assert(hv.r.st.state == TSP_ENDED && hv.r.changes >= 100);
             for (int i = 0; i < 6; i++) mock_http_map[i][0] = NULL;
             mock_http_reset();
         }

@@ -192,6 +192,8 @@ race:
         CioRequest rc = { ku, NULL, NULL, 10, 5, on_data, NULL, &a, 0, 0, 0, NULL, NULL, NULL, NULL, 0, kp };
         r = cio_get(&rc, &status, err, sizeof err);
         assert(r == 0 && status == 200 && cio_keep_reused(kp));
+        printf("\"close\": why not kept: '%s'\n", cio_keep_why(kp));
+        assert(strstr(cio_keep_why(kp), "close"));          /* 1.2.4t */
         snprintf(ku, sizeof ku, "https://127.0.0.1:%d/small", port);
         r = cio_get(&rc, &status, err, sizeof err);
         printf("after \"close\": reused %d\n", cio_keep_reused(kp));
@@ -204,6 +206,28 @@ race:
         memset(&a, 0, sizeof a);
         r = cio_get(&rc, &status, err, sizeof err);
         printf("after a silent close: r=%d status %d bytes %zu err='%s'\n", r, status, a.n, err);
+        assert(r == 0 && status == 200 && a.n == 5000 && !cio_keep_reused(kp));
+        /* 1.2.4t: a reader that says "enough" with the body's last bytes (a film's header and index: exactly the
+         * range asked for) leaves the connection whole: it is kept (on the device not one film request was reused) */
+        for (int k = 0; k < 2; k++) {
+            snprintf(ku, sizeof ku, "https://127.0.0.1:%d/small", port);
+            memset(&a, 0, sizeof a);
+            a.stop_after = 5000;
+            r = cio_get(&rc, &status, err, sizeof err);
+            printf("stopped by the reader at its last byte: r=%d status %d bytes %zu reused %d\n", r, status, a.n, cio_keep_reused(kp));
+            assert(r == 0 && status == 200 && a.n == 5000);
+            if (k == 1) assert(cio_keep_reused(kp));
+        }
+        snprintf(ku, sizeof ku, "https://127.0.0.1:%d/file.ts", port);   /* (stopped in the middle: not kept) */
+        memset(&a, 0, sizeof a);
+        a.stop_after = 40000;
+        r = cio_get(&rc, &status, err, sizeof err);
+        printf("stopped in the middle: why not kept: '%s'\n", cio_keep_why(kp));
+        assert(r == 0 && status == 200 && a.n < 100000 && cio_keep_reused(kp) && strstr(cio_keep_why(kp), "before the body"));
+        snprintf(ku, sizeof ku, "https://127.0.0.1:%d/small", port);
+        memset(&a, 0, sizeof a);
+        r = cio_get(&rc, &status, err, sizeof err);
+        printf("after a stop in the middle: reused %d\n", cio_keep_reused(kp));
         assert(r == 0 && status == 200 && a.n == 5000 && !cio_keep_reused(kp));
         cio_keep_free(kp);
     }

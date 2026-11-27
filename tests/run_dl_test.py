@@ -27,6 +27,7 @@ def _aes(seg, k):
     subprocess.run(f"openssl enc -aes-128-cbc -K {KEY.hex()} -iv {iv.hex()} -in {T}/seg.in -out {T}/seg.out", shell=True, check=True)
     return open(f"{T}/seg.out", "rb").read()
 AESSEGS = [_aes(sg, k) for k, sg in enumerate(SEGS)]
+PL403 = {"n": 0}
 SEG403 = {"n": 0}
 def _media(prefix, key=False, fmp4=False):
     t = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n"
@@ -57,6 +58,9 @@ class H(BaseHTTPRequestHandler):
             if rest == "film.mkv":
                 body = ("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=900000,RESOLUTION=640x360\nlow/index.m3u8\n"
                         "#EXT-X-STREAM-INF:BANDWIDTH=3000000,RESOLUTION=1280x720\nhi/index.m3u8\n").encode()
+            elif rest == "hi/index.m3u8" and kind == "hlsbusy" and PL403["n"] < 2:   # 1.2.4t: right after a stream
+                PL403["n"] += 1
+                self.send_response(403); self.send_header("Content-Length", "0"); self.end_headers(); return
             elif rest == "hi/index.m3u8":
                 body = _media("", key=kind == "hlsaes", fmp4=kind == "hlsfmp4")
                 if kind == "hlslive": body = body.replace(b"#EXT-X-ENDLIST\n", b"")
