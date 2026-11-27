@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.4t (test)
+- **Films' connections are kept now.** A request read just to its end by the app (a film's start, its index: exactly
+  the part asked for) closed its connection as if it had stopped in the middle; no film request ever went over a kept
+  one (on the device each opened a new connection, about 0.7 s each with one provider). The log says why when one
+  cannot be kept (HTTP/1.0, the server said "close", no length, stopped in the middle).
+- **403 for a film's HLS playlist when the film's address itself answered:** asked again every 2 s for up to 10 s,
+  also with no stream before it (on the device the first film after the app started said 403; the next try opened it).
+- **Downloads after a stream:** a 403 within a minute of any stream's end (not only one that had held the downloads)
+  is asked again like 405; an HLS film's playlist too (on the device a film stopped and queued for download at once
+  failed with 403).
+
 ## 1.2.4s (test)
 - **A 403 right after the last film or episode is waited out.** The second provider (one connection) answered 403,
   not 407, for the next film or episode while it still counted the one just closed; it opened on the 3rd or 4th
