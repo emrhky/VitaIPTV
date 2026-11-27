@@ -578,7 +578,9 @@ static int net_down(void)
  * minute after a stream ended; other times the server does not give the file (no use asking again) */
 static int busy_http(int st)
 {
-    if (st == 405) return g_stream_end_ms && now_ms_dl() - g_stream_end_ms < 60000;
+    /* 1.2.4t: 403 too (the second provider): on the device a film was stopped and queued for download at once, and
+     * its playlist answered 403; the end of any stream counts now, not only of one that held the downloads */
+    if (st == 405 || st == 403) return g_stream_end_ms && now_ms_dl() - g_stream_end_ms < 60000;
     return st == 407 || st == 429 || st == 503 || st == 506 || st == 509 || st == 512;   /* (1.5.1: 506 as well) */
 }
 /* 1.4.1: answers that will not change by asking again */
@@ -702,6 +704,17 @@ static void aes_out(void *ctx, const uint8_t *d, size_t n) { AesOut *o = ctx; me
 /* waits t tenths of a second (stops early) */
 static void nap(int t) { for (int k = 0; k < t && !g_stop_cur && !g_quit; k++) sceKernelDelayThread(100000); }
 
+/* 1.2.4t: an HLS film's playlist answered "busy" (the account still counted on the last stream): 1 = asked again
+ * after 5 s (up to 12 times right after a stream, else 3) */
+static int hls_busy_again(int st, int *n)
+{
+    int after_stream = g_stream_end_ms && now_ms_dl() - g_stream_end_ms < 120000;
+    if (!busy_http(st) || (*n)++ >= (after_stream ? 12 : 3) || g_stop_cur || g_quit) return 0;
+    plog("dl: HLS playlist: server answered %d, asking again in 5 s", st);
+    nap(50);
+    return !g_stop_cur && !g_quit;
+}
+
 static const char *hls_run(DlItem *it, const char *dir, const char *url, const char *ua, const char *ref,
                            char *pl, const char *pl_url, int *need_mb, int *free_mb)
 {
@@ -713,8 +726,13 @@ static const char *hls_run(DlItem *it, const char *dir, const char *url, const c
     memset(&m, 0, sizeof m);
     int st = 0;
     snprintf(base, sizeof base, "%s", pl_url ? pl_url : url);
+    int busy_n = 0;
     if (!text) {                                             /* (going on: the playlist again, its addresses may have changed) */
-        if (fetch_mem(url, ua, ref, &tb, &st, base, sizeof base, e, sizeof e) != 0 || st >= 400 || !tb.n) {
+        int fr;
+        while ((fr = fetch_mem(url, ua, ref, &tb, &st, base, sizeof base, e, sizeof e)) == 0 && st >= 400 && hls_busy_again(st, &busy_n)) {
+            free(tb.b); memset(&tb, 0, sizeof tb); snprintf(base, sizeof base, "%s", url);
+        }
+        if (fr != 0 || st >= 400 || !tb.n) {
             if (st >= 400) snprintf(eb, sizeof eb, "The server does not give this one (HTTP %d)", st);
             else snprintf(eb, sizeof eb, "Connection lost (%s)", e[0] ? e : "no answer");
             err = eb;
@@ -734,7 +752,13 @@ static const char *hls_run(DlItem *it, const char *dir, const char *url, const c
         char vu[HLS_URL_MAX];
         snprintf(vu, sizeof vu, "%s", v[k].uri);
         SegBuf mb = { 0 };
-        if (fetch_mem(vu, ua, ref, &mb, &st, base, sizeof base, e, sizeof e) != 0 || st >= 400 || !mb.n) {
+        int fr;
+        char base0[sizeof base];
+        snprintf(base0, sizeof base0, "%s", base);
+        while ((fr = fetch_mem(vu, ua, ref, &mb, &st, base, sizeof base, e, sizeof e)) == 0 && st >= 400 && hls_busy_again(st, &busy_n)) {
+            free(mb.b); memset(&mb, 0, sizeof mb); snprintf(base, sizeof base, "%s", base0);
+        }
+        if (fr != 0 || st >= 400 || !mb.n) {
             free(mb.b);
             if (st >= 400) snprintf(eb, sizeof eb, "The server does not give this one (HTTP %d)", st);
             else snprintf(eb, sizeof eb, "Connection lost (%s)", e[0] ? e : "no answer");

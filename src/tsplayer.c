@@ -416,6 +416,7 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     uint8_t *mpcm;
     int port_rate, port_ch;
     volatile int is_hls;                /* the address answered with an HLS playlist */
+    int vod_nokeep_logged;              /* 1.2.4t */
     int hls_vod;                        /* 1.2.4s: ... a film's, with an end (its time counts from vod_offset_ms) */
     int size_changes;                   /* 1.2.1: the picture size changed on the way (the decoder opened again) */
     int skip_nonref;                    /* decoder too small for this stream: drop pictures nothing refers to */
@@ -4125,6 +4126,7 @@ static int busy_status(int s)
     return s == 405 || s == 407 || s == 429 || s == 503 || s == 506 || s == 509 || s == 512 || (s == 403 && g_recent_stop);
 }
 #define BUSY_403_TRIES 10                                     /* (x 2 s: 20 s; a real 403 is said after that) */
+#define BUSY_403_HLS_TRIES 5                                  /* 1.2.4t: a film's playlist, its address answered: 10 s */
 /* (x 2 s: 44 s. 1.2.4m: every 2 s instead of 5: a one-connection account changing channels was let go by the
  * server a few seconds after the last stream, and the next channel waited up to 5 s more for nothing) */
 #define BUSY_LONG_TRIES 22
@@ -4133,7 +4135,7 @@ static int busy_status(int s)
 static int busy_wait(Tsp *t, int status, const char *what)
 {
     int long_wait = g_recent_use || status == 403;
-    int tries = status == 403 ? BUSY_403_TRIES : long_wait ? BUSY_LONG_TRIES : 2;
+    int tries = status == 403 ? (g_recent_stop ? BUSY_403_TRIES : BUSY_403_HLS_TRIES) : long_wait ? BUSY_LONG_TRIES : 2;
     if (t->status_retries >= tries) return 0;
     int ms = long_wait ? BUSY_LONG_MS : t->status_retries ? 3000 : 1500;
     t->status_retries++;
@@ -4700,7 +4702,11 @@ static int hls_fetch_text(Tsp *t, const char *url, char *text, const char *what,
         if (status >= 400) plog("tsp: HLS %s: HTTP %d (%s)", what, status, url_path_for_log(base && base[0] ? base : url, lp, sizeof lp));
         else plog("tsp: HLS %s: %s (0x%08X)", what, n < 0 ? "connection failed" : "empty answer", (unsigned)n);
         /* 1.2.4s: busy before anything came (a film / episode right after the last one): waited out as for files */
-        if (busy_status(status) && t->st.bytes == 0 && busy_wait(t, status, "HLS")) { attempt--; continue; }
+        /* 1.2.4t: also a 403 for a film's playlist when the film's address itself answered (it sent us on to it): the
+         * account is busy rather than the film not there (on the device the first film after the app started, no
+         * stream before it, said 403; the next try opened it) */
+        int busy = busy_status(status) || (status == 403 && t->vod && !t->vod_stream);
+        if (busy && t->st.bytes == 0 && busy_wait(t, status, "HLS")) { attempt--; continue; }
         if (status == 404 || status == 403 || status == 401 || status == 410) break;
         hls_wait(t, 1000);
     }
@@ -5334,6 +5340,9 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
         char err[96];
         int r = cio_get(&rq, status, err, sizeof err);
         if (cio_keep_reused(kp) && !t->vod_kept_logged++) plog("tsp: VOD: the next request over the kept connection");
+        /* 1.2.4t: a bounded request (header, index) whose connection could not be kept: why, once */
+        if (end && cio_keep_why(kp)[0] && *status < 400 && !t->vod_nokeep_logged++)
+            plog("tsp: VOD: the connection is not kept: %s", cio_keep_why(kp));
         CioKeep *old = __sync_lock_test_and_set(&t->vod_keep, kp);   /* (another one's meanwhile: let go) */
         if (old) cio_keep_free(old);
         t->vod_last_status = *status;

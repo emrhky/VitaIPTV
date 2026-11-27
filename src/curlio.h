@@ -14,6 +14,7 @@ typedef struct CioKeep CioKeep;
 CioKeep *cio_keep_new(void);
 void     cio_keep_free(CioKeep *k);          /* (closes what it holds; NULL is fine) */
 int      cio_keep_reused(const CioKeep *k);  /* the last request went over the kept connection */
+const char *cio_keep_why(const CioKeep *k);  /* 1.2.4t: why the last request's connection was not kept ("": it was) */
 void     cio_keep_close(CioKeep *k);         /* 1.2.4q: closes what it holds, keeps the holder (NULL is fine) */
 int      cio_dns_stale(void);
 /* 1.2.4r: the shared connections (CioRequest.shared): closes those unused for 30 s (call now and then), closes all

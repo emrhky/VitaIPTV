@@ -65,6 +65,7 @@ typedef struct {
 struct CioKeep {
     struct { Conn *c; char host[256]; int port, tls; uint64_t last_ms; } s[KEEP_SLOTS];   /* (c NULL: none) */
     int reused;                         /* the last request went over a kept one */
+    char why[64];                       /* 1.2.4t: why the last one's connection was not kept ("": it was) */
 };
 
 #define TICK_MS 500
@@ -671,6 +672,7 @@ CioKeep *cio_keep_new(void) { return calloc(1, sizeof(CioKeep)); }
 void cio_keep_close(CioKeep *k) { if (k) for (int i = 0; i < KEEP_SLOTS; i++) { conn_drop(k->s[i].c); k->s[i].c = NULL; } }
 void cio_keep_free(CioKeep *k) { if (k) { cio_keep_close(k); free(k); } }
 int cio_keep_reused(const CioKeep *k) { return k ? k->reused : 0; }
+const char *cio_keep_why(const CioKeep *k) { return k ? k->why : ""; }
 /* the kept connection to this server (taken out), NULL none; an old one is closed */
 static Conn *keep_take(CioKeep *k, const char *host, int port, int tls)
 {
@@ -810,7 +812,7 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
     *status = 0;
     snprintf(url, sizeof url, "%s", rq->url);
     CioKeep *kp = rq->shared ? NULL : rq->keep;
-    if (kp) kp->reused = 0;
+    if (kp) { kp->reused = 0; kp->why[0] = 0; }
     if (rq->reused) *rq->reused = 0;
     int no_reuse = 0, pk = -1, tried403 = 0;
 #define DROP_CP() do { conn_drop(cp); cp = NULL; if (pk >= 0) { pool_give(pk, NULL); pk = -1; } } while (0)
@@ -957,7 +959,12 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
                 else { ret = n; snprintf(err, errsz, n == -1006 ? "No data for too long" : "Connection lost"); }
                 break;
             }
-            if (rq->data && rq->data(rq->ctx, buf, (size_t)n)) break;
+            if (rq->data && rq->data(rq->ctx, buf, (size_t)n)) {
+                /* 1.2.4t: the reader had enough with the body's last bytes (a film's header or index: just the range
+                 * asked): the connection is whole and may be kept (it was closed: not one film request reused one) */
+                ended = !b.chunked && b.left == 0;
+                break;
+            }
         }
         if (keepable && ended && b.chunked) {               /* (the trailer: lines up to an empty one) */
             int ch, len = 0, ok = 0;
@@ -970,7 +977,17 @@ int cio_get(const CioRequest *rq, int *status, char *err, size_t errsz)
         if (keepable && ended && ret == 0 && b.npend == 0 && pk >= 0) { pool_give(pk, cp); pk = -1; cp = NULL; }
         else if (keepable && ended && ret == 0 && b.npend == 0) {
             keep_put(kp, cp, host, port, tls);
-        } else DROP_CP();
+            kp->why[0] = 0;
+        } else {
+            if (kp) {                                       /* 1.2.4t: why not (in the log of a film's opening) */
+                const char *w = strncmp((char *)hb, "HTTP/1.1", 8) ? "the server speaks HTTP/1.0" :
+                                header((char *)hb, "Connection", val, sizeof val) && has_close(val) ? "the server said \"close\"" :
+                                !b.chunked && b.left < 0 ? "no length given" :
+                                ret != 0 ? "the transfer failed" : !ended ? "stopped before the body's end" : "more came than said";
+                snprintf(kp->why, sizeof kp->why, "%s", w);
+            }
+            DROP_CP();
+        }
         break;
     }
     if (pk >= 0) pool_give(pk, NULL);                        /* (never left taken) */
@@ -992,6 +1009,7 @@ const char *cio_last_suite(void) { return ""; }
 CioKeep *cio_keep_new(void) { return NULL; }
 void cio_keep_free(CioKeep *k) { (void)k; }
 int cio_keep_reused(const CioKeep *k) { (void)k; return 0; }
+const char *cio_keep_why(const CioKeep *k) { (void)k; return ""; }
 void cio_keep_close(CioKeep *k) { (void)k; }
 int cio_dns_stale(void) { return 0; }
 void cio_pool_idle(void) {}
