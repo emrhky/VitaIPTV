@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.4r (test)
+- **A player that does not stop in time no longer blocks all later channels.** On the device an HLS reader sat in a
+  name lookup while the Wi-Fi came and went; the player was left as it was, and with it the video decoder: every
+  later channel said "decoder could not start" (0x80620808) until the app was closed. Now:
+  - name lookups run on a thread of their own, at most 5 s, and a stop ends them at once;
+  - the addresses found are kept (10 minutes without a new lookup; an earlier one when a lookup fails);
+  - a stuck player is freed, its decoder too, as soon as its thread has ended (before the next one opens).
+- **One connection per server, shared:** the lists, the film details, the guide's now / next and the posters use
+  the server's one connection in turn; another request meanwhile waits for it instead of opening a second one (one
+  provider answered 403 to the film details while the lists' connection stood open). It stays open 30 s unused
+  (reading a film's details and going on finds it open), none is kept while a video plays, and a 403 is asked once
+  more on a new connection.
+- **1080p50 / 60 channels with every picture a reference: a fixed 43 a second** (the HD decoder's limit, measured
+  four times on the device at 44.3-44.9, less 4%). No measuring and no tries higher any more; down only when the
+  picture really falls behind the sound (a stream heavier to decode), back to 43 when it is near it again; the
+  first group (the opening) does not count. The picture rate shown is the last 2 s (a run at 50, then a held
+  picture, showed 50 one second and 36 the next).
+- **Network:** a wait right after the network was down is not taken for a slow line (1080p went to 720p after
+  2.3 s without Wi-Fi); five minutes without the network stop the player with "No network connection" (on the
+  device it tried for 28 minutes, then the Vita went to standby).
+- **Films:** their requests (the start, the index, the place to start from) go over the connections the last one
+  left open, also to the server a film's address sends on to; the opening's steps in the log have the first bytes now.
+- **Posters:** JPEGs are read at the smallest M/8 that still gives the box's size (TMDB's 342x513 at 6/8, it was
+  read whole) with the faster IDCT and upsampling; the posters' thread a little ahead of the guide's.
+
 ## 1.2.4q (test)
 - **Posters on a thread of their own:** they no longer wait behind a film's details or the guide. On the device one
   provider's server took 1.6-4.5 s to accept a connection, its film-details requests held the one queue, and a list

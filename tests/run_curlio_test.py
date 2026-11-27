@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """curlio.c (own HTTP client + mbedTLS from third_party) against a local HTTPS server (needs gcc, openssl)."""
-import os, ssl, subprocess, sys, tempfile, threading, time, base64
+import time, os, ssl, subprocess, sys, tempfile, threading, time, base64
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -22,6 +22,7 @@ data = os.urandom(300000)
 open(f"{T}/file.ts", "wb").write(data)
 
 CONNS = [0]
+F403 = [0]
 small = os.urandom(5000)
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
@@ -42,6 +43,12 @@ class H(BaseHTTPRequestHandler):
             self.wfile.write(b"0\r\n\r\n")
         elif self.path == "/close":                         # says so: not kept
             self.send_response(200); self.send_header("Content-Length", "2"); self.send_header("Connection", "close"); self.end_headers(); self.wfile.write(b"ok")
+        elif self.path == "/held":                          # 1.2.4r: a request that takes a while (another waits)
+            time.sleep(0.8)
+            self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
+        elif self.path == "/f403":                          # 1.2.4r: 403 the first time, then 200
+            F403[0] += 1
+            self.send_response(403 if F403[0] == 1 else 200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"no" if F403[0] == 1 else b"ok")
         elif self.path == "/bye":                           # closes without saying so (a server's idle limit)
             self.send_response(200); self.send_header("Content-Length", "2"); self.end_headers(); self.wfile.write(b"ok")
             self.close_connection = True
@@ -76,7 +83,7 @@ ctx12 = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER); ctx12.load_cert_chain(f"{T}/c.p
 ctx12.maximum_version = ssl.TLSVersion.TLSv1_2
 srv12.socket = ctx12.wrap_socket(srv12.socket, server_side=True)
 threading.Thread(target=srv12.serve_forever, daemon=True).start()
-cc(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra {MCF} -I{ROOT}/src "
+cc(f"gcc -O1 -g -fsanitize=address,undefined -Wall -Wextra -pthread {MCF} -I{ROOT}/src "
    f"{ROOT}/tests/test_curlio.c {ROOT}/src/curlio.c {ROOT}/src/hls.c {MLIB} -o {T}/test_curlio")
 # 1.5.1: a server that drops the first SYNs (its queue full for 4.6 s): how long one socket alone waits, then the app
 import socket as so

@@ -131,6 +131,7 @@ static const Pair FIXED[] = {
     { "No downloaded films: Select > Download on a film", "İndirilmiş film yok: bir filmde Select > İndir" },
     { "No episodes", "Bölüm yok" },
     { "Posters", "Afişler" },   /* 1.2.4q */
+    { "No network connection (the Wi-Fi is off or out of reach)", "Ağ bağlantısı yok (Wi-Fi kapalı ya da kapsama dışında)" },   /* 1.2.4r */
     { "The server has no episodes of this series (it may have been removed)", "Sunucuda bu dizinin bölümü yok (kaldırılmış olabilir)" },
     { "Film and series posters seen before (at most 40 MB, the oldest go first). Cleared: they load from the server again.",
       "Daha önce görülen film ve dizi afişleri (en fazla 40 MB, önce en eskiler gider). Silinirse sunucudan yeniden yüklenir." },

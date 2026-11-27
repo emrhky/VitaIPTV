@@ -133,7 +133,6 @@ static void poster_host_note(const char *url)
     }
 }
 
-static CioKeep *poster_keep;            /* 1.2.4p: one connection for the posters (the poster thread's alone) */
 
 /* ---- 1.2.4q: posters kept on the memory card (cache/posters/<hash>.img, the bytes as they came): a list seen
  * before shows them without the network. At most POSTER_DISK_MAX; past it the oldest go (down to 3/4). The
@@ -221,14 +220,15 @@ static void run_qjob(QJob *j)
 {
     Mem m = {0};
     int poster = j->kind == QJ_POSTER;
-    if (poster && !poster_keep) poster_keep = cio_keep_new();
     char small[IPTV_URL_MAX + 200];
     int local = iptv_is_local_path(j->url);
     int is_small = poster && !local && poster_tmdb_small(j->url, small, sizeof small);
     /* (1.2.4q: film info gives up connecting after 5 s, was 8: a server that does not answer held the queue) */
     CioRequest rq = { is_small ? small : j->url, NULL, NULL, j->kind == QJ_VODINFO ? 5 : 8, 15, mem_data,
                       poster ? epg_stop_cb : qjob_stop_cb, &m };
-    if (poster) rq.keep = poster_keep;
+    int reused = 0;
+    rq.shared = 1;                                           /* 1.2.4r: the server's one connection (posters, film details) */
+    rq.reused = &reused;
     int st = 0;
     char e[96] = "";
     int r;
@@ -253,7 +253,7 @@ static void run_qjob(QJob *j)
     }
     uint64_t t1 = sceKernelGetProcessTimeWide();
     j->dl_us = (unsigned)(t1 - t0);
-    j->reused = poster && !j->disk && cio_keep_reused(poster_keep);
+    j->reused = poster && !j->disk && reused;
     j->cancelled = j->kind == QJ_VODINFO && qjob.cancel;
     if (j->kind == QJ_VODINFO && j->dl_us >= 2000000) {      /* 1.2.4q: a slow server (once in a while) */
         static unsigned slow;
@@ -334,7 +334,6 @@ static int poster_thread(SceSize args, void *argp)
 {
     (void)args; (void)argp;
     while (!epg_quit) {
-        if (poster_keep_drop) { poster_keep_drop = 0; cio_keep_close(poster_keep); }   /* (a video starts) */
         if (pjob.state == 1) {
             run_qjob(&pjob);
             __sync_synchronize();
@@ -342,8 +341,6 @@ static int poster_thread(SceSize args, void *argp)
         }
         sceKernelDelayThread(10000);
     }
-    cio_keep_free(poster_keep);
-    poster_keep = NULL;
     return 0;
 }
 
@@ -359,6 +356,7 @@ static int epg_thread(SceSize args, void *argp)
         if (epg_job == 1) {
             Mem m = {0};
             CioRequest rq = { epg_job_url, NULL, NULL, 8, 10, mem_data, epg_stop_cb, &m };
+            rq.shared = 1;                                   /* 1.2.4r: the account's server: its one connection */
             int st = 0;
             char e[96];
             int r = cio_get(&rq, &st, e, sizeof e);
@@ -384,7 +382,7 @@ static void epg_start(void)
     if (epg_tid >= 0) sceKernelStartThread(epg_tid, 0, NULL);
     xmltv_tid = sceKernelCreateThread("xmltv", xmltv_thread, 0x10000118, 256 * 1024, 0, 0, NULL);   /* 0.8.0 (lower) */
     if (xmltv_tid >= 0) sceKernelStartThread(xmltv_tid, 0, NULL);
-    poster_tid = sceKernelCreateThread("poster", poster_thread, 0x10000110, 256 * 1024, 0, 0, NULL);   /* 1.2.4q */
+    poster_tid = sceKernelCreateThread("poster", poster_thread, 0x10000108, 256 * 1024, 0, 0, NULL);   /* 1.2.4q (1.2.4r: a little ahead of the guide: on the device a poster took 956 ms with 70 ms of CPU) */
     if (poster_tid >= 0) sceKernelStartThread(poster_tid, 0, NULL);
     plog("epg: thread 0x%08X, xmltv 0x%08X, posters 0x%08X, time zone %+d min", (unsigned)epg_tid, (unsigned)xmltv_tid, (unsigned)poster_tid, tz_min);
 }

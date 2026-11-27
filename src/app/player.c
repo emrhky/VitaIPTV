@@ -1177,8 +1177,10 @@ static void draw_tsp_screen(int osd)
             static uint32_t fps_shown;
             static int shown_fps10 = -1;
             unsigned nm = now_ms();
-            if (nm - fps_ms >= 1000 || st->shown < fps_shown) {       /* pictures shown in the last second */
-                if (fps_ms && st->shown >= fps_shown && nm - fps_ms < 3000)
+            /* pictures shown in the last 2 s (1.2.4r: was 1 s: with the group trim a 1080p50 channel shows a run of
+             * pictures at 50 a second, then holds one; a second-long window showed 50 one time, 36 the next) */
+            if (nm - fps_ms >= 2000 || st->shown < fps_shown) {
+                if (fps_ms && st->shown >= fps_shown && nm - fps_ms < 5000)
                     shown_fps10 = (int)((uint64_t)(st->shown - fps_shown) * 10000 / (nm - fps_ms));
                 else shown_fps10 = -1;
                 fps_ms = nm;

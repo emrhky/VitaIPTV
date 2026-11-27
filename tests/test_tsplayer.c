@@ -23,7 +23,6 @@ static int g_own_http;                      /* 0.6.0: "own socket (http)" was lo
 static int g_net_slow, g_net_fast;          /* 0.6.0: "the network is slower than the film" / "the network is fast" */
 static int g_asked_again;                   /* 0.6.0: "the film does not come ...: asking the server again" */
 static int g51_direct;                      /* 1.2: the 5.1 AAC decoder (0x1008) opened */
-static int g_ceil_n, g_ups_n;               /* 1.2.4o: "at most ... from now on" lines; group steps up */
 static int g_level_fix;                     /* 1.2.4o: "level ... given to the decoder" */
 static int g_opened;                        /* 1.2.4q: "opened in N ms: ..." lines */
 void plog(const char *fmt, ...)
@@ -38,8 +37,6 @@ void plog(const char *fmt, ...)
     if (strstr(line, "network is fast")) g_net_fast = 1;
     if (strstr(line, "asking the server again")) g_asked_again = 1;
     if (strstr(line, "5.1: the Vita's decoder (0x1008)")) g51_direct = 1;
-    if (strstr(line, "a second at most here: at most")) g_ceil_n++;
-    if (strstr(line, "nothing late:") && strstr(line, "reference pictures a second now")) g_ups_n++;
     if (strstr(line, "given to the decoder") && strstr(line, "too small for its picture")) g_level_fix++;
     if (!strncmp(line, "tsp: opened in ", 15) && strstr(line, "first bytes at ") && strstr(line, "first picture ")) g_opened++;
     if (getenv("VERBOSE")) puts(line);
@@ -1601,7 +1598,9 @@ limit:
             /* 1.1: 1080p50 without B-pictures (every picture is a reference: seen on the device, 0% left to leave
              * out) from an HD decoder at about 42 pictures/s: "group trim": the first pictures of each 1 s group
              * are decoded, the end of the group is left out; in time with the sound, no jumps to keyframes */
-            decode_order = 0; int_delay = 2; int_out_us = 24000;
+            /* (1.2.4r: at 45 a second, as the device's HD decoder measured four times; the share is fixed at 43 now.
+             * A decoder slower than that: "heavier stream" below) */
+            decode_order = 0; int_delay = 2; int_out_us = 22000;
             r = play(argv[34], 12);
             int_out_us = 0;
             show("1080p50 all P", &r);
@@ -1613,44 +1612,37 @@ limit:
             assert(r.st.dropped < 40 && r.av_max < 400);
             /* 1.2.4m: a decoder with time to spare (the device's 1080p50 channel: 75% of the time waiting for the
              * screen with 67 of 100 decoded): more of each group is given to it, in time with the sound */
-            unsigned skipped_slow = (unsigned)r.st.skipped;
+            unsigned skipped_45 = (unsigned)r.st.skipped;
+            /* 1.2.4r: the share is fixed at 43: a faster decoder gets no more (it was measured and raised in
+             * 1.2.4m-q, and the picture went up and down with it) */
             int_out_us = 12000;
             r = play(argv[34], 12);
             int_out_us = 0;
             show("1080p50 all P, fast decoder", &r);
-            printf("               shown %u, decoded %u, left out %u (with the slower one %u), dropped %u, last %d ms from the sound\n",
-                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, skipped_slow, r.st.dropped, r.av_last);
-            /* (1.2.4p: up to the HD decoder's measured limit at first, 43.5 a second: less than half of what was left out
-             * before is not reached in 8 s any more) */
-            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 300 && r.st.skipped * 5 < skipped_slow * 4);
+            printf("               shown %u, decoded %u, left out %u (at 45 a second %u), dropped %u, last %d ms from the sound\n",
+                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, skipped_45, r.st.dropped, r.av_last);
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.shown >= 280);
+            assert(r.st.skipped * 10 >= skipped_45 * 7 && r.st.skipped * 10 <= skipped_45 * 13);
             assert(r.st.dropped < 40 && r.av_max < 400);
-            /* 1.2.4n: a decoder at about 45 a second (the device's channel): up to all of each group was too many; it
-             * stays below the level that failed instead of going up and down */
-            int_out_us = 22000;
-            g_ceil_n = g_ups_n = 0;
+            /* a heavier stream: the decoder makes 41.7 a second, less than the fixed 43: the share goes down while the
+             * picture falls behind (the only guard now), the picture comes back near the sound */
+            int_out_us = 24000;
             r = play(argv[34], 12);
             int_out_us = 0;
-            show("1080p50 all P, 45/s decoder", &r);
-            printf("               shown %u, decoded %u, left out %u, dropped %u, last %d ms from the sound; ceiling set %d times, %d steps up\n",
-                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.st.dropped, r.av_last, g_ceil_n, g_ups_n);
-            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.dropped < 40 && r.av_max < 450);
-            /* 1.2.4o: the device's channel as numbers (the HD decoder works on its own, so the mock cannot show it):
-             * at most 45.2 a second; 1.2.4n's ceiling missed it and the share went up to 50 every 15 s (the ceiling is
-             * tried 2% higher after each good minute: a little above 45.2 at times) */
+            show("1080p50 all P, heavier stream", &r);
+            printf("               shown %u, decoded %u, left out %u, dropped %u, last %d ms from the sound\n",
+                   r.st.shown, r.st.decoded, (unsigned)r.st.skipped, r.st.dropped, r.av_last);
+            assert(r.st.state == TSP_ENDED && r.nonmono == 0 && r.st.dropped < 40 && r.av_max < 800 && r.st.skipped > skipped_45);
+            /* 1.2.4o (1.2.4r: the fixed share): the device's channel as numbers (the HD decoder works on its own, so
+             * the mock cannot show it). At most 45.2 a second: the share stays at 43, the picture near the sound. */
             double go[4];
-            assert(tsp_test_group_seq(45.2, 90, 0, go) == 0);
-            printf("               device's numbers, 3 min: share %.1f, ceiling %.1f, %d steps up after it, at most %.0f ms behind\n",
-                   go[0], go[1], (int)go[2], go[3]);
-            assert(go[1] >= 42.0 && go[1] <= 46.5 && go[0] >= 38.0 && go[0] <= 46.5 && go[2] <= 4 && go[3] < 400);
-            assert(tsp_test_group_seq(60.0, 60, 0, go) == 0);  /* a decoder with room: all of each group, no ceiling */
-            printf("               a decoder that can do 60: share %.1f, ceiling %.1f\n", go[0], go[1]);
-            assert(go[0] >= 49.9 && go[1] == 0);
-            /* 1.2.4p: with the hardware's figure as the first ceiling (as the player starts now): it never goes up to 50,
-             * the picture stays near the sound, and the probes stay below what was measured */
-            assert(tsp_test_group_seq(45.2, 90, 1, go) == 0);
-            printf("               with the first ceiling: share %.1f, ceiling %.1f, %d steps up at it, at most %.0f ms behind\n",
-                   go[0], go[1], (int)go[2], go[3]);
-            assert(go[0] >= 42.0 && go[0] <= 46.0 && go[1] <= 46.0 && go[3] < 150);   /* (a probe a little past 45.2 is too small to show here) */
+            assert(tsp_test_group_seq(45.2, 90, go) == 0);
+            printf("               device's numbers, 3 min: share %.1f (%.1f-%.1f), at most %.0f ms behind\n", go[0], go[1], go[2], go[3]);
+            assert(go[0] > 42.9 && go[0] < 43.2 && go[1] > 42.9 && go[2] < 43.2 && go[3] < 50);
+            /* a heavier stream (the decoder makes 39): down while the picture falls behind, never above 43, bounded */
+            assert(tsp_test_group_seq(39.0, 90, go) == 0);
+            printf("               a decoder that makes 39: share %.1f (%.1f-%.1f), at most %.0f ms behind\n", go[0], go[1], go[2], go[3]);
+            assert(go[1] < 39.5 && go[2] < 43.2 && go[3] < 450);
         }
         if (argc > 37) {
             /* 1.2.4o: 1920x1080 whose SPS says level 1.3 (two channels on the device; the HD decoder refused the

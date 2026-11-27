@@ -15,6 +15,13 @@ CioKeep *cio_keep_new(void);
 void     cio_keep_free(CioKeep *k);          /* (closes what it holds; NULL is fine) */
 int      cio_keep_reused(const CioKeep *k);  /* the last request went over the kept connection */
 void     cio_keep_close(CioKeep *k);         /* 1.2.4q: closes what it holds, keeps the holder (NULL is fine) */
+int      cio_dns_stale(void);
+/* 1.2.4r: the shared connections (CioRequest.shared): closes those unused for 30 s (call now and then), closes all
+ * (a video starts), and how many are open or in use */
+void     cio_pool_idle(void);
+void     cio_pool_close(void);
+void     cio_pool_keep(int on);              /* 0: none kept open after a request (while a video plays) */
+int      cio_pool_open(void);                /* 1.2.4r: connections made to an earlier address (its lookup failed) */
 
 /* called with every piece of the body; return non-zero to stop the transfer */
 typedef int (*CioData)(void *ctx, const uint8_t *data, size_t len);
@@ -36,6 +43,8 @@ typedef struct {
     char *final_url;                    /* out, may be NULL: the address that answered, after redirects */
     size_t final_cap;
     CioKeep *keep;                      /* 1.2.4p: NULL = one connection a request ("Connection: close") as before */
+    int shared;                         /* 1.2.4r: the server's one connection, shared by the app's threads (not keep) */
+    int *reused;                        /* 1.2.4r: out, may be NULL: it went over an open connection */
 } CioRequest;
 
 int  cio_available(void);

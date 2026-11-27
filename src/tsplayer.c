@@ -230,6 +230,10 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     int connect_fails, multi_out, oom_fixed, status_retries;
     int busy_waited;                    /* 1.2.4n: the last session ended in a busy answer that was waited for */
     uint64_t disc_us;                   /* 1.2.4n: when the last HLS discontinuity came */
+    uint64_t net_back_us;               /* 1.2.4r: when the network last came back after it was down */
+    CioKeep *volatile vod_keep;         /* 1.2.4r: a film's requests over kept connections (taken by the one that runs) */
+    int vod_kept_logged;
+    uint64_t net_lost_us;               /* ... when this time without the network began (0: data came since) */
     int busy_retries;                   /* 1.0: "busy" answers while reconnecting a stream that played */
     uint32_t busy_bytes;                /* ... the data received at the last one */
     int cio_http_off;                   /* 0.6.0: plain http:// through our own socket failed: the system HTTP from now on */
@@ -313,12 +317,11 @@ struct Tsp {                            /* (1.3.1: named, declared above) */
     uint64_t g_t0, g_slot0;             /* ... at the last group start: time, time waited for the screen */
     uint32_t g_bad0;                    /* ... dropped + late pictures then */
     int g_ups, g_downs, g_logged_budget;
-    double tr_ceil;                     /* 1.2.4n: the ceiling found (0 none yet) */
-    int g_good;                         /* ... ms of good groups at the ceiling */
+    double tr_fix;                      /* 1.2.4r: the fixed share (the HD decoder's limit less 4%; 1080p: 43 a second) */
+    int g_n;                            /* ... groups measured (the first: the opening, not counted) */
     uint32_t g_dec0;                    /* 1.2.4o: pictures decoded at the group's start */
     int g_late0;                        /* ... how late the picture was then (ms) */
-    double tr_max;                      /* 1.2.4p: what the decoder makes at most (the hardware's figure, then measured) */
-    int tr_max_measured;                /* ... measured on this stream */
+
     uint32_t fr_drop0;                  /* ... pictures dropped / late when the last 3 s window began */
     int fr_set;
     AudioFx afx;                        /* 1.1: volume boost / speaker mode (Select > Audio) */
@@ -512,6 +515,7 @@ static int wait_for_network(Tsp *t)
     if (sceNetCtlInetGetState(&state) < 0 || state == SCE_NETCTL_STATE_CONNECTED) return 0;
     plog("tsp: the network is down (state %d), waiting for it", state);
     uint64_t t0 = now_us();
+    if (!t->net_lost_us) t->net_lost_us = t0;                 /* 1.2.4r */
     while (!stopping(t) && now_us() - t0 < 120000000ULL) {
         snprintf(t->st.note, sizeof t->st.note, "%s", "Waiting for the network...");
         sceKernelDelayThread(250000);
@@ -520,6 +524,13 @@ static int wait_for_network(Tsp *t)
     t->st.note[0] = 0;
     plog("tsp: network %s after %u ms", state == SCE_NETCTL_STATE_CONNECTED ? "back" : "still down", (unsigned)((now_us() - t0) / 1000));
     if (state == SCE_NETCTL_STATE_CONNECTED) sceKernelDelayThread(1000000);   /* let it settle (DNS, DHCP) */
+    t->net_back_us = now_us();                               /* 1.2.4r: the waits that follow say nothing about the line */
+    /* 1.2.4r: five minutes without the network (on the device 28 minutes, a try every 2 minutes, then standby): the
+     * player stops with a message */
+    if (state != SCE_NETCTL_STATE_CONNECTED && t->net_lost_us && now_us() - t->net_lost_us > 300000000ULL) {
+        plog("tsp: no network for %u s: stopping", (unsigned)((now_us() - t->net_lost_us) / 1000000));
+        set_error_kind(t, TSP_ERRK_NET, "No network connection (the Wi-Fi is off or out of reach)");
+    }
     return 1;
 }
 static const TsInfo *dmx_info(Tsp *t) { return t->mp4 ? mp4_info(t->mp4) : t->avi ? avi_info(t->avi) : t->mkv ? mkv_info(t->mkv) : t->flv ? flv_info(t->flv) : ts_info(t->dmx); }
@@ -1784,72 +1795,50 @@ static void group_measure(Tsp *t, uint64_t now)
     double dt = (double)(now - t->g_t0);
     if (dt < 500000.0) return;                               /* (groups shorter than 0.5 s: measured together) */
     double spare = (double)(t->slot_wait_total - t->g_slot0) / dt;
-    double rate = (double)(t->st.decoded - t->g_dec0) * 1e6 / dt;    /* pictures decoded a second in this group */
     /* (late_ms only far beyond the usual: the decoded run of a group plays a little behind the sound by design,
      * up to about 150 ms, and catches up while the end is left out - so at a group's start it is small.
      * 1.2.4o: or growing from group to group: on the device the picture went 8 -> 100 -> 570 ms behind in 15 s,
      * never a late picture, and nothing was counted until it was far behind) */
-    int creep = t->late_ms > 150 && t->late_ms > t->g_late0 + 50;
+    int creep = t->late_ms > 120 && t->late_ms > t->g_late0 + 30;   /* (1.2.4r: from 120 ms and +30, was 150 and +50:
+                                                                         with the fixed share it is the only guard) */
     int worse = bad != t->g_bad0 || t->late_ms > 250 || creep;
-    /* 1.2.4p: behind, but less than at the last group's start: catching up already. On the device the share went
-     * 46 -> 42.3 -> 38.9 -> 35.8 while the picture came back from 0.44 s behind (each group 0.92 less, until the
-     * end of each group stood for 0.6 s): held where it is instead */
+    /* 1.2.4p: behind, but less than at the last group's start: catching up already (held where it is) */
     int recovering = worse && bad == t->g_bad0 && t->late_ms + 30 < t->g_late0;
     if (recovering) worse = 0;
+    /* 1.2.4r: the first group is the opening (the sound waits for the first picture, the decoder fills up):
+     * on the device the first one cut the share to 31.1 and the next 15 s stood for longer in each group */
+    if (++t->g_n <= 1 && t->late_ms < 300) worse = 0;
     double was = t->tr_cap;
-    /* 1.2.4n: a ceiling. 1.2.4o: from what the decoder did while it was the limit. 1.2.4n took the share before
-     * the last step up, only when the trouble came right after it; on the device it came a group later, no ceiling
-     * was set and the share went up to all of each group again every 15 s (and at 50 the decoder makes 45 a second).
-     * Trouble with no time to spare: the decoder gave all it could, 97% of that is the ceiling. After a minute of
-     * good groups at it, it is tried 2% higher (a lighter part of the programme may allow more). */
-    double ceil = t->tr_ceil > 0 ? t->tr_ceil : (double)t->tr_fps;
+    /* 1.2.4r: a fixed share instead of the measuring of 1.2.4m-p: the HD decoder's limit less 4% (1080p: 43 a second;
+     * measured on the device four times, 44.3 to 44.9). Down only when the picture really falls behind (a stream
+     * heavier to decode), back up to it when it is near the sound again; never above it. */
     if (worse) {
-        double c = rate * 0.97;
-        if (spare < 0.10 && rate > 1.0 && c >= t->tr_cap0 * 0.85) {
-            t->tr_max = rate;                                /* (1.2.4p: the probes stay below it) */
-            t->tr_max_measured = 1;
-            if (c < ceil) {
-                t->tr_ceil = c;
-                plog("tsp: groups: the decoder makes %.1f a second at most here: at most %.1f from now on", rate, c);
-            }
-        }
         t->tr_cap *= 0.92;
-        if (t->tr_cap < t->tr_cap0 * 0.85) t->tr_cap = t->tr_cap0 * 0.85;
-        t->g_good = 0;
-    } else if (recovering) {
-        /* (nothing: neither less nor more while it catches up) */
-    } else if (spare > 0.35 && t->tr_cap < ceil) {
-        t->tr_cap *= spare > 0.5 ? 1.12 : 1.06;
-        if (t->tr_cap > ceil) t->tr_cap = ceil;
-    } else if (t->tr_ceil > 0 && t->tr_cap >= t->tr_ceil && (t->g_good += (int)(dt / 1000)) >= 60000) {   /* (ms at the ceiling) */
-        t->g_good = 0;
-        double top = t->tr_max_measured ? t->tr_max * 0.99 : (double)t->tr_fps;   /* 1.2.4p: not past what was measured */
-        if (t->tr_ceil * 1.02 <= top) t->tr_ceil *= 1.02;
-        else if (t->tr_ceil < top) t->tr_ceil = top;
-        if (t->tr_ceil > t->tr_fps) t->tr_ceil = t->tr_fps;
+        if (t->tr_cap < t->tr_fix * 0.75) t->tr_cap = t->tr_fix * 0.75;
+    } else if (!recovering && t->tr_cap < t->tr_fix && t->late_ms < 150) {
+        t->tr_cap *= 1.06;
+        if (t->tr_cap > t->tr_fix) t->tr_cap = t->tr_fix;
     }
     if (t->tr_cap != was) {
         if (t->tr_cap > was) t->g_ups++; else t->g_downs++;
         if (t->g_ups + t->g_downs <= 30 || (t->g_ups + t->g_downs) % 20 == 0)
-            plog("tsp: groups: %.0f%% of the time to spare, %s: %.1f reference pictures a second now (was %.1f, first %.1f)",
-                 spare * 100.0, bad != t->g_bad0 ? "a picture late or dropped" : worse ? "the picture behind the sound" : "nothing late", t->tr_cap, was, t->tr_cap0);
+            plog("tsp: groups: %.0f%% of the time to spare, %s: %.1f reference pictures a second now (was %.1f, fixed at %.1f)",
+                 spare * 100.0, bad != t->g_bad0 ? "a picture late or dropped" : worse ? "the picture behind the sound" : "nothing late", t->tr_cap, was, t->tr_fix);
     }
     t->g_t0 = now; t->g_slot0 = t->slot_wait_total; t->g_bad0 = bad; t->g_dec0 = t->st.decoded; t->g_late0 = t->late_ms;
 }
 
-/* 1.2.4o test: the device's 1080p50 channel as numbers, one 2 s group after another: the decoder makes at most
- * `max` a second; below it the video thread waits for the screen (60-78% of the time on the device), above it
- * nothing is late but the picture falls behind the sound. out: [0] the share at the end, [1] the ceiling,
- * [2] steps up after the ceiling was found, [3] the most the picture was behind (ms). 0 = done. */
-int tsp_test_group_seq(double max, int groups, int start_ceil, double out[4])
+/* 1.2.4o test (1.2.4r: the fixed share): the device's 1080p50 channel as numbers, one 2 s group after another:
+ * the decoder makes at most `max` a second; below it the video thread waits for the screen (60-78% of the time on
+ * the device), above it nothing is late but the picture falls behind the sound. out: [0] the share at the end,
+ * [1] the least it was, [2] the most it was, [3] the most the picture was behind (ms). 0 = done. */
+int tsp_test_group_seq(double max, int groups, double out[4])
 {
     Tsp *t = calloc(1, sizeof *t);
     if (!t) return -1;
-    t->tr_fps = 50; t->tr_cap0 = t->tr_cap = 33.8;
-    if (start_ceil) { t->tr_max = 366000.0 / 8160; t->tr_ceil = t->tr_max * 0.97; }   /* (as the player sets it) */
+    t->tr_fps = 50; t->tr_fix = 366000.0 / 8160 * 0.96; t->tr_cap0 = t->tr_cap = t->tr_fix;   /* (as the player sets it) */
     uint64_t now = 1000000;
-    double late = 0, dec = 0, wait = 0, most = 0;
-    int ups_after = 0;
+    double late = 0, dec = 0, wait = 0, most = 0, lo = t->tr_cap, hi = t->tr_cap;
     group_measure(t, now);                                   /* (the first call only starts the measurement) */
     for (int g = 0; g < groups; g++) {
         double cap = t->tr_cap, got = cap < max ? cap : max;
@@ -1861,11 +1850,11 @@ int tsp_test_group_seq(double max, int groups, int start_ceil, double out[4])
         t->slot_wait_total = (uint64_t)wait;
         t->st.decoded = (uint32_t)dec;
         t->late_ms = (int)late;
-        double was = t->tr_cap, had = t->tr_ceil;
         group_measure(t, now);
-        if (had > 0 && t->tr_cap > was) ups_after++;
+        if (t->tr_cap < lo) lo = t->tr_cap;
+        if (t->tr_cap > hi) hi = t->tr_cap;
     }
-    out[0] = t->tr_cap; out[1] = t->tr_ceil; out[2] = ups_after; out[3] = most;
+    out[0] = t->tr_cap; out[1] = lo; out[2] = hi; out[3] = most;
     free(t);
     return 0;
 }
@@ -2527,13 +2516,14 @@ static void video_packet(Tsp *t, Pkt *p)
                 double refs = fps * (1.0 - nr);              /* the reference pictures alone */
                 t->pre_skip = need <= can * 0.9 ? 2 : refs <= can * 0.95 ? 1 : 3;
                 t->tr_fps = fps;
-                t->tr_cap = t->tr_cap0 = can * 0.95;
-                /* 1.2.4p: the HD decoder's own limit as the first ceiling: every picture of a 1080p50 channel with all
-                 * pictures referenced, on the device twice: 44.8 and 44.9 a second (366 000 macroblocks); 1.2.4o went
-                 * up to 50 first, fell 0.44 s behind and stood for 0.6 s in each group until it had settled */
-                t->tr_max = 366000.0 / mbs;
-                t->tr_max_measured = 0;
-                t->tr_ceil = t->tr_max * 0.97 > t->tr_cap ? t->tr_max * 0.97 : 0;
+                /* 1.2.4r: the group trim at a fixed share: the HD decoder's limit with every picture of a 1080p50
+                 * channel referenced, measured on the device four times (44.3-44.9 a second: 366 000 macroblocks),
+                 * less 4% (1080p: 43 a second). 1.2.4m-q measured and moved the share (up, down, tried 2% higher),
+                 * and the picture went with it. */
+                t->tr_fix = 366000.0 / mbs * 0.96;
+                if (t->tr_fix > fps) t->tr_fix = fps;
+                t->tr_cap = t->tr_cap0 = t->tr_fix;
+                t->g_n = 0;
                 if (i->height >= 1000) t->st.decoder_slow = 1;
                 plog("tsp: %dx%d at %u fps (%u macroblocks a second) is more than the Vita decoder manages (about "
                      "%s with %d references): %s (%.0f%% not referenced, needs %.0f pictures a second)", t->dw, t->dh, fps, rate,
@@ -4333,6 +4323,7 @@ static void read_http(Tsp *t, uint8_t *buf)
 static void dmx_feed(Tsp *t, const uint8_t *b, size_t n)
 {
     if (!t->data_us && n) t->data_us = now_us();             /* 1.2.4q */
+    if (n) t->net_lost_us = 0;                               /* 1.2.4r: data came: the network is back for good */
     if (t->net_err[0] && n) t->net_err[0] = 0;              /* data comes: an earlier failure is not the story any more */
     if (t->frag) {                                           /* 1.2.2b: an fMP4 segment: kept whole (see hls_get_seg) */
         if (t->flen + n > t->fcap) {
@@ -5062,6 +5053,7 @@ static int vg_data(void *c, const uint8_t *d, size_t n)
     VgCtx *g = c;
     if (stopping(g->t)) return 1;
     if (*g->status == 200 && g->off > 0) { g->refused = 1; return 1; }
+    if (!g->t->data_us && n) g->t->data_us = now_us();       /* 1.2.4r: the opening's first bytes (films too) */
     int r = g->fn(g->t, g->ctx, d, n);
     g->got += n;
     if (vod_first_data(g->t)) return 1;
@@ -5292,8 +5284,17 @@ static int vod_get(Tsp *t, uint64_t off, uint64_t end, VodData fn, void *ctx, in
         CioRequest rq = { t->url, NULL, NULL, 10, (int)(RECV_TIMEOUT_US / 1000000), vg_data, vg_stop, &g,
                           1, off, end ? end - 1 : 0, &tot };
         rq.ua = t->hdr_ua; rq.referer = t->hdr_ref;
+        /* 1.2.4r: over the connections the last request left open (the film's address and the server it sends on
+         * to): a film opens with several requests (its start, its index, the place to start from), each a new
+         * connection before (on the device 6.2 s to the first picture of an MKV started half-way) */
+        CioKeep *kp = __sync_lock_test_and_set(&t->vod_keep, NULL);
+        if (!kp) kp = cio_keep_new();
+        rq.keep = kp;
         char err[96];
         int r = cio_get(&rq, status, err, sizeof err);
+        if (cio_keep_reused(kp) && !t->vod_kept_logged++) plog("tsp: VOD: the next request over the kept connection");
+        CioKeep *old = __sync_lock_test_and_set(&t->vod_keep, kp);   /* (another one's meanwhile: let go) */
+        if (old) cio_keep_free(old);
         t->vod_last_status = *status;
         if (tot && !t->vod_total) t->vod_total = tot;
         else vc_check_total(t, tot);
@@ -6031,7 +6032,8 @@ static void buffer_check(Tsp *t, uint64_t now)
     int too_long = now - t->buf_since > max_wait_ms * 1000ULL;
     uint32_t came = t->st.bytes - t->buf_bytes0;
     if (too_long && !t->vod && !t->st.slow_network && came < 64 * 1024 &&
-        !(t->disc_us && now - t->disc_us < 30000000ULL)) {   /* (before the wait ends: it may not; 1.2.4n: not at a discontinuity) */
+        !(t->disc_us && now - t->disc_us < 30000000ULL) &&     /* (before the wait ends: it may not; 1.2.4n: not at a discontinuity) */
+        !(t->net_back_us && now - t->net_back_us < 30000000ULL)) {   /* (1.2.4r: nor right after the network was down) */
         t->st.slow_network = 1;
         plog("tsp: nothing came during the wait (%u KB in %u ms): the line is too slow for this stream",
              (unsigned)(came / 1024), (unsigned)((now - t->buf_since) / 1000));
@@ -6060,6 +6062,11 @@ static void buffer_check(Tsp *t, uint64_t now)
          * minutes */
         int disc = t->disc_us && now - t->disc_us < 30000000ULL;
         if (!t->vod && disc && !t->st.slow_network) plog("tsp: the wait came with an HLS discontinuity: not counted as a slow line");
+        /* 1.2.4r: nor after the network was down (on the device 2.3 s without Wi-Fi, then 8 s without data: 1080p went
+         * to 720p after an hour without a wait) */
+        int netw = t->net_back_us && now - t->net_back_us < 30000000ULL;
+        if (!t->vod && netw && !disc && !t->st.slow_network) plog("tsp: the wait came after the network was down: not counted as a slow line");
+        disc = disc || netw;
         if (!t->vod && !disc) {                             /* live waits again and again: the line is too slow */
             /* 0.2.6 waited for three waits in two minutes and switched to 720p after about 80 s: now two
              * waits within a minute, or one wait in which (almost) nothing came */
@@ -6242,6 +6249,7 @@ static SceUID start_thread(const char *name, SceKernelThreadEntry fn, int prio, 
 static int tsp_start_ex(const char *url, int vod, int start_ms, int stream_offset_ms)
 {
     tsp_stop();
+    tsp_reap(5000);                                          /* 1.2.4r: a stuck player before: its decoder back first */
     Tsp *t = calloc(1, sizeof *t);
     if (!t) return -1;
     snprintf(t->url, sizeof t->url, "%s", url);
@@ -6383,29 +6391,10 @@ int tsp_vod_pos(int *pos_ms, int *dur_ms)
 static int g_leaked;
 int tsp_leaked(void) { return g_leaked; }
 
-void tsp_stop(void)
+/* the threads have ended: what the player holds goes (the decoder first: the next player needs it) */
+static void tsp_free(Tsp *t)
 {
-    Tsp *t = g_tsp;
-    if (!t) return;
-    g_tsp = NULL;
-    sceKernelLockMutex(t->qlock, 1, NULL);
-    t->cancel = 1;                                          /* the reader sees cancel, or we see its request */
-    int req = t->cur_req, ra = 0;
-    if (req >= 0) ra = sceHttpAbortRequest(req);            /* unblock the reader */
-    sceKernelUnlockMutex(t->qlock, 1);
-    if (req >= 0) plog("tsp: abort HTTP request -> 0x%08X", (unsigned)ra);
-    SceUID ths[3] = { t->thread, t->vthread, t->athread };
-    for (int k = 0; k < 3; k++) {
-        if (ths[k] < 0) continue;
-        SceUInt timeout = 6000000;
-        int r = sceKernelWaitThreadEnd(ths[k], NULL, &timeout);
-        if (r < 0) {                   /* a thread is stuck: leak rather than free memory it may still use */
-            plog("tsp: thread did not stop (0x%08X), leaking the player", (unsigned)r);
-            g_leaked++;                                     /* 1.2.4g: the UI says so (its memory stays taken) */
-            return;
-        }
-        sceKernelDeleteThread(ths[k]);
-    }
+    cio_keep_free(t->vod_keep);                              /* 1.2.4r */
     vita2d_wait_rendering_done();      /* the GPU may still be drawing one of our textures */
     free_plan(t);
     decoder_core_close(t);
@@ -6425,4 +6414,66 @@ void tsp_stop(void)
     plog("tsp: stopped");
     free(t->cues);
     free(t);
+}
+
+/* 1.2.4r: a player whose thread did not stop in time (on the device the HLS reader sat in a name lookup while the
+ * Wi-Fi came and went). It was left as it was - its memory may still be in use - and with it the video decoder:
+ * every later channel then failed with 0x80620808 until the app was closed, though the thread ended a few seconds
+ * later. Now it is kept here and freed once its threads have ended (before the next player opens a decoder). */
+#define ZOMBIES 4
+static struct { Tsp *t; SceUID th[3]; } g_zombie[ZOMBIES];
+/* frees the stuck players whose threads have ended, waiting up to wait_ms for them in all */
+void tsp_reap(int wait_ms)
+{
+    uint64_t until = now_us() + (uint64_t)(wait_ms > 0 ? wait_ms : 0) * 1000ULL;
+    for (int z = 0; z < ZOMBIES; z++) {
+        if (!g_zombie[z].t) continue;
+        int left = 0;
+        for (int k = 0; k < 3; k++) {
+            if (g_zombie[z].th[k] < 0) continue;
+            uint64_t now = now_us();
+            SceUInt to = now < until ? (SceUInt)(until - now) : 1000;
+            if (sceKernelWaitThreadEnd(g_zombie[z].th[k], NULL, &to) < 0) { left++; continue; }
+            sceKernelDeleteThread(g_zombie[z].th[k]);
+            g_zombie[z].th[k] = -1;
+        }
+        if (left) continue;
+        plog("tsp: the player that did not stop has ended now: freed (its decoder too)");
+        Tsp *t = g_zombie[z].t;
+        g_zombie[z].t = NULL;
+        if (g_leaked > 0) g_leaked--;
+        tsp_free(t);
+    }
+}
+
+void tsp_stop(void)
+{
+    Tsp *t = g_tsp;
+    if (!t) return;
+    g_tsp = NULL;
+    sceKernelLockMutex(t->qlock, 1, NULL);
+    t->cancel = 1;                                          /* the reader sees cancel, or we see its request */
+    int req = t->cur_req, ra = 0;
+    if (req >= 0) ra = sceHttpAbortRequest(req);            /* unblock the reader */
+    sceKernelUnlockMutex(t->qlock, 1);
+    if (req >= 0) plog("tsp: abort HTTP request -> 0x%08X", (unsigned)ra);
+    SceUID ths[3] = { t->thread, t->vthread, t->athread };
+    for (int k = 0; k < 3; k++) {
+        if (ths[k] < 0) continue;
+        SceUInt timeout = 6000000;
+        int r = sceKernelWaitThreadEnd(ths[k], NULL, &timeout);
+        if (r < 0) {                   /* a thread is stuck: kept rather than free memory it may still use */
+            int z = 0;
+            while (z < ZOMBIES && g_zombie[z].t) z++;
+            plog("tsp: thread did not stop (0x%08X), %s", (unsigned)r, z < ZOMBIES ? "the player is freed when it ends (1.2.4r)" : "leaking the player");
+            g_leaked++;                                     /* 1.2.4g: the UI says so (its memory stays taken) */
+            if (z < ZOMBIES) {
+                g_zombie[z].t = t;
+                for (int j = 0; j < 3; j++) g_zombie[z].th[j] = j < k ? -1 : ths[j];
+            }
+            return;
+        }
+        sceKernelDeleteThread(ths[k]);
+    }
+    tsp_free(t);
 }

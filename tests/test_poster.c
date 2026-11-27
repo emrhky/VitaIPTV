@@ -23,7 +23,7 @@ static void px_rgb(uint32_t p, int *r, int *g, int *b) { *r = p & 255; *g = p >>
 
 int main(int argc, char **argv)
 {
-    assert(argc == 4);
+    assert(argc == 4 || argc == 5);
     {   /* 1.2.4p: TMDB addresses at the box's size; other sites and small ones as they are */
         char o[512];
         assert(poster_tmdb_small("https://image.tmdb.org/t/p/w600_and_h900_bestv2/abc.jpg", o, sizeof o) &&
@@ -53,6 +53,16 @@ int main(int argc, char **argv)
     assert(poster_decode(d, n / 3, 240, 360, &px, &w, &h) != 0 || px != NULL);   /* cut short: refused or partial, never a crash */
     free(px);
     free(d);
+    if (argc > 4) {                                          /* 1.2.4r: TMDB's w342 (342x513) read at 6/8, not whole */
+        d = load(argv[4], &n);
+        assert(poster_decode(d, n, 240, 360, &px, &w, &h) == 0);
+        fprintf(stderr, "jpeg 342x513 -> %dx%d (%s)\n", w, h, poster_last_src());
+        assert(strstr(poster_last_src(), "read at 6/8 (257x385)") && w == 240 && h == 360);
+        px_rgb(px[50 * w + 120], &r, &g, &b); assert(r > 200 && g < 60 && b < 60);
+        px_rgb(px[300 * w + 120], &r, &g, &b); assert(b > 200 && r < 60);
+        free(px);
+        free(d);
+    }
     d = load(argv[2], &n);                                   /* 100x150 PNG with alpha: not enlarged */
     assert(poster_decode(d, n, 240, 360, &px, &w, &h) == 0 && w == 100 && h == 150);
     px_rgb(px[75 * w + 50], &r, &g, &b); assert(g > 200 && r < 60);

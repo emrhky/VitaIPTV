@@ -6,6 +6,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <pthread.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef struct { size_t n; unsigned long sum; int stop_after; int polls; } Acc;
@@ -17,6 +19,32 @@ static int on_data(void *ctx, const uint8_t *d, size_t n)
     return a->stop_after && a->n >= (size_t)a->stop_after;
 }
 static int stop_now(void *ctx) { Acc *a = ctx; return ++a->polls > 3 && a->stop_after < 0; }
+
+typedef struct { char buf[64]; size_t n; } Txt;   /* 1.2.4r: a short answer, kept */
+static int on_txt(void *ctx, const uint8_t *d, size_t n)
+{
+    Txt *t = ctx;
+    for (size_t k = 0; k < n && t->n + 1 < sizeof t->buf; k++) t->buf[t->n++] = (char)d[k];
+    t->buf[t->n] = 0;
+    return 0;
+}
+static int slow_reused;
+static void *slow_shared(void *p)
+{
+    char u[128];
+    snprintf(u, sizeof u, "https://127.0.0.1:%d/held", *(int *)p);
+    Txt a = { "", 0 };
+    int st = 0, ru = 0;
+    char e[96];
+    CioRequest rq = { u, NULL, NULL, 10, 5, on_txt, NULL, &a, 0, 0, 0, NULL, NULL, NULL, NULL, 0, NULL, 1, &ru };
+    int r = cio_get(&rq, &st, e, sizeof e);
+    assert(r == 0 && st == 200);
+    slow_reused = ru;
+    return NULL;
+}
+static double now_s(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec / 1e9; }
+static double stop_at;
+static int stop_later(void *ctx) { (void)ctx; return now_s() >= stop_at; }
 
 int main(int argc, char **argv)
 {
@@ -178,6 +206,54 @@ race:
         printf("after a silent close: r=%d status %d bytes %zu err='%s'\n", r, status, a.n, err);
         assert(r == 0 && status == 200 && a.n == 5000 && !cio_keep_reused(kp));
         cio_keep_free(kp);
+    }
+    {   /* 1.2.4r: the shared connection: one per server for all threads; a second request meanwhile waits for it
+         * instead of opening another; 403 once more on a new connection; the address kept after a lookup */
+        char ku[128];
+        snprintf(ku, sizeof ku, "https://127.0.0.1:%d/conns", port);
+        Txt ca = { "", 0 };
+        int reused = 0, c0, c1;
+        CioRequest rs = { ku, NULL, NULL, 10, 5, on_txt, NULL, &ca, 0, 0, 0, NULL, NULL, NULL, NULL, 0, NULL, 1, &reused };
+        r = cio_get(&rs, &status, err, sizeof err);
+        assert(r == 0 && status == 200 && ca.n > 0);
+        c0 = atoi(ca.buf);
+        pthread_t th;
+        assert(pthread_create(&th, NULL, slow_shared, &port) == 0);
+        usleep(200000);                                      /* (the other thread has the connection: /held) */
+        memset(&ca, 0, sizeof ca);
+        double t0 = now_s();
+        r = cio_get(&rs, &status, err, sizeof err);
+        double waited = now_s() - t0;
+        pthread_join(th, NULL);
+        assert(r == 0 && status == 200);
+        c1 = atoi(ca.buf);
+        printf("shared: connections %d -> %d, the second request waited %.2f s, reused %d, the other thread's %d\n",
+               c0, c1, waited, reused, slow_reused);
+        assert(c1 == c0 && reused && slow_reused && waited > 0.4);
+        snprintf(ku, sizeof ku, "https://127.0.0.1:%d/f403", port);
+        memset(&ca, 0, sizeof ca);
+        r = cio_get(&rs, &status, err, sizeof err);
+        printf("403 once: status %d\n", status);
+        assert(r == 0 && status == 200);
+        assert(cio_pool_open() >= 1);
+        cio_pool_close();
+        assert(cio_pool_open() == 0);
+        snprintf(ku, sizeof ku, "https://localhost:%d/small", port);   /* (a name: looked up, then kept) */
+        memset(&ca, 0, sizeof ca);
+        r = cio_get(&rs, &status, err, sizeof err);
+        assert(r == 0 && status == 200 && !reused);
+        r = cio_get(&rs, &status, err, sizeof err);
+        assert(r == 0 && status == 200 && reused);
+        cio_pool_close();
+        /* a name lookup that does not end soon: a stop ends the request at once (1.2.4r: the lookup runs on a thread
+         * of its own; getaddrinfo could not be stopped, and a player then did not stop in time) */
+        Acc da = { 0 };
+        CioRequest rd = { "https://name-that-is-not-there.invalid/x", NULL, NULL, 5, 5, on_data, stop_later, &da };
+        stop_at = now_s() + 0.3;
+        double d0 = now_s();
+        r = cio_get(&rd, &status, err, sizeof err);
+        printf("lookup with a stop: r=%d in %.2f s (%s)\n", r, now_s() - d0, err);
+        assert((r == -2 || r == -1001) && now_s() - d0 < 1.5);
     }
     puts("all curlio tests passed");
     fflush(stdout);

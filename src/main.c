@@ -331,34 +331,26 @@ static int net_stop_cb(void *ctx) { (void)ctx; poll_cancel(); return net_cancel;
 static const char *http_ua;                 /* 1.5.1 (http_get: this User-Agent instead of the app's; NULL = the app's) */
 static char *http_final;                    /* 1.2.1 (http_get: the address that answered, after redirects; NULL = not asked) */
 static size_t http_final_cap;
-/* 1.2.4q: one connection kept for the lists and the account's requests (categories, then a category's films, then
- * a series' episodes: one connect for them, not one each; on the device one provider's connects took 1.6-4.5 s).
- * Taken by the request that runs (any thread), given back after it. */
-static CioKeep *volatile api_keep;
-static volatile int poster_keep_drop;       /* (1.2.4q: the poster thread closes its kept connection) */
-/* a video starts: no connection of ours stays open beside it (an account allowing one connection) */
-static void net_keeps_close(void)
-{
-    CioKeep *k = __sync_lock_test_and_set(&api_keep, NULL);
-    if (k) { cio_keep_close(k); CioKeep *o = __sync_lock_test_and_set(&api_keep, k); if (o) cio_keep_free(o); }
-    poster_keep_drop = 1;
-}
+/* 1.2.4q: the lists and the account's requests over one kept connection (categories, then a category's films, then
+ * a series' episodes: one connect for them; on the device one provider's connects took 1.6-4.5 s). 1.2.4r: the
+ * server's one shared connection (curlio's pool): film details and posters to the same server use it too, never a
+ * second one beside it (a provider answered 403 to that); closed after 30 s unused, and when a video starts (an
+ * account allowing one connection). */
+static void net_keeps_close(void) { cio_pool_close(); }
 static int http_get_curl(const char *url, const char *user, const char *pass, Mem *m, char *err, size_t errsz)
 {
     CioRequest rq = { url, user, pass, 10, 20, mem_data, net_stop_cb, m };
     rq.ua = http_ua;                                         /* 1.5.1 (web pages: a browser's) */
-    CioKeep *kp = __sync_lock_test_and_set(&api_keep, NULL);
-    if (!kp) kp = cio_keep_new();
-    rq.keep = kp;
+    int reused = 0;
+    rq.shared = 1;                                           /* 1.2.4r */
+    rq.reused = &reused;
     if (http_final) { http_final[0] = 0; rq.final_url = http_final; rq.final_cap = http_final_cap; }
     int hstatus = 0;
     char e[96];
     unsigned t0 = now_ms();
     int r = cio_get(&rq, &hstatus, e, sizeof e);
     unsigned ms = now_ms() - t0;
-    int tries = cio_last_connect_tries(), reused = cio_keep_reused(kp);
-    CioKeep *old = __sync_lock_test_and_set(&api_keep, kp);  /* (another request's one meanwhile: let go) */
-    if (old) cio_keep_free(old);
+    int tries = cio_last_connect_tries();
     if (reused)
         plog("http: GET %.5s -> status %d, %u KB in %u.%u s, over the kept connection%s%s", url, hstatus,
              (unsigned)(m->len / 1024), ms / 1000, ms % 1000 / 100, r < 0 ? ", " : "", r < 0 ? e : "");
@@ -801,6 +793,11 @@ int main(void)
 
     int menu_open = 0, menu_sel = 0, quit = 0, section_menu = 0, section_sel = 0;
     for (;;) {
+        {   /* 1.2.4r: the shared connections: none kept open beside a video; closed after 30 s unused */
+            static unsigned pool_ms;
+            cio_pool_keep(state != ST_PLAYING);
+            if (now_ms() - pool_ms >= 1000) { pool_ms = now_ms(); cio_pool_idle(); }
+        }
         unsigned p = read_pressed();
         {   /* the left stick up / down moves like the d-pad everywhere but over the playing picture itself (1.2: the
              * channel screen too, the list that has the highlight; the right stick does nothing) */
